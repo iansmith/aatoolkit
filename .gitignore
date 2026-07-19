@@ -10,3 +10,6 @@ go.work.sum
 
 # Local scratch
 /scratch/
+
+# Real shell-env file with live secrets — only enable-aatoolkit.example is tracked.
+enable-aatoolkit

@@ -1,0 +1,26 @@
+# enable-aatoolkit.example — template for the shell environment aatoolkit runs in.
+#
+# Copy this to a file named `enable-aatoolkit` and `source` it before working:
+#
+#     cp enable-aatoolkit.example ../enable-aatoolkit   # note: one dir UP — see below
+#     source ../enable-aatoolkit
+#
+# IMPORTANT:
+#   * The real `enable-aatoolkit` must NEVER be committed — it holds live secrets
+#     (auth tokens, API keys). Only this `.example` template is tracked. `.gitignore`
+#     already excludes `enable-aatoolkit`, but the safer habit is to keep the real
+#     file OUTSIDE the repo entirely.
+#   * Prefer to place the real file in the directory ABOVE this repo (the workspace
+#     root that holds the module dir, e.g. alongside go.work). Sourcing it there
+#     prepares the shell for work in the aatoolkit directory without ever risking the
+#     secret file landing inside version control.
+
+# --- required (no default) ---
+export TWILIO_AUTH_TOKEN=primary_auth_token
+
+# --- engine overrides (all optional; each has a built-in default) ---
+# The engine's tunable knobs are read from AATOOLKIT_* environment variables.
+# Uncomment and set only the ones you need to override, for example:
+#   export AATOOLKIT_STT_URL=http://127.0.0.1:7789
+#   export AATOOLKIT_FAST_URL=http://127.0.0.1:1235/v1/chat/completions
+#   export AATOOLKIT_MAX_TURN_MS=60000
