@@ -1,0 +1,12 @@
+# Go workspace file lives in the parent dir, but ignore any local copy here too.
+go.work
+go.work.sum
+
+# Build artifacts and test binaries
+*.test
+*.out
+/bin/
+/build/
+
+# Local scratch
+/scratch/
