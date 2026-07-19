@@ -1,0 +1,80 @@
+# aatoolkit slopstop project config. Adapted from sophie's .project-conf.toml, with the
+# ticket backend switched from Linear to GitHub.
+#
+# NOTE: the GitHub repo github.com/iansmith/aatoolkit does not exist yet — aatoolkit is
+# local-git-only with no origin until "the big moment" (see repo-split-plan.md §6). That's
+# fine: no GitHub ticket operations run until the repo (and its issues) exist. The config
+# is staged here so the tooling is ready the moment an origin is added.
+system = "github"
+key    = "iansmith/aatoolkit"   # owner/repo for the GitHub Issues backend
+prefix = "AAT"                  # ticket prefix, e.g. AAT-1
+tracking_dir = ".slopstop"
+
+# Tier→model map for the four-tier slopstop process.
+# Table form (v3.1.0+): each tier is a sub-table with provider, model, and optional
+# version. The tier gate matches on model family and, when pinned, a dotted-prefix
+# version match (e.g. version = "4.6" matches claude-opus-4-6).
+[tiers.huge]
+provider = "anthropic"
+model    = "opus"
+version  = "4.8"     # :design + huge-tier checks
+
+[tiers.large]
+provider = "anthropic"
+model    = "opus"
+version  = "4.8"     # :tickets + failure-driven rewrites + drift checks
+
+[tiers.medium]
+provider = "anthropic"
+model    = "sonnet"
+version  = "5"       # :run orchestrator + per-ticket reviewer/adversary subagents
+
+[tiers.small]
+provider = "anthropic"
+model    = "haiku"   # fleet implementation agents (no version pin)
+
+# Point this repo's runs at the local Phase-1 metering router (see ~/slopstop/router).
+# :design health-checks it at run start and :run points each fleet agent at it
+# (ANTHROPIC_BASE_URL + X-Slopstop-Run/X-Slopstop-Ticket headers), so fleet traffic is
+# metered by default. A dead router never blocks a run — agents fall back to direct API.
+[fleet.router]
+enabled = true
+host    = "127.0.0.1"
+port    = 8484
+
+# Fleet monitoring posture. "kill" (the default, set explicitly) terminates any fleet
+# agent that writes outside its ticket's file map — the graduated posture for real runs
+# (as opposed to "warn", the supervised-observation mode used during the meta-test).
+[fleet.monitoring]
+filemap_violation = "kill"
+
+# Run the slopstop flow hands-off: skip interactive prompts and auto-proceed
+# (implement in :plan, confirm in :merge) per the skills' autonomous behavior.
+#
+# NOTE: enabled=true drives :pr / :start / :archive / :plan autonomously. It does
+# NOT by itself make :merge autonomous — per the skill's merge-autonomous.md, full
+# autonomous :merge is activated by passing --autonomous on the :merge command line.
+# The merge_* / archive_immediately keys below are read only on those --autonomous
+# runs. Interactive :merge still auto-confirms via [workflow] skip_confirm (below).
+[autonomous]
+enabled = true
+branch_type = "feat"
+
+# Autonomous :merge behavior (applies when :merge is called with --autonomous).
+merge_strategy      = "merge"   # real merge commit; preserves per-commit history for git bisect
+merge_target_state  = "auto"    # advance the ticket exactly one state, never force-jump to Done
+archive_immediately = true      # chain into :archive when a merge lands a ticket in a terminal state
+
+# PR code review backend for /slopstop-pr.
+# "claude" → in-house /code-review (Skill); "coderabbit" → CodeRabbit bot;
+# "greptile" → Greptile bot.
+[pr_review]
+backend = "claude"
+effort = "high"
+fix    = true
+
+# Don't prompt for the branch type on /slopstop-start — use the heuristic
+# suggestion (from ticket labels/title) automatically. Only falls back to
+# asking when the heuristic produces no suggestion at all.
+[workflow]
+skip_confirm = true
