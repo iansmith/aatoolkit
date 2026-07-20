@@ -1,0 +1,49 @@
+[supervisor]
+log_dir       = "build/logs"
+lock_file     = "build/run/aa-server-status.lock"
+grace_period  = "5s"
+ready_timeout = "15s"
+poll_interval = "500ms"
+health_timeout = "2s"
+
+[[server]]
+name  = "chat-llm"
+type  = "mlx"
+enabled = true
+host  = "127.0.0.1"
+port  = 1235
+model = "mlx-community/gemma-4-31b-it-8bit"
+health = { path = "/v1/models" }
+ready_timeout = "90s"
+
+[[server]]
+name = "voice-out"
+type = "python"
+enabled = true
+host = "127.0.0.1"
+port = 7788
+venv = ".venv"
+entry = "supertonic serve"
+packages = ["supertonic"]
+health = { path = "/healthz" }
+
+[[server]]
+name = "server"
+type = "source"
+enabled = true
+host = "127.0.0.1"
+listens = [9730]
+build = "go build -o build/server ./cmd/server"
+binary = "build/server"
+health = { port = 9730, path = "/healthz" }
+env = { AATOOLKIT_STT_MAX_SEC = "180", AATOOLKIT_ABS_SILENCE_MS = "12000" }
+
+[[server]]
+name = "caddy"
+type = "exec"
+enabled = true
+host = "0.0.0.0"
+listens = [80, 443, 2019]
+health = { host = "127.0.0.1", port = 2019, path = "/config/" }
+command = "go"
+args = ["tool", "caddy", "run", "--config", "Caddyfile"]

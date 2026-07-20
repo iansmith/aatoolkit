@@ -1,0 +1,7 @@
+[[server]]
+name = "server"
+env = { TWILIO_AUTH_TOKEN = "shh" }
+
+[[server]]
+name = "chat-llm"
+host = "0.0.0.0"

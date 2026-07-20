@@ -1,0 +1,12 @@
+[supervisor]
+log_dir = "build/logs"
+
+[[server]]
+name  = "chat-llm"
+type  = "mlx"
+enabled = true
+host  = "127.0.0.1"
+port  = 1235
+model = "mlx-community/gemma-4-31b-it-8bit"
+health = { path = "/v1/models" }
+totally_bogus_field = "oops"
