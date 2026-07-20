@@ -109,6 +109,13 @@ type Session struct {
 	vadCfg           vadConfig
 	vadEventObserver func(ev VADEvent, emitted bool)
 
+	// lastStreamWindow is the StreamWindowIndex of the most recent VADEvent the
+	// session dispatched. Cap/timeout decisions (SOP-166) fire from timers, not
+	// from a VADEvent, so they read this to stamp an audio position
+	// (lastStreamWindow * windowMS) the same way VAD-boundary decisions read the
+	// event's own index. Updated at the single VAD-event choke point in run().
+	lastStreamWindow int
+
 	// turnTranscripts accumulates FullPass STT transcript text for the
 	// current turn (SOP-150). Distinct from turnBuf, which is raw audio.
 	turnTranscripts []string
@@ -532,6 +539,10 @@ func (s *Session) run() {
 			if !ok {
 				return
 			}
+			// Track the latest audio position so a cap/timeout decision, which
+			// fires from a timer rather than a VADEvent, can still stamp one
+			// (SOP-166). This is the single point every VADEvent flows through.
+			s.lastStreamWindow = ev.StreamWindowIndex
 			s.dispatch(SourceVADEvent, ev)
 		case res, ok := <-sttChannel(s.sttOut):
 			if !ok {
@@ -595,11 +606,18 @@ func sttChannel(out STTOutput) <-chan STTResult {
 // (the caller is no longer silent), and re-armed by dispatchFullPass when the
 // utterance ends -- so it measures silence, never active speech (SOP-156).
 func (s *Session) armIdleTimer() {
-	ms := s.idleTimeoutMS
-	if ms <= 0 {
-		ms = MaxSilenceMS
+	s.timerFacility.Arm(s.ctx, timerIdle, time.Duration(resolvedMS(s.idleTimeoutMS, MaxSilenceMS))*time.Millisecond)
+}
+
+// resolvedMS returns the effective timer bound: the per-session With* override
+// when set (> 0), else the package default constant. One definition shared by
+// every arm* site and, for the two operator-tunable caps, the cap decision
+// record (SOP-166).
+func resolvedMS(override, def int) int {
+	if override > 0 {
+		return override
 	}
-	s.timerFacility.Arm(s.ctx, timerIdle, time.Duration(ms)*time.Millisecond)
+	return def
 }
 
 // cancelIdleTimer stops and clears the idle timer, if armed.
@@ -613,11 +631,7 @@ func (s *Session) cancelIdleTimer() {
 // from a non-speaking state and stays speaking until end-of-utterance -- so this
 // caps the whole utterance from its start, not "time since the last resume".
 func (s *Session) armUtteranceTimer() {
-	ms := s.utteranceTimeoutMS
-	if ms <= 0 {
-		ms = MaxUtteranceMS
-	}
-	s.timerFacility.Arm(s.ctx, timerUtterance, time.Duration(ms)*time.Millisecond)
+	s.timerFacility.Arm(s.ctx, timerUtterance, time.Duration(resolvedMS(s.utteranceTimeoutMS, MaxUtteranceMS))*time.Millisecond)
 }
 
 // cancelUtteranceTimer stops and clears the utterance cap, if armed.
@@ -630,11 +644,7 @@ func (s *Session) cancelUtteranceTimer() {
 // onset (guarded by !turnActive in handleSpeechOnset), so it bounds the whole
 // turn from its start, not any single utterance within it.
 func (s *Session) armTurnTimer() {
-	ms := s.turnTimeoutMS
-	if ms <= 0 {
-		ms = MaxTurnMS
-	}
-	s.timerFacility.Arm(s.ctx, timerTurn, time.Duration(ms)*time.Millisecond)
+	s.timerFacility.Arm(s.ctx, timerTurn, time.Duration(resolvedMS(s.turnTimeoutMS, MaxTurnMS))*time.Millisecond)
 }
 
 // cancelTurnTimer stops and clears the turn cap, if armed.
@@ -778,6 +788,22 @@ func (s *Session) recordVADDecision(kind, param string, value any, ev VADEvent, 
 		SilenceCount: ev.SilenceCount,
 		RequestID:    requestID,
 		Effect:       effect,
+	})
+}
+
+// recordCap records one cap/timeout DecisionEvent (SOP-166). These fire from a
+// timer, not a VADEvent, so the audio position comes from the session's
+// last-seen VAD window (lastStreamWindow * windowMS) rather than a triggering
+// event; it is 0 until the first VAD window, which is correct for an idle
+// timeout that fires before any speech. Routed from completeTurn by TurnTrigger.
+func (s *Session) recordCap(kind, param string, value any, effect string) {
+	s.decisionRecorder.Record(DecisionEvent{
+		AudioMS:    s.lastStreamWindow * s.vadCfg.windowMS(),
+		Type:       DecisionTypeCap,
+		Kind:       kind,
+		Param:      param,
+		ParamValue: value,
+		Effect:     effect,
 	})
 }
 
@@ -963,6 +989,25 @@ func (s *Session) completeTurn(trigger TurnTrigger) {
 	s.turnActive = false
 	s.turnEndPending = false
 	s.cancelTurnTimer()
+	s.recordCapFor(trigger)
+}
+
+// recordCapFor records the cap/timeout decision for the three timer-driven
+// completion triggers (SOP-166). The utterance and turn caps record their
+// resolved (operator-tunable) bound; the idle timeout records the MaxSilenceMS
+// constant, not the WithMaxSilenceMS test-seam override, since idle is not a
+// tunable knob. The other triggers (stopword, silence-turn-end, call-end) are
+// not cap decisions and record nothing here -- their VAD-boundary decisions are
+// recorded on their own paths (M2/M3).
+func (s *Session) recordCapFor(trigger TurnTrigger) {
+	switch trigger {
+	case TriggerUtteranceCap:
+		s.recordCap(DecisionKindUtteranceCap, DecisionParamMaxUtterance, resolvedMS(s.utteranceTimeoutMS, MaxUtteranceMS), "forced utterance end")
+	case TriggerTurnCap:
+		s.recordCap(DecisionKindTurnCap, DecisionParamMaxTurn, resolvedMS(s.turnTimeoutMS, MaxTurnMS), "forced turn end")
+	case TriggerIdleTimeout:
+		s.recordCap(DecisionKindIdleTimeout, DecisionParamMaxSilence, MaxSilenceMS, "call ended (idle)")
+	}
 }
 
 // Close cancels the session and, if the sequencer was started, waits for its
