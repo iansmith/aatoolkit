@@ -44,8 +44,10 @@ type DecisionRecorder interface {
 // Decision event types and the labels M1 emits. Kept as named constants so the
 // producer (state.go) and any consumer read the same strings.
 const (
-	DecisionTypeVAD = "vad"
-	DecisionTypeCap = "cap"
+	DecisionTypeVAD         = "vad"
+	DecisionTypeCap         = "cap"
+	DecisionTypeSTTDispatch = "stt_dispatch"
+	DecisionTypeSTTResult   = "stt_result"
 
 	DecisionKindSpeechStart  = "speech-start"
 	DecisionKindSilence      = "silence"
@@ -82,6 +84,15 @@ type DecisionEvent struct {
 	SilenceCount int     `json:"silence_count,omitempty"`
 	RequestID    int     `json:"request_id,omitempty"`
 	Effect       string  `json:"effect,omitempty"`
+
+	// STT round-trip fields (SOP-167). Text is the delivered transcript;
+	// LatencyMS is result_time - dispatch_time from the injected clock;
+	// AudioBytes is the dispatched mu-law buffer length; STTDurSec is whisper's
+	// own reported audio duration. All omitempty so non-STT events stay compact.
+	Text       string  `json:"text,omitempty"`
+	LatencyMS  int     `json:"latency_ms,omitempty"`
+	AudioBytes int     `json:"audio_bytes,omitempty"`
+	STTDurSec  float64 `json:"stt_audio_sec,omitempty"`
 }
 
 // noopRecorder is the default when no recorder is wired: it drops every event
@@ -214,9 +225,19 @@ func WithFileDecisionRecorderFromEnv(dir, streamSID, callSID, label string, cfg 
 }
 
 // formatDecisionLine renders one event as a single human-readable line for the
-// live terminal feed. M1 produces only VAD end-of-utterance events; a later
-// milestone that adds event types revisits this alongside them.
+// live terminal feed. The STT round-trip events (SOP-167) carry no gating
+// param/prob, so they render their own shape; VAD and cap events share the
+// param=value line.
 func formatDecisionLine(ev DecisionEvent) string {
-	return fmt.Sprintf("[%8.3fs] %-16s %s=%v  prob=%.2f silence=%dw  -> %s\n",
-		float64(ev.AudioMS)/1000.0, ev.Kind, ev.Param, ev.ParamValue, ev.Prob, ev.SilenceCount, ev.Effect)
+	switch ev.Type {
+	case DecisionTypeSTTDispatch:
+		return fmt.Sprintf("[%8.3fs] %-16s req=%d bytes=%d  -> %s\n",
+			float64(ev.AudioMS)/1000.0, ev.Type, ev.RequestID, ev.AudioBytes, ev.Effect)
+	case DecisionTypeSTTResult:
+		return fmt.Sprintf("[%8.3fs] %-16s req=%d latency=%dms audio=%.2fs  %q  -> %s\n",
+			float64(ev.AudioMS)/1000.0, ev.Type, ev.RequestID, ev.LatencyMS, ev.STTDurSec, ev.Text, ev.Effect)
+	default:
+		return fmt.Sprintf("[%8.3fs] %-16s %s=%v  prob=%.2f silence=%dw  -> %s\n",
+			float64(ev.AudioMS)/1000.0, ev.Kind, ev.Param, ev.ParamValue, ev.Prob, ev.SilenceCount, ev.Effect)
+	}
 }

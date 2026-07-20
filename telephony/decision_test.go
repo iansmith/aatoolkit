@@ -275,6 +275,128 @@ func TestDecisionRecorder_IdleTimeout(t *testing.T) {
 	}
 }
 
+// fakeNow is a mutable monotonic clock for the injected decision clock
+// (WithDecisionClock). A test advances it explicitly between a dispatch and its
+// result so the recorded latency is exact and deterministic -- no wall clock.
+type fakeNow struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeNow() *fakeNow { return &fakeNow{t: time.Unix(0, 0)} }
+
+func (f *fakeNow) now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.t
+}
+
+func (f *fakeNow) advance(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.t = f.t.Add(d)
+}
+
+// waitEventType blocks until at least one DecisionEvent of the given type has
+// been recorded and returns the first, with a deadlock backstop a passing test
+// never reaches. Used to observe the stt_dispatch / stt_result records, each of
+// which appears once on the single-utterance path (M5 / SOP-167).
+func waitEventType(t *testing.T, rec *mockRecorder, typ string) telephony.DecisionEvent {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, ev := range rec.all() {
+			if ev.Type == typ {
+				return ev
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("no %q event recorded within the backstop (all: %+v)", typ, rec.all())
+	return telephony.DecisionEvent{}
+}
+
+// TestDecisionRecorder_STTDispatchAndResult drives one utterance to an STT
+// dispatch, advances the injected clock by a known delta, then delivers the
+// matching STTResult, and asserts both the stt_dispatch and stt_result decisions
+// are recorded -- the latter correlated by request id and carrying the exact
+// latency, the transcript, and whisper's own audio duration (M5 / SOP-167).
+func TestDecisionRecorder_STTDispatchAndResult(t *testing.T) {
+	const sessionID = "test-sttdec"
+	rec := &mockRecorder{}
+	fnow := newFakeNow()
+	dataIn := telephony.NewBufferedChan[[]byte](256)
+	sttIn := telephony.NewBufferedChan[telephony.STTRequest](100)
+	sttOut := telephony.NewBufferedChan[telephony.STTResult](100)
+
+	probs := speechThenSilenceProbs(1, telephony.EndSilenceWindows())
+	s := telephony.NewSession(context.Background(), sessionID,
+		telephony.WithVADFactory(func() (telephony.VADDetector, error) {
+			return &fakeDetector{probs: probs}, nil
+		}),
+		telephony.WithTwilioDataInput(dataIn),
+		telephony.WithSTTInput(sttIn),
+		telephony.WithSTTOutput(sttOut),
+		telephony.WithDecisionRecorder(rec),
+		telephony.WithDecisionClock(fnow.now),
+	)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	for i := 0; i < telephony.EndSilenceWindows()+2; i++ {
+		sendData(t, dataIn, windowFrame(0x80), 5*time.Second)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// The dispatch appears on sttIn; receiving it proves dispatchSTT (and its
+	// stt_dispatch record + stored dispatch instant) have already run.
+	ctx, cancel := context.WithTimeout(context.Background(), recvTimeout)
+	req, err := sttIn.Recv(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("STT request not received (end-of-utterance never dispatched): %v", err)
+	}
+
+	dispatch := waitEventType(t, rec, "stt_dispatch")
+	if dispatch.RequestID != req.RequestID {
+		t.Errorf("stt_dispatch RequestID: got %d, want %d", dispatch.RequestID, req.RequestID)
+	}
+	if dispatch.AudioBytes <= 0 {
+		t.Errorf("stt_dispatch AudioBytes: got %d, want > 0", dispatch.AudioBytes)
+	}
+
+	// Advance the clock, then deliver the result: latency must be exactly the delta.
+	fnow.advance(800 * time.Millisecond)
+	ctx, cancel = context.WithTimeout(context.Background(), recvTimeout)
+	err = sttOut.Send(ctx, telephony.STTResult{
+		SessionID: sessionID,
+		RequestID: req.RequestID,
+		Kind:      telephony.FullPass,
+		Text:      "hello world",
+		Duration:  1.5,
+	})
+	cancel()
+	if err != nil {
+		t.Fatalf("send STT result: %v", err)
+	}
+
+	result := waitEventType(t, rec, "stt_result")
+	if result.RequestID != req.RequestID {
+		t.Errorf("stt_result RequestID: got %d, want %d", result.RequestID, req.RequestID)
+	}
+	if result.LatencyMS != 800 {
+		t.Errorf("stt_result LatencyMS: got %d, want 800", result.LatencyMS)
+	}
+	if result.Text != "hello world" {
+		t.Errorf("stt_result Text: got %q, want %q", result.Text, "hello world")
+	}
+	if result.STTDurSec != 1.5 {
+		t.Errorf("stt_result STTDurSec: got %v, want 1.5", result.STTDurSec)
+	}
+}
+
 // TestWithFileDecisionRecorderFromEnv_Gating covers the AATOOLKIT_EVENT_LOG
 // gate (DoD: "no files written and the no-op recorder is used" when off or no
 // dir). Close flushes even a session that never Started, and the recorder
