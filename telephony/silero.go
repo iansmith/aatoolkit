@@ -21,6 +21,13 @@ const sileroSampleRate = 8000
 // layers, batch size 1, hidden size 128.
 var sileroStateShape = []int{2, 1, 128}
 
+// sileroStateElems is the flattened length of the recurrent state tensor —
+// one definition shared by the in-process detector's Reset and the HTTP
+// detector's wire encoding (silero_http.go), so the two can't drift.
+func sileroStateElems() int {
+	return sileroStateShape[0] * sileroStateShape[1] * sileroStateShape[2]
+}
+
 // sileroDetector implements vadDetector against the embedded Silero VAD ONNX
 // model via gonnx. It is not safe for concurrent use: each session owns its
 // own instance and its own recurrent state (SOP-93 owns any future pooling).
@@ -87,10 +94,9 @@ func (d *sileroDetector) Detect(window []float32) (float32, error) {
 // history — called by runVAD on every exit (ctx cancel, closed input, or
 // cancel mid-send) so a session's next use starts clean.
 func (d *sileroDetector) Reset() {
-	stateElems := sileroStateShape[0] * sileroStateShape[1] * sileroStateShape[2]
 	d.state = tensor.New(
 		tensor.WithShape(sileroStateShape...),
-		tensor.WithBacking(make([]float32, stateElems)),
+		tensor.WithBacking(make([]float32, sileroStateElems())),
 	)
 	d.sr = tensor.New(tensor.FromScalar(int64(sileroSampleRate)))
 }
