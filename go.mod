@@ -7,6 +7,7 @@ require (
 	github.com/advancedclimatesystems/gonnx v0.0.0-00010101000000-000000000000
 	github.com/coder/websocket v1.8.15
 	github.com/shirou/gopsutil/v4 v4.26.6
+	github.com/traefik/yaegi v0.16.1
 	gorgonia.org/tensor v0.9.24
 )
 
