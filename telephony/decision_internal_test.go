@@ -94,6 +94,68 @@ func TestDecisionRecorder_Silence(t *testing.T) {
 	}
 }
 
+// TestDecisionRecorder_TurnEnd — a silence-driven VADTurnEnd records a turn-end
+// decision naming TurnEndSilenceMS.
+func TestDecisionRecorder_TurnEnd(t *testing.T) {
+	rec := &mockDecRecorder{}
+	s := newDecTestSession(t, rec)
+	defer s.Close()
+	s.setState(StateListening)
+
+	// SilenceCount is injected test input here (this drives the machine's event
+	// directly, not the threshold-crossing); the recorder copies it through.
+	s.dispatch(SourceVADEvent, VADEvent{Kind: VADTurnEnd, Prob: 0.02, StreamWindowIndex: 40, SilenceCount: 160})
+
+	evs := filterDecisionKind(rec.events, DecisionKindTurnEnd)
+	if len(evs) != 1 {
+		t.Fatalf("turn-end events: got %d, want 1 (%+v)", len(evs), rec.events)
+	}
+	e := evs[0]
+	if e.Type != DecisionTypeVAD || e.Param != DecisionParamTurnEndSilence {
+		t.Errorf("type/param: got %q/%q, want %q/%q", e.Type, e.Param, DecisionTypeVAD, DecisionParamTurnEndSilence)
+	}
+	if e.ParamValue != s.vadCfg.TurnEndSilenceMS {
+		t.Errorf("param_value: got %v, want %v (TurnEndSilenceMS)", e.ParamValue, s.vadCfg.TurnEndSilenceMS)
+	}
+	if want := 40 * s.vadCfg.windowMS(); e.AudioMS != want {
+		t.Errorf("audio_ms: got %d, want %d", e.AudioMS, want)
+	}
+	if e.SilenceCount != 160 {
+		t.Errorf("silence_count: got %d, want 160 (injected)", e.SilenceCount)
+	}
+	if e.Effect != "turn closed (silence-turn-end)" {
+		t.Errorf("effect: got %q", e.Effect)
+	}
+}
+
+// TestDecisionRecorder_DeferredTurnEndRecordedOnce — a VADTurnEnd that arrives
+// while a FullPass is still in flight is deferred; it must be recorded exactly
+// once, at the point the pass resolves and the turn actually completes.
+func TestDecisionRecorder_DeferredTurnEndRecordedOnce(t *testing.T) {
+	rec := &mockDecRecorder{}
+	sttIn := NewBufferedChan[STTRequest](10)
+	s := newDecTestSession(t, rec, WithSTTInput(sttIn))
+	defer s.Close()
+	s.setState(StateListening)
+
+	// Utterance ends -> dispatch a pass (sttReqID 1), enter AwaitingFullResult.
+	s.dispatch(SourceVADEvent, VADEvent{Kind: VADEndOfUtterance, StreamWindowIndex: 10})
+	if s.State() != StateAwaitingFullResult {
+		t.Fatalf("after EOU: state %s, want StateAwaitingFullResult", s.State())
+	}
+	// Turn-end arrives while the pass is still in flight: deferred, not yet
+	// recorded.
+	s.dispatch(SourceVADEvent, VADEvent{Kind: VADTurnEnd, StreamWindowIndex: 20, SilenceCount: 160})
+	if got := len(filterDecisionKind(rec.events, DecisionKindTurnEnd)); got != 0 {
+		t.Fatalf("turn-end recorded before the pass resolved: got %d, want 0", got)
+	}
+	// Pass resolves -> the deferred turn-end completes and is recorded once.
+	s.dispatch(SourceSTTResult, STTResult{SessionID: s.CallSID, RequestID: 1, Kind: FullPass, Text: "hello"})
+	if got := len(filterDecisionKind(rec.events, DecisionKindTurnEnd)); got != 1 {
+		t.Fatalf("turn-end after the pass resolved: got %d, want exactly 1 (%+v)", got, rec.events)
+	}
+}
+
 // TestDecisionRecorder_DroppedUtteranceRecorded — when a second utterance ends
 // while the first FullPass is still in flight (StateAwaitingFullResult), the
 // dropped end-of-utterance is recorded too, distinctly from the dispatched one.

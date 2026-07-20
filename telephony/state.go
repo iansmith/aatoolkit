@@ -411,9 +411,14 @@ func withSpeechReset(h transitionHandler) transitionHandler {
 				s.recordVADDecision(DecisionKindSilence, DecisionParamSilenceThresh, s.vadCfg.SilenceThresh, vev, "silence run started", 0)
 			case VADTurnEnd:
 				if s.State() == StateAwaitingFullResult {
+					// Defer completion until the in-flight pass returns; carry
+					// the event so the turn-end decision is recorded then, at
+					// the completion point (SOP-165).
 					s.turnEndPending = true
+					s.turnEndEvent = vev
 					return s.State()
 				}
+				s.recordTurnEnd(vev)
 				s.completeTurn(TriggerSilenceTurnEnd)
 				return s.sendBedAndEnterSpeaking()
 			}
@@ -530,6 +535,7 @@ func handleSTTResult(s *Session, ev transitionEvent) SessionState {
 			// deferred completion (turnEndPending, set by withSpeechReset) so
 			// this text lands in the turn it belongs to, not the next one.
 			if s.turnEndPending {
+				s.recordTurnEnd(s.turnEndEvent)
 				s.completeTurn(TriggerSilenceTurnEnd)
 				turnCompleted = true
 			}
