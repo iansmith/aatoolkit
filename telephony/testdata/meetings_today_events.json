@@ -1,0 +1,35 @@
+{
+  "source": "meetings_today.ulaw",
+  "sample_rate": 8000,
+  "window_size": 256,
+  "events": [
+    {
+      "window_index": 123,
+      "kind": "speech"
+    },
+    {
+      "window_index": 130,
+      "kind": "silence"
+    },
+    {
+      "window_index": 135,
+      "kind": "silence"
+    },
+    {
+      "window_index": 151,
+      "kind": "silence"
+    },
+    {
+      "window_index": 200,
+      "kind": "silence"
+    },
+    {
+      "window_index": 216,
+      "kind": "silence"
+    },
+    {
+      "window_index": 237,
+      "kind": "end-of-utterance"
+    }
+  ]
+}

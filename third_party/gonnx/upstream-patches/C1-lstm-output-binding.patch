@@ -1,0 +1,166 @@
+diff --git a/ops/lstm/lstm.go b/ops/lstm/lstm.go
+index f7bc057..5c3434d 100644
+--- a/ops/lstm/lstm.go
++++ b/ops/lstm/lstm.go
+@@ -244,16 +244,14 @@ func (l *LSTM) Apply(inputs []tensor.Tensor) ([]tensor.Tensor, error) {
+ 		return nil, err
+ 	}
+ 
+-	outputMap := map[string]tensor.Tensor{
+-		"Y": Y, "Y_h": Yh, "Y_c": Yc,
+-	}
+-
+-	result := []tensor.Tensor{}
+-	for _, outputName := range l.outputs {
+-		result = append(result, outputMap[outputName])
+-	}
+-
+-	return result, nil
++	// ONNX LSTM outputs are positional (Y, Y_h, Y_c) and the executor binds them positionally,
++	// so return them by position, truncated to the number the node declares (LSTM may declare
++	// 0–3). Keying by canonical names would return nil for any node whose output names differ
++	// from "Y"/"Y_h"/"Y_c" (e.g. the Silero decoder LSTM). Cap at 3 so a malformed node that
++	// declares >3 outputs yields a length mismatch error downstream rather than a slice panic.
++	nOutputs := min(len(l.outputs), 3)
++
++	return []tensor.Tensor{Y, Yh, Yc}[:nOutputs], nil
+ }
+ 
+ // gateCalculation performs a standard gate calculation for an LSTM gate defined as:
+diff --git a/ops/lstm/lstm_test.go b/ops/lstm/lstm_test.go
+index 4d66882..c31d565 100644
+--- a/ops/lstm/lstm_test.go
++++ b/ops/lstm/lstm_test.go
+@@ -46,6 +46,20 @@ func TestLSTMInitUnkownAttr(t *testing.T) {
+ 	}
+ }
+ 
++// layout=1 is the opset-14 batchwise layout, which LSTM does not implement. Its
++// existing default: branch already rejects the unknown 'layout' attribute, so
++// this test locks that behavior rather than adding code. layout=0 is the ONNX
++// default (the attribute is omitted), which inits cleanly.
++func TestLSTMInitRejectsLayout(t *testing.T) {
++	lstm := &LSTM{}
++
++	err := lstm.Init(&onnx.NodeProto{Attribute: []*onnx.AttributeProto{{Name: "layout", I: 1}}})
++	assert.Equal(t, ops.ErrInvalidAttribute("layout", lstm), err)
++
++	err = lstm.Init(&onnx.NodeProto{})
++	assert.Nil(t, err)
++}
++
+ func TestLSTM(t *testing.T) {
+ 	tests := []struct {
+ 		version  int64
+@@ -147,11 +161,110 @@ func TestLSTM(t *testing.T) {
+ 		assert.Equal(t, test.err, err)
+ 
+ 		if err == nil {
+-			assert.Equal(t, test.expected, res[1].Data())
++			// Tolerance not exact equality: the stable Sigmoid (0.5*(1+tanh(x/2)))
++			// shifts gate outputs by a last float32 ULP vs the old exp form (SOP-89).
++			// 1e-5 (not 1e-6) because some cases reach magnitude ~8, where one float32
++			// ULP is ~1e-6 and the accumulated shift is a couple of ULP.
++			assert.InDeltaSlice(t, test.expected, res[1].Data(), 1e-5)
+ 		}
+ 	}
+ }
+ 
++// lstmForwardAttrs builds the standard forward-LSTM attributes (sigmoid/tanh/tanh, hidden 4)
++// with the given node output names. ONNX LSTM outputs are positional; the op must return the
++// Y/Y_h/Y_c tensors by position regardless of the declared names.
++func lstmForwardAttrs(outputs ...string) *onnx.NodeProto {
++	return &onnx.NodeProto{
++		Attribute: []*onnx.AttributeProto{
++			{Name: "activation_alpha", Floats: []float32{}},
++			{Name: "activation_beta", Floats: []float32{}},
++			{Name: "activations", Strings: [][]byte{[]byte("sigmoid"), []byte("tanh"), []byte("tanh")}},
++			{Name: "direction", S: []byte("forward")},
++			{Name: "hidden_size", I: 4},
++		},
++		Output: outputs,
++	}
++}
++
++// A node whose output names are NOT the canonical Y/Y_h/Y_c must still get its three outputs
++// (currently they come back nil because the op keys an output map by canonical names).
++func TestLSTMNonCanonicalOutputNames(t *testing.T) {
++	lstm := lstmVersions[7]()
++	err := lstm.Init(lstmForwardAttrs("my_Y", "my_Yh", "my_Yc"))
++	assert.Nil(t, err)
++
++	res, err := lstm.Apply(lstmInput0())
++	assert.Nil(t, err)
++	assert.Len(t, res, 3)
++	for i := range res {
++		assert.NotNilf(t, res[i], "output %d must not be nil", i)
++	}
++	// Y_h must equal the canonical-name run for the same config (first TestLSTM case).
++	if res[1] != nil {
++		assert.InDeltaSlice(t, []float32{0.9159305, 0.9356764, 0.87070554, 0.84180677}, res[1].Data(), 1e-6)
++	}
++}
++
++// A node declaring a single (non-canonical) output gets exactly one non-nil tensor (the Y).
++func TestLSTMSingleNonCanonicalOutput(t *testing.T) {
++	lstm := lstmVersions[7]()
++	err := lstm.Init(lstmForwardAttrs("only_output"))
++	assert.Nil(t, err)
++
++	res, err := lstm.Apply(lstmInput0())
++	assert.Nil(t, err)
++	assert.Len(t, res, 1)
++	assert.NotNil(t, res[0])
++}
++
++// A node declaring two (non-canonical) outputs gets exactly [Y, Y_h], both non-nil.
++func TestLSTMTwoNonCanonicalOutputs(t *testing.T) {
++	lstm := lstmVersions[7]()
++	err := lstm.Init(lstmForwardAttrs("out0", "out1"))
++	assert.Nil(t, err)
++
++	res, err := lstm.Apply(lstmInput0())
++	assert.Nil(t, err)
++	assert.Len(t, res, 2)
++	for i := range res {
++		assert.NotNilf(t, res[i], "output %d must not be nil", i)
++	}
++}
++
++// Locks output ORDER and values: a non-canonical-name run must produce exactly the same
++// Y/Y_h/Y_c tensors, in the same positions, as a canonical-name run. Guards against a fix
++// that returns the outputs non-nil but mis-ordered (e.g. Y and Y_c swapped).
++func TestLSTMOutputsMatchCanonicalRegardlessOfNames(t *testing.T) {
++	canon := lstmVersions[7]()
++	assert.Nil(t, canon.Init(lstmForwardAttrs("Y", "Y_h", "Y_c")))
++	canonRes, err := canon.Apply(lstmInput0())
++	assert.Nil(t, err)
++
++	nonCanon := lstmVersions[7]()
++	assert.Nil(t, nonCanon.Init(lstmForwardAttrs("a", "b", "c")))
++	nonRes, err := nonCanon.Apply(lstmInput0())
++	assert.Nil(t, err)
++
++	assert.Len(t, nonRes, len(canonRes))
++	for i := range canonRes {
++		if assert.NotNilf(t, nonRes[i], "output %d must not be nil", i) {
++			assert.Equalf(t, canonRes[i].Shape(), nonRes[i].Shape(), "output %d shape differs from canonical", i)
++			assert.Equalf(t, canonRes[i].Data(), nonRes[i].Data(), "output %d differs from canonical", i)
++		}
++	}
++}
++
++// A malformed node declaring more than 3 outputs must not panic (the positional slice is
++// capped at 3). ONNX LSTM has exactly 3 outputs, so this only guards against corrupt models.
++func TestLSTMMoreThanThreeOutputsDoesNotPanic(t *testing.T) {
++	lstm := lstmVersions[7]()
++	assert.Nil(t, lstm.Init(lstmForwardAttrs("a", "b", "c", "d")))
++
++	res, err := lstm.Apply(lstmInput0())
++	assert.Nil(t, err)
++	assert.Len(t, res, 3) // capped — never more than the 3 real outputs
++}
++
+ func TestInputValidationLSTM(t *testing.T) {
+ 	tests := []struct {
+ 		version  int64

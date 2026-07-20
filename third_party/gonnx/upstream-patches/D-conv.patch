@@ -1,0 +1,247 @@
+diff --git a/ops/conv/conv.go b/ops/conv/conv.go
+index 01fefb3..2b9c110 100644
+--- a/ops/conv/conv.go
++++ b/ops/conv/conv.go
+@@ -348,6 +348,9 @@ func (c *Conv) applyConv1D(x, kernel tensor.Tensor) (tensor.Tensor, error) {
+ 			}
+ 
+ 			subKernel := subKernelView.Materialize()
++			if err := c.reshapeToChannelBlock(subKernel, kernel.Shape()[1]); err != nil {
++				return nil, err
++			}
+ 
+ 			for h := 0; h < paddedX.Shape()[2]; h += strideSize {
+ 				dimHOutputIdx := h / strideSize
+@@ -414,6 +417,9 @@ func (c *Conv) applyConv2D(x, kernel tensor.Tensor) (tensor.Tensor, error) {
+ 			}
+ 
+ 			subKernel := subKernelView.Materialize()
++			if err := c.reshapeToChannelBlock(subKernel, kernel.Shape()[1]); err != nil {
++				return nil, err
++			}
+ 
+ 			// Loop over all 2D subImages of the input image and compute the convolution
+ 			// for that subImage. Store the result at the right place in the output tensor.
+@@ -423,7 +429,7 @@ func (c *Conv) applyConv2D(x, kernel tensor.Tensor) (tensor.Tensor, error) {
+ 					continue
+ 				}
+ 
+-				for w := 0; w < paddedX.Shape()[2]; w += c.strides[1] {
++				for w := 0; w < paddedX.Shape()[3]; w += c.strides[1] {
+ 					dimWOutputIdx := w / c.strides[1]
+ 					if dimWOutputIdx >= outputWDim {
+ 						continue
+@@ -547,7 +553,34 @@ func (c *Conv) getSubImage(x tensor.Tensor, batchIdx int, startSpatialCoords ...
+ 		return nil, err
+ 	}
+ 
+-	return subImage.Materialize(), nil
++	materialized := subImage.Materialize()
++
++	// gorgonia's Slice drops the sliced length-1 axes (the batch axis, and any unit
++	// spatial axis), so restore the documented [C, kernelShape...] shape. Without this
++	// the sub-image and sub-kernel can collapse to inconsistent ranks and fail to
++	// broadcast — see reshapeToChannelBlock.
++	if err := c.reshapeToChannelBlock(materialized, x.Shape()[1]); err != nil {
++		return nil, err
++	}
++
++	return materialized, nil
++}
++
++// reshapeToChannelBlock reshapes a sliced sub-image or sub-kernel in place to its
++// canonical [nChannels, kernelShape...] shape. The convolution loops slice a
++// sub-image and a sub-kernel out of higher-rank tensors and then multiply them;
++// gorgonia's Dense.Slice drops every sliced length-1 axis, and it drops them
++// inconsistently between the two (a 1x1 conv leaves the sub-image as [C] but the
++// sub-kernel as [C,1]), which leaves UnidirectionalBroadcast unable to align them.
++// Restoring both to the same canonical rank keeps the subsequent broadcast valid —
++// including the legitimate case of a single-channel kernel broadcast across a
++// multi-channel image — for every conv shape, unit axes or not.
++func (c *Conv) reshapeToChannelBlock(t tensor.Tensor, nChannels int) error {
++	shape := make([]int, 0, 1+len(c.kernelShape))
++	shape = append(shape, nChannels)
++	shape = append(shape, c.kernelShape...)
++
++	return t.Reshape(shape...)
+ }
+ 
+ // addBias adds a bias to the output of the convolution. It reshapes the
+diff --git a/ops/conv/conv_test.go b/ops/conv/conv_test.go
+index 0c264bd..ef221c3 100644
+--- a/ops/conv/conv_test.go
++++ b/ops/conv/conv_test.go
+@@ -260,6 +260,29 @@ func TestConv(t *testing.T) {
+ 			[]int{1, 1, 2, 2},
+ 			[]float32{8.5, 12.5, 20.5, 24.5},
+ 		},
++		// Test a 2D convolution whose input is wider than it is tall (W > H).
++		// Regression for SOP-90: applyConv2D's inner width loop bounded by the
++		// padded H instead of the padded W, so the rightmost output column(s)
++		// were left at their zero-init value. Here H=1, W=3, kernel 1x2 over two
++		// channels, stride 1 -> output width 2. Column 1 (47) must be computed;
++		// the bug returned [37, 0].
++		{
++			11,
++			&onnx.NodeProto{
++				Attribute: []*onnx.AttributeProto{
++					{Name: "auto_pad", S: []byte("NOTSET")},
++					{Name: "dilations", Ints: []int64{}},
++					{Name: "group", I: 1},
++					{Name: "kernel_shape", Ints: []int64{1, 2}},
++					{Name: "pads", Ints: []int64{0, 0, 0, 0}},
++					{Name: "strides", Ints: []int64{1, 1}},
++				},
++			},
++			[][]int{{1, 2, 1, 3}, {1, 2, 1, 2}},
++			[][]float32{{1, 2, 3, 4, 5, 6}, {1, 2, 3, 4}},
++			[]int{1, 1, 1, 2},
++			[]float32{37, 47},
++		},
+ 	}
+ 
+ 	for _, test := range tests {
+@@ -740,3 +763,143 @@ func ConvUnsupportedOnnxNodeProtoFixture() *onnx.NodeProto {
+ func conv11BaseOpFixture() ops.BaseOperator {
+ 	return ops.NewBaseOperator(11, 2, 3, convTypeConstraints, "conv")
+ }
++
++// TestConvUnitAxes exercises convolutions whose sub-image and sub-kernel both
++// collapse to unit spatial/kernel axes — the 1x1 "pointwise" conv the Silero VAD
++// decoder uses as its final classifier. gorgonia's Dense.Slice drops every sliced
++// length-1 axis, so the sub-image loses its unit spatial axis while the sub-kernel
++// keeps a unit kernel axis, leaving the internal elementwise multiply with
++// rank-inconsistent operands (e.g. [128] vs [128,1]) that UnidirectionalBroadcast
++// cannot reconcile. See SOP-88.
++func TestConvUnitAxes(t *testing.T) {
++	tests := []struct {
++		name          string
++		node          *onnx.NodeProto
++		shapes        [][]int
++		backings      [][]float32
++		expectedShape tensor.Shape
++		expected      []float32
++	}{
++		{
++			// Silero decoder final conv shape: 1x1 Conv1D over 128 channels, one
++			// spatial position. Verifies behaviors 1 & 5 (shape [1,1,1], no error).
++			name: "1x1 Conv1D, Silero decoder shape [1,128,1]",
++			node: &onnx.NodeProto{
++				Attribute: []*onnx.AttributeProto{
++					{Name: "kernel_shape", Ints: []int64{1}},
++					{Name: "pads", Ints: []int64{0, 0}},
++					{Name: "strides", Ints: []int64{1}},
++				},
++			},
++			shapes:        [][]int{{1, 128, 1}, {1, 128, 1}, {1}},
++			backings:      [][]float32{onesF32(128), onesF32(128), {0.25}},
++			expectedShape: tensor.Shape{1, 1, 1},
++			// sum over 128 channels of 1*1, plus bias 0.25 = 128.25
++			expected: []float32{128.25},
++		},
++		{
++			// Small 1x1 Conv1D with distinct weights so the channelwise sum is a
++			// non-trivial hand-checkable reference (behavior 2).
++			name: "1x1 Conv1D, distinct channel weights",
++			node: &onnx.NodeProto{
++				Attribute: []*onnx.AttributeProto{
++					{Name: "kernel_shape", Ints: []int64{1}},
++					{Name: "pads", Ints: []int64{0, 0}},
++					{Name: "strides", Ints: []int64{1}},
++				},
++			},
++			shapes:   [][]int{{1, 3, 1}, {1, 3, 1}, {1}},
++			backings: [][]float32{{2, 3, 4}, {5, 6, 7}, {0.5}},
++			// 2*5 + 3*6 + 4*7 + 0.5 = 56.5
++			expectedShape: tensor.Shape{1, 1, 1},
++			expected:      []float32{56.5},
++		},
++		{
++			// Unit kernel (kernel_shape=1) but MULTIPLE spatial positions: the
++			// collapse recurs at every output position, so the fix must live inside
++			// the position loop, not just handle the single-position case. No bias —
++			// the collapse happens before addBias runs.
++			name: "1x1 Conv1D, kernel=1 over H=3, no bias",
++			node: &onnx.NodeProto{
++				Attribute: []*onnx.AttributeProto{
++					{Name: "kernel_shape", Ints: []int64{1}},
++					{Name: "pads", Ints: []int64{0, 0}},
++					{Name: "strides", Ints: []int64{1}},
++				},
++			},
++			shapes:   [][]int{{1, 2, 3}, {1, 2, 1}},
++			backings: [][]float32{{1, 2, 3, 4, 5, 6}, {2, 3}},
++			// ch0={1,2,3} w0=2, ch1={4,5,6} w1=3:
++			// h0=1*2+4*3=14, h1=2*2+5*3=19, h2=3*2+6*3=24
++			expectedShape: tensor.Shape{1, 1, 3},
++			expected:      []float32{14, 19, 24},
++		},
++		{
++			// Multiple kernels (M=2): reconciliation must hold per-kernel.
++			name: "1x1 Conv1D, 2 kernels with bias",
++			node: &onnx.NodeProto{
++				Attribute: []*onnx.AttributeProto{
++					{Name: "kernel_shape", Ints: []int64{1}},
++					{Name: "pads", Ints: []int64{0, 0}},
++					{Name: "strides", Ints: []int64{1}},
++				},
++			},
++			shapes:   [][]int{{1, 2, 1}, {2, 2, 1}, {2}},
++			backings: [][]float32{{3, 4}, {5, 6, 7, 8}, {1, 10}},
++			// k0: 3*5+4*6+1=40, k1: 3*7+4*8+10=63
++			expectedShape: tensor.Shape{1, 2, 1},
++			expected:      []float32{40, 63},
++		},
++		{
++			// 1x1 Conv2D whose sub-image collapses to [C] while the sub-kernel keeps
++			// unit kernel axes [C,1,1] — the 2D analog of the same collapse (behavior 4).
++			name: "1x1 Conv2D, unit spatial + kernel axes",
++			node: &onnx.NodeProto{
++				Attribute: []*onnx.AttributeProto{
++					{Name: "kernel_shape", Ints: []int64{1, 1}},
++					{Name: "pads", Ints: []int64{0, 0, 0, 0}},
++					{Name: "strides", Ints: []int64{1, 1}},
++				},
++			},
++			shapes:   [][]int{{1, 2, 1, 1}, {1, 2, 1, 1}, {1}},
++			backings: [][]float32{{3, 4}, {5, 6}, {1}},
++			// 3*5 + 4*6 + 1 = 40
++			expectedShape: tensor.Shape{1, 1, 1, 1},
++			expected:      []float32{40},
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			inputs := []tensor.Tensor{
++				ops.TensorWithBackingFixture(test.backings[0], test.shapes[0]...),
++				ops.TensorWithBackingFixture(test.backings[1], test.shapes[1]...),
++				nil,
++			}
++			if len(test.backings) == 3 {
++				inputs[2] = ops.TensorWithBackingFixture(test.backings[2], test.shapes[2]...)
++			}
++
++			conv := convVersions[11]()
++			err := conv.Init(test.node)
++			assert.Nil(t, err)
++
++			res, err := conv.Apply(inputs)
++			if err != nil {
++				t.Fatalf("Apply returned error: %v", err)
++			}
++
++			assert.Equal(t, test.expectedShape, res[0].Shape())
++			assert.Equal(t, test.expected, res[0].Data())
++		})
++	}
++}
++
++func onesF32(n int) []float32 {
++	out := make([]float32, n)
++	for i := range out {
++		out[i] = 1
++	}
++
++	return out
++}

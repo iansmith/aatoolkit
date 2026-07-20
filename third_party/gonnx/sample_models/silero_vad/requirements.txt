@@ -1,0 +1,9 @@
+# Pinned to the versions that produced the committed goldens.json.
+# Bumping these may shift the last few float bits; regenerate and review the diff.
+numpy==2.4.6
+onnxruntime==1.27.0
+# generate_realaudio_goldens.py decodes mu-law with the stdlib `audioop` module,
+# which was removed from the standard library in Python 3.13. On 3.13+ this backport
+# restores it; on <=3.12 it is unused (audioop is built in). Either way, run the
+# generators on Python <=3.12 for exact parity with the committed fixtures.
+audioop-lts==0.2.1; python_version >= "3.13"
