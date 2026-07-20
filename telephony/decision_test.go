@@ -118,6 +118,163 @@ func TestDecisionRecorder_EndOfUtterance(t *testing.T) {
 	}
 }
 
+// waitCapEvent blocks until exactly one type="cap" DecisionEvent of the given
+// kind has been recorded, and returns it. Polls rec (the cap is recorded on the
+// session's sequencer goroutine, inside completeTurn, before terminateWithClip)
+// with a deadlock backstop a passing test never reaches. Asserts on the literal
+// wire values ("cap", the kind strings) so the test pins the recorded JSON
+// contract directly and compiles against current code — where nothing records a
+// cap decision, so the backstop is the RED signal (M4 / SOP-166).
+func waitCapEvent(t *testing.T, rec *mockRecorder, kind string) telephony.DecisionEvent {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var found []telephony.DecisionEvent
+		for _, ev := range rec.all() {
+			if ev.Type == "cap" && ev.Kind == kind {
+				found = append(found, ev)
+			}
+		}
+		switch {
+		case len(found) == 1:
+			return found[0]
+		case len(found) > 1:
+			t.Fatalf("cap events of kind %q: got %d, want 1 (all: %+v)", kind, len(found), rec.all())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("no %q cap event recorded within the backstop (all: %+v)", kind, rec.all())
+	return telephony.DecisionEvent{}
+}
+
+// TestDecisionRecorder_UtteranceCap drives a caller past the per-utterance cap
+// and asserts the forced utterance-end is recorded as a type="cap" decision
+// naming MaxUtteranceMS, its resolved (overridden) value, and an audio position
+// carried from the last VAD window — the cap fires from a timer, not a VADEvent,
+// so the position comes from the session's tracked stream-window (M4 behavior 4).
+func TestDecisionRecorder_UtteranceCap(t *testing.T) {
+	rec := &mockRecorder{}
+	clock := newFakeClock()
+	det := &fakeDetector{probs: voicedProbs(50)}
+	data := telephony.NewBufferedChan[[]byte](8)
+	sink := &spySink{}
+	s := telephony.NewSession(context.Background(), "deccap-utt",
+		telephony.WithVADFactory(func() (telephony.VADDetector, error) { return det, nil }),
+		telephony.WithTurnSink(sink),
+		telephony.WithTwilioDataInput(data),
+		telephony.WithClock(clock.after),
+		telephony.WithMaxUtteranceMS(utteranceTestMS),
+		telephony.WithMaxSilenceMS(idleTestMS),
+		telephony.WithDecisionRecorder(rec),
+	)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	for i := 0; i < 3; i++ { // onset: begins the utterance, arms the cap
+		sendData(t, data, windowFrame(byte(i+1)), recvTimeout)
+	}
+	waitSpeechStart(t, sink) // ensures a VAD window (hence a stream position) was seen
+
+	clock.fire(t, utteranceTestDur()) // the cap expires while still speaking
+
+	e := waitCapEvent(t, rec, "utterance-cap")
+	if e.Param != "MaxUtteranceMS" {
+		t.Errorf("Param: got %q, want MaxUtteranceMS", e.Param)
+	}
+	if e.ParamValue != utteranceTestMS {
+		t.Errorf("ParamValue: got %v, want %d (the resolved override)", e.ParamValue, utteranceTestMS)
+	}
+	if e.AudioMS <= 0 || e.AudioMS%32 != 0 {
+		t.Errorf("AudioMS: got %d, want a positive multiple of 32 (last-window position after speech)", e.AudioMS)
+	}
+	if !strings.Contains(e.Effect, "forced utterance end") {
+		t.Errorf("Effect: got %q, want a mention of the forced utterance end", e.Effect)
+	}
+}
+
+// TestDecisionRecorder_TurnCap drives a caller past the whole-turn cap and
+// asserts the forced turn-end is recorded as a type="cap" decision naming
+// MaxTurnMS and its resolved value.
+func TestDecisionRecorder_TurnCap(t *testing.T) {
+	rec := &mockRecorder{}
+	clock := newFakeClock()
+	det := &fakeDetector{probs: voicedProbs(50)}
+	data := telephony.NewBufferedChan[[]byte](8)
+	sink := &spySink{}
+	s := telephony.NewSession(context.Background(), "deccap-turn",
+		telephony.WithVADFactory(func() (telephony.VADDetector, error) { return det, nil }),
+		telephony.WithTurnSink(sink),
+		telephony.WithTwilioDataInput(data),
+		telephony.WithTurnEndPolicy(telephony.StopwordPolicy{}),
+		telephony.WithClock(clock.after),
+		telephony.WithMaxTurnMS(turnTestMS),
+		telephony.WithDecisionRecorder(rec),
+	)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	for i := 0; i < 3; i++ { // onset: opens the turn, arms the turn cap
+		sendData(t, data, windowFrame(byte(i+1)), recvTimeout)
+	}
+	waitSpeechStart(t, sink)
+
+	clock.fire(t, turnTestDur()) // the whole-turn cap expires
+
+	e := waitCapEvent(t, rec, "turn-cap")
+	if e.Param != "MaxTurnMS" {
+		t.Errorf("Param: got %q, want MaxTurnMS", e.Param)
+	}
+	if e.ParamValue != turnTestMS {
+		t.Errorf("ParamValue: got %v, want %d (the resolved override)", e.ParamValue, turnTestMS)
+	}
+	if e.AudioMS <= 0 || e.AudioMS%32 != 0 {
+		t.Errorf("AudioMS: got %d, want a positive multiple of 32 (last-window position after speech)", e.AudioMS)
+	}
+	if !strings.Contains(e.Effect, "forced turn end") {
+		t.Errorf("Effect: got %q, want a mention of the forced turn end", e.Effect)
+	}
+}
+
+// TestDecisionRecorder_IdleTimeout fires the idle/silence timer with no speech
+// and asserts the call-ending timeout is recorded as a type="cap" decision
+// naming MaxSilenceMS. ParamValue is the production MaxSilenceMS constant, NOT
+// the WithMaxSilenceMS test-seam override (which only exists to make the timer
+// fire fast) — the idle cap is not an operator-tunable knob, unlike the
+// utterance/turn caps (M4 behavior 3). The injected clock fires the timer, so no
+// real 15 s wait.
+func TestDecisionRecorder_IdleTimeout(t *testing.T) {
+	rec := &mockRecorder{}
+	clock := newFakeClock()
+	det := &fakeDetector{}
+	s := telephony.NewSession(context.Background(), "deccap-idle",
+		telephony.WithVADFactory(func() (telephony.VADDetector, error) { return det, nil }),
+		telephony.WithClock(clock.after),
+		telephony.WithMaxSilenceMS(idleTestMS),
+		telephony.WithDecisionRecorder(rec),
+	)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	clock.fire(t, idleTestDur()) // silence deadline reached with no speech at all
+
+	e := waitCapEvent(t, rec, "idle-timeout")
+	if e.Param != "MaxSilenceMS" {
+		t.Errorf("Param: got %q, want MaxSilenceMS", e.Param)
+	}
+	if e.ParamValue != telephony.MaxSilenceMS {
+		t.Errorf("ParamValue: got %v, want %d (the MaxSilenceMS constant, not the test-seam override)", e.ParamValue, telephony.MaxSilenceMS)
+	}
+	if !strings.Contains(e.Effect, "idle") {
+		t.Errorf("Effect: got %q, want a mention of the idle call-end", e.Effect)
+	}
+}
+
 // TestWithFileDecisionRecorderFromEnv_Gating covers the AATOOLKIT_EVENT_LOG
 // gate (DoD: "no files written and the no-op recorder is used" when off or no
 // dir). Close flushes even a session that never Started, and the recorder

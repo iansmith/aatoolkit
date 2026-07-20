@@ -45,16 +45,23 @@ type DecisionRecorder interface {
 // producer (state.go) and any consumer read the same strings.
 const (
 	DecisionTypeVAD = "vad"
+	DecisionTypeCap = "cap"
 
-	DecisionKindSpeechStart = "speech-start"
-	DecisionKindSilence     = "silence"
-	DecisionKindEndOfUtter  = "end-of-utterance"
-	DecisionKindTurnEnd     = "turn-end"
+	DecisionKindSpeechStart  = "speech-start"
+	DecisionKindSilence      = "silence"
+	DecisionKindEndOfUtter   = "end-of-utterance"
+	DecisionKindTurnEnd      = "turn-end"
+	DecisionKindUtteranceCap = "utterance-cap"
+	DecisionKindTurnCap      = "turn-cap"
+	DecisionKindIdleTimeout  = "idle-timeout"
 
 	DecisionParamSpeechThresh   = "SpeechThresh"
 	DecisionParamSilenceThresh  = "SilenceThresh"
 	DecisionParamEndSilence     = "EndSilenceMS"
 	DecisionParamTurnEndSilence = "TurnEndSilenceMS"
+	DecisionParamMaxUtterance   = "MaxUtteranceMS"
+	DecisionParamMaxTurn        = "MaxTurnMS"
+	DecisionParamMaxSilence     = "MaxSilenceMS"
 )
 
 // DecisionEvent is one recorded decision. The shape is deliberately flat and
