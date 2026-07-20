@@ -37,6 +37,12 @@ type VADEvent struct {
 	Prob         float32 // detector probability that produced this event
 	VoicedCount  int     // voiced windows accumulated since speech-start
 	SilenceCount int     // consecutive sub-SilenceThresh windows since speech
-	WindowIndex  int     // monotonic per-utterance window counter
-	SessionID    string  // set by the vadService wrapper at construction time
+	WindowIndex  int     // monotonic per-utterance window counter (resets at each speech onset)
+	// StreamWindowIndex is a monotonic, never-reset window counter over the
+	// whole stream (0 at the first window, +1 per window processed). Unlike
+	// WindowIndex it does not reset at speech onset, so AudioMS =
+	// StreamWindowIndex * windowMS gives a stable position in the input audio
+	// for a DecisionEvent -- see decision.go.
+	StreamWindowIndex int
+	SessionID         string // set by the vadService wrapper at construction time
 }

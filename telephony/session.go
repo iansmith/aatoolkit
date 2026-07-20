@@ -104,6 +104,7 @@ type Session struct {
 
 	vadFactory       func() (VADDetector, error)
 	turnSink         TurnSink
+	decisionRecorder DecisionRecorder
 	turnEndPolicy    TurnEndPolicy
 	vadCfg           vadConfig
 	vadEventObserver func(ev VADEvent, emitted bool)
@@ -230,6 +231,14 @@ func WithVADFactory(f func() (VADDetector, error)) SessionOption {
 // boundary events. Start defaults to a logging TurnSink when none is given.
 func WithTurnSink(sink TurnSink) SessionOption {
 	return func(s *Session) { s.turnSink = sink }
+}
+
+// WithDecisionRecorder wires the DecisionRecorder that receives one
+// DecisionEvent per parameterized voice-input choice (M1: end-of-utterance).
+// Unset, a session uses a no-op recorder (NewSession default) and records
+// nothing. The session owns the recorder's lifecycle: Close flushes it.
+func WithDecisionRecorder(r DecisionRecorder) SessionOption {
+	return func(s *Session) { s.decisionRecorder = r }
 }
 
 // ProdTurnSink is the production TurnSink: it logs turn completions with
@@ -418,6 +427,11 @@ func NewSession(ctx context.Context, callSID string, opts ...SessionOption) *Ses
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	// Default the recorder to a no-op so every call site can Record/Close
+	// unconditionally (mirrors how the tap treats a nil *Tap as a no-op).
+	if s.decisionRecorder == nil {
+		s.decisionRecorder = noopRecorder{}
 	}
 	// Built after the options so WithClock can supply the passage of time.
 	s.timerFacility = NewTimerFacilityWithClock(ctx, s.clock)
@@ -744,6 +758,25 @@ func (s *Session) dispatchSTT(kind STTPassKind, audio []byte) {
 	}
 }
 
+// recordEndOfUtterance emits the one DecisionEvent M1 records: the
+// end-of-utterance choice made by EndSilenceMS. Called from dispatchFullPass
+// right after dispatchSTT, so sttReqID already names the dispatched request.
+// ev is the VADEndOfUtterance event that triggered the dispatch; its
+// StreamWindowIndex gives the audio position (StreamWindowIndex * windowMS).
+func (s *Session) recordEndOfUtterance(ev VADEvent) {
+	s.decisionRecorder.Record(DecisionEvent{
+		AudioMS:      ev.StreamWindowIndex * s.vadCfg.windowMS(),
+		Type:         DecisionTypeVAD,
+		Kind:         DecisionKindEndOfUtter,
+		Param:        DecisionParamEndSilence,
+		ParamValue:   s.vadCfg.EndSilenceMS,
+		Prob:         ev.Prob,
+		SilenceCount: ev.SilenceCount,
+		RequestID:    s.sttReqID,
+		Effect:       fmt.Sprintf("utterance closed; dispatched STT request %d", s.sttReqID),
+	})
+}
+
 // drainSTTDispatch relays STTRequests from sttDispatchCh to sttIn in FIFO
 // order, isolated from run()'s select loop so a slow/backed-up STT sidecar
 // stalls only this goroutine (Charter R8) -- mirrors forwardToVAD's pattern.
@@ -916,5 +949,11 @@ func (s *Session) Close() {
 		s.cancelSimTurnTimer()
 		s.cancelTurnTimer()
 		s.vad.Close()
+	}
+	// Flush the decision record after the sequencer has drained (so no further
+	// Record can arrive) and regardless of started, so a never-started session
+	// still writes a clean, empty record. Idempotent -- a second Close no-ops.
+	if err := s.decisionRecorder.Close(); err != nil {
+		log.Printf("telephony: session %s: decision recorder close: %v", s.CallSID, err)
 	}
 }

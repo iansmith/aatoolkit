@@ -3,6 +3,7 @@ package twilio
 import (
 	"context"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -66,7 +67,7 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	// the payloads delivered to the session").
 	tap := NewTap(tapDirFromEnv(), start.StreamSID, start.CallSID, tapLabelFromEnv(), startedAt)
 
-	sess := newSession(ctx, start.CallSID,
+	opts := []telephony.SessionOption{
 		telephony.WithTwilioDataInput(dataIn),
 		telephony.WithTwilioControlInput(controlIn),
 		telephony.WithTwilioDataOutput(NewDataPlaneOutput(conn, start.StreamSID, tap)),
@@ -78,7 +79,14 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 			// mark-echo wait) has no reason to wait out again.
 			_ = conn.CloseNow()
 		}),
-	)
+	}
+	// Decision-event recording rides the same directory and label as the audio
+	// tap, gated by AATOOLKIT_EVENT_LOG; the option is a no-op when recording is
+	// off or no tap dir is set. The session flushes the recorder on Close.
+	opts = append(opts, telephony.WithFileDecisionRecorderFromEnv(
+		tapDirFromEnv(), start.StreamSID, start.CallSID, tapLabelFromEnv(), telephony.DefaultVADConfig(), os.Stderr))
+
+	sess := newSession(ctx, start.CallSID, opts...)
 	if err := sess.Start(); err != nil {
 		log.Printf("twilio: handleStream: session start: %v", err)
 		return err
