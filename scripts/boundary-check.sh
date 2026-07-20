@@ -15,16 +15,11 @@ fi
 
 # 2. Content denylist — closed/particular tokens that must never appear here.
 #    Edit .boundary-denylist (one extended-regex per line; # starts a comment).
-#    CLAUDE.md is EXEMPT: it carries a copy of the cross-project universal rules block,
-#    which legitimately names the sibling repos (incl. the closed one). It is dev-meta,
-#    not open product surface. Trade-off: this guard does NOT catch a closed leak inside
-#    CLAUDE.md — it MUST be sanitized/reviewed by hand before the first public push
-#    (repo-split-plan.md §6). See CLAUDE.md's own "Boundary check exempts this file".
 if [ -f .boundary-denylist ]; then
   while IFS= read -r pat; do
     [ -z "$pat" ] && continue
     case "$pat" in \#*) continue ;; esac
-    if grep -rniE "$pat" --include='*.go' --include='*.md' --exclude=CLAUDE.md . 2>/dev/null; then
+    if grep -rniE "$pat" --include='*.go' --include='*.md' . 2>/dev/null; then
       echo "BOUNDARY FAIL: denylisted term matched: /$pat/ (above)." >&2
       fail=1
     fi

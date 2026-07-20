@@ -1,146 +1,87 @@
 # aatoolkit
 
----
+aatoolkit is an open, reusable engine for building voice/telephony agents: Twilio media
+streaming, STT + a VAD/turn state machine, an LLM driver, a fact-extraction toolkit, a
+generic runtime Go-policy loader, and a process supervisor. It is the *mechanism*; a
+specific agent supplies its *meaning* (prompts, policy, ontology, identity) by injecting it
+through `driver.Config` + `interp.Load` + the `host.Host` interface. Any number of agents can
+run on the same engine.
 
-<!-- BEGIN UNIVERSAL SECTION -->
-<!-- REFERENCE COPY. This repo (ticket-plugin / slopstop) holds the canonical universal
-     block; the other five projects carry byte-identical copies of it. Edit it HERE, then
-     propagate — never the other way round, and never by hand.
-     Extract with the ANCHORED pattern (^...$) — an unanchored one also matches the
-     marker names mentioned in prose below, and stops early:
-       awk '/^<!-- BEGIN UNIVERSAL SECTION -->$/,/^<!-- END UNIVERSAL SECTION -->$/' CLAUDE.md
-     Project-specific overrides go OUTSIDE these markers. See §10. -->
+## The one hard rule — the boundary
 
-# Universal Project Rules
+**aatoolkit must never reference or embed the closed product(s) that consume it.**
+Dependencies flow consumer → aatoolkit only, never the reverse. This is enforced by
+`scripts/boundary-check.sh` (run by the pre-commit hook via `core.hooksPath = .githooks`, and
+by CI in `.github/workflows/boundary.yml` — the unbypassable gate). It rejects any import of a
+closed module and any denylisted identity token (`.boundary-denylist`). Keep the engine
+generic: mechanism here, meaning in the consumer.
 
-These rules apply across all of Ian's projects unless this CLAUDE.md explicitly overrides them.
+## Development rules
 
-## 1. Pre-commit
+### 1. Pre-commit
+- Run `gofmt`, the build, and the targeted tests for the area you touched before committing.
+  Run the full suite only when touching shared/cross-cutting code.
+- Commit, then push — only after the above are clean.
 
-- **ALWAYS run `/simplify` on uncommitted changes before every commit.** No exceptions on size — a one-line change can introduce a duplicate constant, touch the wrong file, or violate a project rule, all of which `/simplify` catches cheaply. Apply real findings inline before committing.
-- Run the project's build + targeted tests (the package or area you touched) before commit. Run the full suite only when touching shared/cross-cutting code.
-- Commit, then push — only after the above are clean. **If the project has multiple remotes, push to all of them.**
+### 2. Tests
+- **Tests-first for new behavior and for fixes.** For new behavior, write the test describing
+  the contract and confirm it's red for the right reason before implementing. For a bug fix,
+  write a test that reproduces it — red before, green after. Trivial tweaks, copy changes, and
+  pure refactors are exempt.
+- **A failing test is signal, not chore.** Investigate the root cause; never delete a test,
+  narrow an assertion, `Skip()`, or cite an unverified "flake" to silence it.
 
-## 2. Tests
+### 3. Git
+- **Never squash-merge or rebase-merge.** Use a real merge commit — squash and rebase lose
+  fixup context and break `git bisect`.
+- Always name the branch explicitly in `git push origin <branch>`.
+- Never `--force`, `reset --hard`, `--no-verify`, or admin-merge unless explicitly asked. When
+  a hook or check fails, fix the underlying issue rather than bypassing it.
+- Create new commits rather than amending (except amending one fresh commit on a solo branch
+  before anyone has pulled it).
 
-- **Tests-first for new behavior AND for fixes.** For new behavior, write the test describing the desired contract; confirm it's red **for the right reason** before implementing. For bug fixes, write a test that reproduces the bug — it must be red before the fix and green after. Trivial tweaks, copy changes, and pure refactors are exempt.
-- **A failing test is signal, not chore.** Investigate the root cause before changing anything. Never delete a test, narrow an assertion, call `Skip()`, or cite an unverified "flake" to silence it. "Known flake" is a label, not an explanation.
+### 4. Refactoring scope
+- **Dedupe is in scope.** If you find 2+ near-identical code paths while working on a change,
+  extract the helper and migrate the duplicates in the same PR.
+- **Structural changes are out of scope without discussion** — renaming exported symbols,
+  altering public signatures, moving files, or reshaping package boundaries.
+- When extending an existing system, study its types and patterns first; mirror the existing
+  vocabulary rather than inventing parallel terms.
+- Foundational correctness over quick wins. "Nearly passing" is failing — don't declare a
+  category of failures done by cherry-picking the easy cases.
 
-(Test scope before commit is covered by §1. Project-specific guidance on test runtime and scoping lives in each project's CLAUDE.md.)
-
-## 3. Git
-
-- **NEVER squash-merge or rebase-merge.** Use `gh pr merge --merge` (real merge commit). Squash and rebase lose fixup context and break `git bisect`.
-- Always include the explicit branch name in `git push origin <branch>`.
-- Never `git push --force`, `git reset --hard`, `git commit --no-verify`, `git push --no-verify`, or `gh pr merge --admin` unless the user explicitly asks. When a hook or check fails, fix the underlying issue, don't bypass.
-- Create new commits rather than amending. The single exception: amending one fresh commit on a solo branch before anyone has pulled it.
-
-## 4. Refactoring scope
-
-- **Dedupe is in scope.** If you find 2+ near-identical code paths while working on a change, extract the helper and migrate the duplicates in the same PR.
-- **Structural changes are out of scope without discussion.** Renaming exported symbols, altering public signatures, moving files, or reshaping module boundaries must be raised separately.
-- When extending an existing system, study its types and patterns first. Mirror existing vocabulary; don't invent parallel terms for the same concept.
-- Foundational correctness over quick wins. "Nearly passing" is failing. When working through a category of failures, **don't declare done by cherry-picking the easy cases** — solve the problem completely.
-
-## 5. Source of truth
-
-- **One definition per value.** No duplicate constants, aliases, or parallel names. If something needs renaming, update every reference — never add an alias.
+### 5. Source of truth
+- **One definition per value.** No duplicate constants, aliases, or parallel names. If
+  something needs renaming, update every reference — never add an alias.
 - Never edit generated files by hand. Edit the source and regenerate.
 
-## 6. Agents and worktrees
+### 6. Agents and worktrees
+- When running coding agents in parallel, commit and push before launching worktree agents
+  (worktrees start from HEAD, not the working directory). Aim for milestones frequent enough
+  that progress is visible but not noisy, and for parallelism that won't cause merge-back
+  conflicts on the base branch.
+- Every agent runs on its own branch in its own directory, commits only to that branch, and
+  reports at each milestone. Restate the relevant rules in each agent prompt — agents start
+  with no prior context.
+- Never use `open` to display files unless explicitly asked (disruptive).
 
-### Coordinator rules — how to behave when running agents
+### 7. Environment
+- Never modify `PATH` manually. If the project has special path/environment requirements, ask
+  first. The shell env for local dev is sourced from `enable-aatoolkit` (see
+  `enable-aatoolkit.example`); the real file holds secrets and is gitignored — keep it out of
+  the repo (best kept one directory up, at the workspace root).
 
-- Commit and push before launching worktree agents — worktrees start from HEAD, not the working directory.
-- **Aim for fine-grained milestones** — frequent enough that progress is visible (rough target: a check-in every few minutes of work), but not so frequent that the output becomes noise. Every 10 seconds is too often; every 20 minutes is too long.
-- **Aim for parallelism that won't cause merge-back conflicts on the base branch.** If the work can't be cleanly parallelized, consider whether sequential agent offload is actually worth the overhead — small tasks belong on your own plate; genuinely large offloads (long builds, multi-file refactors you'd otherwise wait on) can still be a win even when sequential.
-- **Never use `open` to display files unless the user explicitly asks.** Disruptive even from the main session.
+### 8. Documentation layout
+- `docs/` is **gitignored** — personal notes, scratch, drafts. Not committed.
+- `design/` is **tracked**, but don't add files to it without explicit confirmation — design
+  docs are deliberate artifacts.
 
-### Agent instructions — what to include in every agent prompt
+## Local development
 
-- **Run on a separate branch in a separate directory.** Before working, prepare the directory if the project requires it — e.g., symlink large, rarely-changing directories that aren't under git control from the worktree to their original location, so the agent has its dependencies without duplicating them.
-- **Commit only to your worktree's branch.** Never touch `main`/`master` or other shared branches from a worktree.
-- **Commit and report at every milestone, not just at the end.**
-- **Never use `open` to display files** (disrupts the user's screen).
-- **Restate the relevant project rules verbatim in the prompt.** Agents start with no prior context and won't follow rules they don't see.
-
-## 7. Environment
-
-- Never modify PATH manually. If the project has special path or environment requirements, ask the user the first time, then save them to memory for that project so subsequent sessions pick them up automatically.
-
-## 8. Documentation directory layout (universal)
-
-- `docs/` is **gitignored** — used for personal notes, scratch work, drafts. Not committed.
-- `design/` is **tracked**, but you do **not** add files to it without explicit user confirmation. Design docs are deliberate artifacts.
-- Files specific to a particular ticket (continuation prompts, mid-flight notes, ticket-local plans) go into the **ticket's local storage directory** (`~/.claude/ticket-active/<TICKET>/`), not into `docs/` or `design/`.
-
-## 9. Automated PR review
-
-- **CodeRabbit is OFF** — the subscription was cancelled 2026-07-17. Do not wait for it, do not post `@coderabbitai review`, and do not treat its absence on a PR as a problem. (Greptile is under consideration; nothing is decided.)
-- **The review backend is per-project config, not a fixed tool.** `[pr_review] backend` in `.project-conf.toml` selects it: `claude` (Claude's own `/code-review`), `coderabbit`, or `greptile`. Both lyos repos are on `claude`. Switching later is a one-line config change — do not hard-code a tool name into a workflow.
-- `/simplify`'s pre-commit role is to preempt review findings, not to substitute for the actual review.
-- When a project has multiple remotes, **prefer the GitHub remote** for any hosted review bot. Bot reviews do not work on Bitbucket; if Bitbucket is the only remote, factor that into the review plan separately.
-
-## 10. Adding a new rule — where it lives
-
-- **Project-specific operational tip or bug record** → `feedback_*.md` in this project's memory dir; index it in `MEMORY.md`. Default home for new learnings.
-- **Project-specific rule every session must follow** → the project-specific section of this `CLAUDE.md`. Delete the memory file if it would duplicate.
-- **Universal rule applying to every project of Ian's** → edit the **reference copy in
-  `ticket-plugin`** (slopstop), then propagate to the other five. Don't drift one project's
-  universal block.
-
-**`ticket-plugin/CLAUDE.md` is the reference copy.** The other five carry byte-identical
-mirrors of the marked block. Edit there and propagate outward — never edit a mirror, and never
-propagate from one. Fitting home: slopstop is the tool these rules run on.
-
-The six: `ticket-plugin` (slopstop, **reference**), `lyos/mobile-v2`, `lyos/server-v2`,
-`louis14`, `mazzy` (mazarin), `sophie`.
-
-**Mirroring is mechanical — do not hand-copy.** The block is delimited by
-`<!-- BEGIN UNIVERSAL SECTION -->` / `<!-- END UNIVERSAL SECTION -->` markers, so:
-
-```bash
-# 1. extract from the reference. The ^...$ anchors matter: the marker names also
-#    appear in this prose, and an unanchored pattern terminates on them early
-#    (it silently yields ~6 lines instead of the whole block).
-awk '/^<!-- BEGIN UNIVERSAL SECTION -->$/,/^<!-- END UNIVERSAL SECTION -->$/' \
-    ~/ticket-plugin/CLAUDE.md > /tmp/UNIVERSAL.md
-
-# 2. replace the marked region in each mirror, then verify — all six must print one hash:
-for f in ~/ticket-plugin/CLAUDE.md ~/lyos/mobile-v2/CLAUDE.md ~/lyos/server-v2/CLAUDE.md \
-         ~/louis14/CLAUDE.md ~/mazzy/CLAUDE.md ~/sophie/sophie/CLAUDE.md; do
-  awk '/^<!-- BEGIN UNIVERSAL SECTION -->$/,/^<!-- END UNIVERSAL SECTION -->$/' "$f" | md5 -q
-done | sort -u   # exactly one line = in sync
-```
-
-A project-specific section may deliberately **override** a universal rule (e.g. mazzy's
-"Pre-commit (overrides universal §1)"). That is fine and belongs *outside* the markers — the
-marked region must stay byte-identical everywhere.
-
-Promotion is one-way: memory → project-specific → universal. Rules go up when they prove durable.
-
-<!-- END UNIVERSAL SECTION -->
-
----
-
-# aatoolkit-Specific Declarations
-
-## Universal block: standalone copy, NOT auto-propagated (yet)
-
-The universal section above is a **one-time copy** from the `ticket-plugin` reference.
-aatoolkit is deliberately **not** in the six-repo auto-propagation set (§10): this repo is
-bound for public release, and its CLAUDE.md must be **sanitized** — the references to the
-closed `sophie` repo and Ian's other private projects removed — before the first public
-push (see `../sophie/docs/repo-split-plan.md` §6). A byte-identical mirror would fight that.
-
-Consequence: **universal-rule changes are not delivered here automatically.** Until this
-file is sanitized and its maintenance model is settled, port universal changes by hand.
-
-## Boundary check exempts this file
-
-`scripts/boundary-check.sh` scans `*.go`/`*.md` for the closed token `sophie` and would
-otherwise reject every commit, because the copied universal block names the sibling repos.
-`CLAUDE.md` is therefore excluded from the content-denylist grep. It is a dev-meta file,
-not part of the open product surface — but that means the boundary guard does NOT catch a
-closed leak *inside CLAUDE.md*. Treat CLAUDE.md as a mandatory item in the manual
-pre-public-push review (plan §6).
+aatoolkit is developed alongside its consumer(s) via a `go.work` workspace one directory up
+(so cross-module edits resolve from local disk); `go.work` is not committed. CI and the
+consumer's release builds use the pinned module version, so aatoolkit must always build and
+test **standalone** — verify with `GOWORK=off go build ./... && GOWORK=off go test ./...`
+before relying on a change. The vendored `third_party/gonnx` fork is wired via a local
+`replace`; a consumer that depends on aatoolkit must re-declare that replace (replace
+directives are not inherited).
