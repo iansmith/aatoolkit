@@ -270,6 +270,7 @@ type vadMachine struct {
 	voicedCount  int  // voiced windows accumulated since speech-start
 	turnEndFired bool // VADTurnEnd fired for this silence run; suppressed until next speech onset
 	windowIndex  int  // monotonic window counter since speech-start (0 at onset)
+	streamWindow int  // monotonic window counter over the whole stream; never reset (audio-position clock)
 }
 
 func newVADMachine(cfg vadConfig) *vadMachine { return &vadMachine{cfg: cfg.withDefaults()} }
@@ -282,6 +283,11 @@ func (m *vadMachine) windowMS() int {
 // step advances the machine by one window's speech probability, returning an
 // event when a boundary is crossed.
 func (m *vadMachine) step(prob float32) (VADEvent, bool) {
+	// Count every window uniformly, before any branch, so streamWindow is the
+	// stream-global audio-position clock regardless of which path this window
+	// takes (onset, dead-zone, silence, or speech). windowIndex below stays
+	// per-utterance and is managed inside the branches as before.
+	m.streamWindow++
 	if !m.speaking {
 		if prob >= m.cfg.SpeechThresh {
 			m.speaking = true
@@ -345,11 +351,12 @@ func (m *vadMachine) step(prob float32) (VADEvent, bool) {
 // it on relay (charter R10).
 func (m *vadMachine) event(kind VADKind, prob float32) VADEvent {
 	return VADEvent{
-		Kind:         kind,
-		Prob:         prob,
-		VoicedCount:  m.voicedCount,
-		SilenceCount: m.silenceCount,
-		WindowIndex:  m.windowIndex,
+		Kind:              kind,
+		Prob:              prob,
+		VoicedCount:       m.voicedCount,
+		SilenceCount:      m.silenceCount,
+		WindowIndex:       m.windowIndex,
+		StreamWindowIndex: m.streamWindow,
 	}
 }
 

@@ -88,9 +88,21 @@ func replayFile(ctx context.Context, path string, endSilenceMS int) ([]telephony
 	}
 	callSID := recordingID(path)
 	sttClient := telephony.NewSTTClient(sttBaseURL())
-	return telephony.Replay(ctx, callSID, bytes.NewReader(data), sttClient,
-		telephony.WithVADConfig(telephony.VADConfig{EndSilenceMS: endSilenceMS}),
-	)
+
+	// Resolve a full config (defaults with the endSilenceMS override) so both
+	// the session and, when recording is on, the decision-record header carry
+	// the same values.
+	cfg := telephony.DefaultVADConfig()
+	cfg.EndSilenceMS = endSilenceMS
+	// Reuse the replay path to reproduce the decision record from the saved
+	// audio (AATOOLKIT_EVENT_LOG). Events land beside the recording, keyed by
+	// its id; the session flushes the recorder on its own Close inside Replay.
+	opts := []telephony.SessionOption{
+		telephony.WithVADConfig(cfg),
+		telephony.WithFileDecisionRecorderFromEnv(filepath.Dir(path), callSID, callSID, "", cfg, os.Stderr),
+	}
+
+	return telephony.Replay(ctx, callSID, bytes.NewReader(data), sttClient, opts...)
 }
 
 // recordingID derives a recording's identity from its .ulaw path: the

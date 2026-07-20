@@ -420,7 +420,7 @@ func withSpeechReset(h transitionHandler) transitionHandler {
 func handleListeningVADEvent(s *Session, ev transitionEvent) SessionState {
 	vev, _ := ev.payload.(VADEvent)
 	if vev.Kind == VADEndOfUtterance {
-		return dispatchFullPass(s)
+		return dispatchFullPass(s, vev)
 	}
 	return s.State()
 }
@@ -440,9 +440,13 @@ func handleListeningVADEvent(s *Session, ev transitionEvent) SessionState {
 // append-only for the whole call, and every pass re-sends everything said so
 // far -- growing latency per pass and repeating earlier text in each
 // transcript.
-func dispatchFullPass(s *Session) SessionState {
+func dispatchFullPass(s *Session, ev VADEvent) SessionState {
 	s.onUtteranceEnd()
 	s.dispatchSTT(FullPass, s.turnBuf)
+	// Record after dispatchSTT so sttReqID names the request just dispatched;
+	// ev carries the audio position and probability/silence state that ended
+	// this utterance.
+	s.recordEndOfUtterance(ev)
 	s.turnBuf = nil
 	return StateAwaitingFullResult
 }
