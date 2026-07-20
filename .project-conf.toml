@@ -54,8 +54,9 @@ filemap_violation = "kill"
 # NOTE: enabled=true drives :pr / :start / :archive / :plan autonomously. It does
 # NOT by itself make :merge autonomous — per the skill's merge-autonomous.md, full
 # autonomous :merge is activated by passing --autonomous on the :merge command line.
-# The merge_* / archive_immediately keys below are read only on those --autonomous
-# runs. Interactive :merge still auto-confirms via [workflow] skip_confirm (below).
+# The merge_* keys below are read only on those --autonomous runs. Interactive
+# :merge still auto-confirms via [workflow] skip_confirm (below). [workflow]
+# skip_archive, unlike these, applies in BOTH modes — it's not [autonomous]-scoped.
 [autonomous]
 enabled = true
 branch_type = "feat"
@@ -63,7 +64,6 @@ branch_type = "feat"
 # Autonomous :merge behavior (applies when :merge is called with --autonomous).
 merge_strategy      = "merge"   # real merge commit; preserves per-commit history for git bisect
 merge_target_state  = "auto"    # advance the ticket exactly one state, never force-jump to Done
-archive_immediately = true      # chain into :archive when a merge lands a ticket in a terminal state
 
 # PR code review backend for /slopstop-pr.
 # "claude" → in-house /code-review (Skill); "coderabbit" → CodeRabbit bot;
@@ -76,5 +76,9 @@ fix    = true
 # Don't prompt for the branch type on /slopstop-start — use the heuristic
 # suggestion (from ticket labels/title) automatically. Only falls back to
 # asking when the heuristic produces no suggestion at all.
+# skip_archive=false: :merge always chains into :archive on terminal state
+# (slopstop v3.4.0+, both interactive and autonomous — replaces the old
+# [autonomous] archive_immediately key, which no longer exists).
 [workflow]
 skip_confirm = true
+skip_archive = false
