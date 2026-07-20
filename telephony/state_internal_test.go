@@ -10,6 +10,40 @@ import (
 	"time"
 )
 
+// TestAwaitingMarkEcho_AbsorbsInboundDataPlane pins SOP-169: while the farewell
+// clip plays and the session waits for the mark echo (StateAwaitingMarkEcho),
+// the caller keeps streaming media until the socket closes, so inbound
+// data/VAD/STT are expected -- they must be absorbed silently, not logged as an
+// unimplemented gap. The state must stay AwaitingMarkEcho (the mark-echo wait
+// is not abandoned).
+func TestAwaitingMarkEcho_AbsorbsInboundDataPlane(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  InputSource
+		payload any
+	}{
+		{"twilio-data", SourceTwilioData, []byte{0x01, 0x02}},
+		{"vad-event", SourceVADEvent, VADEvent{Kind: VADSpeech}},
+		{"stt-result", SourceSTTResult, STTResult{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewSession(context.Background(), "markecho-absorb")
+			defer s.Close()
+			s.setState(StateAwaitingMarkEcho)
+
+			s.dispatch(tc.source, tc.payload)
+
+			if got := s.State(); got != StateAwaitingMarkEcho {
+				t.Errorf("state after %s: got %s, want StateAwaitingMarkEcho (mark-echo wait must not be abandoned)", tc.name, got)
+			}
+			if s.notImplLogged[notImplKey{state: StateAwaitingMarkEcho, source: tc.source}] {
+				t.Errorf("%s in AwaitingMarkEcho was logged 'not yet implemented' — expected teardown input must be absorbed silently", tc.name)
+			}
+		})
+	}
+}
+
 // countingSink counts TurnSink callbacks. The external session_test.go has
 // its own spySink; this package-internal one exists because tests that reach
 // the unexported transition table cannot import that one.
@@ -187,14 +221,16 @@ func TestSpeechOnsetDoesNotChangeState(t *testing.T) {
 }
 
 // TestNotImplementedLogsOncePerStateSourcePair pins the fix for the
-// stub-handler log burying the control plane.
+// stub-handler log burying the control plane: a per-frame source hitting a
+// still-stubbed row must report once per (state, source) pair, not per frame.
 //
-// Observed live (build/logs/server-2026-07-16-12-45-12.log): a single call
-// produced 104 lines, 100 of them the identical "state=AwaitingMarkEcho
-// source=TwilioData: not yet implemented". AwaitingMarkEcho takes inbound
-// media for the farewell clip's whole 2s playout, and at 50 frames/sec the
-// stub handler fired per frame. The gap itself is real (SOP-115/G,H owns it),
-// so the line stays -- it just reports once per (state, source) pair.
+// The original trigger was AwaitingMarkEcho taking inbound media for the
+// farewell clip's whole 2s playout (build/logs/server-2026-07-16-12-45-12.log:
+// 100 identical "state=AwaitingMarkEcho source=TwilioData" lines at 50
+// frames/sec). SOP-169 later absorbed that data plane during teardown, so it no
+// longer stubs -- but the per-pair suppression is a general guard for any
+// still-stubbed termination row, exercised here via StateTerminating (which
+// still stubs every source, SOP-115/G,H).
 //
 // Frame count and log content only; no clock is read.
 func TestNotImplementedLogsOncePerStateSourcePair(t *testing.T) {
@@ -206,9 +242,9 @@ func TestNotImplementedLogsOncePerStateSourcePair(t *testing.T) {
 	s := NewSession(context.Background(), "notimpl-once", WithTurnSink(&countingSink{}))
 	defer s.Close()
 
-	s.setState(StateAwaitingMarkEcho)
+	s.setState(StateTerminating)
 
-	// 100 media frames == the ~2s farewell playout at 50 frames/sec.
+	// 100 frames stands in for a sustained per-frame source at ~50 frames/sec.
 	const frames = 100
 	for i := 0; i < frames; i++ {
 		s.dispatch(SourceTwilioData, []byte{0xFF})
@@ -216,7 +252,7 @@ func TestNotImplementedLogsOncePerStateSourcePair(t *testing.T) {
 
 	got := strings.Count(buf.String(), "not yet implemented")
 	if got != 1 {
-		t.Errorf("AwaitingMarkEcho + %d media frames logged %d \"not yet implemented\" lines, want 1: the farewell playout's inbound media repeats the same gap per frame and buries the control plane", frames, got)
+		t.Errorf("Terminating + %d media frames logged %d \"not yet implemented\" lines, want 1: a per-frame source repeats the same gap and buries the control plane", frames, got)
 	}
 	// The one line must say it stands for many. Without that, a single
 	// occurrence reads as "this happened once" when it happened `frames`
@@ -239,18 +275,19 @@ func TestNotImplementedLogsEachDistinctPair(t *testing.T) {
 	s := NewSession(context.Background(), "notimpl-distinct", WithTurnSink(&countingSink{}))
 	defer s.Close()
 
-	// Two distinct stub pairs, each driven twice.
+	// Two distinct stub pairs, each driven twice. Both live in StateTerminating
+	// (still stubs every source, SOP-115/G,H); AwaitingMarkEcho's data plane is
+	// now absorbed (SOP-169), so it no longer offers a stubbed data pair.
 	for i := 0; i < 2; i++ {
-		s.setState(StateAwaitingMarkEcho)
-		s.dispatch(SourceTwilioData, []byte{0xFF})
 		s.setState(StateTerminating)
 		s.dispatch(SourceTwilioData, []byte{0xFF})
+		s.dispatch(SourceVADEvent, VADEvent{Kind: VADSpeech})
 	}
 
 	if got := strings.Count(buf.String(), "not yet implemented"); got != 2 {
 		t.Errorf("two distinct stub (state, source) pairs logged %d lines, want 2 (one each): suppression must be per pair, not global", got)
 	}
-	for _, want := range []string{"state=AwaitingMarkEcho", "state=Terminating"} {
+	for _, want := range []string{"source=TwilioData", "source=VADEvent"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("expected a report naming %s, got: %q", want, buf.String())
 		}

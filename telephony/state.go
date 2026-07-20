@@ -244,14 +244,19 @@ func buildTransitionTable() transitionTable {
 	}
 
 	// AwaitingMarkEcho: waiting for Twilio to echo the farewell mark back, or
-	// for the mark-echo timeout to fire (SOP-125). Every other source is a
-	// stub here -- no further call audio/VAD/STT activity is expected once
-	// the farewell has been sent.
+	// for the mark-echo timeout to fire (SOP-125). The control-plane mark echo
+	// and its timer drive the wait; the inbound data plane (media, and the VAD/
+	// STT it feeds) keeps arriving until the socket closes and is absorbed
+	// silently -- expected teardown traffic, not a gap (SOP-169). Anything else
+	// remains a stub.
 	for _, src := range AllSources {
 		t[StateAwaitingMarkEcho][src] = handleNotImplemented
 	}
 	t[StateAwaitingMarkEcho][SourceTwilioControl] = handleMarkEchoControlEvent
 	t[StateAwaitingMarkEcho][SourceMarkEchoTimer] = handleMarkEchoTimeout
+	t[StateAwaitingMarkEcho][SourceTwilioData] = handleAbsorb
+	t[StateAwaitingMarkEcho][SourceVADEvent] = handleAbsorb
+	t[StateAwaitingMarkEcho][SourceSTTResult] = handleAbsorb
 
 	// Idle timer: fires after MaxSilenceMS of no VAD speech and starts call
 	// termination (SOP-125 Observable behavior #3). Wired into every state
@@ -659,4 +664,13 @@ func handleNotImplemented(s *Session, ev transitionEvent) SessionState {
 // handleClosed absorbs any input once the session is Closed.
 func handleClosed(s *Session, ev transitionEvent) SessionState {
 	return StateClosed
+}
+
+// handleAbsorb silently discards an event and leaves the state unchanged. Used
+// for inputs that are expected but have nothing to act on -- inbound call audio
+// (and the VAD/STT it feeds) that keeps arriving while the session tears down,
+// during the mark-echo wait (SOP-169). Unlike handleClosed it does not force a
+// state change, so the mark-echo wait is preserved.
+func handleAbsorb(s *Session, ev transitionEvent) SessionState {
+	return s.State()
 }
