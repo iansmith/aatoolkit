@@ -352,7 +352,7 @@ func handleControlEvent(s *Session, ev transitionEvent) SessionState {
 // is the first onset of a new turn" -- so the turn-level cap (SOP-161) arms
 // here, guarded by that check, rather than on every onset the way the
 // per-utterance cap does.
-func handleSpeechOnset(s *Session) SessionState {
+func handleSpeechOnset(s *Session, ev VADEvent) SessionState {
 	s.cancelIdleTimer()
 	s.armUtteranceTimer()
 	if !s.turnActive {
@@ -362,6 +362,7 @@ func handleSpeechOnset(s *Session) SessionState {
 	if s.turnSink != nil {
 		s.turnSink.OnSpeechStart()
 	}
+	s.recordVADDecision(DecisionKindSpeechStart, DecisionParamSpeechThresh, s.vadCfg.SpeechThresh, ev, "utterance opened", 0)
 	return s.State()
 }
 
@@ -397,7 +398,12 @@ func withSpeechReset(h transitionHandler) transitionHandler {
 		if vev, ok := ev.payload.(VADEvent); ok {
 			switch vev.Kind {
 			case VADSpeech:
-				return handleSpeechOnset(s)
+				return handleSpeechOnset(s, vev)
+			case VADSilence:
+				// Record the silence-onset decision (SilenceThresh) uniformly
+				// across every live VAD-consuming state, then fall through to
+				// the state's own handler (which treats silence as a no-op).
+				s.recordVADDecision(DecisionKindSilence, DecisionParamSilenceThresh, s.vadCfg.SilenceThresh, vev, "silence run started", 0)
 			case VADTurnEnd:
 				if s.State() == StateAwaitingFullResult {
 					s.turnEndPending = true
@@ -446,7 +452,7 @@ func dispatchFullPass(s *Session, ev VADEvent) SessionState {
 	// Record after dispatchSTT so sttReqID names the request just dispatched;
 	// ev carries the audio position and probability/silence state that ended
 	// this utterance.
-	s.recordEndOfUtterance(ev)
+	s.recordEndOfUtterance(ev, true)
 	s.turnBuf = nil
 	return StateAwaitingFullResult
 }
@@ -480,6 +486,9 @@ func handleAwaitingFullResultVADEvent(s *Session, ev transitionEvent) SessionSta
 	// the caller has finished, and a subsequent silence force-stops the call
 	// instead of ending it with the farewell (SOP-156).
 	s.onUtteranceEnd()
+	// Still a real end-of-utterance decision, just a dropped one (SOP-164) --
+	// the interesting mis-cut the dataset wants to see.
+	s.recordEndOfUtterance(vev, false)
 	return s.State()
 }
 

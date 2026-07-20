@@ -653,7 +653,7 @@ func TestTurnLifecycle_ActiveOnOnsetClearedOnComplete(t *testing.T) {
 		t.Fatal("turnActive is true before any speech onset")
 	}
 
-	handleSpeechOnset(s)
+	handleSpeechOnset(s, VADEvent{Kind: VADSpeech})
 	if !s.turnActive {
 		t.Fatal("turnActive is false after speech onset, want true")
 	}
@@ -663,7 +663,7 @@ func TestTurnLifecycle_ActiveOnOnsetClearedOnComplete(t *testing.T) {
 		t.Fatal("turnActive is true after VADTurnEnd, want false")
 	}
 
-	handleSpeechOnset(s)
+	handleSpeechOnset(s, VADEvent{Kind: VADSpeech})
 	if !s.turnActive {
 		t.Fatal("turnActive is false after a second speech onset following completion, want true")
 	}
