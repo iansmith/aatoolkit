@@ -120,8 +120,12 @@ type Session struct {
 	// turnEndPending is set when VADTurnEnd fires while a full pass is still
 	// in flight (StateAwaitingFullResult): completing now would flush
 	// turnTranscripts before that pass's result arrives, so completion is
-	// deferred until handleSTTResult processes it (state.go).
+	// deferred until handleSTTResult processes it (state.go). turnEndEvent
+	// carries the triggering VADEvent through the deferral so the turn-end
+	// decision (SOP-165) can be recorded with its audio position when the
+	// deferred completion finally runs.
 	turnEndPending bool
+	turnEndEvent   VADEvent
 
 	// dataIn, controlIn, sttOut, and sttIn are the service-interface inputs
 	// driving the select loop's total (state, source) transition table. Any
@@ -792,6 +796,14 @@ func (s *Session) recordEndOfUtterance(ev VADEvent, dispatched bool) {
 		effect = fmt.Sprintf("utterance closed; dropped (STT pass %d still in flight)", s.sttReqID)
 	}
 	s.recordVADDecision(DecisionKindEndOfUtter, DecisionParamEndSilence, s.vadCfg.EndSilenceMS, ev, effect, reqID)
+}
+
+// recordTurnEnd records the silence-driven turn-end (TurnEndSilenceMS) decision.
+// Called on both the immediate path (VADTurnEnd in a live state) and the
+// deferred path (VADTurnEnd that arrived while a pass was in flight, completed
+// later in handleSTTResult), each passing the triggering VADEvent (SOP-165).
+func (s *Session) recordTurnEnd(ev VADEvent) {
+	s.recordVADDecision(DecisionKindTurnEnd, DecisionParamTurnEndSilence, s.vadCfg.TurnEndSilenceMS, ev, "turn closed (silence-turn-end)", 0)
 }
 
 // drainSTTDispatch relays STTRequests from sttDispatchCh to sttIn in FIFO

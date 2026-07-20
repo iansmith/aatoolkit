@@ -49,10 +49,12 @@ const (
 	DecisionKindSpeechStart = "speech-start"
 	DecisionKindSilence     = "silence"
 	DecisionKindEndOfUtter  = "end-of-utterance"
+	DecisionKindTurnEnd     = "turn-end"
 
-	DecisionParamSpeechThresh  = "SpeechThresh"
-	DecisionParamSilenceThresh = "SilenceThresh"
-	DecisionParamEndSilence    = "EndSilenceMS"
+	DecisionParamSpeechThresh   = "SpeechThresh"
+	DecisionParamSilenceThresh  = "SilenceThresh"
+	DecisionParamEndSilence     = "EndSilenceMS"
+	DecisionParamTurnEndSilence = "TurnEndSilenceMS"
 )
 
 // DecisionEvent is one recorded decision. The shape is deliberately flat and
