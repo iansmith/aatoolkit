@@ -113,6 +113,32 @@ func TestTap_WiredToDataPlane(t *testing.T) {
 	}
 }
 
+// TestTap_CreatesMissingTapDir: the tap directory (AATOOLKIT_AUDIO_TAP) may not
+// exist yet -- a fresh build/, or one just emptied by `task clean`. handleStream
+// must create it, or every capture write (tap AND the decision recorder, which
+// share the dir) silently ENOENTs, since capture is best-effort. Regression for
+// the live "open build/audio/....in.ulaw: no such file or directory" seen when
+// build/audio had never been created.
+func TestTap_CreatesMissingTapDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does-not-exist-yet")
+	t.Setenv(tapDirEnv, dir)
+
+	h := newHarness(t)
+	h.sendMedia([]byte{0x01, 0x02, 0x03})
+	h.sendRaw([]byte(`{"event":"stop","streamSid":"SS` + t.Name() + `"}`))
+
+	select {
+	case <-h.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleStream did not return after stop")
+	}
+
+	streamSID := "SS" + t.Name()
+	if _, err := os.ReadFile(inulawPath(dir, streamSID)); err != nil {
+		t.Fatalf("no recording — handleStream did not create the missing tap dir %s: %v", dir, err)
+	}
+}
+
 // TestTap_EnvVarNamesTheDir pins the variable's spelling. Without it, an
 // implementation reading AATOOLKIT_TAP (or AATOOLKIT_AUDIO_TAP_DIR, or anything else)
 // is green, captures nothing, and looks correct -- the operator simply finds no
