@@ -519,10 +519,16 @@ func handleSTTResult(s *Session, ev transitionEvent) SessionState {
 	if res.RequestID != s.sttReqID {
 		log.Printf("telephony: session %s: discard STT result: RequestID %d does not match awaited %d",
 			s.CallSID, res.RequestID, s.sttReqID)
+		// Release the discarded request's dispatch instant so the map stays
+		// cleared-on-result even when a superseded pass's late result arrives
+		// (SOP-167) -- recordSTTResult, which normally deletes it, never runs
+		// for a discarded result.
+		delete(s.sttDispatchTimes, res.RequestID)
 		return s.State()
 	}
 
 	log.Printf("telephony: session %s: STT result %s: %q", s.CallSID, res.Kind, res.Text)
+	s.recordSTTResult(res)
 
 	var turnCompleted bool
 	if res.Kind == FullPass {

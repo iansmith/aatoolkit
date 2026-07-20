@@ -182,6 +182,12 @@ type Session struct {
 	sttDispatchCh chan STTRequest
 	sttReqID      int
 
+	// sttDispatchTimes records the injected-clock instant each STT request was
+	// dispatched, keyed by request id, so handleSTTResult can report the round-
+	// trip latency (SOP-167). Written in dispatchSTT and read+deleted in
+	// handleSTTResult -- both on the sequencer goroutine, so no lock is needed.
+	sttDispatchTimes map[int]time.Time
+
 	// turnBuf accumulates raw inbound μ-law frame bytes for the current
 	// utterance (SOP-124 Observable behavior #1: the state machine owns this
 	// buffer, not a service).
@@ -194,6 +200,12 @@ type Session struct {
 	// clock is how this session's timers wait out their durations; nil means
 	// the wall clock. See WithClock.
 	clock func(time.Duration) <-chan time.Time
+
+	// now is the injected monotonic clock the decision recorder reads to time
+	// STT round-trip latency (SOP-167). Defaults to time.Now; a test overrides
+	// it via WithDecisionClock. Distinct from clock, which supplies relative
+	// durations (after) rather than an absolute instant.
+	now func() time.Time
 
 	// vad wraps the VAD goroutine behind the service-interface planes: In
 	// accepts raw frames, Out emits VADEvents. Constructed in Start once the
@@ -397,6 +409,15 @@ func WithClock(after func(time.Duration) <-chan time.Time) SessionOption {
 	return func(s *Session) { s.clock = after }
 }
 
+// WithDecisionClock replaces the monotonic clock the decision recorder reads to
+// time STT round-trip latency (SOP-167) with now. nil, the default, means the
+// wall clock (time.Now). Distinct from WithClock: that seam supplies relative
+// durations for timers; this one supplies absolute instants for latency. Test
+// seam -- a fake now advanced by a known delta makes the recorded latency exact.
+func WithDecisionClock(now func() time.Time) SessionOption {
+	return func(s *Session) { s.now = now }
+}
+
 // WithMaxSilenceMS overrides MaxSilenceMS for this session. Test seam only:
 // MaxSilenceMS's real multi-second default is impractical to wait out in a
 // test.
@@ -427,14 +448,15 @@ func WithSimTurnMS(ms int) SessionOption {
 func NewSession(ctx context.Context, callSID string, opts ...SessionOption) *Session {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &Session{
-		CallSID:       callSID,
-		forwardCh:     make(chan []byte, ComputeDepth(DataPlaneBufferMS, MuLawFrameMS)),
-		sttDispatchCh: make(chan STTRequest, sttDispatchDepth),
-		closedCh:      make(chan struct{}),
-		state:         StateIdle,
-		cancel:        cancel,
-		ctx:           ctx,
-		done:          make(chan struct{}),
+		CallSID:          callSID,
+		forwardCh:        make(chan []byte, ComputeDepth(DataPlaneBufferMS, MuLawFrameMS)),
+		sttDispatchCh:    make(chan STTRequest, sttDispatchDepth),
+		closedCh:         make(chan struct{}),
+		state:            StateIdle,
+		cancel:           cancel,
+		ctx:              ctx,
+		done:             make(chan struct{}),
+		sttDispatchTimes: make(map[int]time.Time),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -443,6 +465,12 @@ func NewSession(ctx context.Context, callSID string, opts ...SessionOption) *Ses
 	// unconditionally (mirrors how the tap treats a nil *Tap as a no-op).
 	if s.decisionRecorder == nil {
 		s.decisionRecorder = noopRecorder{}
+	}
+	// Default the decision clock to the wall clock; a test injects a fake via
+	// WithDecisionClock. This is the sole reference to the real clock and it is
+	// injectable, per the inject-time rule (no internal wall-clock read).
+	if s.now == nil {
+		s.now = time.Now
 	}
 	// Built after the options so WithClock can supply the passage of time.
 	s.timerFacility = NewTimerFacilityWithClock(ctx, s.clock)
@@ -767,9 +795,53 @@ func (s *Session) dispatchSTT(kind STTPassKind, audio []byte) {
 	}
 	select {
 	case s.sttDispatchCh <- req:
+		s.recordSTTDispatch(req.RequestID, len(audio))
 	default:
 		log.Printf("telephony: session %s: WARN STT dispatch buffer full, dropping %v request", s.CallSID, kind)
 	}
+}
+
+// recordSTTDispatch records an stt_dispatch decision and stores the dispatch
+// instant (from the injected clock) so the matching result can report round-trip
+// latency (SOP-167). audioBytes is the dispatched mu-law buffer length; the audio
+// position is the last VAD window, since a dispatch carries no VADEvent of its
+// own. Called only for genuinely enqueued requests (the select's success branch).
+func (s *Session) recordSTTDispatch(requestID, audioBytes int) {
+	s.sttDispatchTimes[requestID] = s.now()
+	s.decisionRecorder.Record(DecisionEvent{
+		AudioMS:    s.lastStreamWindow * s.vadCfg.windowMS(),
+		Type:       DecisionTypeSTTDispatch,
+		RequestID:  requestID,
+		AudioBytes: audioBytes,
+		Effect:     "sent to STT",
+	})
+}
+
+// recordSTTResult records an stt_result decision correlated to its dispatch,
+// reporting the transcript, whisper's own audio duration, and the round-trip
+// latency measured from the injected clock (SOP-167). The stored dispatch instant
+// is consumed so the map does not grow across a long call; a result with no
+// recorded dispatch (should not happen on the accepted path) reports 0 latency.
+func (s *Session) recordSTTResult(res STTResult) {
+	var latencyMS int
+	if dispatched, ok := s.sttDispatchTimes[res.RequestID]; ok {
+		latencyMS = int(s.now().Sub(dispatched).Milliseconds())
+		delete(s.sttDispatchTimes, res.RequestID)
+	} else {
+		// Should not happen on the accepted path (every dispatch stores its
+		// instant); a missing one means the dispatch was dropped buffer-full,
+		// so surface it rather than record an indistinguishable zero latency.
+		log.Printf("telephony: session %s: WARN stt_result %d has no recorded dispatch instant; latency omitted",
+			s.CallSID, res.RequestID)
+	}
+	s.decisionRecorder.Record(DecisionEvent{
+		Type:      DecisionTypeSTTResult,
+		RequestID: res.RequestID,
+		Text:      res.Text,
+		LatencyMS: latencyMS,
+		STTDurSec: res.Duration,
+		Effect:    "transcript delivered",
+	})
 }
 
 // recordVADDecision records one VAD-boundary DecisionEvent. ev supplies the
