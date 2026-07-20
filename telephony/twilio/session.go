@@ -57,6 +57,17 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	dataIn := telephony.NewBufferedChan[[]byte](telephony.ComputeDepth(telephony.DataPlaneBufferMS, telephony.MuLawFrameMS))
 	controlIn := telephony.NewBufferedChan[telephony.ControlEvent](controlPlaneDepth)
 
+	// The tap and the decision recorder both write files into the capture dir
+	// but neither creates it, so make it once here (before either is wired) --
+	// a fresh or just-cleaned build/audio would otherwise silently ENOENT every
+	// capture write, since both are best-effort. Empty dir = capture off: skip.
+	tapDir := tapDirFromEnv()
+	if tapDir != "" {
+		if err := os.MkdirAll(tapDir, 0o755); err != nil {
+			log.Printf("twilio: handleStream: create capture dir %s: %v", tapDir, err)
+		}
+	}
+
 	// tap is nil unless AATOOLKIT_AUDIO_TAP names a directory, and a nil *Tap is
 	// a no-op, so the disabled path costs nothing and needs no branch below.
 	// Built before the session so its reference can be threaded into both
@@ -65,7 +76,7 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	// receive/send, so what gets recorded and what the session heard/said
 	// cannot diverge (SOP-152 Observable behavior 2 -- "byte-identical to
 	// the payloads delivered to the session").
-	tap := NewTap(tapDirFromEnv(), start.StreamSID, start.CallSID, tapLabelFromEnv(), startedAt)
+	tap := NewTap(tapDir, start.StreamSID, start.CallSID, tapLabelFromEnv(), startedAt)
 
 	opts := []telephony.SessionOption{
 		telephony.WithTwilioDataInput(dataIn),
@@ -84,7 +95,7 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	// tap, gated by AATOOLKIT_EVENT_LOG; the option is a no-op when recording is
 	// off or no tap dir is set. The session flushes the recorder on Close.
 	opts = append(opts, telephony.WithFileDecisionRecorderFromEnv(
-		tapDirFromEnv(), start.StreamSID, start.CallSID, tapLabelFromEnv(), telephony.DefaultVADConfig(), os.Stderr))
+		tapDir, start.StreamSID, start.CallSID, tapLabelFromEnv(), telephony.DefaultVADConfig(), os.Stderr))
 
 	sess := newSession(ctx, start.CallSID, opts...)
 	if err := sess.Start(); err != nil {
