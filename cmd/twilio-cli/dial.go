@@ -154,7 +154,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		_, msg, err := conn.Read(readCtx)
 		if err != nil {
 			if isCallEnded(err) {
-				log.Printf("twilio-cli: call ended: %v", err)
+				log.Printf("twilio-cli: call ended: %s", callEndReason(err))
 				cancelMic()       // unblock goroutine before we wait for its result
 				return <-micErrCh // propagate hard mic failures to the caller
 			}
@@ -206,6 +206,27 @@ func isCallEnded(err error) bool {
 		errors.Is(err, net.ErrClosed)
 }
 
+// callEndReason renders an (already isCallEnded-classified) error as a plain
+// outcome, so a normal hang-up reads as one rather than as a stack of library
+// wording -- e.g. a server that force-stops and drops the socket surfaces as
+// "failed to get reader: failed to read frame header: EOF", which looks like a
+// failure but is just the peer closing. Unknown causes fall back to the raw
+// error so nothing is hidden.
+func callEndReason(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "stopped (Ctrl-C)"
+	case websocket.CloseStatus(err) != -1:
+		return "peer closed the stream"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
+		errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE),
+		errors.Is(err, net.ErrClosed):
+		return "server closed the connection"
+	default:
+		return err.Error()
+	}
+}
+
 // mulawPlayoutDuration is how long n bytes of μ-law audio take to play out:
 // 1 byte per sample at sampleRateHz.
 func mulawPlayoutDuration(n int) time.Duration {
@@ -234,7 +255,7 @@ var errHandshakePeerGone = errors.New("peer closed during handshake")
 func writeHandshake(ctx context.Context, conn *websocket.Conn, msg []byte) error {
 	if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
 		if isCallEnded(err) {
-			log.Printf("twilio-cli: call ended during handshake: %v", err)
+			log.Printf("twilio-cli: call ended during handshake: %s", callEndReason(err))
 			return errHandshakePeerGone
 		}
 		return fmt.Errorf("send handshake frame: %w", err)
