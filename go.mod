@@ -3,7 +3,7 @@ module github.com/iansmith/aatoolkit
 go 1.26.4
 
 require (
-	github.com/BurntSushi/toml v0.3.1
+	github.com/BurntSushi/toml v1.6.0
 	github.com/advancedclimatesystems/gonnx v0.0.0-00010101000000-000000000000
 	github.com/coder/websocket v1.8.15
 	github.com/shirou/gopsutil/v4 v4.26.6
