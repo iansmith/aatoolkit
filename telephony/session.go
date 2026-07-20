@@ -758,23 +758,40 @@ func (s *Session) dispatchSTT(kind STTPassKind, audio []byte) {
 	}
 }
 
-// recordEndOfUtterance emits the one DecisionEvent M1 records: the
-// end-of-utterance choice made by EndSilenceMS. Called from dispatchFullPass
-// right after dispatchSTT, so sttReqID already names the dispatched request.
-// ev is the VADEndOfUtterance event that triggered the dispatch; its
-// StreamWindowIndex gives the audio position (StreamWindowIndex * windowMS).
-func (s *Session) recordEndOfUtterance(ev VADEvent) {
+// recordVADDecision records one VAD-boundary DecisionEvent. ev supplies the
+// audio position (StreamWindowIndex * windowMS), the detector probability, and
+// the silence count; the caller names the kind, the gating param and its
+// resolved value, the effect, and the STT request id (0 when none is
+// associated). One record site for every VAD-boundary decision (SOP-164).
+func (s *Session) recordVADDecision(kind, param string, value any, ev VADEvent, effect string, requestID int) {
 	s.decisionRecorder.Record(DecisionEvent{
 		AudioMS:      ev.StreamWindowIndex * s.vadCfg.windowMS(),
 		Type:         DecisionTypeVAD,
-		Kind:         DecisionKindEndOfUtter,
-		Param:        DecisionParamEndSilence,
-		ParamValue:   s.vadCfg.EndSilenceMS,
+		Kind:         kind,
+		Param:        param,
+		ParamValue:   value,
 		Prob:         ev.Prob,
 		SilenceCount: ev.SilenceCount,
-		RequestID:    s.sttReqID,
-		Effect:       fmt.Sprintf("utterance closed; dispatched STT request %d", s.sttReqID),
+		RequestID:    requestID,
+		Effect:       effect,
 	})
+}
+
+// recordEndOfUtterance records the end-of-utterance (EndSilenceMS) decision.
+// dispatched distinguishes the two paths an utterance can close on: the normal
+// path that dispatched a FullPass (effect names the request), and the dropped
+// path -- a second utterance closed while a pass was still in flight, so no new
+// pass was sent (SOP-164). sttReqID names the relevant pass either way.
+func (s *Session) recordEndOfUtterance(ev VADEvent, dispatched bool) {
+	var effect string
+	var reqID int
+	if dispatched {
+		effect = fmt.Sprintf("utterance closed; dispatched STT request %d", s.sttReqID)
+		reqID = s.sttReqID
+	} else {
+		effect = fmt.Sprintf("utterance closed; dropped (STT pass %d still in flight)", s.sttReqID)
+	}
+	s.recordVADDecision(DecisionKindEndOfUtter, DecisionParamEndSilence, s.vadCfg.EndSilenceMS, ev, effect, reqID)
 }
 
 // drainSTTDispatch relays STTRequests from sttDispatchCh to sttIn in FIFO

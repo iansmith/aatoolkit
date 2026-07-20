@@ -81,11 +81,20 @@ func TestDecisionRecorder_EndOfUtterance(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond) // let the record settle after the enqueue
 
+	// A single utterance now records more than the end-of-utterance decision
+	// (M2 added speech-start + silence), so pick out the EOU event rather than
+	// asserting a total count.
 	evs := rec.all()
-	if len(evs) != 1 {
-		t.Fatalf("recorded events: got %d, want 1 (%+v)", len(evs), evs)
+	var eou []telephony.DecisionEvent
+	for _, ev := range evs {
+		if ev.Kind == telephony.DecisionKindEndOfUtter {
+			eou = append(eou, ev)
+		}
 	}
-	e := evs[0]
+	if len(eou) != 1 {
+		t.Fatalf("end-of-utterance events: got %d, want 1 (all: %+v)", len(eou), evs)
+	}
+	e := eou[0]
 	if e.Type != telephony.DecisionTypeVAD {
 		t.Errorf("Type: got %q, want %q", e.Type, telephony.DecisionTypeVAD)
 	}

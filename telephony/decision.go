@@ -44,9 +44,15 @@ type DecisionRecorder interface {
 // Decision event types and the labels M1 emits. Kept as named constants so the
 // producer (state.go) and any consumer read the same strings.
 const (
-	DecisionTypeVAD         = "vad"
+	DecisionTypeVAD = "vad"
+
+	DecisionKindSpeechStart = "speech-start"
+	DecisionKindSilence     = "silence"
 	DecisionKindEndOfUtter  = "end-of-utterance"
-	DecisionParamEndSilence = "EndSilenceMS"
+
+	DecisionParamSpeechThresh  = "SpeechThresh"
+	DecisionParamSilenceThresh = "SilenceThresh"
+	DecisionParamEndSilence    = "EndSilenceMS"
 )
 
 // DecisionEvent is one recorded decision. The shape is deliberately flat and
