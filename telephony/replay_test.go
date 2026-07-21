@@ -62,8 +62,8 @@ func TestReplay_Deterministic(t *testing.T) {
 	sttClient := fixedTextSTTServer(t, "hello there")
 
 	// 8 windows of speech then enough silence to cross the default
-	// EndSilenceMS (900ms / 32ms per window ~= 29 windows) -- content is
-	// irrelevant with a fake VAD factory, only the byte count (window
+	// telephony.EndSilenceWindows() (= ceil(EndSilenceMS / windowMS)) -- content
+	// is irrelevant with a fake VAD factory, only the byte count (window
 	// count) the fake detector is asked to classify matters.
 	audio := bytes.Repeat([]byte{0x01}, 8*256)
 
@@ -111,8 +111,8 @@ func TestReplay_Deterministic(t *testing.T) {
 // against a snapshot of the real, unmodified decodeMuLaw -> windower ->
 // sileroDetector.Detect -> vadMachine.step pipeline. That golden
 // (testdata/meetings_today_events.json) records exactly one
-// "end-of-utterance" event, at window 244, for this recording at the
-// current default EndSilenceMS=900 -- i.e. this call's real "live log" is
+// "end-of-utterance" event (the test reads its window from the golden, not a
+// literal) for this recording at the current default -- i.e. its real "live log" is
 // "one utterance." Replay is called here with no VAD override at all (the
 // real, default NewSileroDetector Session.Start already uses), so this is
 // literally the production VAD+STT path, driven from a byte stream instead
@@ -140,12 +140,47 @@ func TestReplay_MatchesProduction(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 
-	if len(results) != 1 {
-		t.Fatalf("got %d FullPass results, want exactly 1 (testdata/meetings_today_events.json's single end-of-utterance event at window 244): %+v", len(results), results)
+	// Derive the expected FullPass count from the committed golden rather than
+	// hardcoding a count or window: Replay dispatches one FullPass per
+	// end-of-utterance event, so reading the fixture keeps this in lockstep with
+	// the golden across a VAD retune (AATK-4).
+	euWindows := goldenEndOfUtteranceWindows(t)
+	if len(results) != len(euWindows) {
+		t.Fatalf("got %d FullPass results, want %d (golden end-of-utterance windows %v): %+v", len(results), len(euWindows), euWindows, results)
 	}
 	if results[0].Text != "can you show me my meetings today" {
 		t.Errorf("results[0].Text = %q, want the STT stub's canned reply", results[0].Text)
 	}
+}
+
+// goldenEndOfUtteranceWindows reads the committed meetings_today events golden and
+// returns the window index of every end-of-utterance event. Tests derive the
+// expected utterance count (and the boundary they cite) from the fixture instead of
+// hardcoding it, so they never drift out of sync with the golden on a VAD retune.
+// A local anonymous struct is used because the golden type in silero_e2e_test.go
+// lives in package telephony (internal), unreachable from this external test.
+func goldenEndOfUtteranceWindows(t *testing.T) []int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "meetings_today_events.json"))
+	if err != nil {
+		t.Fatalf("read events golden: %v", err)
+	}
+	var golden struct {
+		Events []struct {
+			WindowIndex int    `json:"window_index"`
+			Kind        string `json:"kind"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(raw, &golden); err != nil {
+		t.Fatalf("parse events golden: %v", err)
+	}
+	var windows []int
+	for _, e := range golden.Events {
+		if e.Kind == "end-of-utterance" {
+			windows = append(windows, e.WindowIndex)
+		}
+	}
+	return windows
 }
 
 // fakeReplayDetector is a minimal telephony.VADDetector: speechN windows
