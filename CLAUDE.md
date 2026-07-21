@@ -7,14 +7,14 @@ specific agent supplies its *meaning* (prompts, policy, ontology, identity) by i
 through `driver.Config` + `interp.Load` + the `host.Host` interface. Any number of agents can
 run on the same engine.
 
-## The one hard rule — the boundary
+## The one hard rule — standalone
 
-**aatoolkit must never reference or embed the closed product(s) that consume it.**
-Dependencies flow consumer → aatoolkit only, never the reverse. This is enforced by
-`scripts/boundary-check.sh` (run by the pre-commit hook via `core.hooksPath = .githooks`, and
-by CI in `.github/workflows/boundary.yml` — the unbypassable gate). It rejects any import of a
-closed module and any denylisted identity token (`.boundary-denylist`). Keep the engine
-generic: mechanism here, meaning in the consumer.
+**aatoolkit is a standalone module: it must not depend on anything outside its own
+module.** Dependencies flow consumer → aatoolkit only, never the reverse — a consuming
+agent injects its meaning through `driver.Config` + `interp.Load` + `host.Host`, but the
+engine never imports or embeds the consumer. Verify the engine still stands alone with
+`GOWORK=off go build ./...` and `GOWORK=off go test ./...` before committing. Keep the
+engine generic: mechanism here, meaning in the consumer.
 
 ## Development rules
 

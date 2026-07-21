@@ -34,7 +34,7 @@ ULAW = HERE / "meetings_today.ulaw"
 GOLDENS = HERE / "meetings_today_goldens.json"
 
 SAMPLE_RATE = 8000
-WINDOW = 256  # samples per inference frame at 8 kHz — sophie's sileroWindowSize (silero.go)
+WINDOW = 256  # samples per inference frame at 8 kHz — the Silero window size
 
 MODEL_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
 RECORDING_SHA256 = "556fe18f83e69ddd021a19d353a45f1352e4cec9a3ed78aa2e2aa7973c7cdc03"

@@ -1,5 +1,5 @@
-# aatoolkit slopstop project config. Adapted from sophie's .project-conf.toml, with the
-# ticket backend switched from Linear to GitHub.
+# aatoolkit slopstop project config: GitHub Issues ticket backend and the four-tier
+# model map for the slopstop process.
 #
 # NOTE: the GitHub repo github.com/iansmith/aatoolkit does not exist yet — aatoolkit is
 # local-git-only with no origin until "the big moment" (see repo-split-plan.md §6). That's

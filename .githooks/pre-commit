@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Pre-commit boundary guard for aatoolkit (the open module). Fast local aid; the
-# authoritative gate is the same check in CI (see .github/workflows/boundary.yml).
-# Enable in a fresh clone with:  git config core.hooksPath .githooks
-exec "$(git rev-parse --show-toplevel)/scripts/boundary-check.sh"

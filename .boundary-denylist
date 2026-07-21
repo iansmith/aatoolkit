@@ -1,4 +1,0 @@
-# Closed / particular tokens that must NEVER appear in the open aatoolkit repo.
-# One POSIX extended-regex per line; '#' starts a comment. Matched case-insensitively
-# against *.go and *.md. Keep this list current as the closed product's identity grows.
-sophie
