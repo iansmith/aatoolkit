@@ -87,7 +87,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	}
 	// micStopped is closed once the mic goroutine has fully returned — which now
 	// includes the graceful drain of ffmpeg's buffered tail on shutdown
-	// (capture_darwin.go). Both stop paths below wait on it before sending the stop
+	// (capture_darwin.go). The Ctrl-C path below waits on it before sending the stop
 	// frame, so the server receives the trailing media BEFORE the stream-stop event
 	// (AATK-2). Sending stop first would let the server close the turn while the last
 	// ~100-300ms of audio was still arriving.
@@ -98,6 +98,11 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	// The readCtx.Done fallback keeps this from blocking forever if ctx is cancelled
 	// after an early return (e.g. handshake failure) that never started the mic
 	// goroutine, so micStopped is never closed — dial's deferred cancelRead unblocks it.
+	//
+	// The other two end triggers do NOT send stop from here: a caller hangup sends it
+	// synchronously inside the mic goroutine below (gated on naturalEnd), and a
+	// server-initiated close needs no stop at all — the socket is already gone, so
+	// sending would only draw a broken pipe (AATK-7).
 	go func() {
 		<-ctx.Done()
 		cancelMic()
@@ -107,16 +112,6 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		}
 		sendStop()
 		cancelRead()
-	}()
-	// Natural mic end (caller hangup / capture EOF): the mic goroutine has already
-	// returned, so its audio is fully sent; send stop.
-	go func() {
-		select {
-		case <-micStopped:
-			sendStop()
-			cancelRead()
-		case <-readCtx.Done():
-		}
 	}()
 
 	// Twilio opens every Media Stream with a connected frame before start;
@@ -147,8 +142,20 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	go func() {
 		defer cancelMic() // goroutine exit cancels the read loop
 		err := streamMic(micCtx, conn, streamSID)
+		// naturalEnd: streamMic returned on its OWN (mic EOF = caller hangup), not
+		// because something cancelled micCtx (Ctrl-C, or a server-initiated close via
+		// the read loop's cancelMic).
+		naturalEnd := micCtx.Err() == nil
 		if errors.Is(err, context.Canceled) {
 			err = nil
+		}
+		// Caller hangup: notify the server with a stop frame, here (synchronously,
+		// before micErrCh) so a server-initiated close — where naturalEnd is false and
+		// the socket is already closed — never sends one (AATK-7). Ctrl-C's stop is
+		// handled by the ctx.Done goroutine above.
+		if naturalEnd {
+			sendStop()
+			cancelRead()
 		}
 		micErrCh <- err   // always send before cancelMic fires (defer is LIFO)
 		close(micStopped) // mic (including its graceful drain) has fully returned
