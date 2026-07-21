@@ -9,9 +9,16 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/assets"
 )
 
-// sileroWindowSize is the Silero VAD v6.2.1 model's fixed inference window:
-// 256 float32 PCM samples (32ms @ 8kHz).
+// sileroWindowSize is the Silero VAD v6.2.1 model's per-call chunk: 256 float32
+// PCM samples (32ms @ 8kHz).
 const sileroWindowSize = 256
+
+// sileroContextSize is the number of samples of the PREVIOUS window Silero VAD
+// carries as context, prepended to each new chunk (AATK-8). At 8kHz the model's
+// actual input is sileroContextSize + sileroWindowSize = 64 + 256 = 320 samples;
+// feeding a bare 256 (no context) runs the model cold each frame and misses short
+// utterances — see snakers4/silero-vad and testdata/how_are_you.ulaw.
+const sileroContextSize = 64
 
 // sileroSampleRate is the sample rate the engine feeds the model — Twilio's
 // μ-law audio, decoded to float32 PCM (see vad.go's decodeMuLaw).
@@ -32,9 +39,10 @@ func sileroStateElems() int {
 // model via gonnx. It is not safe for concurrent use: each session owns its
 // own instance and its own recurrent state (SOP-93 owns any future pooling).
 type sileroDetector struct {
-	model *gonnx.Model
-	state tensor.Tensor
-	sr    tensor.Tensor
+	model   *gonnx.Model
+	state   tensor.Tensor
+	sr      tensor.Tensor
+	context []float32 // last sileroContextSize samples of the previous window (AATK-8)
 }
 
 // NewSileroDetector builds a sileroDetector from the embedded, go:embed-ded
@@ -66,9 +74,11 @@ func (d *sileroDetector) Detect(window []float32) (float32, error) {
 		return 0, fmt.Errorf("silero: window length %d != %d", len(window), sileroWindowSize)
 	}
 
+	// Model input is the carried 64-sample context ++ the 256-sample window = 320
+	// (AATK-8). The backing is a fresh copy, so reusing d.context below is safe.
 	input := tensor.New(
-		tensor.WithShape(1, len(window)),
-		tensor.WithBacking(append([]float32(nil), window...)),
+		tensor.WithShape(1, sileroContextSize+len(window)),
+		tensor.WithBacking(append(append([]float32(nil), d.context...), window...)),
 	)
 
 	outputs, err := d.model.Run(gonnx.Tensors{"input": input, "state": d.state, "sr": d.sr})
@@ -86,6 +96,8 @@ func (d *sileroDetector) Detect(window []float32) (float32, error) {
 		return 0, fmt.Errorf("silero: model did not return updated state")
 	}
 	d.state = stateN
+	// Carry this window's tail as the next call's context.
+	d.context = append(d.context[:0], window[len(window)-sileroContextSize:]...)
 
 	return out[0], nil
 }
@@ -99,4 +111,5 @@ func (d *sileroDetector) Reset() {
 		tensor.WithBacking(make([]float32, sileroStateElems())),
 	)
 	d.sr = tensor.New(tensor.FromScalar(int64(sileroSampleRate)))
+	d.context = make([]float32, sileroContextSize)
 }

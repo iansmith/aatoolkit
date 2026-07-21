@@ -29,12 +29,15 @@ import numpy as np
 import onnxruntime as ort
 
 HERE = pathlib.Path(__file__).parent
-MODEL = HERE.parent.parent.parent / "third_party" / "gonnx" / "sample_models" / "onnx_models" / "silero_vad.onnx"
+# testdata/ -> telephony/ -> aatoolkit/ ; the vendored fork lives at aatoolkit/third_party
+# (was one level higher pre repo-split, when testdata sat under internal/telephony/).
+MODEL = HERE.parent.parent / "third_party" / "gonnx" / "sample_models" / "onnx_models" / "silero_vad.onnx"
 ULAW = HERE / "meetings_today.ulaw"
 GOLDENS = HERE / "meetings_today_goldens.json"
 
 SAMPLE_RATE = 8000
-WINDOW = 256  # samples per inference frame at 8 kHz — the Silero window size
+WINDOW = 256  # samples per inference chunk at 8 kHz — the Silero window size
+CONTEXT = 64  # samples of the previous chunk prepended as context (AATK-8); model input is CONTEXT+WINDOW=320
 
 MODEL_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
 RECORDING_SHA256 = "556fe18f83e69ddd021a19d353a45f1352e4cec9a3ed78aa2e2aa7973c7cdc03"
@@ -66,14 +69,16 @@ def main() -> None:
 
     state = np.zeros((2, 1, 128), dtype=np.float32)
     sr = np.array(SAMPLE_RATE, dtype=np.int64)
+    context = np.zeros(CONTEXT, dtype=np.float32)  # AATK-8: previous chunk's tail, zero-init
 
     out = []
     for i, fr in enumerate(frames):
-        inp = fr.reshape(1, WINDOW).astype(np.float32)
+        inp = np.concatenate([context, fr]).reshape(1, CONTEXT + WINDOW).astype(np.float32)
         names = [o.name for o in sess.get_outputs()]
         d = dict(zip(names, sess.run(None, {"input": inp, "state": state, "sr": sr})))
         prob = float(np.asarray(d["output"]).ravel()[0])
         state = np.asarray(d["stateN"]).astype(np.float32)
+        context = fr[-CONTEXT:].astype(np.float32)  # carry this chunk's tail forward
         if not np.isfinite(prob) or not np.all(np.isfinite(state)):
             raise SystemExit(f"onnxruntime itself produced non-finite output at frame {i} -- unexpected")
         out.append({"index": i, "output": prob})
