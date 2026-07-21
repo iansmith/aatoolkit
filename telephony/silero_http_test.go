@@ -50,13 +50,16 @@ func newRecordingSidecar(prob float32) *recordingSidecar {
 	rs := &recordingSidecar{prob: prob}
 	rs.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		stateBytes := len(body) - sileroWindowSize*4
+		// Input is the 64-sample context ++ 256-sample window = 320 floats (AATK-8);
+		// the state is the trailing remainder.
+		inputBytes := (sileroContextSize + sileroWindowSize) * 4
+		stateBytes := len(body) - inputBytes
 		if stateBytes <= 0 {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		rs.gotWindows = append(rs.gotWindows, leDecode(body[:sileroWindowSize*4]))
-		gotState := leDecode(body[sileroWindowSize*4:])
+		rs.gotWindows = append(rs.gotWindows, leDecode(body[:inputBytes]))
+		gotState := leDecode(body[inputBytes:])
 		rs.gotStates = append(rs.gotStates, gotState)
 
 		if rs.status != 0 {
@@ -110,10 +113,20 @@ func TestHTTPVADDetector_DetectDecodesProbAndSendsWindow(t *testing.T) {
 	if len(rs.gotWindows) != 1 {
 		t.Fatalf("sidecar saw %d requests, want 1", len(rs.gotWindows))
 	}
-	for i, got := range rs.gotWindows[0] {
-		if got != 0.5 {
-			t.Fatalf("request window[%d] = %v, want 0.5 (window bytes not sent faithfully)", i, got)
-			break
+	// The input is the 64-sample context ++ the 256-sample window (AATK-8). On the
+	// first frame the context is zero-init; the window carries the 0.5 samples.
+	input := rs.gotWindows[0]
+	if len(input) != sileroContextSize+sileroWindowSize {
+		t.Fatalf("request input length %d, want %d (context+window)", len(input), sileroContextSize+sileroWindowSize)
+	}
+	for i := 0; i < sileroContextSize; i++ {
+		if input[i] != 0 {
+			t.Fatalf("request context[%d] = %v, want 0 (zero-init on the first frame)", i, input[i])
+		}
+	}
+	for i := sileroContextSize; i < len(input); i++ {
+		if input[i] != 0.5 {
+			t.Fatalf("request window[%d] = %v, want 0.5 (window bytes not sent faithfully)", i-sileroContextSize, input[i])
 		}
 	}
 	// Initial state must be all zeros, matching sileroDetector's zeroed start.

@@ -4,31 +4,19 @@
   "window_size": 256,
   "events": [
     {
-      "window_index": 123,
+      "window_index": 106,
       "kind": "speech"
     },
     {
-      "window_index": 130,
+      "window_index": 190,
       "kind": "silence"
     },
     {
-      "window_index": 135,
+      "window_index": 214,
       "kind": "silence"
     },
     {
-      "window_index": 151,
-      "kind": "silence"
-    },
-    {
-      "window_index": 200,
-      "kind": "silence"
-    },
-    {
-      "window_index": 216,
-      "kind": "silence"
-    },
-    {
-      "window_index": 244,
+      "window_index": 242,
       "kind": "end-of-utterance"
     }
   ]
