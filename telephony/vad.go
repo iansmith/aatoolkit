@@ -102,15 +102,16 @@ type vadConfig struct {
 }
 
 func defaultVADConfig() vadConfig {
-	// EndSilenceMS 700 -> 900 (AATK-3): the SOP-154 revert to 700 assumed SOP-150's
-	// fusion buffer made a mid-sentence cut free -- fragments re-join into one turn.
-	// It is not free: each fragment is transcribed independently, so a mid-clause cut
-	// makes Whisper hallucinate an ending on the truncated fragment. Turn-taking
-	// dataset recording D5 ("...the plumber still hasn't called back") split at 700
-	// into "...still has to do it." + "hasn't called back." -- "has to do it" invented;
-	// whole at 900. 900 is the knee (kills the hallucination at lower latency than
-	// 1050). Caveat: n=5, one voice -- re-sweep as more of the dataset is collected.
-	return vadConfig{WindowSize: 256, SpeechThresh: 0.5, SilenceThresh: 0.35, EndSilenceMS: 900, SampleRateHz: 8000, TurnEndSilenceMS: 5000}
+	// EndSilenceMS 900 -> 700 (AATK-9): AATK-3 raised 700 -> 900 to kill a Whisper
+	// phrase-break hallucination (D5, "...the plumber still hasn't called back" split
+	// into "...has to do it." at 700), but that split was the AATK-8 cold-start VAD bug
+	// -- Silero was fed a bare 256-sample window with no 64-sample context, so it ran
+	// cold every frame and mis-placed the boundary. AATK-8 fixed the detector (feed
+	// 320 = 64 context + 256 chunk); a 700/900/1050 re-sweep over the fix-clean set is
+	// then content-identical, so 900 bought nothing. Reverted to 700 (SOP-154's value)
+	// for lower turn-taking latency. Caveat: one voice, partial set -- AATK-5 re-sweeps
+	// across the fuller re-collection before the tuning question closes.
+	return vadConfig{WindowSize: 256, SpeechThresh: 0.5, SilenceThresh: 0.35, EndSilenceMS: 700, SampleRateHz: 8000, TurnEndSilenceMS: 5000}
 }
 
 // withDefaults fills any unset (non-positive) field from defaultVADConfig so a
