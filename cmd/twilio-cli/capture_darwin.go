@@ -12,6 +12,30 @@ import (
 	"github.com/coder/websocket"
 )
 
+// newFFmpegCmd builds the avfoundation→μ-law ffmpeg capture command for mic.
+func newFFmpegCmd(ctx context.Context, mic string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-f", "avfoundation", "-i", mic,
+		"-ar", "8000", "-ac", "1",
+		"-acodec", "pcm_mulaw", "-f", "mulaw", "-",
+	)
+	cmd.Stderr = os.Stderr
+	gracefulCancel(cmd)
+	return cmd
+}
+
+// gracefulCancel wires cmd so a ctx-cancel stops the process with SIGINT — letting
+// ffmpeg flush its capture buffer and close stdout at EOF — instead of
+// exec.CommandContext's default SIGKILL, which drops buffered audio and truncates the
+// recording's tail. WaitDelay bounds the graceful window before the hard kill.
+//
+// STUB (AATK-2 Phase 0): only WaitDelay is set here; cmd.Cancel is left at
+// exec.CommandContext's default SIGKILL, so the graceful-cancel test is red.
+func gracefulCancel(cmd *exec.Cmd) {
+	cmd.WaitDelay = 3 * time.Second
+}
+
 // streamMicFrames captures mic input via ffmpeg, slices it into 8 kHz μ-law
 // 20 ms frames (160 bytes each), and sends each frame to conn as a Twilio
 // media event. Returns when ctx is cancelled or the connection closes.
@@ -20,14 +44,7 @@ func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string
 	if mic == "" {
 		mic = ":default"
 	}
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner", "-loglevel", "error",
-		"-f", "avfoundation", "-i", mic,
-		"-ar", "8000", "-ac", "1",
-		"-acodec", "pcm_mulaw", "-f", "mulaw", "-",
-	)
-	cmd.Stderr = os.Stderr
-	cmd.WaitDelay = 3 * time.Second
+	cmd := newFFmpegCmd(ctx, mic)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
