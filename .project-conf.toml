@@ -1,13 +1,8 @@
-# aatoolkit slopstop project config: GitHub Issues ticket backend and the four-tier
+# aatoolkit slopstop project config: Linear ticket backend and the four-tier
 # model map for the slopstop process.
-#
-# NOTE: the GitHub repo github.com/iansmith/aatoolkit does not exist yet — aatoolkit is
-# local-git-only with no origin until "the big moment" (see repo-split-plan.md §6). That's
-# fine: no GitHub ticket operations run until the repo (and its issues) exist. The config
-# is staged here so the tooling is ready the moment an origin is added.
-system = "github"
-key    = "iansmith/aatoolkit"   # owner/repo for the GitHub Issues backend
-prefix = "AAT"                  # ticket prefix, e.g. AAT-1
+system = "linear"
+key    = "AATK"                 # Linear team key (team "AiAssistantToolkit")
+prefix = "AATK"                 # ticket prefix, e.g. AATK-1
 tracking_dir = ".slopstop"
 
 # Tier→model map for the four-tier slopstop process.
