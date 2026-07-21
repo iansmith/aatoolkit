@@ -95,10 +95,16 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 
 	// Ctrl-C / ctx-cancel path: cancel the mic to trigger the graceful ffmpeg stop
 	// (SIGINT → flush → drain to EOF), wait for that drain to finish, THEN send stop.
+	// The readCtx.Done fallback keeps this from blocking forever if ctx is cancelled
+	// after an early return (e.g. handshake failure) that never started the mic
+	// goroutine, so micStopped is never closed — dial's deferred cancelRead unblocks it.
 	go func() {
 		<-ctx.Done()
 		cancelMic()
-		<-micStopped
+		select {
+		case <-micStopped:
+		case <-readCtx.Done():
+		}
 		sendStop()
 		cancelRead()
 	}()
