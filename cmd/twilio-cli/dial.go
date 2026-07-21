@@ -85,22 +85,28 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 			logCtlFrame("->", stopMsg)
 		})
 	}
-	// micDone fires only when the mic goroutine stops on its own (caller
-	// hangup / capture EOF) rather than because something else cancelled
-	// micCtx first (Ctrl-C or a server-initiated close, both already handled
-	// via their own paths below). This lets caller hangup trigger the same
-	// stop-frame send as Ctrl-C without also firing it redundantly when the
-	// server already closed the connection.
-	micDone := make(chan struct{}, 1)
+	// micStopped is closed once the mic goroutine has fully returned — which now
+	// includes the graceful drain of ffmpeg's buffered tail on shutdown
+	// (capture_darwin.go). Both stop paths below wait on it before sending the stop
+	// frame, so the server receives the trailing media BEFORE the stream-stop event
+	// (AATK-2). Sending stop first would let the server close the turn while the last
+	// ~100-300ms of audio was still arriving.
+	micStopped := make(chan struct{})
 
+	// Ctrl-C / ctx-cancel path: cancel the mic to trigger the graceful ffmpeg stop
+	// (SIGINT → flush → drain to EOF), wait for that drain to finish, THEN send stop.
 	go func() {
 		<-ctx.Done()
+		cancelMic()
+		<-micStopped
 		sendStop()
 		cancelRead()
 	}()
+	// Natural mic end (caller hangup / capture EOF): the mic goroutine has already
+	// returned, so its audio is fully sent; send stop.
 	go func() {
 		select {
-		case <-micDone:
+		case <-micStopped:
 			sendStop()
 			cancelRead()
 		case <-readCtx.Done():
@@ -135,14 +141,11 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	go func() {
 		defer cancelMic() // goroutine exit cancels the read loop
 		err := streamMic(micCtx, conn, streamSID)
-		naturalEnd := micCtx.Err() == nil // stopped on its own, not cancelled
 		if errors.Is(err, context.Canceled) {
 			err = nil
 		}
-		micErrCh <- err // always send before cancelMic fires (defer is LIFO)
-		if naturalEnd {
-			micDone <- struct{}{}
-		}
+		micErrCh <- err   // always send before cancelMic fires (defer is LIFO)
+		close(micStopped) // mic (including its graceful drain) has fully returned
 	}()
 
 	// bytesSinceMark estimates the playout duration of the audio Twilio has
