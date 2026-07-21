@@ -397,6 +397,79 @@ func TestDecisionRecorder_STTDispatchAndResult(t *testing.T) {
 	}
 }
 
+// TestTranscriptSummary_WrittenAtClose drives one full user turn (utterance ->
+// STT result -> silence turn-end) and asserts the conversation transcript
+// summary is both printed to the live writer and written to <sid>.transcript.txt
+// at Close, with the turn's utterance bracketed (SOP-168).
+func TestTranscriptSummary_WrittenAtClose(t *testing.T) {
+	dir := t.TempDir()
+	const sid = "test-transcript"
+	var live bytes.Buffer
+
+	probs := speechThenSilenceProbs(1, telephony.TurnEndSilenceWindows()+10)
+	dataIn := telephony.NewBufferedChan[[]byte](256)
+	sttIn := telephony.NewBufferedChan[telephony.STTRequest](100)
+	sttOut := telephony.NewBufferedChan[telephony.STTResult](100)
+	sink := &spySink{}
+	s := telephony.NewSession(context.Background(), sid,
+		telephony.WithVADFactory(func() (telephony.VADDetector, error) { return &fakeDetector{probs: probs}, nil }),
+		telephony.WithTurnSink(sink),
+		telephony.WithTwilioDataInput(dataIn),
+		telephony.WithSTTInput(sttIn),
+		telephony.WithSTTOutput(sttOut),
+		telephony.WithTranscriptOutput(dir, sid, &live),
+	)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// One utterance -> end-of-utterance -> STT dispatch.
+	for i := 0; i < telephony.EndSilenceWindows()+2; i++ {
+		sendData(t, dataIn, windowFrame(0x80), recvTimeout)
+		time.Sleep(2 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), recvTimeout)
+	req, err := sttIn.Recv(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("STT request not received: %v", err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), recvTimeout)
+	err = sttOut.Send(ctx, telephony.STTResult{SessionID: sid, RequestID: req.RequestID, Kind: telephony.FullPass, Text: "hello world"})
+	cancel()
+	if err != nil {
+		t.Fatalf("send STT result: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Continued silence -> turn-end -> completeTurn captures the turn.
+	for i := 0; i <= telephony.TurnEndSilenceWindows()+10; i++ {
+		sendData(t, dataIn, windowFrame(0x80), recvTimeout)
+		time.Sleep(2 * time.Millisecond)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(sink.turnTexts()) == 0 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if len(sink.turnTexts()) == 0 {
+		t.Fatal("turn did not complete within the backstop")
+	}
+
+	s.Close()
+
+	const want = "user  --> [hello world]\n"
+	if live.String() != want {
+		t.Errorf("live transcript: got %q, want %q", live.String(), want)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, sid+".transcript.txt"))
+	if err != nil {
+		t.Fatalf("read transcript file: %v", err)
+	}
+	if string(got) != want {
+		t.Errorf("transcript file: got %q, want %q", string(got), want)
+	}
+}
+
 // TestWithFileDecisionRecorderFromEnv_Gating covers the AATOOLKIT_EVENT_LOG
 // gate (DoD: "no files written and the no-op recorder is used" when off or no
 // dir). Close flushes even a session that never Started, and the recorder

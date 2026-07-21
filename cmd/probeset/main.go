@@ -54,17 +54,17 @@ func sttBaseURL() string {
 }
 
 func replayCmd(args []string) {
-	fs := flag.NewFlagSet("replay", flag.ExitOnError)
-	endSilenceMS := fs.Int("end-silence-ms", telephony.DefaultVADConfig().EndSilenceMS, "VAD end-of-utterance silence threshold (ms)")
-	fs.Parse(args)
-
-	if fs.NArg() == 0 {
+	cfg, filename, err := parseReplayFlags(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "replay: %v\n", err)
+		os.Exit(1)
+	}
+	if filename == "" {
 		fmt.Fprintf(os.Stderr, "Usage: probeset replay [flags] <file.ulaw>\n")
 		os.Exit(1)
 	}
 
-	filename := fs.Arg(0)
-	results, err := replayFile(context.Background(), filename, *endSilenceMS)
+	results, err := replayFileCfg(context.Background(), filename, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "replay: %v\n", err)
 		os.Exit(1)
@@ -76,12 +76,33 @@ func replayCmd(args []string) {
 	}
 }
 
-// replayFile reads path's raw μ-law bytes and drives them through
-// telephony.Replay at endSilenceMS, using callSID derived from the
-// filename (its base name, extension stripped) so results are traceable
-// back to the recording without depending on any sidecar metadata replay
-// itself doesn't need.
-func replayFile(ctx context.Context, path string, endSilenceMS int) ([]telephony.ReplayResult, error) {
+// parseReplayFlags parses replay's VAD sweep flags into a full VADConfig
+// (defaults for any knob not overridden) and returns the recording path
+// (fs.Arg(0), "" if none). Each flag threads into the replay session's config
+// so a recording can be re-run at different thresholds (SOP-168). Split out from
+// replayCmd so the flag->config threading is unit-testable without os.Exit.
+func parseReplayFlags(args []string) (telephony.VADConfig, string, error) {
+	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
+	def := telephony.DefaultVADConfig()
+	endSilenceMS := fs.Int("end-silence-ms", def.EndSilenceMS, "VAD end-of-utterance silence threshold (ms)")
+	turnEndSilenceMS := fs.Int("turn-end-silence-ms", def.TurnEndSilenceMS, "VAD turn-end silence threshold (ms)")
+	speechThresh := fs.Float64("speech-thresh", float64(def.SpeechThresh), "VAD speech-onset probability threshold")
+	silenceThresh := fs.Float64("silence-thresh", float64(def.SilenceThresh), "VAD silence probability threshold")
+	if err := fs.Parse(args); err != nil {
+		return telephony.VADConfig{}, "", err
+	}
+	cfg := def
+	cfg.EndSilenceMS = *endSilenceMS
+	cfg.TurnEndSilenceMS = *turnEndSilenceMS
+	cfg.SpeechThresh = float32(*speechThresh)
+	cfg.SilenceThresh = float32(*silenceThresh)
+	return cfg, fs.Arg(0), nil
+}
+
+// replayFileCfg reads path's raw μ-law bytes and drives them through
+// telephony.Replay at cfg, using callSID derived from the filename (its base
+// name, extension stripped) so results are traceable back to the recording.
+func replayFileCfg(ctx context.Context, path string, cfg telephony.VADConfig) ([]telephony.ReplayResult, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -89,17 +110,17 @@ func replayFile(ctx context.Context, path string, endSilenceMS int) ([]telephony
 	callSID := recordingID(path)
 	sttClient := telephony.NewSTTClient(sttBaseURL())
 
-	// Resolve a full config (defaults with the endSilenceMS override) so both
-	// the session and, when recording is on, the decision-record header carry
-	// the same values.
-	cfg := telephony.DefaultVADConfig()
-	cfg.EndSilenceMS = endSilenceMS
-	// Reuse the replay path to reproduce the decision record from the saved
-	// audio (AATOOLKIT_EVENT_LOG). Events land beside the recording, keyed by
-	// its id; the session flushes the recorder on its own Close inside Replay.
+	// Reuse the replay path to reproduce the decision record + transcript from
+	// the saved audio (AATOOLKIT_EVENT_LOG). Events land beside the recording,
+	// keyed by its id; the session flushes on its own Close inside Replay.
 	opts := []telephony.SessionOption{
 		telephony.WithVADConfig(cfg),
 		telephony.WithFileDecisionRecorderFromEnv(filepath.Dir(path), callSID, callSID, "", cfg, os.Stderr),
+		// Conversation transcript summary (SOP-168): printed to stderr and written
+		// to <id>.transcript.txt beside the recording at end of replay. Agent role
+		// label is consumer-injected via AATOOLKIT_AGENT_LABEL.
+		telephony.WithTranscriptOutput(filepath.Dir(path), callSID, os.Stderr),
+		telephony.WithTranscriptAgentLabel(os.Getenv("AATOOLKIT_AGENT_LABEL")),
 	}
 
 	return telephony.Replay(ctx, callSID, bytes.NewReader(data), sttClient, opts...)
@@ -119,7 +140,9 @@ func recordingID(path string) string {
 
 func buildCmd(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
-	endSilenceMS := fs.Int("end-silence-ms", telephony.DefaultVADConfig().EndSilenceMS, "VAD end-of-utterance silence threshold (ms)")
+	// -1 = unset: seed EndSilenceMS from each recording's captured vad_config
+	// rather than overriding it (SOP-168 behavior 3).
+	endSilenceMS := fs.Int("end-silence-ms", -1, "VAD end-of-utterance silence threshold (ms); default: each recording's captured value")
 	fs.Parse(args)
 
 	if fs.NArg() == 0 {
@@ -149,17 +172,32 @@ func buildCmd(args []string) {
 // shared Go type, and internal/telephony/twilio isn't safe to import from
 // here regardless (it imports internal/telephony, which cmd/probeset also
 // imports directly for Replay -- an import through twilio would be the
-// long way around for two fields).
+// long way around). VADConfig is the recording's captured VAD config, the
+// baseline a sweep varies one knob from (SOP-168 behavior 3).
 type recordingSidecar struct {
-	Label string `json:"label"`
+	Label     string              `json:"label"`
+	VADConfig telephony.VADConfig `json:"vad_config"`
+}
+
+// configForRecording seeds the replay config from the recording's captured
+// vad_config (SOP-168 behavior 3), so a sweep varies one knob from the captured
+// baseline rather than package defaults. endSilenceOverride >= 0 overrides
+// EndSilenceMS; < 0 (unset) keeps the captured value.
+func configForRecording(sc recordingSidecar, endSilenceOverride int) telephony.VADConfig {
+	cfg := sc.VADConfig
+	if endSilenceOverride >= 0 {
+		cfg.EndSilenceMS = endSilenceOverride
+	}
+	return cfg
 }
 
 // buildDataset replays every "<id>.in.ulaw" recording under dir (falling
-// back to "<id>.ulaw" if the two-channel naming isn't present) at
-// endSilenceMS, reads each recording's label from its "<id>.json" sidecar,
-// and returns every recording's structurally-derived dataset rows
-// (RowsFromUtterances) concatenated in filename order.
-func buildDataset(ctx context.Context, dir string, endSilenceMS int) ([]telephony.DatasetRow, error) {
+// back to "<id>.ulaw" if the two-channel naming isn't present), seeding each
+// replay from that recording's captured "<id>.json" sidecar vad_config
+// (endSilenceOverride >= 0 overrides EndSilenceMS), and returns every
+// recording's structurally-derived dataset rows (RowsFromUtterances)
+// concatenated in filename order.
+func buildDataset(ctx context.Context, dir string, endSilenceOverride int) ([]telephony.DatasetRow, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read dir %s: %w", dir, err)
@@ -180,10 +218,11 @@ func buildDataset(ctx context.Context, dir string, endSilenceMS int) ([]telephon
 		ulawPath := filepath.Join(dir, name)
 		sidecarPath := filepath.Join(dir, id+".json")
 
-		label, err := readRecordingLabel(sidecarPath)
+		sc, err := readRecordingSidecar(sidecarPath)
 		if err != nil {
 			return nil, fmt.Errorf("recording %s: %w", id, err)
 		}
+		cfg := configForRecording(sc, endSilenceOverride)
 
 		data, err := os.ReadFile(ulawPath)
 		if err != nil {
@@ -191,7 +230,7 @@ func buildDataset(ctx context.Context, dir string, endSilenceMS int) ([]telephon
 		}
 
 		results, err := telephony.Replay(ctx, id, bytes.NewReader(data), sttClient,
-			telephony.WithVADConfig(telephony.VADConfig{EndSilenceMS: endSilenceMS}),
+			telephony.WithVADConfig(cfg),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("replay %s: %w", id, err)
@@ -204,24 +243,24 @@ func buildDataset(ctx context.Context, dir string, endSilenceMS int) ([]telephon
 		if len(utterances) == 0 {
 			continue
 		}
-		rows = append(rows, telephony.RowsFromUtterances(id, label, utterances, endSilenceMS)...)
+		rows = append(rows, telephony.RowsFromUtterances(id, telephony.RecordingLabel(sc.Label), utterances, cfg.EndSilenceMS)...)
 	}
 	return rows, nil
 }
 
-func readRecordingLabel(sidecarPath string) (telephony.RecordingLabel, error) {
+func readRecordingSidecar(sidecarPath string) (recordingSidecar, error) {
 	data, err := os.ReadFile(sidecarPath)
 	if err != nil {
-		return "", fmt.Errorf("read sidecar %s: %w", sidecarPath, err)
+		return recordingSidecar{}, fmt.Errorf("read sidecar %s: %w", sidecarPath, err)
 	}
 	var sc recordingSidecar
 	if err := json.Unmarshal(data, &sc); err != nil {
-		return "", fmt.Errorf("parse sidecar %s: %w", sidecarPath, err)
+		return recordingSidecar{}, fmt.Errorf("parse sidecar %s: %w", sidecarPath, err)
 	}
 	if sc.Label == "" {
-		return "", fmt.Errorf("sidecar %s: empty label", sidecarPath)
+		return recordingSidecar{}, fmt.Errorf("sidecar %s: empty label", sidecarPath)
 	}
-	return telephony.RecordingLabel(sc.Label), nil
+	return sc, nil
 }
 
 func scoreCmd(args []string) {

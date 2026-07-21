@@ -3,6 +3,7 @@ package telephony
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"sync"
@@ -119,6 +120,21 @@ type Session struct {
 	// turnTranscripts accumulates FullPass STT transcript text for the
 	// current turn (SOP-150). Distinct from turnBuf, which is raw audio.
 	turnTranscripts []string
+
+	// transcriptTurns accumulates each completed turn's per-utterance
+	// transcripts, captured at the flushTurnTranscripts seam before they are
+	// joined, so Close can render the conversation transcript summary (SOP-168).
+	transcriptTurns [][]string
+
+	// Transcript summary output, rendered at Close (SOP-168). transcriptLive
+	// (nil = no print) receives the summary; transcriptDir/transcriptSID
+	// (dir == "" = no file) write <sid>.transcript.txt. Set by WithTranscriptOutput.
+	// transcriptAgentLabel names the response role ("" = the generic default);
+	// a consumer injects its product name via WithTranscriptAgentLabel.
+	transcriptDir        string
+	transcriptSID        string
+	transcriptLive       io.Writer
+	transcriptAgentLabel string
 
 	// turnActive is true while a turn is in progress (from speech onset until
 	// turn completion). Source of truth for "a turn is in progress."
@@ -904,6 +920,23 @@ func (s *Session) recordTurnEnd(ev VADEvent) {
 	s.recordVADDecision(DecisionKindTurnEnd, DecisionParamTurnEndSilence, s.vadCfg.TurnEndSilenceMS, ev, "turn closed (silence-turn-end)", 0)
 }
 
+// recordStopwordTurnEnd records the turn-end decision for a stopword-completed
+// turn (SOP-168). Unlike the silence-driven turn-end (recordTurnEnd), a stopword
+// end has no triggering VADEvent -- the turn ended because the STT transcript
+// matched the stopword -- so it takes its audio position from the last VAD
+// window, like the cap decisions. Same DecisionKindTurnEnd as the silence path
+// (both close a turn); the effect names the cause. Without this the stopword
+// turn-completion -- the primary turn-ender in practice -- would leave no entry
+// in the decision log, a hole for a labelled dataset.
+func (s *Session) recordStopwordTurnEnd() {
+	s.decisionRecorder.Record(DecisionEvent{
+		AudioMS: s.lastStreamWindow * s.vadCfg.windowMS(),
+		Type:    DecisionTypeVAD,
+		Kind:    DecisionKindTurnEnd,
+		Effect:  "turn closed (stopword)",
+	})
+}
+
 // drainSTTDispatch relays STTRequests from sttDispatchCh to sttIn in FIFO
 // order, isolated from run()'s select loop so a slow/backed-up STT sidecar
 // stalls only this goroutine (Charter R8) -- mirrors forwardToVAD's pattern.
@@ -993,6 +1026,9 @@ func (s *Session) flushTurnTranscripts(trigger TurnTrigger) {
 	if len(s.turnTranscripts) == 0 {
 		return
 	}
+	// Capture the per-utterance list (a copy, before the join below clears it)
+	// for the conversation transcript summary (SOP-168).
+	s.transcriptTurns = append(s.transcriptTurns, append([]string(nil), s.turnTranscripts...))
 	text := strings.Join(s.turnTranscripts, " ")
 	s.turnTranscripts = nil
 	if s.turnSink != nil {
@@ -1061,17 +1097,19 @@ func (s *Session) completeTurn(trigger TurnTrigger) {
 	s.turnActive = false
 	s.turnEndPending = false
 	s.cancelTurnTimer()
-	s.recordCapFor(trigger)
+	s.recordTurnCompletion(trigger)
 }
 
-// recordCapFor records the cap/timeout decision for the three timer-driven
-// completion triggers (SOP-166). The utterance and turn caps record their
-// resolved (operator-tunable) bound; the idle timeout records the MaxSilenceMS
-// constant, not the WithMaxSilenceMS test-seam override, since idle is not a
-// tunable knob. The other triggers (stopword, silence-turn-end, call-end) are
-// not cap decisions and record nothing here -- their VAD-boundary decisions are
-// recorded on their own paths (M2/M3).
-func (s *Session) recordCapFor(trigger TurnTrigger) {
+// recordTurnCompletion records the decision for the turn-completion triggers
+// whose decision comes from session state alone -- the three timer-driven caps
+// (SOP-166) and the stopword turn-end (SOP-168) -- all of which take their audio
+// position from the last VAD window, not a triggering event. The utterance and
+// turn caps record their resolved (operator-tunable) bound; the idle timeout
+// records the MaxSilenceMS constant (idle is not a tunable knob). The stopword
+// records a turn-end decision naming its cause. Silence-turn-end is NOT here: it
+// needs the triggering VADEvent (prob/silence/position), so it is recorded at
+// its own site (recordTurnEnd). Call-end records nothing (a mid-turn hangup).
+func (s *Session) recordTurnCompletion(trigger TurnTrigger) {
 	switch trigger {
 	case TriggerUtteranceCap:
 		s.recordCap(DecisionKindUtteranceCap, DecisionParamMaxUtterance, resolvedMS(s.utteranceTimeoutMS, MaxUtteranceMS), "forced utterance end")
@@ -1079,6 +1117,8 @@ func (s *Session) recordCapFor(trigger TurnTrigger) {
 		s.recordCap(DecisionKindTurnCap, DecisionParamMaxTurn, resolvedMS(s.turnTimeoutMS, MaxTurnMS), "forced turn end")
 	case TriggerIdleTimeout:
 		s.recordCap(DecisionKindIdleTimeout, DecisionParamMaxSilence, MaxSilenceMS, "call ended (idle)")
+	case TriggerStopword:
+		s.recordStopwordTurnEnd()
 	}
 }
 
@@ -1102,4 +1142,8 @@ func (s *Session) Close() {
 	if err := s.decisionRecorder.Close(); err != nil {
 		log.Printf("telephony: session %s: decision recorder close: %v", s.CallSID, err)
 	}
+	// Render the conversation transcript summary from the drained turn
+	// accumulator (SOP-168), same lifecycle as the decision record. Idempotent:
+	// emitTranscript clears the accumulator, so a second Close is a no-op.
+	s.emitTranscript()
 }

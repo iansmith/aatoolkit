@@ -96,6 +96,12 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	// off or no tap dir is set. The session flushes the recorder on Close.
 	opts = append(opts, telephony.WithFileDecisionRecorderFromEnv(
 		tapDir, start.StreamSID, start.CallSID, tapLabelFromEnv(), telephony.DefaultVADConfig(), os.Stderr))
+	// Conversation transcript summary (SOP-168): printed to stderr at end of
+	// call, and written to <streamSID>.transcript.txt when a tap dir is set. The
+	// agent role label is consumer-injected via AATOOLKIT_AGENT_LABEL.
+	opts = append(opts,
+		telephony.WithTranscriptOutput(tapDir, start.StreamSID, os.Stderr),
+		telephony.WithTranscriptAgentLabel(agentLabelFromEnv()))
 
 	sess := newSession(ctx, start.CallSID, opts...)
 	if err := sess.Start(); err != nil {
