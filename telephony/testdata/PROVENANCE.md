@@ -76,7 +76,10 @@ for that fixture's own story.
   | original | `EndSilenceMS = 700` | end-of-utterance at window 237 |
   | 2026-07-16 | `EndSilenceMS = 1050` (700ms fired inside a sentence, splitting one spoken thought into several turns) | end-of-utterance 237 → **248**; events 0–6 unchanged |
   | 2026-07-17 (SOP-154) | `EndSilenceMS = 1050 → 700` (revert: SOP-150's fusion buffer makes a sub-utterance cut free, so the 1050ms workaround is no longer needed — see `design/voice-input-stt.md`) | end-of-utterance 248 → **237**; events 0–6 unchanged |
+  | 2026-07-21 (AATK-3) | `EndSilenceMS = 700 → 900` (the "sub-utterance cut is free" premise was wrong: fragments are transcribed independently, so a mid-clause cut makes Whisper hallucinate on the truncated fragment — dataset D5, "the plumber still hasn't called back" → "…has to do it" at 700; whole at 900) | end-of-utterance 237 → **244**; events 0–6 unchanged |
 
-  That shift is `ceil(1050/32) − ceil(700/32) = 33 − 22 = 11` windows, where 32ms
-  is the window duration (`WindowSize 256 / SampleRateHz 8000`). Observed: 11,
-  in both directions.
+  Those shifts are `ceil(EndSilenceMS/32) − ceil(700/32)` windows, where 32ms is the
+  window duration (`WindowSize 256 / SampleRateHz 8000`): `ceil(1050/32) − ceil(700/32)
+  = 33 − 22 = 11` (the 2026-07-16/17 moves) and `ceil(900/32) − ceil(700/32) = 29 − 22
+  = 7` (AATK-3: 237 → 244). Observed: 11 in both directions, and 7. Only the terminal
+  end-of-utterance event moves; events 0–5 are unchanged.
