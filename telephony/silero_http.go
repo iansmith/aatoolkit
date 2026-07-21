@@ -67,20 +67,22 @@ func (c *VADClient) Detector() func() (VADDetector, error) {
 	}
 }
 
-// infer runs one window through the sidecar, sending the current state and
-// returning the speech probability and the updated state. The wire format is
-// little-endian float32 throughout (matching numpy/struct on the Python side):
+// infer runs one input window through the sidecar, sending the current state and
+// returning the speech probability and the updated state. input is the 64-sample
+// context ++ the 256-sample chunk = 320 samples (AATK-8; the caller assembles it).
+// The wire format is little-endian float32 throughout (matching numpy/struct on
+// the Python side):
 //
-//	request : window (sileroWindowSize f32) ++ state (sileroStateElems f32)
+//	request : input (sileroContextSize+sileroWindowSize f32) ++ state (sileroStateElems f32)
 //	response: prob (1 f32) ++ new state (sileroStateElems f32)
-func (c *VADClient) infer(ctx context.Context, window, state []float32) (float32, []float32, error) {
-	if len(window) != sileroWindowSize {
-		return 0, nil, fmt.Errorf("silero-http: window length %d != %d", len(window), sileroWindowSize)
+func (c *VADClient) infer(ctx context.Context, input, state []float32) (float32, []float32, error) {
+	if len(input) != sileroContextSize+sileroWindowSize {
+		return 0, nil, fmt.Errorf("silero-http: input length %d != %d", len(input), sileroContextSize+sileroWindowSize)
 	}
 
-	reqBuf := make([]byte, (len(window)+len(state))*4)
-	putFloat32sLE(reqBuf, window)
-	putFloat32sLE(reqBuf[len(window)*4:], state)
+	reqBuf := make([]byte, (len(input)+len(state))*4)
+	putFloat32sLE(reqBuf, input)
+	putFloat32sLE(reqBuf[len(input)*4:], state)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url+"/", bytes.NewReader(reqBuf))
 	if err != nil {
@@ -110,28 +112,37 @@ func (c *VADClient) infer(ctx context.Context, window, state []float32) (float32
 // owns the recurrent state threaded across Detect calls; it is not safe for
 // concurrent use (one per session, like sileroDetector).
 type httpSileroDetector struct {
-	client *VADClient
-	state  []float32 // sileroStateElems() floats, [2,1,128] flattened C-order
+	client  *VADClient
+	state   []float32 // sileroStateElems() floats, [2,1,128] flattened C-order
+	context []float32 // last sileroContextSize samples of the previous window (AATK-8)
 }
 
 // Detect posts one window to the sidecar, threads the returned state, and
 // returns the speech probability — the vadDetector contract sileroDetector
-// also implements.
+// also implements. It prepends the carried 64-sample context to the window
+// (context ++ window = 320) and carries this window's tail forward, exactly as
+// the in-process sileroDetector does — that parity keeps the two interchangeable.
 func (d *httpSileroDetector) Detect(window []float32) (float32, error) {
+	if len(window) != sileroWindowSize {
+		return 0, fmt.Errorf("silero-http: window length %d != %d", len(window), sileroWindowSize)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultVADTimeout)
 	defer cancel()
-	prob, newState, err := d.client.infer(ctx, window, d.state)
+	input := append(append([]float32(nil), d.context...), window...)
+	prob, newState, err := d.client.infer(ctx, input, d.state)
 	if err != nil {
 		return 0, err
 	}
 	d.state = newState
+	d.context = append(d.context[:0], window[len(window)-sileroContextSize:]...)
 	return prob, nil
 }
 
-// Reset zeroes the recurrent state, starting a fresh utterance's inference
-// history — called by runVAD on every exit, exactly as for sileroDetector.
+// Reset zeroes the recurrent state and context, starting a fresh utterance's
+// inference history — called by runVAD on every exit, exactly as for sileroDetector.
 func (d *httpSileroDetector) Reset() {
 	d.state = make([]float32, sileroStateElems())
+	d.context = make([]float32, sileroContextSize)
 }
 
 // putFloat32sLE writes xs as little-endian float32 into dst, which must have
