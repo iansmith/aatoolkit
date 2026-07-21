@@ -434,14 +434,15 @@ func TestSessionStartFailsOnBadFactory(t *testing.T) {
 // probability sequence and asserts the injected TurnSink sees OnSpeechStart
 // and OnEndOfUtterance at the expected boundaries.
 func TestSessionTurnSinkDispatch(t *testing.T) {
-	// Default thresholds (vad.go): SpeechThresh 0.5, SilenceThresh 0.35,
-	// EndSilenceMS 900, WindowSize 256 @ 8kHz (32ms/window) — so it takes
-	// ceil(900/32)=29 consecutive silent windows after a speech onset to
-	// reach end-of-utterance.
-	probs := make([]float32, 0, 23)
+	// It takes telephony.EndSilenceWindows() (= ceil(EndSilenceMS / windowMS),
+	// with the thresholds in vad.go) consecutive silent windows after a speech
+	// onset to reach end-of-utterance. Derive the silence run and the slice
+	// capacity from that helper so this tracks any VAD retune instead of pinning
+	// a frozen window count.
+	probs := make([]float32, 0, 1+telephony.EndSilenceWindows())
 	probs = append(probs, 0.9) // -> Speech
 	for i := 0; i < telephony.EndSilenceWindows(); i++ {
-		probs = append(probs, 0.1) // -> ... -> EndOfUtterance on the 22nd
+		probs = append(probs, 0.1) // -> ... -> EndOfUtterance on the last silent window
 	}
 
 	det := &fakeDetector{probs: probs}

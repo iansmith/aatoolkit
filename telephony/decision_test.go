@@ -523,6 +523,10 @@ func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
 		t.Fatal("NewFileDecisionRecorder returned nil for a non-empty dir")
 	}
 
+	// ParamValue/AudioMS here are arbitrary fixture inputs the recorder serializes
+	// verbatim — NOT the VAD default (which is DefaultVADConfig().EndSilenceMS). This
+	// test exercises the recorder's flush/live-feed, so any values work; they are
+	// deliberately literals, decoupled from the tuned default.
 	in := []telephony.DecisionEvent{
 		{Type: "vad", Kind: "end-of-utterance", Param: "EndSilenceMS", ParamValue: 700, AudioMS: 640, RequestID: 1, Effect: "utterance closed; dispatched STT request 1"},
 		{Type: "vad", Kind: "end-of-utterance", Param: "EndSilenceMS", ParamValue: 700, AudioMS: 1280, RequestID: 2, Effect: "utterance closed; dispatched STT request 2"},
