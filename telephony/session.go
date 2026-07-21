@@ -925,9 +925,10 @@ func (s *Session) recordTurnEnd(ev VADEvent) {
 // end has no triggering VADEvent -- the turn ended because the STT transcript
 // matched the stopword -- so it takes its audio position from the last VAD
 // window, like the cap decisions. Same DecisionKindTurnEnd as the silence path
-// (both close a turn); the effect names the cause. Without this the stopword
-// turn-completion -- the primary turn-ender in practice -- would leave no entry
-// in the decision log, a hole for a labelled dataset.
+// (both close a turn); the effect names the cause. The stopword is a caller
+// shortcut to end a turn without waiting out the silence timeout (silence is the
+// normal turn-ender); without this it would leave no entry in the decision log,
+// a hole for a labelled dataset.
 func (s *Session) recordStopwordTurnEnd() {
 	s.decisionRecorder.Record(DecisionEvent{
 		AudioMS: s.lastStreamWindow * s.vadCfg.windowMS(),
