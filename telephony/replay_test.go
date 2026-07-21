@@ -62,7 +62,7 @@ func TestReplay_Deterministic(t *testing.T) {
 	sttClient := fixedTextSTTServer(t, "hello there")
 
 	// 8 windows of speech then enough silence to cross the default
-	// EndSilenceMS (700ms / 32ms per window ~= 22 windows) -- content is
+	// EndSilenceMS (900ms / 32ms per window ~= 29 windows) -- content is
 	// irrelevant with a fake VAD factory, only the byte count (window
 	// count) the fake detector is asked to classify matters.
 	audio := bytes.Repeat([]byte{0x01}, 8*256)
@@ -111,8 +111,8 @@ func TestReplay_Deterministic(t *testing.T) {
 // against a snapshot of the real, unmodified decodeMuLaw -> windower ->
 // sileroDetector.Detect -> vadMachine.step pipeline. That golden
 // (testdata/meetings_today_events.json) records exactly one
-// "end-of-utterance" event, at window 237, for this recording at the
-// current default EndSilenceMS=700 -- i.e. this call's real "live log" is
+// "end-of-utterance" event, at window 244, for this recording at the
+// current default EndSilenceMS=900 -- i.e. this call's real "live log" is
 // "one utterance." Replay is called here with no VAD override at all (the
 // real, default NewSileroDetector Session.Start already uses), so this is
 // literally the production VAD+STT path, driven from a byte stream instead
@@ -141,7 +141,7 @@ func TestReplay_MatchesProduction(t *testing.T) {
 	}
 
 	if len(results) != 1 {
-		t.Fatalf("got %d FullPass results, want exactly 1 (testdata/meetings_today_events.json's single end-of-utterance event at window 237): %+v", len(results), results)
+		t.Fatalf("got %d FullPass results, want exactly 1 (testdata/meetings_today_events.json's single end-of-utterance event at window 244): %+v", len(results), results)
 	}
 	if results[0].Text != "can you show me my meetings today" {
 		t.Errorf("results[0].Text = %q, want the STT stub's canned reply", results[0].Text)
