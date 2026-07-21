@@ -83,3 +83,26 @@ for that fixture's own story.
   = 33 − 22 = 11` (the 2026-07-16/17 moves) and `ceil(900/32) − ceil(700/32) = 29 − 22
   = 7` (AATK-3: 237 → 244). Observed: 11 in both directions, and 7. Only the terminal
   end-of-utterance event moves; events 0–5 are unchanged.
+
+---
+
+# `how_are_you.ulaw` — short-utterance VAD fixture
+
+| | |
+|---|---|
+| File | `how_are_you.ulaw` |
+| Content | "How are you doing today?" — a short (~1.5 s speech) utterance, then trailing silence |
+| Source | Recorded by Ian directly via `twilio-cli`, 2026-07-21, for AATK-8 (not derived from any vendored/third-party asset) |
+| Format | 8 kHz, mono, G.711 μ-law, 1 byte/sample, no header (raw payload — Twilio Media Streams on-wire format) |
+| Size | 66,080 bytes = 8.26 s |
+| sha256 | `8393054bfa091bb41dd4a626435b98d5c3682f79f60ad71bed42c096074f733a` |
+
+## Why this fixture
+
+`meetings_today.ulaw` is a long, sustained utterance the VAD detects even when
+mis-configured. This fixture is a **short** utterance (the whole spoken phrase is
+~1.5 s) — the case AATK-8 fixes. Without Silero's 64-sample context window the model's
+speech probability never crosses `SpeechThresh` (0.5) on so brief an utterance (it
+peaks at ~0.28), so the VAD emits no onset and the pipeline produces no rows.
+`TestSilero_DetectsShortUtterance` (`silero_short_test.go`) pins that the real detector
+now crosses the threshold on this recording — red before the context fix, green after.
