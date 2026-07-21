@@ -31,6 +31,12 @@ func newFFmpegCmd(ctx context.Context, mic string) *exec.Cmd {
 // exec.CommandContext's default SIGKILL, which drops buffered audio and truncates the
 // recording's tail. WaitDelay bounds the graceful window: if ffmpeg does not exit
 // within it, os/exec escalates to SIGKILL, so a wedged process can never hang teardown.
+//
+// It also runs the child in its OWN process group (Setpgid). A terminal Ctrl-C signals
+// twilio-cli's whole foreground group; without this the child ffmpeg would receive that
+// SIGINT directly AND cmd.Cancel's — a double signal ffmpeg treats as "Immediate exit
+// requested", skipping the very flush this function exists to enable. Isolated, ffmpeg
+// sees only cmd.Cancel's single, controlled SIGINT.
 func gracefulCancel(cmd *exec.Cmd) {
 	cmd.WaitDelay = 3 * time.Second
 	cmd.Cancel = func() error {
@@ -39,6 +45,10 @@ func gracefulCancel(cmd *exec.Cmd) {
 		}
 		return cmd.Process.Signal(syscall.SIGINT)
 	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
 }
 
 // streamMicFrames captures mic input via ffmpeg, slices it into 8 kHz μ-law
