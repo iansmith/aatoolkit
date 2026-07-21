@@ -102,13 +102,15 @@ type vadConfig struct {
 }
 
 func defaultVADConfig() vadConfig {
-	// EndSilenceMS reverted 1050 -> 700 (SOP-154): f5cad49 widened it to stop
-	// a VAD cut inside a sentence from becoming its own STT pass and LLM turn
-	// ("...I can't." / "really fix this." / "right now because I've got work"
-	// -- build/logs/server-2026-07-16-14-44-05.log). SOP-150's fusion buffer
-	// now re-joins those fragments into one turn, so a mis-cut costs nothing
-	// -- see design/voice-input-stt.md for the full reasoning.
-	return vadConfig{WindowSize: 256, SpeechThresh: 0.5, SilenceThresh: 0.35, EndSilenceMS: 700, SampleRateHz: 8000, TurnEndSilenceMS: 5000}
+	// EndSilenceMS 700 -> 900 (AATK-3): the SOP-154 revert to 700 assumed SOP-150's
+	// fusion buffer made a mid-sentence cut free -- fragments re-join into one turn.
+	// It is not free: each fragment is transcribed independently, so a mid-clause cut
+	// makes Whisper hallucinate an ending on the truncated fragment. Turn-taking
+	// dataset recording D5 ("...the plumber still hasn't called back") split at 700
+	// into "...still has to do it." + "hasn't called back." -- "has to do it" invented;
+	// whole at 900. 900 is the knee (kills the hallucination at lower latency than
+	// 1050). Caveat: n=5, one voice -- re-sweep as more of the dataset is collected.
+	return vadConfig{WindowSize: 256, SpeechThresh: 0.5, SilenceThresh: 0.35, EndSilenceMS: 900, SampleRateHz: 8000, TurnEndSilenceMS: 5000}
 }
 
 // withDefaults fills any unset (non-positive) field from defaultVADConfig so a
