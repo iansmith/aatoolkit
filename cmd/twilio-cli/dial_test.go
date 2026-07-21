@@ -307,6 +307,47 @@ func withFakeMic(t *testing.T, fn func(ctx context.Context, conn *websocket.Conn
 	t.Cleanup(func() { streamMic = original })
 }
 
+// TestDial_NoStopFrameOnServerClose asserts that a SERVER-initiated close (the
+// farewell / idle-timeout hangup) does NOT make twilio-cli send a stop frame — the
+// server already closed the socket, so the write only draws a "broken pipe". AATK-7:
+// a regression from AATK-2, which sends stop unconditionally when the mic goroutine
+// returns, including when the read loop's cancelMic ends it on a server close. The bug
+// is a goroutine race (the stop goroutine's select can pick micStopped or readCtx.Done),
+// so this asserts on the log with a short settle; run under -count to exercise the race.
+func TestDial_NoStopFrameOnServerClose(t *testing.T) {
+	// The read loop's cancelMic ends the mic on a server close; a fake mic that runs
+	// until its context is cancelled reproduces that (streamMic returns via
+	// cancellation, i.e. naturalEnd=false — NOT on its own).
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
+		readHandshake(t, buf) // consume connected + start
+		conn.Close()          // server-initiated close
+	}))
+	defer srv.Close()
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	out := captureLog(t, func() {
+		if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+			t.Errorf("dial after server close: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond) // let any stray stop goroutine (mis)fire into the captured log
+	})
+
+	if strings.Contains(out, "send stop") {
+		t.Errorf("twilio-cli sent a stop frame after a server-initiated close (broken pipe):\n%s", out)
+	}
+}
+
 // blockingMic simulates a long-running capture that only stops when ctx is
 // cancelled — mirrors real streamMicFrames' shape without touching hardware.
 func blockingMic(ctx context.Context, _ *websocket.Conn, _ string) error {
