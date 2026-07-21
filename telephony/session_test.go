@@ -435,8 +435,8 @@ func TestSessionStartFailsOnBadFactory(t *testing.T) {
 // and OnEndOfUtterance at the expected boundaries.
 func TestSessionTurnSinkDispatch(t *testing.T) {
 	// Default thresholds (vad.go): SpeechThresh 0.5, SilenceThresh 0.35,
-	// EndSilenceMS 700, WindowSize 256 @ 8kHz (32ms/window) — so it takes
-	// ceil(700/32)=22 consecutive silent windows after a speech onset to
+	// EndSilenceMS 900, WindowSize 256 @ 8kHz (32ms/window) — so it takes
+	// ceil(900/32)=29 consecutive silent windows after a speech onset to
 	// reach end-of-utterance.
 	probs := make([]float32, 0, 23)
 	probs = append(probs, 0.9) // -> Speech
