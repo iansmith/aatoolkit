@@ -4,6 +4,7 @@ system = "linear"
 key    = "AATK"                 # Linear team key (team "AiAssistantToolkit")
 prefix = "AATK"                 # ticket prefix, e.g. AATK-1
 tracking_dir = ".slopstop"
+archive_dir  = ".slopstop/ticket-archive"   # project-local; avoids the protected ~/.claude default
 
 # Tier→model map for the four-tier slopstop process.
 # Table form (v3.1.0+): each tier is a sub-table with provider, model, and optional
