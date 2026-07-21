@@ -194,6 +194,64 @@ func TestDecisionRecorder_DroppedUtteranceRecorded(t *testing.T) {
 	}
 }
 
+// TestDecisionRecorder_StopwordTurnEnd — a turn completed by the stopword
+// records a turn-end decision (effect names the stopword cause), filling the
+// log gap that would otherwise leave stopword turns unrecorded (SOP-168).
+func TestDecisionRecorder_StopwordTurnEnd(t *testing.T) {
+	rec := &mockDecRecorder{}
+	sttIn := NewBufferedChan[STTRequest](10)
+	s := newDecTestSession(t, rec, WithSTTInput(sttIn), WithTurnEndPolicy(StopwordPolicy{}))
+	defer s.Close()
+	s.setState(StateListening)
+
+	// Utterance ends -> dispatch a pass (sttReqID 1), enter AwaitingFullResult.
+	s.dispatch(SourceVADEvent, VADEvent{Kind: VADEndOfUtterance, StreamWindowIndex: 10})
+	// The STT result is the stopword -> the turn completes on the stopword.
+	s.dispatch(SourceSTTResult, STTResult{SessionID: s.CallSID, RequestID: 1, Kind: FullPass, Text: "done"})
+
+	te := filterDecisionKind(rec.events, DecisionKindTurnEnd)
+	if len(te) != 1 {
+		t.Fatalf("turn-end decisions: got %d, want 1 (%+v)", len(te), rec.events)
+	}
+	// Assert the meaningful contract (a turn-end naming the stopword cause), not
+	// the event's Type -- the type taxonomy is SOP-171's to restructure.
+	if !strings.Contains(te[0].Effect, "stopword") {
+		t.Errorf("Effect: got %q, want a mention of the stopword cause", te[0].Effect)
+	}
+}
+
+// TestComputeTotals pins the per-recording header totals (SOP-168): utterances
+// from end-of-utterance events, turns from every recorded turn completion
+// (silence-turn-end, stopword, turn-cap, utterance-cap) but NOT idle-timeout,
+// and STT calls from stt_dispatch events.
+func TestComputeTotals(t *testing.T) {
+	events := []DecisionEvent{
+		{Type: DecisionTypeVAD, Kind: DecisionKindSpeechStart},
+		{Type: DecisionTypeVAD, Kind: DecisionKindEndOfUtter},
+		{Type: DecisionTypeSTTDispatch},
+		{Type: DecisionTypeSTTResult},
+		{Type: DecisionTypeVAD, Kind: DecisionKindTurnEnd},                                   // silence turn-end
+		{Type: DecisionTypeVAD, Kind: DecisionKindTurnEnd, Effect: "turn closed (stopword)"}, // stopword turn-end
+		{Type: DecisionTypeCap, Kind: DecisionKindTurnCap},
+		{Type: DecisionTypeCap, Kind: DecisionKindUtteranceCap},
+		{Type: DecisionTypeCap, Kind: DecisionKindIdleTimeout}, // call-end, NOT a turn
+		{Type: DecisionTypeVAD, Kind: DecisionKindEndOfUtter},  // second utterance
+	}
+	got := computeTotals(events)
+	if got.Events != len(events) {
+		t.Errorf("Events: got %d, want %d", got.Events, len(events))
+	}
+	if got.Utterances != 2 {
+		t.Errorf("Utterances: got %d, want 2", got.Utterances)
+	}
+	if got.Turns != 4 {
+		t.Errorf("Turns: got %d, want 4 (2 turn-end + turn-cap + utterance-cap; idle excluded)", got.Turns)
+	}
+	if got.STTCalls != 1 {
+		t.Errorf("STTCalls: got %d, want 1", got.STTCalls)
+	}
+}
+
 // TestVADEvent_StreamWindowIndexMonotonic drives the vadMachine across two
 // utterances and asserts StreamWindowIndex is the never-reset stream clock
 // while WindowIndex still resets to 0 at each speech onset. windowMS is 32 at

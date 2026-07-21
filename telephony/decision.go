@@ -109,10 +109,39 @@ func (noopRecorder) Close() error         { return nil }
 // config that produced them -- the config is a moving target and cannot be
 // recovered after the fact, the same reason the audio tap's sidecar keeps it.
 type decisionHeader struct {
-	StreamSID string    `json:"stream_sid"`
-	CallSID   string    `json:"call_sid"`
-	Label     string    `json:"label,omitempty"`
-	VADConfig VADConfig `json:"vad_config"`
+	StreamSID string         `json:"stream_sid"`
+	CallSID   string         `json:"call_sid"`
+	Label     string         `json:"label,omitempty"`
+	VADConfig VADConfig      `json:"vad_config"`
+	Totals    decisionTotals `json:"totals"`
+}
+
+// decisionTotals is the per-recording summary written into the header at Close
+// (SOP-168). Turns counts every recorded turn completion -- silence-turn-end,
+// stopword, turn-cap, utterance-cap (all now emit a decision) -- but not the
+// idle timeout, which ends the call after its turn already closed. A mid-turn
+// Twilio hangup (TriggerCallEnd) records no decision and so is not counted.
+type decisionTotals struct {
+	Events     int `json:"events"`
+	Utterances int `json:"utterances"`
+	Turns      int `json:"turns"`
+	STTCalls   int `json:"stt_calls"`
+}
+
+// computeTotals derives the per-recording totals from the buffered events.
+func computeTotals(events []DecisionEvent) decisionTotals {
+	t := decisionTotals{Events: len(events)}
+	for _, ev := range events {
+		switch {
+		case ev.Kind == DecisionKindEndOfUtter:
+			t.Utterances++
+		case ev.Kind == DecisionKindTurnEnd || ev.Kind == DecisionKindTurnCap || ev.Kind == DecisionKindUtteranceCap:
+			t.Turns++
+		case ev.Type == DecisionTypeSTTDispatch:
+			t.STTCalls++
+		}
+	}
+	return t
 }
 
 // FileDecisionRecorder buffers events in memory, feeds each one live to an
@@ -185,6 +214,7 @@ func (r *FileDecisionRecorder) Close() error {
 	r.closed = true
 
 	sid := r.header.StreamSID
+	r.header.Totals = computeTotals(r.buf)
 	hdr, err := json.Marshal(r.header)
 	if err != nil {
 		return fmt.Errorf("decision recorder: marshal header: %w", err)
