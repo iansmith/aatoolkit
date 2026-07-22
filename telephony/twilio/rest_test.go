@@ -67,6 +67,36 @@ func TestRESTClient_SendSMS_RequestShape(t *testing.T) {
 	}
 }
 
+// TestRESTClient_SendSMS_ContentType asserts the request is form-encoded per the
+// ticket's observable behavior 2 ("Content-Type: application/x-www-form-urlencoded").
+// Added by Phase-0 adversary review: the RequestShape test parses the form via
+// r.ParseForm but never pins the Content-Type header itself, so a client that sent
+// e.g. JSON with matching field names could pass it unnoticed.
+func TestRESTClient_SendSMS_ContentType(t *testing.T) {
+	var gotContentType string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	client := twilio.RESTClient{
+		AccountSID: "AC123",
+		KeySID:     "SK1",
+		KeySecret:  "sekret",
+		BaseURL:    srv.URL,
+	}
+
+	if err := client.SendSMS(context.Background(), "+15550001111", "+15550002222", "hello"); err != nil {
+		t.Fatalf("SendSMS returned error: %v", err)
+	}
+
+	if want := "application/x-www-form-urlencoded"; !strings.HasPrefix(gotContentType, want) {
+		t.Errorf("Content-Type = %q, want prefix %q", gotContentType, want)
+	}
+}
+
 // TestRESTClient_SendSMS_ErrorOnNon2xx asserts non-2xx responses surface a non-nil
 // error carrying the status code, and that the error text never leaks the credential
 // secret or the basic-auth blob (ticket: "Credentials are never logged").
