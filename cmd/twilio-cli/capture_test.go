@@ -292,7 +292,8 @@ func TestDrainFrames_PayloadSurvivesTwilioEncodingRoundTrip(t *testing.T) {
 // worked example: chunk 1 starts playing at t=0ms, chunk 2 at t=20ms, etc.
 func TestCLI_ChunkTimestamp(t *testing.T) {
 	data := bytes.Repeat([]byte{0x7f}, 3*muLawFrame20ms)
-	enc := newMediaFrameEncoder("MZ_chunktest")
+	seqNum := 1
+	enc := newMediaFrameEncoder("MZ_chunktest", &seqNum)
 
 	var frames [][]byte
 	err := drainFrames(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
@@ -329,6 +330,43 @@ func TestCLI_ChunkTimestamp(t *testing.T) {
 		if !ok || gotTimestamp != wantTimestamp[i] {
 			t.Errorf("frame[%d]: timestamp = %v, want %q", i, media["timestamp"], wantTimestamp[i])
 		}
+	}
+}
+
+// TestMediaFrameEncoder_SequenceNumberIncrements pins AATK-16 observable
+// behavior 4: the shared per-call sequenceNumber counter advances by one for
+// every media frame. Seeded at 1 (the start frame's number, as dial does), the
+// first media frame carries 2, then 3, 4, ... and the shared counter reflects
+// the last value — proving the media path no longer emits the placeholder 0.
+func TestMediaFrameEncoder_SequenceNumberIncrements(t *testing.T) {
+	seqNum := 1
+	enc := newMediaFrameEncoder("MZ_seq", &seqNum)
+
+	var got []string
+	for i := 0; i < 3; i++ {
+		raw, err := enc.encode([]byte{0x7f})
+		if err != nil {
+			t.Fatalf("encode %d: %v", i, err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("frame[%d]: not JSON: %v", i, err)
+		}
+		seq, ok := m["sequenceNumber"].(string)
+		if !ok {
+			t.Fatalf("frame[%d]: sequenceNumber missing or not a string: %v", i, m["sequenceNumber"])
+		}
+		got = append(got, seq)
+	}
+
+	want := []string{"2", "3", "4"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("media[%d] sequenceNumber = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+	if seqNum != 4 {
+		t.Errorf("shared seqNum after 3 media frames = %d, want 4", seqNum)
 	}
 }
 

@@ -59,6 +59,15 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 
 	streamSID := newSID("MZ")
 
+	// seqNum is this call's single, unified Twilio sequenceNumber counter: it
+	// starts at 1 for the start frame, the media encoder advances it per media
+	// frame, and the stop frame takes the next value. The connected frame is
+	// NOT counted. It is only ever read/written from one goroutine at a time —
+	// the main goroutine before the mic starts (start), the mic goroutine while
+	// streaming (media), and sendStop only after the mic goroutine has fully
+	// returned (see micStopped) — so a plain int needs no lock.
+	seqNum := 1
+
 	// The blocking read loop below uses readCtx, NOT ctx directly: coder/websocket
 	// closes the underlying connection as soon as a Read's context is done, so if
 	// the read were bound to ctx, cancelling ctx (SIGINT) would kill the socket
@@ -70,8 +79,12 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	var sendStopOnce sync.Once
 	sendStop := func() {
 		sendStopOnce.Do(func() {
-			// seqNum placeholder 0 — real per-call sequenceNumber counter wired by SOP-142.
-			stopMsg, err := twilio.EncodeStop(streamSID, callSid, defaultAccountSid, 0)
+			// The stop frame takes the next sequence number after the last media
+			// frame. Safe to advance seqNum here: sendStop runs only after the mic
+			// goroutine has fully returned (natural end runs it inline after
+			// streamMic; the ctx-cancel path waits on micStopped first).
+			seqNum++
+			stopMsg, err := twilio.EncodeStop(streamSID, callSid, defaultAccountSid, seqNum)
 			if err != nil {
 				log.Printf("twilio-cli: encode stop: %v", err)
 				return
@@ -128,8 +141,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		return ignoreHandshakeHangup(err)
 	}
 
-	// seqNum placeholder 1 — real per-call sequenceNumber counter wired by SOP-142.
-	startMsg, err := twilio.EncodeStart(streamSID, callSid, defaultAccountSid, 1)
+	startMsg, err := twilio.EncodeStart(streamSID, callSid, defaultAccountSid, seqNum)
 	if err != nil {
 		return fmt.Errorf("encode start: %w", err)
 	}
@@ -141,7 +153,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	micErrCh := make(chan error, 1)
 	go func() {
 		defer cancelMic() // goroutine exit cancels the read loop
-		err := streamMic(micCtx, conn, streamSID)
+		err := streamMic(micCtx, conn, streamSID, &seqNum)
 		// naturalEnd: streamMic returned on its OWN (mic EOF = caller hangup), not
 		// because something cancelled micCtx (Ctrl-C, or a server-initiated close via
 		// the read loop's cancelMic).

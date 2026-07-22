@@ -15,19 +15,23 @@ const sampleRateHz = 8000
 const muLawFrame20ms = sampleRateHz * 20 / 1000
 
 // mediaFrameEncoder tracks a monotonic chunk counter for one call's outgoing
-// media frames, starting at 1.
+// media frames, starting at 1. seqNum points at the call's shared per-message
+// sequenceNumber counter (owned by dial): each media frame advances it, so the
+// wire carries a single unified sequence across start, media, and stop.
 type mediaFrameEncoder struct {
 	streamSID string
 	chunk     int
+	seqNum    *int
 }
 
-func newMediaFrameEncoder(streamSID string) *mediaFrameEncoder {
-	return &mediaFrameEncoder{streamSID: streamSID}
+func newMediaFrameEncoder(streamSID string, seqNum *int) *mediaFrameEncoder {
+	return &mediaFrameEncoder{streamSID: streamSID, seqNum: seqNum}
 }
 
 func (e *mediaFrameEncoder) encode(payload []byte) ([]byte, error) {
 	e.chunk++
-	// seqNum placeholder 0 — real per-call sequenceNumber counter wired by SOP-142.
+	// AATK-16 RED: media still emits the placeholder 0; the shared seqNum is not
+	// yet advanced or wired into the frame.
 	return twilio.EncodeMediaWithMetadata(e.streamSID, payload, e.chunk, 0)
 }
 
