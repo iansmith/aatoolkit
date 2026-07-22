@@ -1,6 +1,10 @@
 package driver
 
 import (
+	"context"
+	"encoding/binary"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -90,4 +94,83 @@ func TestSpeechQueueSingleClipAndCloseOnce(t *testing.T) {
 	default:
 		t.Fatal("done channel not closed after the clip finished")
 	}
+}
+
+// TestSynthesizeWAV_ReturnsBytes verifies that SynthesizeWAV fetches and returns
+// WAV bytes from the TTS server without invoking afplay.
+func TestSynthesizeWAV_ReturnsBytes(t *testing.T) {
+	// Create a minimal valid WAV file for testing.
+	wav := makeTestWAV([]int16{100, 200, 300})
+
+	// Create a fake TTS server that returns the test WAV.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		w.Write(wav)
+	}))
+	defer server.Close()
+
+	// Create a Host with the fake TTS server.
+	h := &Host{
+		tiers:  make(map[string]Tier),
+		client: &http.Client{},
+		prompt: func() string { return "" },
+		tts: TTSConfig{
+			URL:    server.URL,
+			Lang:   "en",
+			Format: "wav",
+		},
+	}
+
+	// Call SynthesizeWAV with a context.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	audio, err := h.SynthesizeWAV(ctx, []byte("test"), "alice", 1.0)
+	if err != nil {
+		t.Fatalf("SynthesizeWAV failed: %v", err)
+	}
+
+	if len(audio) == 0 {
+		t.Fatal("SynthesizeWAV returned empty audio")
+	}
+
+	if string(audio) != string(wav) {
+		t.Errorf("audio bytes mismatch: got %d bytes, want %d", len(audio), len(wav))
+	}
+}
+
+// makeTestWAV creates a minimal valid WAV file containing the given samples.
+func makeTestWAV(samples []int16) []byte {
+	const (
+		sampleRate     = 8000
+		numChannels    = 1
+		bitsPerSample  = 16
+		bytesPerSample = bitsPerSample / 8
+	)
+
+	pcmLen := len(samples) * bytesPerSample
+	wavLen := 44 + pcmLen
+
+	wav := make([]byte, wavLen)
+
+	copy(wav[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(wav[4:8], uint32(36+pcmLen))
+	copy(wav[8:12], "WAVE")
+	copy(wav[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(wav[16:20], 16)
+	binary.LittleEndian.PutUint16(wav[20:22], 1)
+	binary.LittleEndian.PutUint16(wav[22:24], numChannels)
+	binary.LittleEndian.PutUint32(wav[24:28], sampleRate)
+	binary.LittleEndian.PutUint32(wav[28:32], uint32(sampleRate*numChannels*bytesPerSample))
+	binary.LittleEndian.PutUint16(wav[32:34], numChannels*bytesPerSample)
+	binary.LittleEndian.PutUint16(wav[34:36], bitsPerSample)
+	copy(wav[36:40], "data")
+	binary.LittleEndian.PutUint32(wav[40:44], uint32(pcmLen))
+
+	for i, sample := range samples {
+		off := 44 + i*bytesPerSample
+		binary.LittleEndian.PutUint16(wav[off:off+2], uint16(sample))
+	}
+
+	return wav
 }
