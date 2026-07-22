@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
@@ -84,10 +85,13 @@ func TestSMSForm_Fields(t *testing.T) {
 	}
 }
 
-// TestPostSMSWebhook_WrongPath403s pins observable behavior 1's warning: the
-// signature is computed over the exact POST URL, so posting to the wrong path
-// (e.g. "/sms" instead of the registered "/sms/inbound") 403s.
-func TestPostSMSWebhook_WrongPath403s(t *testing.T) {
+// TestPostSMSWebhook_SignatureURLMismatch403s pins observable behavior 1's
+// warning directly: the signature is computed over the exact POST URL, so a
+// signature computed for one URL and presented on a POST to a different URL
+// must 403 — isolated from routing (both URLs below are otherwise valid,
+// registered paths; only the signed-vs-actual URL differs), so this cannot
+// pass merely because an unmatched route 404s.
+func TestPostSMSWebhook_SignatureURLMismatch403s(t *testing.T) {
 	const authToken = "test-auth-token"
 
 	srv := &twilio.Server{AuthToken: authToken, StreamScheme: "ws"}
@@ -96,13 +100,26 @@ func TestPostSMSWebhook_WrongPath403s(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	// postSMSWebhook signs over the URL it's given; giving it the wrong path
-	// means the signature won't match what the server reconstructs from
-	// r.URL.RequestURI(), so the server 403s and postSMSWebhook must error.
-	wrongURL := ts.URL + "/sms"
-	err := postSMSWebhook(context.Background(), wrongURL, authToken, "SMtest0002", "+15551234567", "+15105559999", "hello there")
-	if err == nil {
-		t.Fatal("expected an error POSTing to the wrong path, got nil")
+	realURL := ts.URL + "/sms/inbound"
+	wrongURLForSigning := ts.URL + "/sms"
+	form := smsForm("SMtest0002", "+15551234567", "+15105559999", "hello there")
+	sig := twilio.ComputeSignature(authToken, wrongURLForSigning, form)
+
+	req, err := http.NewRequest(http.MethodPost, realURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", sig)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("want 403 (signature bound to a different URL than the one posted to), got %d", resp.StatusCode)
 	}
 }
 

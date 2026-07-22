@@ -41,9 +41,11 @@ func localConfigPath(basePath string) string {
 	return basePath + ".local.toml"
 }
 
-// resolveWebhookURL loads the merged aa-server-status config at basePath and
-// derives the the server server's webhook URL from its host and webhook port.
-func resolveWebhookURL(basePath string) (string, error) {
+// resolveTarget loads the merged aa-server-status config at basePath and
+// derives the server's URL for pathSuffix (e.g. "/webhook" or "/sms/inbound")
+// from its host and webhook port. Shared by webhookTarget and
+// smsWebhookTarget, which differ only in which route they need.
+func resolveTarget(basePath, pathSuffix string) (string, error) {
 	cfg, err := config.Load(basePath, localConfigPath(basePath))
 	if err != nil {
 		return "", err
@@ -56,47 +58,29 @@ func resolveWebhookURL(basePath string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("%q server in %s declares no webhook port (needs two listens)", serverName, basePath)
 	}
-	return fmt.Sprintf("http://%s:%d/webhook", srv.Host, port), nil
+	return fmt.Sprintf("http://%s:%d%s", srv.Host, port, pathSuffix), nil
 }
 
-// webhookTarget resolves the webhook URL to dial: an explicit flag value
-// always wins and skips config resolution entirely (even if config is
+// webhookTarget resolves the voice webhook URL to dial: an explicit flag
+// value always wins and skips config resolution entirely (even if config is
 // missing or broken); otherwise it's derived from the aa-server-status config
 // at basePath.
 func webhookTarget(explicit, basePath string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
-	return resolveWebhookURL(basePath)
+	return resolveTarget(basePath, "/webhook")
 }
 
-// resolveSMSWebhookURL loads the merged aa-server-status config at basePath
-// and derives the the server server's inbound-SMS webhook URL (the
-// /sms/inbound route, not /webhook) from its host and webhook port.
-func resolveSMSWebhookURL(basePath string) (string, error) {
-	cfg, err := config.Load(basePath, localConfigPath(basePath))
-	if err != nil {
-		return "", err
-	}
-	srv, ok := cfg.ServerByName(serverName)
-	if !ok {
-		return "", fmt.Errorf("no %q server declared in %s", serverName, basePath)
-	}
-	port, ok := srv.WebhookPort()
-	if !ok {
-		return "", fmt.Errorf("%q server in %s declares no webhook port (needs two listens)", serverName, basePath)
-	}
-	return fmt.Sprintf("http://%s:%d/sms/inbound", srv.Host, port), nil
-}
-
-// smsWebhookTarget resolves the SMS webhook URL to post to: an explicit flag
-// value always wins, skipping config resolution entirely; otherwise it's
-// derived from the aa-server-status config at basePath. Mirrors webhookTarget.
+// smsWebhookTarget resolves the inbound-SMS webhook URL to post to (the
+// /sms/inbound route, not /webhook): an explicit flag value always wins,
+// skipping config resolution entirely; otherwise it's derived from the
+// aa-server-status config at basePath. Mirrors webhookTarget.
 func smsWebhookTarget(explicit, basePath string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
-	return resolveSMSWebhookURL(basePath)
+	return resolveTarget(basePath, "/sms/inbound")
 }
 
 // runSMSMode implements the `twilio-cli sms <FROM-e164> <BODY>` subcommand:
