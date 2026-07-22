@@ -15,16 +15,19 @@ import (
 )
 
 // smsForm builds the standard Twilio inbound-SMS webhook field set for
-// messageSid, from, to, and body. Mirrors webhookForm's ceremony for the
-// voice webhook.
+// messageSid, from, to, and body, including the SmsMessageSid/SmsSid aliases
+// real Twilio inbound-SMS webhooks send alongside MessageSid (mirroring
+// webhookForm's Caller/Called aliases for the voice webhook).
 func smsForm(messageSid, from, to, body string) url.Values {
 	return url.Values{
-		"MessageSid": {messageSid},
-		"AccountSid": {defaultAccountSid},
-		"From":       {from},
-		"To":         {to},
-		"Body":       {body},
-		"ApiVersion": {defaultAPIVersion},
+		"MessageSid":    {messageSid},
+		"SmsMessageSid": {messageSid},
+		"SmsSid":        {messageSid},
+		"AccountSid":    {defaultAccountSid},
+		"From":          {from},
+		"To":            {to},
+		"Body":          {body},
+		"ApiVersion":    {defaultAPIVersion},
 	}
 }
 
