@@ -58,17 +58,29 @@ func decodeWAVToPCM16(wav []byte) ([]int16, int, error) {
 	if bitsPerSample != 16 {
 		return nil, 0, fmt.Errorf("only 16-bit PCM supported")
 	}
+	if numChannels < 1 {
+		return nil, 0, fmt.Errorf("invalid channel count")
+	}
 
-	dataOffset := fmtOffset + 8 + int(binary.LittleEndian.Uint32(wav[fmtOffset+4:fmtOffset+8]))
-	if dataOffset+8 > len(wav) {
+	// Walk chunks from fmtOffset to find "data" — some WAV writers insert
+	// chunks (e.g. "fact", "LIST") between "fmt " and "data", so the data
+	// chunk cannot be assumed to immediately follow fmt.
+	dataOffset := -1
+	dataSize := 0
+	for i := fmtOffset; i+8 <= len(wav); {
+		id := string(wav[i : i+4])
+		sz := int(binary.LittleEndian.Uint32(wav[i+4 : i+8]))
+		body := i + 8
+		if id == "data" {
+			dataOffset, dataSize = i, sz
+			break
+		}
+		i = body + sz + (sz & 1)
+	}
+	if dataOffset < 0 {
 		return nil, 0, fmt.Errorf("data chunk not found")
 	}
 
-	if string(wav[dataOffset:dataOffset+4]) != "data" {
-		return nil, 0, fmt.Errorf("data chunk error")
-	}
-
-	dataSize := int(binary.LittleEndian.Uint32(wav[dataOffset+4 : dataOffset+8]))
 	pcmStart := dataOffset + 8
 	pcmEnd := pcmStart + dataSize
 
@@ -77,12 +89,18 @@ func decodeWAVToPCM16(wav []byte) ([]int16, int, error) {
 	}
 
 	pcmData := wav[pcmStart:pcmEnd]
-	numSamples := dataSize / (bitsPerSample / 8) / numChannels
-	pcm := make([]int16, numSamples)
+	bytesPerSample := bitsPerSample / 8
+	numFrames := dataSize / bytesPerSample / numChannels
+	pcm := make([]int16, numFrames)
 
-	for i := 0; i < numSamples; i++ {
-		sampleOffset := i * (bitsPerSample / 8) * numChannels
-		pcm[i] = int16(binary.LittleEndian.Uint16(pcmData[sampleOffset : sampleOffset+2]))
+	for i := 0; i < numFrames; i++ {
+		frameOffset := i * bytesPerSample * numChannels
+		var sum int32
+		for c := 0; c < numChannels; c++ {
+			sampleOffset := frameOffset + c*bytesPerSample
+			sum += int32(int16(binary.LittleEndian.Uint16(pcmData[sampleOffset : sampleOffset+2])))
+		}
+		pcm[i] = int16(sum / int32(numChannels))
 	}
 
 	return pcm, sampleRate, nil
