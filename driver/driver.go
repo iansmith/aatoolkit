@@ -328,33 +328,48 @@ func (h *Host) SpeakSync(text []byte, voice string, speed float64) error {
 	return nil
 }
 
-func (h *Host) synthesizeAndPlay(plain, voice string, speed float64) error {
+// SynthesizeWAV fetches synthesized WAV bytes from the TTS server without playing them.
+func (h *Host) SynthesizeWAV(ctx context.Context, text []byte, voice string, speed float64) ([]byte, error) {
 	body, err := json.Marshal(map[string]any{
-		"text":            plain,
+		"text":            string(text),
 		"voice":           voice,
 		"lang":            h.tts.Lang,
 		"speed":           speed,
 		"response_format": h.tts.Format,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, "POST", h.tts.URL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("calling TTS %s: %w", h.tts.URL, err)
+		return nil, fmt.Errorf("calling TTS %s: %w", h.tts.URL, err)
 	}
 	defer resp.Body.Close()
+
 	audio, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("TTS %s: status %d: %.200s", h.tts.URL, resp.StatusCode, audio)
+		return nil, fmt.Errorf("TTS %s: status %d: %.200s", h.tts.URL, resp.StatusCode, audio)
 	}
+
+	return audio, nil
+}
+
+func (h *Host) synthesizeAndPlay(plain, voice string, speed float64) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	audio, err := h.SynthesizeWAV(ctx, []byte(plain), voice, speed)
+	if err != nil {
+		return err
+	}
+
 	return playAudio(audio, h.tts.Format)
 }
 
