@@ -19,8 +19,10 @@ import (
 var e164Pattern = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
 
 // validateE164 returns an error if s is not a well-formed E.164 number.
-// AATK-16 RED: not yet implemented — accepts anything.
 func validateE164(s string) error {
+	if !e164Pattern.MatchString(s) {
+		return fmt.Errorf("invalid E.164 number %q (want +<country><subscriber>, e.g. +15105551234)", s)
+	}
 	return nil
 }
 
