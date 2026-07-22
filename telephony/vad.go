@@ -57,11 +57,13 @@ func (l logTurnSink) OnTurnComplete(text string, trigger TurnTrigger) {
 
 // vadDetector runs voice-activity inference on one fixed-size window of PCM
 // samples, returning the probability in [0,1] that the window contains speech.
-// The concrete Silero-backed detector (gonnx) is added under SOP-67; the VAD
-// goroutine and its state machine are written against this interface so they
-// are testable with a fake detector before the model runtime exists.
+// The concrete Silero-backed detector runs out-of-process over HTTP
+// (silero_http.go); the VAD goroutine and its state machine are written against
+// this interface so they stay testable with a fake detector. ctx bounds a
+// single inference — the HTTP detector derives a per-inference deadline from it
+// (SOP-147); a fake may ignore it.
 type vadDetector interface {
-	Detect(window []float32) (float32, error)
+	Detect(ctx context.Context, window []float32) (float32, error)
 	Reset()
 }
 
@@ -500,12 +502,14 @@ func runVAD(ctx context.Context, in <-chan []byte, out chan<- VADEvent, det vadD
 				return
 			}
 			for _, win := range w.push(decodeMuLaw(frame)) {
-				prob, err := det.Detect(win)
+				prob, err := det.Detect(ctx, win)
 				if err != nil {
-					for _, f := range onNoEvent {
-						f()
-					}
-					continue
+					// Fail loud, don't silently drop (SOP-147): a detector error
+					// means VAD can no longer classify audio, so end the VAD
+					// goroutine with an attributable log rather than continuing to
+					// feed the state machine no-event windows forever.
+					log.Printf("telephony: VAD detector error, ending VAD: %v", err)
+					return
 				}
 				ev, emit := m.step(prob)
 				if !emit {

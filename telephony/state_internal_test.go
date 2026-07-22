@@ -88,8 +88,8 @@ func (s *turnSpy) OnTurnComplete(text string, _ TurnTrigger) { s.turns = append(
 // noopDetector satisfies vadDetector for sessions that never process audio.
 type noopDetector struct{}
 
-func (noopDetector) Detect([]float32) (float32, error) { return 0, nil }
-func (noopDetector) Reset()                            {}
+func (noopDetector) Detect(context.Context, []float32) (float32, error) { return 0, nil }
+func (noopDetector) Reset()                                             {}
 
 // newTestSession builds a minimal Session suitable for direct handler calls.
 // It is NOT Start()ed — no goroutines run.

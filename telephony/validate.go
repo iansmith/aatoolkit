@@ -1,6 +1,7 @@
 package telephony
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -8,18 +9,18 @@ import (
 )
 
 // ValidateVAD is the engine's startup self-test for the VAD pipeline: it
-// constructs the production Silero detector and runs one real inference,
-// failing hard (a non-nil error) if the model can't load or produces an
-// implausible result. Main calls this once before accepting calls and panics
-// on a non-nil error — a broken VAD model should never reach production
-// silently as a detector that always returns garbage.
-func ValidateVAD() error {
-	return validateVAD(NewSileroDetector)
+// constructs a detector from the given factory and runs one real inference,
+// failing hard (a non-nil error) if the detector can't be built or produces an
+// implausible result. A consumer calls this once before accepting calls,
+// passing the same factory it wires via WithVADFactory (e.g.
+// NewVADClient(url).Detector()) — since SOP-147 the detector is the out-of-
+// process sidecar, so the self-test also confirms the sidecar answers.
+func ValidateVAD(factory func() (VADDetector, error)) error {
+	return validateVAD(factory)
 }
 
-// validateVAD is ValidateVAD with the detector factory injected, so tests can
-// exercise the failure path (e.g. a corrupt model) without touching the real
-// embedded asset.
+// validateVAD is ValidateVAD's implementation, taking the unexported detector
+// type so tests can inject a fake factory to exercise the failure path.
 func validateVAD(factory func() (vadDetector, error)) error {
 	det, err := factory()
 	if err != nil {
@@ -27,11 +28,11 @@ func validateVAD(factory func() (vadDetector, error)) error {
 	}
 
 	// A zero-valued window is a deterministic, dependency-free self-test
-	// input — it doesn't need a real audio fixture, only a real model run.
+	// input — it doesn't need a real audio fixture, only a real inference.
 	window := make([]float32, sileroWindowSize)
 
 	start := time.Now()
-	prob, err := det.Detect(window)
+	prob, err := det.Detect(context.Background(), window)
 	elapsed := time.Since(start)
 	if err != nil {
 		return fmt.Errorf("vad self-test: inference: %w", err)
