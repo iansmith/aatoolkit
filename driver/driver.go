@@ -42,13 +42,14 @@ type Tier struct {
 // Host is the driver's concrete host.Host: it turns a (messages, tier) pair
 // into an HTTP call against the tier's llama-server.
 type Host struct {
-	tiers   map[string]Tier
-	client  *http.Client
-	prompt  func() string // agent-supplied system-prompt provider (see Config.Prompt)
-	tts     TTSConfig
-	speech  *speechQueue // serial TTS worker so an ack and the answer don't overlap
-	history []message
-	histMu  sync.Mutex
+	tiers       map[string]Tier
+	client      *http.Client
+	prompt      func() string // agent-supplied system-prompt provider (see Config.Prompt)
+	tts         TTSConfig
+	speech      *speechQueue // serial TTS worker so an ack and the answer don't overlap
+	history     []message
+	userContext func() string // optional user context block
+	histMu      sync.Mutex
 }
 
 // Config is what an agent supplies to stand up a driver: its LLM tiers, TTS
@@ -57,18 +58,20 @@ type Host struct {
 // own Config. Prompt is called every turn; use FilePrompt for a hot-reloading file
 // or supply any func() string (embed, remote, constant).
 type Config struct {
-	Tiers  map[string]Tier
-	TTS    TTSConfig
-	Prompt func() string
+	Tiers       map[string]Tier
+	TTS         TTSConfig
+	Prompt      func() string
+	UserContext func() string // optional user context block injected after system prompt
 }
 
 // New builds a driver Host from cfg, wiring the serial speech queue internally.
 func New(cfg Config) *Host {
 	h := &Host{
-		tiers:  cfg.Tiers,
-		client: &http.Client{},
-		prompt: cfg.Prompt,
-		tts:    cfg.TTS,
+		tiers:       cfg.Tiers,
+		client:      &http.Client{},
+		prompt:      cfg.Prompt,
+		tts:         cfg.TTS,
+		userContext: cfg.UserContext,
 	}
 	h.speech = newSpeechQueue(func(text []byte, voice string, speed float64) {
 		if err := h.synthesizeAndPlay(string(text), voice, speed); err != nil {
@@ -276,12 +279,21 @@ func (h *Host) LastAnswer() []byte {
 	return nil
 }
 
-// Context assembles [current system prompt] + history into a JSON messages
-// array ready for Send.
+// Context assembles [current system prompt] + optional user context + history
+// into a JSON messages array ready for Send.
 func (h *Host) Context() []byte {
 	h.histMu.Lock()
-	msgs := make([]message, 0, len(h.history)+1)
+	capacity := len(h.history) + 1
+	if h.userContext != nil && h.userContext() != "" {
+		capacity++
+	}
+	msgs := make([]message, 0, capacity)
 	msgs = append(msgs, message{Role: "system", Content: h.prompt()})
+	if h.userContext != nil {
+		if ctx := h.userContext(); ctx != "" {
+			msgs = append(msgs, message{Role: "system", Content: ctx})
+		}
+	}
 	msgs = append(msgs, h.history...)
 	h.histMu.Unlock()
 	b, _ := json.Marshal(msgs)
