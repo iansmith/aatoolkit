@@ -23,6 +23,15 @@ type replyRouterContextKey struct{}
 
 var replyRouterKey replyRouterContextKey
 
+// ContextWithReplyRouter returns a copy of ctx carrying router, so that a
+// later handleStream call on that ctx registers its session's ReplySink with
+// it. Server.ReplyRouter is the production entry point (AATK-22); this is
+// exported for callers driving handleStream/HandleStreamWithOpts directly
+// (e.g. tests, or a consumer not going through Server).
+func ContextWithReplyRouter(ctx context.Context, router *telephony.ReplyRouter) context.Context {
+	return context.WithValue(ctx, replyRouterKey, router)
+}
+
 const stopDrainTimeout = 500 * time.Millisecond
 
 // DefaultHandleStream is the default session handler. It drives a live
