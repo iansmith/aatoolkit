@@ -11,12 +11,16 @@ const (
 )
 
 // Message is a typed turn at the policy seam: the compiled harness produces
-// one per user utterance; the interpreted policy reads it and adapts
-// response style to the transport.
+// one per user utterance. The interpreted policy reads only Text to generate
+// a response; the policy does not condition response style on transport or
+// session identity. Transport, SessionID, and From are reply-routing metadata
+// only — they tell the harness where and how to deliver the response, but do
+// not influence the response content.
 type Message struct {
 	Text      string
 	Transport TransportType
 	SessionID string
+	From      string
 }
 
 // VADKind is the kind of voice-activity event emitted by the VAD goroutine.
