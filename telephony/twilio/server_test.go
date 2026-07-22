@@ -244,6 +244,54 @@ func TestServeHTTP_BadSignatureRejectedBeforeFromLogic(t *testing.T) {
 	}
 }
 
+// --- AATK-19: Authorize gate on the voice webhook ---
+
+// An unknown/unauthorized caller must be rejected with HTTP 200 and the exact
+// rejection TwiML (never a stream connect) — Twilio treats a non-200 as a
+// retriable delivery failure, so rejection must still be 200.
+func TestServeHTTP_UnknownCallerRejected(t *testing.T) {
+	s := &twilio.Server{
+		AuthToken:       "t",
+		Authorize:       func(string) bool { return false },
+		VoiceRejectText: "I'm sorry, this service is not available",
+	}
+	form := url.Values{"From": {"+15105551234"}, "CallSid": {"CA123"}}
+	req := signedWebhookRequest(t, "t", "https", "example.com", form)
+	w := httptest.NewRecorder()
+
+	s.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	want := `<Response><Say>I&#39;m sorry, this service is not available</Say><Hangup/></Response>`
+	if got := w.Body.String(); got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+// Authorize == nil must reproduce today's behavior exactly (back-compat: existing
+// callers of Server that never set Authorize keep working unchanged).
+func TestServeHTTP_NilAuthorizeAllows(t *testing.T) {
+	s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss"} // Authorize left nil
+	form := url.Values{"From": {"+15105551234"}, "CallSid": {"CA123"}}
+	req := signedWebhookRequest(t, "authtoken", "https", "example.com", form)
+	w := httptest.NewRecorder()
+
+	s.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	var tw twiMLStream
+	if err := xml.Unmarshal(w.Body.Bytes(), &tw); err != nil {
+		t.Fatalf("unmarshal TwiML body %q: %v", w.Body.String(), err)
+	}
+	if want := "wss://example.com/streams"; tw.Connect.Stream.URL != want {
+		t.Fatalf("Stream url = %q, want %q (nil Authorize must not change existing behavior)", tw.Connect.Stream.URL, want)
+	}
+}
+
 // --- log output ---
 
 func TestServeHTTP_LogsFromAndCallSid(t *testing.T) {
