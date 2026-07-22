@@ -125,7 +125,16 @@ func (p *dropOldestPlane) Send(ctx context.Context, f Frame) error {
 func (p *dropOldestPlane) Recv(ctx context.Context) (Frame, error) {
 	var zero Frame
 	select {
-	case f := <-p.ch:
+	case f, ok := <-p.ch:
+		// A closed channel still delivers every buffered frame (ok == true)
+		// before it reports closed (ok == false). So this drains in order and
+		// only reports errPlaneClosed once the channel is closed AND empty —
+		// giving both teardown barriers off one edge, with no context-vs-buffer
+		// race. The comma-ok is load-bearing: keying the sentinel on "a receive
+		// returned" instead would swallow a legitimate zero Frame (AATK-15).
+		if !ok {
+			return zero, errPlaneClosed
+		}
 		return f, nil
 	case <-ctx.Done():
 		return zero, fmt.Errorf("recv cancelled: %w", ctx.Err())
