@@ -52,6 +52,12 @@ type Server struct {
 	// default — a directly-constructed Server{} is never accidentally
 	// insecure).
 	StreamScheme string
+
+	// AuthorizedCallers is a list of E.164-formatted phone numbers allowed to
+	// make voice calls and send SMS. If non-empty, calls and SMS from numbers
+	// not in this list are rejected with 403. If empty, all calls and SMS
+	// are accepted (authorized-caller gate is disabled).
+	AuthorizedCallers []string
 }
 
 // streamScheme returns the interpreted advertise scheme ("ws" or "wss") per
@@ -110,6 +116,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(s.AuthorizedCallers) > 0 {
+		authorized := false
+		for _, allowed := range s.AuthorizedCallers {
+			if from == allowed {
+				authorized = true
+				break
+			}
+		}
+		if !authorized {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+	}
+
 	log.Printf("twilio: ServeHTTP: From=%s CallSid=%s", from, callSid)
 
 	streamURL := fmt.Sprintf("%s://%s/streams", s.streamScheme(), r.Host)
@@ -126,9 +146,25 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	from := r.PostForm.Get("From")
+
+	if len(s.AuthorizedCallers) > 0 {
+		authorized := false
+		for _, allowed := range s.AuthorizedCallers {
+			if from == allowed {
+				authorized = true
+				break
+			}
+		}
+		if !authorized {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+	}
+
 	msg := InboundSMS{
 		MessageSID: r.PostForm.Get("MessageSid"),
-		From:       r.PostForm.Get("From"),
+		From:       from,
 		To:         r.PostForm.Get("To"),
 		Body:       r.PostForm.Get("Body"),
 	}

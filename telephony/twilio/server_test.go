@@ -270,3 +270,89 @@ func TestServeHTTP_LogsFromAndCallSid(t *testing.T) {
 		t.Fatalf("log output %q does not contain CallSid value", logged)
 	}
 }
+
+// --- behavior: authorized-caller webhook gate (AATK-19) ---
+
+// Test that authorized callers can make voice calls through the webhook.
+func TestServeHTTP_AuthorizedCallerSucceeds(t *testing.T) {
+	authorizedCallers := []string{"+15105551234", "+12025559876"}
+	s := &twilio.Server{
+		AuthToken:         "authtoken",
+		StreamScheme:      "wss",
+		AuthorizedCallers: authorizedCallers,
+	}
+	form := url.Values{"From": {"+15105551234"}, "CallSid": {"CA123"}}
+	req := signedWebhookRequest(t, "authtoken", "https", "example.com", form)
+	w := httptest.NewRecorder()
+
+	s.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorized caller: status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+// Test that unauthorized callers are rejected with 403.
+func TestServeHTTP_UnauthorizedCallerRejected(t *testing.T) {
+	authorizedCallers := []string{"+15105551234", "+12025559876"}
+	s := &twilio.Server{
+		AuthToken:         "authtoken",
+		StreamScheme:      "wss",
+		AuthorizedCallers: authorizedCallers,
+	}
+	form := url.Values{"From": {"+15555555555"}, "CallSid": {"CA123"}}
+	req := signedWebhookRequest(t, "authtoken", "https", "example.com", form)
+	w := httptest.NewRecorder()
+
+	s.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized caller: status = %d, want 403", w.Code)
+	}
+}
+
+// Test that SMS from authorized callers succeeds.
+func TestServeSMS_AuthorizedCallerSucceeds(t *testing.T) {
+	authorizedCallers := []string{"+15105551234", "+12025559876"}
+	s := &twilio.Server{
+		AuthToken:         "authtoken",
+		AuthorizedCallers: authorizedCallers,
+	}
+	form := url.Values{
+		"MessageSid": {"SM123"},
+		"From":       {"+15105551234"},
+		"To":         {"+15105559999"},
+		"Body":       {"hello"},
+	}
+	req := signedTwilioRequest(t, "authtoken", "https", "example.com", "/sms", form)
+	w := httptest.NewRecorder()
+
+	s.ServeSMS(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorized SMS: status = %d, want 200", w.Code)
+	}
+}
+
+// Test that SMS from unauthorized callers is rejected with 403.
+func TestServeSMS_UnauthorizedCallerRejected(t *testing.T) {
+	authorizedCallers := []string{"+15105551234", "+12025559876"}
+	s := &twilio.Server{
+		AuthToken:         "authtoken",
+		AuthorizedCallers: authorizedCallers,
+	}
+	form := url.Values{
+		"MessageSid": {"SM123"},
+		"From":       {"+15555555555"},
+		"To":         {"+15105559999"},
+		"Body":       {"hello"},
+	}
+	req := signedTwilioRequest(t, "authtoken", "https", "example.com", "/sms", form)
+	w := httptest.NewRecorder()
+
+	s.ServeSMS(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized SMS: status = %d, want 403", w.Code)
+	}
+}
