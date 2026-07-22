@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sync"
 
 	"github.com/coder/websocket"
 )
@@ -52,6 +53,60 @@ type Server struct {
 	// default — a directly-constructed Server{} is never accidentally
 	// insecure).
 	StreamScheme string
+
+	// Authorize decides whether a caller/sender is allowed through the voice
+	// and SMS webhooks. A nil Authorize means authorize-all (back-compat: a
+	// Server that never sets it behaves exactly as before this field existed).
+	// The engine ships only this injected predicate — it never resolves or
+	// holds any identity/roster itself.
+	Authorize func(from string) bool
+
+	// VoiceRejectText and SMSRejectText are the caller-facing rejection
+	// wording for an unauthorized voice call / SMS, respectively. Injected by
+	// the consumer — the engine never hard-codes rejection copy.
+	VoiceRejectText string
+	SMSRejectText   string
+
+	fromMu    sync.Mutex
+	fromBySID map[string]string // CallSid -> From, bounded by maxPendingFrom
+	fromOrder []string          // insertion order, for evict-oldest
+}
+
+// maxPendingFrom bounds the CallSid->From map recorded by ServeHTTP for
+// ServeStreams to thread onto the start Frame. Mirrors the maxAbandoned
+// evict-oldest discipline in telephony/stt.go: a call whose stream never
+// opens (or is rejected at the webhook) would otherwise leave a permanent
+// entry, growing unboundedly over a long-running server's lifetime.
+const maxPendingFrom = 1024
+
+// recordFrom remembers from under callSid for a later ServeStreams lookup.
+// A blank callSid is never recorded — it cannot uniquely key a later start
+// frame, so keeping it would just waste an eviction slot.
+func (s *Server) recordFrom(callSid, from string) {
+	if callSid == "" {
+		return
+	}
+	s.fromMu.Lock()
+	defer s.fromMu.Unlock()
+	if s.fromBySID == nil {
+		s.fromBySID = make(map[string]string)
+	}
+	if _, exists := s.fromBySID[callSid]; !exists {
+		s.fromOrder = append(s.fromOrder, callSid)
+		if len(s.fromOrder) > maxPendingFrom {
+			delete(s.fromBySID, s.fromOrder[0])
+			s.fromOrder = s.fromOrder[1:]
+		}
+	}
+	s.fromBySID[callSid] = from
+}
+
+// lookupFrom returns the From recorded for callSid, or "" if none was ever
+// recorded (unknown/missing case).
+func (s *Server) lookupFrom(callSid string) string {
+	s.fromMu.Lock()
+	defer s.fromMu.Unlock()
+	return s.fromBySID[callSid]
 }
 
 // streamScheme returns the interpreted advertise scheme ("ws" or "wss") per
@@ -112,6 +167,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("twilio: ServeHTTP: From=%s CallSid=%s", from, callSid)
 
+	s.recordFrom(callSid, from)
+
+	if s.Authorize != nil && !s.Authorize(from) {
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, html.EscapeString(s.VoiceRejectText))
+		return
+	}
+
 	streamURL := fmt.Sprintf("%s://%s/streams", s.streamScheme(), r.Host)
 	w.Header().Set("Content-Type", "text/xml")
 	fmt.Fprintf(w, `<Response><Connect><Stream url="%s"/></Connect></Response>`, html.EscapeString(streamURL))
@@ -126,9 +189,16 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	from := r.PostForm.Get("From")
+	if s.Authorize != nil && !s.Authorize(from) {
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprintf(w, `<Response><Message>%s</Message></Response>`, html.EscapeString(s.SMSRejectText))
+		return
+	}
+
 	msg := InboundSMS{
 		MessageSID: r.PostForm.Get("MessageSid"),
-		From:       r.PostForm.Get("From"),
+		From:       from,
 		To:         r.PostForm.Get("To"),
 		Body:       r.PostForm.Get("Body"),
 	}
@@ -186,6 +256,8 @@ func (s *Server) ServeStreams(w http.ResponseWriter, r *http.Request) {
 		conn.Close(websocket.StatusPolicyViolation, "expected start frame")
 		return
 	}
+
+	f.From = s.lookupFrom(f.CallSID)
 
 	if s.HandleStream != nil {
 		s.HandleStream(ctx, conn, f)
