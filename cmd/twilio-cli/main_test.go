@@ -28,6 +28,31 @@ func writeConfig(t *testing.T, contents string) string {
 	return basePath
 }
 
+// TestE164Validation pins AATK-16 observable behavior 1: the CLI validates the
+// caller's FROM number locally (^\+[1-9]\d{1,14}$) before any network call.
+func TestE164Validation(t *testing.T) {
+	cases := []struct {
+		input   string
+		wantErr bool
+		desc    string
+	}{
+		{"+15555550100", false, "valid +1 US number (11 digits)"},
+		{"5103844134", true, "invalid: missing + prefix"},
+		{"+0123", true, "invalid: leading 0 after +"},
+		{"+1", true, "invalid: too short (only 2 chars)"},
+		{"+123456789012345", false, "valid: 15 digits total"},
+		{"+1234567890123456", true, "invalid: 16 digits (too long)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			err := validateE164(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateE164(%q) = %v, wantErr %v", tc.input, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestWebhookTarget_ExplicitFlagOverridesConfig covers observable behavior 2:
 // an explicit -webhook flag wins outright, even when config resolution would
 // otherwise succeed with a different value.

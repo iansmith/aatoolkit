@@ -12,28 +12,35 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
-// defaultFrom is the caller-id twilio-cli presents on every webhook POST.
-// Placeholder for the eventual real-Twilio swap (PRD D9) — no -from flag.
-const defaultFrom = "+15105551234"
-
 const (
+	// defaultTo is the -to flag's default dialed number.
 	defaultTo         = "+15105559999"
 	defaultAccountSid = "ACtwiliocli0000000000000000000000"
 	defaultAPIVersion = "2010-04-01"
 	defaultCallStatus = "ringing"
 	defaultDirection  = "inbound"
+	// defaultCallerName is the CallerName alias placeholder. On a real call
+	// this is caller-id-lookup gated and often absent; a fixed placeholder is
+	// enough for a faithful stand-in.
+	defaultCallerName = "Anonymous"
 )
 
-// webhookForm builds the standard Twilio voice-webhook field set for callSid.
-func webhookForm(callSid string) url.Values {
+// webhookForm builds the standard Twilio voice-webhook field set for callSid,
+// from, and to. Twilio sends the caller-id aliases Caller (= From) and Called
+// (= To) alongside From/To, plus CallerName; twilio-cli sends them too so the
+// signed form matches what the real webhook carries.
+func webhookForm(callSid, from, to string) url.Values {
 	return url.Values{
 		"CallSid":    {callSid},
 		"AccountSid": {defaultAccountSid},
-		"From":       {defaultFrom},
-		"To":         {defaultTo},
+		"From":       {from},
+		"To":         {to},
 		"CallStatus": {defaultCallStatus},
 		"Direction":  {defaultDirection},
 		"ApiVersion": {defaultAPIVersion},
+		"Caller":     {from},
+		"Called":     {to},
+		"CallerName": {defaultCallerName},
 	}
 }
 
@@ -41,8 +48,8 @@ func webhookForm(callSid string) url.Values {
 // standard voice-webhook field set (signed over webhookURL, the exact URL
 // posted to) and returns the Media Streams URL extracted from the TwiML
 // response.
-func fetchStreamURL(ctx context.Context, webhookURL, authToken, callSid string) (string, error) {
-	form := webhookForm(callSid)
+func fetchStreamURL(ctx context.Context, webhookURL, authToken, callSid, from, to string) (string, error) {
+	form := webhookForm(callSid, from, to)
 	sig := twilio.ComputeSignature(authToken, webhookURL, form)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, strings.NewReader(form.Encode()))
