@@ -38,7 +38,9 @@ func webhookForm(callSid, from, to string) url.Values {
 		"CallStatus": {defaultCallStatus},
 		"Direction":  {defaultDirection},
 		"ApiVersion": {defaultAPIVersion},
-		// AATK-16 RED: caller-id aliases (Caller/Called/CallerName) not yet added.
+		"Caller":     {from},
+		"Called":     {to},
+		"CallerName": {defaultCallerName},
 	}
 }
 

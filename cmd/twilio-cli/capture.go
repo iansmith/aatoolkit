@@ -30,9 +30,8 @@ func newMediaFrameEncoder(streamSID string, seqNum *int) *mediaFrameEncoder {
 
 func (e *mediaFrameEncoder) encode(payload []byte) ([]byte, error) {
 	e.chunk++
-	// AATK-16 RED: media still emits the placeholder 0; the shared seqNum is not
-	// yet advanced or wired into the frame.
-	return twilio.EncodeMediaWithMetadata(e.streamSID, payload, e.chunk, 0)
+	*e.seqNum++
+	return twilio.EncodeMediaWithMetadata(e.streamSID, payload, e.chunk, *e.seqNum)
 }
 
 // drainFrames reads fixed-size frames from r and calls send for each complete
