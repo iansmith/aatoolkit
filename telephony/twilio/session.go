@@ -19,6 +19,10 @@ import (
 // immediately races Close()'s ctx cancellation against that async delivery,
 // and the transition table's stop handling (state.go's handleControlEvent)
 // can be skipped entirely on the real Twilio path.
+type replyRouterContextKey struct{}
+
+var replyRouterKey replyRouterContextKey
+
 const stopDrainTimeout = 500 * time.Millisecond
 
 // DefaultHandleStream is the default session handler. It drives a live
@@ -78,10 +82,11 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	// the payloads delivered to the session").
 	tap := NewTap(tapDir, start.StreamSID, start.CallSID, tapLabelFromEnv(), startedAt)
 
+	dataOut := NewDataPlaneOutput(conn, start.StreamSID, tap)
 	opts := []telephony.SessionOption{
 		telephony.WithTwilioDataInput(dataIn),
 		telephony.WithTwilioControlInput(controlIn),
-		telephony.WithTwilioDataOutput(NewDataPlaneOutput(conn, start.StreamSID, tap)),
+		telephony.WithTwilioDataOutput(dataOut),
 		telephony.WithTwilioControlOutput(NewControlPlaneOutput(conn, start.StreamSID)),
 		telephony.WithCloseFunc(func() {
 			// CloseNow, not Close: Close performs a close handshake and
@@ -107,6 +112,13 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	if err := sess.Start(); err != nil {
 		log.Printf("twilio: handleStream: session start: %v", err)
 		return err
+	}
+
+	// Register with ReplyRouter if one is available in the context.
+	replyRouter, ok := ctx.Value(replyRouterKey).(*telephony.ReplyRouter)
+	if ok && replyRouter != nil {
+		replyRouter.Register(start.CallSID, dataOut)
+		defer replyRouter.Deregister(start.CallSID)
 	}
 
 	// The data and control pumps terminate differently at teardown.
