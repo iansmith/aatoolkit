@@ -23,8 +23,9 @@ func TestWebhookCeremony_AcceptedByRealServer(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
+	const from, to = "+15551234567", "+15559876543"
 	webhookURL := ts.URL + "/webhook"
-	streamURL, err := fetchStreamURL(context.Background(), webhookURL, authToken, "CAtest0001")
+	streamURL, err := fetchStreamURL(context.Background(), webhookURL, authToken, "CAtest0001", from, to)
 	if err != nil {
 		t.Fatalf("fetchStreamURL: %v", err)
 	}
@@ -41,8 +42,33 @@ func TestWebhookCeremony_AcceptedByRealServer(t *testing.T) {
 	if got := gotForm.Get("CallSid"); got != "CAtest0001" {
 		t.Errorf("CallSid = %q, want CAtest0001", got)
 	}
-	if got := gotForm.Get("From"); got != defaultFrom {
-		t.Errorf("From = %q, want %q", got, defaultFrom)
+	if got := gotForm.Get("From"); got != from {
+		t.Errorf("From = %q, want %q", got, from)
+	}
+}
+
+// TestWebhookForm_Aliases pins AATK-16 observable behavior 3: the webhook form
+// carries Twilio's caller-id aliases Caller (= From) and Called (= To) plus a
+// non-empty CallerName, in addition to the From/To it already sent.
+func TestWebhookForm_Aliases(t *testing.T) {
+	const from, to = "+15551234567", "+15559876543"
+	form := webhookForm("CAaliases0001", from, to)
+
+	if got := form.Get("Caller"); got != from {
+		t.Errorf("Caller = %q, want %q (= From)", got, from)
+	}
+	if got := form.Get("Called"); got != to {
+		t.Errorf("Called = %q, want %q (= To)", got, to)
+	}
+	if form.Get("CallerName") == "" {
+		t.Error("CallerName is empty, want a non-empty placeholder")
+	}
+	// The raw From/To fields remain, unaffected by the aliases.
+	if got := form.Get("From"); got != from {
+		t.Errorf("From = %q, want %q", got, from)
+	}
+	if got := form.Get("To"); got != to {
+		t.Errorf("To = %q, want %q", got, to)
 	}
 }
 
@@ -92,7 +118,7 @@ func TestCallSid_SingleSourcedAcrossWebhookAndStart(t *testing.T) {
 	defer ts.Close()
 
 	webhookURL := ts.URL + "/webhook"
-	if _, err := fetchStreamURL(context.Background(), webhookURL, authToken, callSid); err != nil {
+	if _, err := fetchStreamURL(context.Background(), webhookURL, authToken, callSid, "+15551234567", "+15559876543"); err != nil {
 		t.Fatalf("fetchStreamURL: %v", err)
 	}
 	if gotWebhookCallSid != callSid {

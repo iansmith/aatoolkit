@@ -54,7 +54,7 @@ func gracefulCancel(cmd *exec.Cmd) {
 // streamMicFrames captures mic input via ffmpeg, slices it into 8 kHz μ-law
 // 20 ms frames (160 bytes each), and sends each frame to conn as a Twilio
 // media event. Returns when ctx is cancelled or the connection closes.
-func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string) error {
+func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int) error {
 	mic := os.Getenv("AATOOLKIT_STT_MIC")
 	if mic == "" {
 		mic = ":default"
@@ -69,7 +69,7 @@ func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string
 		return fmt.Errorf("streamMicFrames: start ffmpeg (installed? `brew install ffmpeg`): %w", err)
 	}
 
-	enc := newMediaFrameEncoder(streamSID)
+	enc := newMediaFrameEncoder(streamSID, seqNum)
 	// Drain on context.Background(), NOT ctx: on shutdown ctx is cancelled, which
 	// (via newFFmpegCmd's cmd.Cancel) sends ffmpeg a SIGINT so it flushes its buffer
 	// and closes stdout. drainFrames must read that flushed tail through to EOF rather

@@ -7,10 +7,22 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 
 	"github.com/iansmith/aatoolkit/config"
 )
+
+// e164Pattern matches an E.164 number: a leading '+', a non-zero first digit,
+// then 1–14 more digits (2–15 total). Mirrors the server's own check so an
+// invalid caller number is rejected at the CLI before any network call.
+var e164Pattern = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
+
+// validateE164 returns an error if s is not a well-formed E.164 number.
+// AATK-16 RED: not yet implemented — accepts anything.
+func validateE164(s string) error {
+	return nil
+}
 
 const (
 	defaultBasePath = "aa-server-status.toml"
@@ -59,7 +71,24 @@ func webhookTarget(explicit, basePath string) (string, error) {
 func main() {
 	webhookURL := flag.String("webhook", "", "the server server webhook URL (default: resolved from aa-server-status.toml)")
 	noEchoMarks := flag.Bool("no-echo-marks", false, "suppress mark-echo (for testing the server's AwaitingMarkEcho timeout)")
+	toNumber := flag.String("to", defaultTo, "dialed (listening) number, E.164")
 	flag.Parse()
+
+	// The caller's E.164 number is a required positional arg, validated locally
+	// before any network call so a typo fails fast with a clear message rather
+	// than a 403 from the server's own signature/E.164 check.
+	from := flag.Arg(0)
+	if from == "" {
+		fmt.Fprintf(os.Stderr, "usage: %s [flags] <FROM-e164>\n", os.Args[0])
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+	if err := validateE164(from); err != nil {
+		log.Fatalf("twilio-cli: FROM: %v", err)
+	}
+	if err := validateE164(*toNumber); err != nil {
+		log.Fatalf("twilio-cli: -to: %v", err)
+	}
 
 	target, err := webhookTarget(*webhookURL, defaultBasePath)
 	if err != nil {
@@ -73,7 +102,7 @@ func main() {
 
 	callSid := newSID("CA")
 
-	streamURL, err := fetchStreamURL(ctx, target, authToken, callSid)
+	streamURL, err := fetchStreamURL(ctx, target, authToken, callSid, from, *toNumber)
 	if err != nil {
 		log.Fatalf("twilio-cli: %v", err)
 	}
