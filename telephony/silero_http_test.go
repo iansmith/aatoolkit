@@ -1,6 +1,7 @@
 package telephony
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"math"
@@ -10,8 +11,9 @@ import (
 )
 
 // The wire protocol under test (must match scripts/vad_server.py):
-//   request : sileroWindowSize float32 (window) ++ stateElems float32 (state),
-//             little-endian == 2048 bytes for the 256/256 contract.
+//   request : (sileroContextSize+sileroWindowSize) float32 (context++window)
+//             ++ stateElems float32 (state), little-endian == 2304 bytes (AATK-8's
+//             320-sample input; not the earlier bare-256 contract).
 //   response: 1 float32 (speech prob) ++ stateElems float32 (updated state),
 //             little-endian == 1028 bytes.
 // These encode/decode helpers are deliberately independent of the production
@@ -103,7 +105,7 @@ func TestHTTPVADDetector_DetectDecodesProbAndSendsWindow(t *testing.T) {
 	}
 
 	win := newTestWindow(0.5)
-	prob, err := det.Detect(win)
+	prob, err := det.Detect(context.Background(), win)
 	if err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
@@ -147,10 +149,10 @@ func TestHTTPVADDetector_ThreadsState(t *testing.T) {
 
 	det, _ := NewVADClient(rs.srv.URL).Detector()()
 
-	if _, err := det.Detect(newTestWindow(0.1)); err != nil {
+	if _, err := det.Detect(context.Background(), newTestWindow(0.1)); err != nil {
 		t.Fatalf("Detect #1: %v", err)
 	}
-	if _, err := det.Detect(newTestWindow(0.2)); err != nil {
+	if _, err := det.Detect(context.Background(), newTestWindow(0.2)); err != nil {
 		t.Fatalf("Detect #2: %v", err)
 	}
 	// The sidecar returned (received state + 1). The first request's state was
@@ -170,9 +172,9 @@ func TestHTTPVADDetector_ResetZeroesState(t *testing.T) {
 	defer rs.close()
 
 	det, _ := NewVADClient(rs.srv.URL).Detector()()
-	det.Detect(newTestWindow(0.1)) // advances state to ones on the sidecar side
+	det.Detect(context.Background(), newTestWindow(0.1)) // advances state to ones on the sidecar side
 	det.Reset()
-	if _, err := det.Detect(newTestWindow(0.1)); err != nil {
+	if _, err := det.Detect(context.Background(), newTestWindow(0.1)); err != nil {
 		t.Fatalf("Detect after Reset: %v", err)
 	}
 	for i, s := range rs.gotStates[len(rs.gotStates)-1] {
@@ -190,7 +192,7 @@ func TestHTTPVADDetector_RejectsWrongWindow(t *testing.T) {
 	defer rs.close()
 
 	det, _ := NewVADClient(rs.srv.URL).Detector()()
-	if _, err := det.Detect(make([]float32, sileroWindowSize-1)); err == nil {
+	if _, err := det.Detect(context.Background(), make([]float32, sileroWindowSize-1)); err == nil {
 		t.Fatal("expected error for short window, got nil")
 	}
 	if len(rs.gotWindows) != 0 {
@@ -206,14 +208,14 @@ func TestHTTPVADDetector_ServerError(t *testing.T) {
 	defer rs.close()
 
 	det, _ := NewVADClient(rs.srv.URL).Detector()()
-	if _, err := det.Detect(newTestWindow(0.1)); err == nil {
+	if _, err := det.Detect(context.Background(), newTestWindow(0.1)); err == nil {
 		t.Fatal("expected error on 500 response, got nil")
 	}
 }
 
 // TestHTTPVADDetector_FreshStatePerSession ensures the factory hands each
 // session its own detector state — one session's threading must not leak into
-// another's, matching NewSileroDetector building a fresh gonnx state per call.
+// another's, matching a fresh detector state built per session.
 func TestHTTPVADDetector_FreshStatePerSession(t *testing.T) {
 	rs := newRecordingSidecar(0.5)
 	defer rs.close()
@@ -222,8 +224,8 @@ func TestHTTPVADDetector_FreshStatePerSession(t *testing.T) {
 	detA, _ := factory()
 	detB, _ := factory()
 
-	detA.Detect(newTestWindow(0.1)) // A advances its state
-	if _, err := detB.Detect(newTestWindow(0.1)); err != nil {
+	detA.Detect(context.Background(), newTestWindow(0.1)) // A advances its state
+	if _, err := detB.Detect(context.Background(), newTestWindow(0.1)); err != nil {
 		t.Fatalf("detB.Detect: %v", err)
 	}
 	// B's first request must carry zeros, unaffected by A.

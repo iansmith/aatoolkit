@@ -38,7 +38,7 @@ type fakeVAD struct {
 	resets int32
 }
 
-func (f *fakeVAD) Detect(window []float32) (float32, error) {
+func (f *fakeVAD) Detect(_ context.Context, window []float32) (float32, error) {
 	idx := atomic.AddInt32(&f.calls, 1) - 1
 	if idx%vadCycleLen == 0 {
 		return 0.9, nil // >= SpeechThresh (0.5)

@@ -38,7 +38,7 @@ type fakeDetector struct {
 	resets int
 }
 
-func (f *fakeDetector) Detect(window []float32) (float32, error) {
+func (f *fakeDetector) Detect(_ context.Context, window []float32) (float32, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := float32(0)
@@ -67,7 +67,7 @@ func newWindowSpyDetector(capacity int) *windowSpyDetector {
 	return &windowSpyDetector{windows: make(chan []float32, capacity)}
 }
 
-func (d *windowSpyDetector) Detect(window []float32) (float32, error) {
+func (d *windowSpyDetector) Detect(_ context.Context, window []float32) (float32, error) {
 	got := append([]float32(nil), window...)
 	d.windows <- got
 	return 0, nil
@@ -347,7 +347,7 @@ type slowDetector struct {
 	gate chan struct{}
 }
 
-func (d *slowDetector) Detect(window []float32) (float32, error) {
+func (d *slowDetector) Detect(_ context.Context, window []float32) (float32, error) {
 	<-d.gate
 	return 0, nil
 }
