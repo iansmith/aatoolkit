@@ -109,19 +109,37 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 		return err
 	}
 
-	// pumpCtx (not the outer ctx) bounds the pump goroutines' lifetime to
-	// this call: cancelling it and joining pumpWG before Close() guarantees
-	// they exit here rather than leaking until the outer ctx (e.g. an HTTP
-	// request context with its own, looser lifetime) eventually cancels.
-	pumpCtx, cancelPumps := context.WithCancel(ctx)
+	// The data and control pumps terminate differently at teardown.
+	//
+	// The DATA pump's graceful termination is structural, not context-driven:
+	// closing the data plane (demux.CloseData below) makes its Recv drain every
+	// buffered frame and then return errPlaneClosed, so pumpWG.Wait() implies a
+	// fully drained plane with no goroutine left to leak. It therefore takes the
+	// outer ctx directly — the one context graceful teardown does NOT cancel,
+	// leaving ctx cancellation as purely the hard-abort escape that unblocks a
+	// pump wedged on a torn-down downstream. This is the AATK-15 fix: under the
+	// old cancel-then-join, a frame still buffered at cancel time was abandoned
+	// in a 50/50 select between a ready <-ch and a ready <-ctx.Done(), losing it
+	// from both the tap and the session. See design/teardown-protocol.md.
+	//
+	// The CONTROL pump keeps context-cancel termination (its own cancellable
+	// ctrlCtx): control frames carry no completeness requirement (the stop that
+	// triggered teardown is already consumed), so abort semantics are correct
+	// for it, and there is no control-plane close to drive it structurally.
+	ctrlCtx, cancelCtrl := context.WithCancel(ctx)
 	var pumpWG sync.WaitGroup
 	pumpWG.Add(2)
-	go func() { defer pumpWG.Done(); pumpDataPlane(pumpCtx, demux.Data, dataIn, tap) }()
-	go func() { defer pumpWG.Done(); pumpControlPlane(pumpCtx, demux.Control, controlIn) }()
+	go func() { defer pumpWG.Done(); pumpDataPlane(ctx, demux.Data, dataIn, tap) }()
+	go func() { defer pumpWG.Done(); pumpControlPlane(ctrlCtx, demux.Control, controlIn) }()
 	defer func() {
-		cancelPumps()
+		// Stop input structurally, on every exit path (stop frame, read error,
+		// outer-context cancel): close the data plane so the data pump drains to
+		// errPlaneClosed, then cancel the control pump. After pumpWG.Wait() the
+		// data plane is fully drained and no in-flight frame can still be
+		// writing, so it is safe to close the tap and session.
+		demux.CloseData()
+		cancelCtrl()
 		pumpWG.Wait()
-		// After pumpWG.Wait(), so no in-flight frame can still be writing.
 		tap.Close()
 		sess.Close()
 	}()
@@ -166,7 +184,11 @@ func waitForClosed(sess *telephony.Session, timeout time.Duration) {
 
 // pumpDataPlane relays decoded media frames from the demux's data plane into
 // the session's TwilioDataPlaneInput, translating Frame to its raw mu-law
-// payload. It exits when ctx is cancelled or a Recv fails.
+// payload. Its graceful terminator is errPlaneClosed: once handleStream closes
+// the data plane, Recv drains every buffered frame (each written to the tap
+// here) and then returns errPlaneClosed, so pumpWG.Wait() implies a fully
+// drained plane. A ctx-cancelled Recv is the hard-abort escape. Both surface as
+// a non-nil err and end the pump (AATK-15).
 //
 // tap may be nil (capture disabled), which is a no-op. It is written before
 // Send: the recording is of what arrived on the wire, and a Send failure that
