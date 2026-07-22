@@ -20,13 +20,30 @@ var e164Pattern = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
 // handler owns the connection for the duration of the call and returns when done.
 type StreamHandler func(ctx context.Context, conn *websocket.Conn, start Frame) error
 
+// InboundSMS is the parsed subset of a Twilio inbound-message webhook. Additional
+// fields (NumMedia, MediaUrl0…, NumSegments, …) remain available on the raw form
+// if a consumer needs them later.
+type InboundSMS struct {
+	MessageSID string // Twilio MessageSid
+	From       string // sender, E.164
+	To         string // the Twilio number that received it, E.164
+	Body       string // message text
+}
+
+// SMSHandler is called by ServeSMS for each validated inbound-SMS webhook. It is
+// fire-and-forget: ServeSMS always answers Twilio with empty TwiML regardless, so
+// a synchronous reply is not modeled here (a future reply path is a separate change).
+type SMSHandler func(ctx context.Context, msg InboundSMS)
+
 // Server handles Twilio HTTP webhook requests and WebSocket Media Streams connections.
 // Set AuthToken to the Twilio auth token for the account; every inbound webhook
 // request is validated against the X-Twilio-Signature header before processing.
-// Set HandleStream to handle incoming Media Streams WebSocket connections.
+// Set HandleStream to handle incoming Media Streams WebSocket connections, and
+// HandleSMS to handle inbound SMS webhooks.
 type Server struct {
 	AuthToken    string
 	HandleStream StreamHandler
+	HandleSMS    SMSHandler
 
 	// StreamScheme selects the scheme advertised in the TwiML <Stream url>
 	// and, correspondingly, the scheme used to reconstruct the URL for
@@ -57,21 +74,32 @@ func (s *Server) validateScheme() string {
 	return "https"
 }
 
-// ServeHTTP implements http.Handler. It validates the Twilio request signature and
-// returns 403 Forbidden for any request that fails validation (including requests
-// with an empty AuthToken). On success it validates the caller's E.164 From number
-// (403 on failure), logs From and CallSid, and responds with TwiML instructing
-// Twilio to open the Media Streams WebSocket at /streams.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// authenticate parses the request body and validates the Twilio signature over
+// the reconstructed public URL (scheme from validateScheme, host from r.Host as
+// preserved by the reverse proxy). It writes the error response and returns false
+// on any failure; on success the parsed body is available in r.PostForm.
+func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) bool {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
-		return
+		return false
 	}
 
 	sig := r.Header.Get("X-Twilio-Signature")
 	rawURL := s.validateScheme() + "://" + r.Host + r.URL.RequestURI()
 	if !ValidateSignature(s.AuthToken, rawURL, r.PostForm, sig) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// ServeHTTP implements http.Handler for the Twilio call webhook. It validates the
+// request signature (403 on failure, including an empty AuthToken), then validates
+// the caller's E.164 From number (403 on failure), logs From and CallSid, and
+// responds with TwiML instructing Twilio to open the Media Streams WebSocket at
+// /streams.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.authenticate(w, r) {
 		return
 	}
 
@@ -87,6 +115,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	streamURL := fmt.Sprintf("%s://%s/streams", s.streamScheme(), r.Host)
 	w.Header().Set("Content-Type", "text/xml")
 	fmt.Fprintf(w, `<Response><Connect><Stream url="%s"/></Connect></Response>`, html.EscapeString(streamURL))
+}
+
+// ServeSMS handles a Twilio inbound-SMS webhook. It validates the request
+// signature (403 on failure, including an empty AuthToken), parses the message
+// fields into InboundSMS, hands them to HandleSMS if set, and answers with empty
+// TwiML so Twilio sends no automatic reply.
+func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
+	if !s.authenticate(w, r) {
+		return
+	}
+
+	msg := InboundSMS{
+		MessageSID: r.PostForm.Get("MessageSid"),
+		From:       r.PostForm.Get("From"),
+		To:         r.PostForm.Get("To"),
+		Body:       r.PostForm.Get("Body"),
+	}
+	if s.HandleSMS != nil {
+		s.HandleSMS(r.Context(), msg)
+	}
+
+	w.Header().Set("Content-Type", "text/xml")
+	fmt.Fprint(w, "<Response></Response>")
 }
 
 // ServeStreams handles a Twilio Media Streams WebSocket connection. It upgrades

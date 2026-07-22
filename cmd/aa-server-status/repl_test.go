@@ -11,23 +11,26 @@ import (
 // fakeEngine records calls made against it, for asserting dispatch behavior
 // (in particular the exit-rule distinction between TeardownAll and Down).
 type fakeEngine struct {
-	statuses           []ServerStatus
-	teardownCalls      int
-	teardownReturn     []string
-	downCalls          []string
-	upCalls            []string
-	deadCalls          []string
-	buildCalls         []string
-	logsCalls          []string
-	killCalls          []int
-	killErr            error
-	commandCalls       []string
-	commandResult      struct {
+	statuses       []ServerStatus
+	teardownCalls  int
+	teardownReturn []string
+	downCalls      []string
+	upCalls        []string
+	deadCalls      []string
+	buildCalls     []string
+	logsCalls      []string
+	killCalls      []int
+	killErr        error
+	commandCalls   []string
+	commandResult  struct {
 		cmd  string
 		args []string
 	}
-	commandErr         error
-	viewCalls          []struct{ name string; nowrap bool }
+	commandErr error
+	viewCalls  []struct {
+		name   string
+		nowrap bool
+	}
 	viewResult         []string
 	viewErr            error
 	failNotImplemented bool
@@ -80,7 +83,10 @@ func (f *fakeEngine) Command(name string) (string, []string, error) {
 }
 
 func (f *fakeEngine) View(name string, nowrap bool) ([]string, error) {
-	f.viewCalls = append(f.viewCalls, struct{ name string; nowrap bool }{name, nowrap})
+	f.viewCalls = append(f.viewCalls, struct {
+		name   string
+		nowrap bool
+	}{name, nowrap})
 	if f.viewErr != nil {
 		return nil, f.viewErr
 	}
