@@ -105,3 +105,20 @@ func TestPostSMSWebhook_WrongPath403s(t *testing.T) {
 		t.Fatal("expected an error POSTing to the wrong path, got nil")
 	}
 }
+
+// TestPostSMSWebhook_WrongAuthToken403s is the distinct auth-mismatch error
+// path: correct path, but the CLI signs with a different auth token than the
+// server validates against, so the signature never matches.
+func TestPostSMSWebhook_WrongAuthToken403s(t *testing.T) {
+	srv := &twilio.Server{AuthToken: "server-side-token", StreamScheme: "ws"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sms/inbound", srv.ServeSMS)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	webhookURL := ts.URL + "/sms/inbound"
+	err := postSMSWebhook(context.Background(), webhookURL, "wrong-client-token", "SMtest0003", "+15551234567", "+15105559999", "hello there")
+	if err == nil {
+		t.Fatal("expected an error POSTing with a mismatched auth token, got nil")
+	}
+}
