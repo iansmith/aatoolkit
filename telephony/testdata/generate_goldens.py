@@ -29,11 +29,12 @@ import numpy as np
 import onnxruntime as ort
 
 HERE = pathlib.Path(__file__).parent
-# testdata/ -> telephony/ ; the model is the embedded copy telephony/assets/silero_vad.onnx.
-# (SOP-146 repoints off third_party/gonnx/sample_models, which SOP-149 deletes. Once the
-# embed is removed too the model must be supplied out-of-tree to regenerate; the committed
-# fixtures below make that a dev-only step.)
-MODEL = HERE.parent / "assets" / "silero_vad.onnx"
+# testdata/ -> telephony/ -> aatoolkit/ . The engine no longer vendors the model
+# (SOP-149 removed both third_party/gonnx and the telephony/assets embed), so this
+# dev-only regenerator expects it supplied out-of-tree at models/silero_vad/silero_vad.onnx
+# (the sidecar's default path); the sha256 check below rejects any other file. The
+# committed fixtures make regeneration a rare, offline step.
+MODEL = HERE.parent.parent / "models" / "silero_vad" / "silero_vad.onnx"
 ULAW = HERE / "meetings_today.ulaw"
 GOLDENS = HERE / "meetings_today_goldens.json"
 SYNTHETIC = HERE / "silero_goldens.json"
