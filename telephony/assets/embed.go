@@ -4,14 +4,6 @@ package assets
 
 import _ "embed"
 
-// SileroVADONNX is the vendored Silero VAD v6.2.1 ONNX model (see
-// PROVENANCE.md). It is byte-identical to
-// third_party/gonnx/sample_models/onnx_models/silero_vad.onnx —
-// TestModelDriftGuard in internal/telephony/silero_test.go enforces that.
-//
-//go:embed silero_vad.onnx
-var SileroVADONNX []byte
-
 // FarewellULaw is the call-termination farewell clip (SOP-125), μ-law
 // encoded at 8 kHz (1 byte/sample, so len/8000 == seconds). It says
 // "Call me anytime... Bye!" in the voice-out TTS's F5 voice.
