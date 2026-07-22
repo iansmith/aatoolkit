@@ -80,7 +80,11 @@ func readSidecar(t *testing.T, dir, streamSID string) tapSidecar {
 // payloads delivered to the session. This drives a real media frame through the
 // real handler path -- websocket, DecodeFrame, demux, pumpDataPlane -- and
 // requires it to land on disk. Nothing is asserted by waiting: the stop frame
-// makes handleStream return, and its defer closes the tap before h.done fires.
+// makes handleStream return, and its defer closes the tap after draining the
+// pump. The frame delivered before the stop is guaranteed on disk because the
+// data plane's Recv drains buffered frames before honoring the pump's teardown
+// cancellation (AATK-14) -- not by timing luck, which is what made this test
+// load-sensitively flaky before. See TestDataPlaneRecvPrefersBufferedFrameOverCancellation.
 func TestTap_WiredToDataPlane(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(tapDirEnv, dir)

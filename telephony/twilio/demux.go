@@ -108,6 +108,18 @@ func (p *dropOldestPlane) Send(ctx context.Context, f Frame) error {
 
 func (p *dropOldestPlane) Recv(ctx context.Context) (Frame, error) {
 	var zero Frame
+	// Prefer a buffered frame over cancellation. A frame already in the buffer
+	// arrived before teardown and must not be dropped when the pump's context is
+	// cancelled — otherwise a plain select over a ready channel and a ready
+	// ctx.Done() picks 50/50 and the frame vanishes from both the session and
+	// the tap (the load-sensitive TestTap_WiredToDataPlane flake). The producer
+	// stops before the pump context is cancelled, so the buffer is finite and
+	// this still exits promptly once drained.
+	select {
+	case f := <-p.ch:
+		return f, nil
+	default:
+	}
 	select {
 	case f := <-p.ch:
 		return f, nil
