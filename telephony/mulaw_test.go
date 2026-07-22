@@ -6,27 +6,72 @@ import (
 )
 
 // TestEncodeMuLawFrames_FrameSizeAndPad asserts that EncodeMuLawFrames produces
-// frames of exactly SampleRateHz*MuLawFrameMS/1000 bytes, with the last frame
-// zero-padded to 0xFF.
+// frames of exactly SampleRateHz*MuLawFrameMS/1000 bytes each, across multiple
+// frames (not just a single one), with only the last frame zero-padded to 0xFF.
 func TestEncodeMuLawFrames_FrameSizeAndPad(t *testing.T) {
-	halfFrame := SampleRateHz * MuLawFrameMS / 1000 / 2
-	wav := pcm16ToWAV(make([]int16, halfFrame), SampleRateHz)
+	frameSize := SampleRateHz * MuLawFrameMS / 1000
+	// Two and a half frames' worth of samples, so the last frame needs padding
+	// and there are multiple full frames to check.
+	totalSamples := frameSize*2 + frameSize/2
+	wav := pcm16ToWAV(make([]int16, totalSamples), SampleRateHz)
 
-	frames := EncodeMuLawFrames(wav)
-	expectedFrameSize := SampleRateHz * MuLawFrameMS / 1000
-
-	if len(frames) != expectedFrameSize {
-		t.Fatalf("want %d bytes, got %d", expectedFrameSize, len(frames))
+	frames, err := EncodeMuLawFrames(wav)
+	if err != nil {
+		t.Fatalf("EncodeMuLawFrames: %v", err)
+	}
+	if len(frames) != 3 {
+		t.Fatalf("want 3 frames, got %d", len(frames))
 	}
 
-	for i := halfFrame; i < expectedFrameSize; i++ {
-		if frames[i] != 0xFF {
-			t.Errorf("pad byte at %d: want 0xFF, got 0x%02x", i, frames[i])
+	for i, frame := range frames {
+		if len(frame) != frameSize {
+			t.Errorf("frame %d: want %d bytes, got %d", i, frameSize, len(frame))
+		}
+	}
+
+	last := frames[2]
+	for i := frameSize / 2; i < frameSize; i++ {
+		if last[i] != 0xFF {
+			t.Errorf("pad byte at frame 2 offset %d: want 0xFF, got 0x%02x", i, last[i])
 		}
 	}
 }
 
-// TestMuLaw_RoundTrip encodes a PCM signal, decodes, and checks round-trip.
+// TestEncodeMuLawFrames_PropagatesDecodeError asserts a malformed WAV surfaces
+// an error instead of silently returning nil/empty frames.
+func TestEncodeMuLawFrames_PropagatesDecodeError(t *testing.T) {
+	_, err := EncodeMuLawFrames([]byte("not a wav"))
+	if err == nil {
+		t.Fatal("want a non-nil error for a malformed WAV, got nil")
+	}
+}
+
+// referenceLinearToMuLaw independently re-implements the same nearest-code
+// search as linearToMuLaw, in this test file rather than calling production's
+// function, so a bug in production's search bounds (e.g. an off-by-one that
+// silently excludes a candidate byte) shows up as a mismatch here instead of a
+// false pass. It is the in-test oracle the ticket calls for — computed from the
+// existing muLawToLinear decode table, not hand-typed.
+func referenceLinearToMuLaw(sample int16) byte {
+	best := byte(0)
+	bestErr := int32(1<<31 - 1)
+	for b := 0; b <= 255; b++ {
+		decoded := muLawToLinear(byte(b))
+		err := int32(sample) - int32(decoded)
+		if err < 0 {
+			err = -err
+		}
+		if err < bestErr {
+			bestErr = err
+			best = byte(b)
+		}
+	}
+	return best
+}
+
+// TestMuLaw_RoundTrip encodes a PCM ramp and asserts every single encoded byte
+// exactly matches the independently-computed G.711 oracle above — not a loose
+// statistical tolerance, since the oracle removes the need for one.
 func TestMuLaw_RoundTrip(t *testing.T) {
 	const numSamples = 8000
 	pcm := make([]int16, numSamples)
@@ -35,24 +80,34 @@ func TestMuLaw_RoundTrip(t *testing.T) {
 	}
 
 	wav := pcm16ToWAV(pcm, SampleRateHz)
-	frames := EncodeMuLawFrames(wav)
-	decoded := decodeMuLaw(frames)
+	frames, err := EncodeMuLawFrames(wav)
+	if err != nil {
+		t.Fatalf("EncodeMuLawFrames: %v", err)
+	}
+	frameSize := SampleRateHz * MuLawFrameMS / 1000
+	flat := make([]byte, 0, len(frames)*frameSize)
+	for _, f := range frames {
+		flat = append(flat, f...)
+	}
 
-	passCount := 0
 	for i, sample := range pcm {
-		reconstructed := int16(decoded[i] * 32767)
-		err := int32(sample) - int32(reconstructed)
-		if err < 0 {
-			err = -err
-		}
-		if err <= 16000 {
-			passCount++
+		want := referenceLinearToMuLaw(sample)
+		got := flat[i]
+		if got != want {
+			t.Fatalf("sample %d (%d): encoded 0x%02x, want 0x%02x (oracle)", i, sample, got, want)
 		}
 	}
 
-	passRatio := float64(passCount) / float64(len(pcm))
-	if passRatio < 0.9 {
-		t.Errorf("only %.1f%% in range (pass=%d/%d)", passRatio*100, passCount, len(pcm))
+	// Round-trip sanity: decoding the encoded frames reproduces the same
+	// samples muLawToLinear(want) would, for every sample — this is exact
+	// (not a tolerance), since flat[i] was just proven to equal want above.
+	decoded := decodeMuLaw(flat[:len(pcm)])
+	for i, sample := range pcm {
+		wantDecoded := muLawToLinear(referenceLinearToMuLaw(sample))
+		gotDecoded := int16(decoded[i] * 32768)
+		if gotDecoded != wantDecoded {
+			t.Errorf("sample %d: decodeMuLaw reconstructed %d, want %d", i, gotDecoded, wantDecoded)
+		}
 	}
 }
 
