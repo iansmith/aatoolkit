@@ -2,6 +2,7 @@ package twilio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -9,6 +10,13 @@ import (
 
 	"github.com/iansmith/aatoolkit/telephony"
 )
+
+// errPlaneClosed is the sentinel Recv returns once the data plane's channel is
+// closed AND drained — the structural marker "everything up to Done, and
+// nothing after" (AATK-15). It is distinct from a context-cancellation error:
+// close+drained is the graceful teardown boundary, ctx.Done() is the hard-abort
+// escape. See design/teardown-protocol.md.
+var errPlaneClosed = errors.New("twilio: demux: data plane closed")
 
 // controlPlaneDepth is the buffer depth for the control plane. Control
 // events (start/stop/mark/clear) are rare, so a small depth is generous.
@@ -51,6 +59,7 @@ type dropOldestPlane struct {
 	now func() time.Time
 
 	mu        sync.Mutex
+	closed    bool
 	dropping  bool
 	dropCount int
 	dropStart time.Time
@@ -83,6 +92,13 @@ func (p *dropOldestPlane) Send(ctx context.Context, f Frame) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// After Close, the channel is closed: a send would panic. Drop instead —
+	// teardown has stopped input, and no frame sent after the close boundary is
+	// owed delivery (AATK-15).
+	if p.closed {
+		return nil
+	}
+
 	select {
 	case p.ch <- f:
 		p.recordNotDropping()
@@ -109,11 +125,35 @@ func (p *dropOldestPlane) Send(ctx context.Context, f Frame) error {
 func (p *dropOldestPlane) Recv(ctx context.Context) (Frame, error) {
 	var zero Frame
 	select {
-	case f := <-p.ch:
+	case f, ok := <-p.ch:
+		// A closed channel still delivers every buffered frame (ok == true)
+		// before it reports closed (ok == false). So this drains in order and
+		// only reports errPlaneClosed once the channel is closed AND empty —
+		// giving both teardown barriers off one edge, with no context-vs-buffer
+		// race. The comma-ok is load-bearing: keying the sentinel on "a receive
+		// returned" instead would swallow a legitimate zero Frame (AATK-15).
+		if !ok {
+			return zero, errPlaneClosed
+		}
 		return f, nil
 	case <-ctx.Done():
 		return zero, fmt.Errorf("recv cancelled: %w", ctx.Err())
 	}
+}
+
+// Close closes the data plane's channel, marking the teardown boundary. It is
+// idempotent (a second call is a no-op) and reuses p.mu so it serializes with
+// Send: after Close returns, Send no-ops and Recv drains any buffered frames
+// before reporting errPlaneClosed. Single-producer is what makes closing here
+// safe — Go's rule is that only the sole sender closes (AATK-15).
+func (p *dropOldestPlane) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	p.closed = true
+	close(p.ch)
 }
 
 // recordDropped notes that one frame was evicted, logging the start of a
@@ -219,6 +259,22 @@ func NewDemuxWithPlanes(data TwilioDataPlaneInput, control TwilioControlPlaneInp
 func NewDemux() *Demux {
 	dataDepth := telephony.ComputeDepth(telephony.DataPlaneBufferMS, telephony.MuLawFrameMS)
 	return NewDemuxWithPlanes(NewDataPlane(dataDepth), NewControlPlane(controlPlaneDepth))
+}
+
+// dataPlaneCloser is the close capability the data plane's concrete type
+// (dropOldestPlane) provides beyond the telephony.ServiceInput[Frame] interface.
+// CloseData type-asserts to it rather than widening ServiceInput, whose
+// Send/Recv signatures are shared and not ours to grow (AATK-15).
+type dataPlaneCloser interface{ Close() }
+
+// CloseData closes the data plane if its concrete type supports it, marking the
+// teardown boundary so the data pump drains and terminates on the resulting
+// errPlaneClosed rather than on context cancellation. A no-op for a data plane
+// that is not a closer.
+func (d *Demux) CloseData() {
+	if c, ok := d.Data.(dataPlaneCloser); ok {
+		c.Close()
+	}
 }
 
 // Route decodes raw and routes the resulting Frame to the correct plane.
