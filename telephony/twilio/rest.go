@@ -16,7 +16,7 @@ const defaultBaseURL = "https://api.twilio.com"
 
 // RESTClient sends outbound SMS via the Twilio Messages REST API. Credentials are
 // supplied by the caller — the client never reads TWILIO_* environment variables
-// (charter R8; the sophie side sources them from enable-sophie).
+// itself (charter R8; the consumer is responsible for sourcing its own credentials).
 type RESTClient struct {
 	AccountSID string
 	KeySID     string
