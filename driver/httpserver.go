@@ -49,19 +49,19 @@ func StartHealthServer(addr string) *http.Server {
 }
 
 // newTwilioMux builds the Twilio-facing routes: /webhook (the Twilio call
-// webhook, s.ServeHTTP) and /streams (the Media Streams WebSocket upgrade,
-// s.ServeStreams).
+// webhook, s.ServeHTTP), /streams (the Media Streams WebSocket upgrade,
+// s.ServeStreams), and /sms/inbound (the inbound-SMS webhook, s.ServeSMS).
 func newTwilioMux(s *twilio.Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook", s.ServeHTTP)
 	mux.HandleFunc("/streams", s.ServeStreams)
+	mux.HandleFunc("/sms/inbound", s.ServeSMS)
 	return mux
 }
 
-// StartTwilioServer launches the Twilio Media Streams WebSocket listener in
-// the background. It registers s.ServeStreams at /streams — the path
-// twilio-cli and Twilio both connect to. Bind failures are reported to stderr
-// but do not crash the process.
+// StartTwilioServer launches the Twilio-facing HTTP listener in the background,
+// serving the routes built by newTwilioMux (/webhook, /streams, /sms/inbound).
+// Bind failures are reported to stderr but do not crash the process.
 func StartTwilioServer(addr string, s *twilio.Server) *http.Server {
 	mux := newTwilioMux(s)
 	srv := &http.Server{Addr: addr, Handler: mux}
