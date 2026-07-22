@@ -81,6 +81,14 @@ func readSidecar(t *testing.T, dir, streamSID string) tapSidecar {
 // real handler path -- websocket, DecodeFrame, demux, pumpDataPlane -- and
 // requires it to land on disk. Nothing is asserted by waiting: the stop frame
 // makes handleStream return, and its defer closes the tap before h.done fires.
+//
+// This is load-independent because teardown is a structural stop->drain->close
+// boundary (AATK-15): the defer closes the data plane, the pump drains every
+// buffered frame to the tap and terminates on errPlaneClosed, then tap.Close
+// runs. It used to flake -- a frame buffered at teardown was abandoned in a
+// 50/50 select between a ready <-ch and a ready <-ctx.Done(). See
+// TestHandleStreamDrainsDataBeforeTapClose for the K-frame drain guard and
+// design/teardown-protocol.md for the protocol.
 func TestTap_WiredToDataPlane(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(tapDirEnv, dir)

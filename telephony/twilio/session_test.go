@@ -1,10 +1,12 @@
 package twilio
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -628,4 +630,68 @@ func TestHandleStreamWithOpts(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("handleStream did not return")
 	}
+}
+
+// AATK-15. handleStreamDrainCheck drives K media frames into a live handler,
+// triggers teardown via cut, and asserts every pre-teardown payload survived to
+// <streamSID>.in.ulaw in order. It is the structural companion to
+// TestTap_WiredToDataPlane: where that test proves the tap is wired, this proves
+// the stop→drain→close boundary loses nothing at teardown. Under the old
+// ctx-cancel teardown a buffered frame could be abandoned in a 50/50 select
+// between a ready <-ch and a ready <-ctx.Done(); the close/drain boundary makes
+// capture complete and load-independent. See design/teardown-protocol.md.
+func handleStreamDrainCheck(t *testing.T, cut func(*harness)) {
+	t.Helper()
+
+	// Distinct, non-zero payloads so the on-disk concatenation pins order, not
+	// merely byte count. K=3.
+	payloads := [][]byte{{0x11, 0x11, 0x11}, {0x22, 0x22, 0x22}, {0x33, 0x33, 0x33}}
+
+	dir := t.TempDir()
+	t.Setenv(tapDirEnv, dir)
+
+	h := newHarness(t)
+	for _, p := range payloads {
+		h.sendMedia(p)
+	}
+	cut(h)
+
+	select {
+	case <-h.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleStream did not return after teardown")
+	}
+
+	streamSID := "SS" + t.Name()
+	got, err := os.ReadFile(inulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("no recording after teardown — a pre-teardown media frame was lost from the tap: %v", err)
+	}
+
+	var want []byte
+	for _, p := range payloads {
+		want = append(want, p...)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("recording = % x (%d bytes), want % x (%d bytes) — a pre-teardown media frame was dropped instead of drained before tap.Close",
+			got, len(got), want, len(want))
+	}
+}
+
+// TestHandleStreamDrainsDataBeforeTapClose covers the graceful stop-frame exit
+// path: all K media frames delivered before the stop are drained to the tap.
+func TestHandleStreamDrainsDataBeforeTapClose(t *testing.T) {
+	handleStreamDrainCheck(t, func(h *harness) {
+		h.sendRaw([]byte(`{"event":"stop","streamSid":"SS` + t.Name() + `"}`))
+	})
+}
+
+// TestHandleStreamDrainsDataOnReadErrorPath covers the read-error exit path
+// (conn closed abruptly, no stop frame): the frames already read into the data
+// plane are still drained to the tap before close, so the same K payloads land
+// on disk.
+func TestHandleStreamDrainsDataOnReadErrorPath(t *testing.T) {
+	handleStreamDrainCheck(t, func(h *harness) {
+		h.conn.CloseNow()
+	})
 }
