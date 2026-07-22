@@ -19,6 +19,19 @@ import (
 // immediately races Close()'s ctx cancellation against that async delivery,
 // and the transition table's stop handling (state.go's handleControlEvent)
 // can be skipped entirely on the real Twilio path.
+type replyRouterContextKey struct{}
+
+var replyRouterKey replyRouterContextKey
+
+// ContextWithReplyRouter returns a copy of ctx carrying router, so that a
+// later handleStream call on that ctx registers its session's ReplySink with
+// it. Server.ReplyRouter is the production entry point (AATK-22); this is
+// exported for callers driving handleStream/HandleStreamWithOpts directly
+// (e.g. tests, or a consumer not going through Server).
+func ContextWithReplyRouter(ctx context.Context, router *telephony.ReplyRouter) context.Context {
+	return context.WithValue(ctx, replyRouterKey, router)
+}
+
 const stopDrainTimeout = 500 * time.Millisecond
 
 // DefaultHandleStream is the default session handler. It drives a live
@@ -78,10 +91,11 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	// the payloads delivered to the session").
 	tap := NewTap(tapDir, start.StreamSID, start.CallSID, tapLabelFromEnv(), startedAt)
 
+	dataOut := NewDataPlaneOutput(conn, start.StreamSID, tap)
 	opts := []telephony.SessionOption{
 		telephony.WithTwilioDataInput(dataIn),
 		telephony.WithTwilioControlInput(controlIn),
-		telephony.WithTwilioDataOutput(NewDataPlaneOutput(conn, start.StreamSID, tap)),
+		telephony.WithTwilioDataOutput(dataOut),
 		telephony.WithTwilioControlOutput(NewControlPlaneOutput(conn, start.StreamSID)),
 		telephony.WithCloseFunc(func() {
 			// CloseNow, not Close: Close performs a close handshake and
@@ -107,6 +121,13 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	if err := sess.Start(); err != nil {
 		log.Printf("twilio: handleStream: session start: %v", err)
 		return err
+	}
+
+	// Register with ReplyRouter if one is available in the context.
+	replyRouter, ok := ctx.Value(replyRouterKey).(*telephony.ReplyRouter)
+	var replySink *telephony.ReplySink
+	if ok && replyRouter != nil {
+		replySink = replyRouter.Register(start.CallSID, dataOut)
 	}
 
 	// The data and control pumps terminate differently at teardown.
@@ -143,6 +164,21 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 		tap.Close()
 		sess.Close()
 	}()
+	// Deferred after (so it runs before, LIFO) the teardown above: a
+	// registered session must stop being routable the instant teardown
+	// begins, not after the data plane has drained and the session/tap have
+	// closed. Deferred the other way around, a Route call arriving during
+	// that drain/close window would still find the session "live" and
+	// attempt a real send into a connection already being torn down, instead
+	// of the clean unknown-session path Route takes once a session is gone.
+	//
+	// Close, not Deregister(start.CallSID): Close only removes replySink if
+	// it is still the sink registered under start.CallSID, so a duplicate
+	// registration racing on the same CallSID can't have its still-live
+	// session torn out from under it by this one's teardown.
+	if replySink != nil {
+		defer replySink.Close()
+	}
 
 	for {
 		_, raw, err := conn.Read(ctx)

@@ -1,6 +1,7 @@
 package twilio_test
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
@@ -571,5 +573,65 @@ func TestServeStreams_ConnectedThenNonStart_Rejects(t *testing.T) {
 	case <-handlerCalled:
 		t.Error("HandleStream was called despite protocol violation (connected then non-start)")
 	default:
+	}
+}
+
+// noopVAD is a minimal telephony.VADDetector for tests that need a live
+// session to start but don't exercise turn-taking: it never reports speech.
+type noopVAD struct{}
+
+func (noopVAD) Detect(_ context.Context, _ []float32) (float32, error) { return 0, nil }
+func (noopVAD) Reset()                                                 {}
+
+// New (AATK-22): a Server configured with a ReplyRouter must make it reachable
+// by a live session's real handleStream, not just accept the field silently.
+// This exercises the actual production wiring path (Server -> ServeStreams ->
+// DefaultHandleStream), not the ReplyRouter unit alone: Route must deliver the
+// frame through the session's existing dataPlaneOutput and out over the wire,
+// EncodeMedia-wrapped, to the connected client.
+func TestServeStreams_ReplyRouterRoutesToLiveSession(t *testing.T) {
+	router := telephony.NewReplyRouter()
+	s := &twilio.Server{
+		HandleStream: func(ctx context.Context, conn *websocket.Conn, start twilio.Frame) error {
+			return twilio.HandleStreamWithOpts(ctx, conn, start,
+				telephony.WithVADFactory(func() (telephony.VADDetector, error) {
+					return noopVAD{}, nil
+				}))
+		},
+		ReplyRouter: router,
+	}
+	srv := streamsServer(t, s)
+	conn := dialStreams(t, srv)
+	sendStart(t, conn, "SSreply01", "CAreply01")
+
+	wantPayload := []byte{0x11, 0x22, 0x33}
+	deadline := time.Now().Add(2 * time.Second)
+	var routeErr error
+	for time.Now().Before(deadline) {
+		routeErr = router.Route(context.Background(), "CAreply01", [][]byte{wantPayload})
+		if routeErr == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if routeErr != nil {
+		t.Fatalf("session never registered with ReplyRouter: %v", routeErr)
+	}
+
+	readCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, raw, err := conn.Read(readCtx)
+	if err != nil {
+		t.Fatalf("read reply frame: %v", err)
+	}
+	f, err := twilio.DecodeFrame(raw)
+	if err != nil {
+		t.Fatalf("decode reply frame: %v", err)
+	}
+	if f.Event != twilio.EventMedia {
+		t.Fatalf("Event = %q, want %q", f.Event, twilio.EventMedia)
+	}
+	if !bytes.Equal(f.Payload, wantPayload) {
+		t.Fatalf("Payload = %x, want %x", f.Payload, wantPayload)
 	}
 }
