@@ -292,6 +292,54 @@ func TestServeHTTP_NilAuthorizeAllows(t *testing.T) {
 	}
 }
 
+// Adversary gap: Authorize returning true (not nil) must allow through — pins
+// that the gate checks the predicate's result, not merely whether it's set.
+func TestServeHTTP_AuthorizeTrueAllows(t *testing.T) {
+	s := &twilio.Server{
+		AuthToken:    "authtoken",
+		StreamScheme: "wss",
+		Authorize:    func(string) bool { return true },
+	}
+	form := url.Values{"From": {"+15105551234"}, "CallSid": {"CA123"}}
+	req := signedWebhookRequest(t, "authtoken", "https", "example.com", form)
+	w := httptest.NewRecorder()
+
+	s.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	var tw twiMLStream
+	if err := xml.Unmarshal(w.Body.Bytes(), &tw); err != nil {
+		t.Fatalf("unmarshal TwiML body %q: %v", w.Body.String(), err)
+	}
+	if want := "wss://example.com/streams"; tw.Connect.Stream.URL != want {
+		t.Fatalf("Stream url = %q, want %q (Authorize returning true must allow through)", tw.Connect.Stream.URL, want)
+	}
+}
+
+// Adversary gap: an unsigned/forged request must still 403 even when Authorize
+// would reject the caller anyway — signature validation is the security
+// boundary and must run before the Authorize gate, not be shadowed by it.
+func TestServeHTTP_BadSignatureRejectedBeforeAuthorize(t *testing.T) {
+	s := &twilio.Server{
+		AuthToken:       "authtoken",
+		StreamScheme:    "wss",
+		Authorize:       func(string) bool { return false },
+		VoiceRejectText: "nope",
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://example.com/webhook", strings.NewReader("From=%2B15105551234"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", "bm90YXJlYWxzaWc=")
+	w := httptest.NewRecorder()
+
+	s.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for bad signature (must not fall through to Authorize-reject TwiML)", w.Code)
+	}
+}
+
 // --- log output ---
 
 func TestServeHTTP_LogsFromAndCallSid(t *testing.T) {

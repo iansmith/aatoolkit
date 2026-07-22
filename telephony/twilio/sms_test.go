@@ -156,3 +156,29 @@ func TestServeSMS_NilAuthorizeAllows(t *testing.T) {
 		t.Fatalf("InboundSMS.From = %q, want %q", got.From, "+15105551234")
 	}
 }
+
+// Adversary gap: Authorize returning true (not nil) must allow through — pins
+// that the gate checks the predicate's result, not merely whether it's set.
+func TestServeSMS_AuthorizeTrueAllows(t *testing.T) {
+	called := 0
+	s := &twilio.Server{
+		AuthToken: "authtoken",
+		Authorize: func(string) bool { return true },
+		HandleSMS: func(context.Context, twilio.InboundSMS) { called++ },
+	}
+	form := url.Values{"From": {"+15105551234"}, "Body": {"hi"}}
+	req := signedTwilioRequest(t, "authtoken", "https", "webhook.example.com", "/sms/inbound", form)
+	w := httptest.NewRecorder()
+
+	s.ServeSMS(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); body != "<Response></Response>" {
+		t.Fatalf("body = %q, want empty-ack TwiML (Authorize returning true must allow through)", body)
+	}
+	if called != 1 {
+		t.Fatalf("HandleSMS called %d times, want 1", called)
+	}
+}
