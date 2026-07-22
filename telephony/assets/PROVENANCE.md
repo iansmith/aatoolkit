@@ -1,7 +1,7 @@
 # Vendored asset provenance (the engine copy)
 
-This directory holds `go:embed`-ded binary assets: the farewell clip, two
-sound-effect clips (SOP-156), and the Silero VAD model. All are documented below.
+This directory holds `go:embed`-ded binary assets: the farewell clip and two
+sound-effect clips (SOP-156). All are documented below.
 
 ---
 
@@ -71,41 +71,5 @@ and an audible click; the 8 ms fades force both edges to zero.
 
 Supertonic's synthesis is not seeded, so re-running `make_farewell.sh` yields a
 slightly different rendering (duration varies by ~5%) — there is no sha256 to
-pin here, unlike the model below. Audition after regenerating.
+pin here. Audition after regenerating.
 
----
-
-# Silero VAD — vendored model provenance (the engine copy)
-
-This is a byte-identical copy of the model already vendored (and provenance-
-documented) in `third_party/gonnx/sample_models/onnx_models/silero_vad.onnx`.
-It is duplicated here so it can be `go:embed`-ded directly into the
-`github.com/iansmith/aatoolkit/telephony/assets` package, with no runtime file reads.
-`TestModelDriftGuard` (`internal/telephony/silero_test.go`) asserts the two
-copies stay byte-identical.
-
-## The model
-
-| | |
-|---|---|
-| File | `silero_vad.onnx` |
-| Upstream repo | https://github.com/snakers4/silero-vad |
-| Upstream path | `src/silero_vad/data/silero_vad.onnx` |
-| Version | v6.2.1 (byte-identical to v6.2; see the gonnx fork's provenance below) |
-| Size | 2,327,524 bytes |
-| sha256 | `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3` |
-| License | MIT — Copyright (c) 2020-present Silero Team |
-| ONNX opset | 16 |
-
-Verify the vendored copy at any time:
-
-```sh
-shasum -a 256 internal/telephony/assets/silero_vad.onnx
-# 1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
-```
-
-## Full provenance
-
-See `third_party/gonnx/sample_models/silero_vad/PROVENANCE.md` for the full
-version-identification writeup (which upstream tags were compared and why
-v6.2.1 was pinned).
