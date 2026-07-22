@@ -60,13 +60,19 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSMSForm_Fields pins the SMS webhook form field set: MessageSid,
-// AccountSid, From, To, Body, ApiVersion.
+// TestSMSForm_Fields pins the SMS webhook form field set: MessageSid (plus
+// its SmsMessageSid/SmsSid aliases), AccountSid, From, To, Body, ApiVersion.
 func TestSMSForm_Fields(t *testing.T) {
 	form := smsForm("SMtest0001", "+15551234567", "+15105559999", "hello there")
 
 	if got := form.Get("MessageSid"); got != "SMtest0001" {
 		t.Errorf("MessageSid = %q, want SMtest0001", got)
+	}
+	if got := form.Get("SmsMessageSid"); got != "SMtest0001" {
+		t.Errorf("SmsMessageSid = %q, want SMtest0001", got)
+	}
+	if got := form.Get("SmsSid"); got != "SMtest0001" {
+		t.Errorf("SmsSid = %q, want SMtest0001", got)
 	}
 	if got := form.Get("From"); got != "+15551234567" {
 		t.Errorf("From = %q, want +15551234567", got)
