@@ -70,7 +70,83 @@ func webhookTarget(explicit, basePath string) (string, error) {
 	return resolveWebhookURL(basePath)
 }
 
+// resolveSMSWebhookURL loads the merged aa-server-status config at basePath
+// and derives the the server server's inbound-SMS webhook URL (the
+// /sms/inbound route, not /webhook) from its host and webhook port.
+func resolveSMSWebhookURL(basePath string) (string, error) {
+	cfg, err := config.Load(basePath, localConfigPath(basePath))
+	if err != nil {
+		return "", err
+	}
+	srv, ok := cfg.ServerByName(serverName)
+	if !ok {
+		return "", fmt.Errorf("no %q server declared in %s", serverName, basePath)
+	}
+	port, ok := srv.WebhookPort()
+	if !ok {
+		return "", fmt.Errorf("%q server in %s declares no webhook port (needs two listens)", serverName, basePath)
+	}
+	return fmt.Sprintf("http://%s:%d/sms/inbound", srv.Host, port), nil
+}
+
+// smsWebhookTarget resolves the SMS webhook URL to post to: an explicit flag
+// value always wins, skipping config resolution entirely; otherwise it's
+// derived from the aa-server-status config at basePath. Mirrors webhookTarget.
+func smsWebhookTarget(explicit, basePath string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	return resolveSMSWebhookURL(basePath)
+}
+
+// runSMSMode implements the `twilio-cli sms <FROM-e164> <BODY>` subcommand:
+// it posts a signed inbound-SMS webhook to the server, starts a local capture
+// server for the outbound REST reply, and prints the captured To/Body.
+func runSMSMode(args []string) {
+	fs := flag.NewFlagSet("sms", flag.ExitOnError)
+	webhookURL := fs.String("webhook", "", "the server server SMS webhook URL (default: resolved from aa-server-status.toml)")
+	toNumber := fs.String("to", defaultTo, "the Twilio number the SMS was sent to, E.164")
+	fs.Parse(args)
+
+	from := fs.Arg(0)
+	body := strings.Join(fs.Args()[1:], " ")
+	if from == "" || body == "" {
+		fmt.Fprintf(os.Stderr, "usage: %s sms [flags] <FROM-e164> <BODY>\n", os.Args[0])
+		fs.PrintDefaults()
+		os.Exit(1)
+	}
+	if err := validateE164(from); err != nil {
+		log.Fatalf("twilio-cli: sms: FROM: %v", err)
+	}
+	if err := validateE164(*toNumber); err != nil {
+		log.Fatalf("twilio-cli: sms: -to: %v", err)
+	}
+
+	target, err := smsWebhookTarget(*webhookURL, defaultBasePath)
+	if err != nil {
+		log.Fatalf("twilio-cli: sms: %v", err)
+	}
+
+	authToken := os.Getenv("TWILIO_AUTH_TOKEN")
+
+	capture := newSMSCaptureServer()
+	defer capture.Close()
+	fmt.Printf("capture server listening at %s — point the server's RESTClient.BaseURL there\n", capture.URL)
+
+	msg, err := runSMS(context.Background(), target, authToken, from, *toNumber, body, capture)
+	if err != nil {
+		log.Fatalf("twilio-cli: sms: %v", err)
+	}
+
+	fmt.Printf("captured reply: To=%s Body=%q\n", msg.To, msg.Body)
+}
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "sms" {
+		runSMSMode(os.Args[2:])
+		return
+	}
+
 	webhookURL := flag.String("webhook", "", "the server server webhook URL (default: resolved from aa-server-status.toml)")
 	noEchoMarks := flag.Bool("no-echo-marks", false, "suppress mark-echo (for testing the server's AwaitingMarkEcho timeout)")
 	toNumber := flag.String("to", defaultTo, "dialed (listening) number, E.164")
