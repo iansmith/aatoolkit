@@ -511,6 +511,32 @@ func TestServeStreams_FromThreadedFromWebhook(t *testing.T) {
 	}
 }
 
+// Adversary gap: Frame.From must be the empty string when no webhook ever
+// recorded the stream's CallSID (unknown/missing case named explicitly in the
+// ticket's Definition of done) — pins the zero-value default, not a panic or
+// a stale value from an unrelated CallSid.
+func TestServeStreams_FromEmptyWhenNoWebhookRecorded(t *testing.T) {
+	s := &twilio.Server{} // no ServeHTTP call ever made for this CallSid
+
+	received := make(chan twilio.Frame, 1)
+	s.HandleStream = func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
+		received <- f
+		return nil
+	}
+	srv := streamsServer(t, s)
+	conn := dialStreams(t, srv)
+	sendStart(t, conn, "SSunknown01", "CAunknown01")
+
+	select {
+	case f := <-received:
+		if f.From != "" {
+			t.Fatalf("Frame.From = %q, want \"\" (no webhook recorded this CallSid)", f.From)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler not called within 2s")
+	}
+}
+
 // Error: connected then non-start — if connected is followed by something other
 // than start, the server must close with StatusPolicyViolation.
 func TestServeStreams_ConnectedThenNonStart_Rejects(t *testing.T) {
