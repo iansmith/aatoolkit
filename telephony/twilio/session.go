@@ -125,9 +125,9 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 
 	// Register with ReplyRouter if one is available in the context.
 	replyRouter, ok := ctx.Value(replyRouterKey).(*telephony.ReplyRouter)
+	var replySink *telephony.ReplySink
 	if ok && replyRouter != nil {
-		replyRouter.Register(start.CallSID, dataOut)
-		defer replyRouter.Deregister(start.CallSID)
+		replySink = replyRouter.Register(start.CallSID, dataOut)
 	}
 
 	// The data and control pumps terminate differently at teardown.
@@ -164,6 +164,21 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 		tap.Close()
 		sess.Close()
 	}()
+	// Deferred after (so it runs before, LIFO) the teardown above: a
+	// registered session must stop being routable the instant teardown
+	// begins, not after the data plane has drained and the session/tap have
+	// closed. Deferred the other way around, a Route call arriving during
+	// that drain/close window would still find the session "live" and
+	// attempt a real send into a connection already being torn down, instead
+	// of the clean unknown-session path Route takes once a session is gone.
+	//
+	// Close, not Deregister(start.CallSID): Close only removes replySink if
+	// it is still the sink registered under start.CallSID, so a duplicate
+	// registration racing on the same CallSID can't have its still-live
+	// session torn out from under it by this one's teardown.
+	if replySink != nil {
+		defer replySink.Close()
+	}
 
 	for {
 		_, raw, err := conn.Read(ctx)
