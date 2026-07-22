@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // ---------------------------------------------------------------------------
@@ -431,23 +433,18 @@ func padWAVSilence(wav []byte) []byte {
 	}
 	byteRate := 0
 	dataSizeOff, dataEnd := -1, -1
-	for i := 12; i+8 <= len(wav); {
-		id := string(wav[i : i+4])
-		sz := int(binary.LittleEndian.Uint32(wav[i+4 : i+8]))
-		body := i + 8
+	telephony.WalkWAVChunks(wav, func(id string, body, sz int) bool {
 		switch id {
 		case "fmt ":
 			if body+16 <= len(wav) {
 				byteRate = int(binary.LittleEndian.Uint32(wav[body+8 : body+12]))
 			}
 		case "data":
-			dataSizeOff, dataEnd = i+4, body+sz
+			dataSizeOff, dataEnd = body-4, body+sz
+			return false
 		}
-		if dataEnd >= 0 {
-			break
-		}
-		i = body + sz + (sz & 1)
-	}
+		return true
+	})
 	// dataEnd < dataSizeOff+4 guards a malformed chunk size with the high bit
 	// set (negative sz), which would wrap dataBytes below zero.
 	if byteRate <= 0 || dataSizeOff < 0 || dataEnd < dataSizeOff+4 || dataEnd > len(wav) {
