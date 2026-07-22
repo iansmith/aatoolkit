@@ -283,16 +283,18 @@ func (h *Host) LastAnswer() []byte {
 // into a JSON messages array ready for Send.
 func (h *Host) Context() []byte {
 	h.histMu.Lock()
+	var userCtx string
+	if h.userContext != nil {
+		userCtx = h.userContext()
+	}
 	capacity := len(h.history) + 1
-	if h.userContext != nil && h.userContext() != "" {
+	if userCtx != "" {
 		capacity++
 	}
 	msgs := make([]message, 0, capacity)
 	msgs = append(msgs, message{Role: "system", Content: h.prompt()})
-	if h.userContext != nil {
-		if ctx := h.userContext(); ctx != "" {
-			msgs = append(msgs, message{Role: "system", Content: ctx})
-		}
+	if userCtx != "" {
+		msgs = append(msgs, message{Role: "system", Content: userCtx})
 	}
 	msgs = append(msgs, h.history...)
 	h.histMu.Unlock()
