@@ -1,6 +1,6 @@
 // Package driver is the compiled engine an agent runs on: the LLM HTTP client
 // (Host, a host.Host implementation), TTS synthesis + playback, the serial speech
-// queue, health/Twilio HTTP servers, mic capture, and the local endpointer. An
+// queue, and health/Twilio HTTP servers. An
 // agent supplies its particulars — tiers, TTS transport, and a system-prompt
 // provider — through Config and stands the driver up with New. It bakes in no
 // agent identity: prompts and policy come from the caller.
@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -523,6 +524,16 @@ func EnvBool(k string) bool {
 		return true
 	}
 	return false
+}
+
+// EnvFloatOr reads a float env var, falling back to def when unset or unparseable.
+func EnvFloatOr(k string, def float64) float64 {
+	if v := os.Getenv(k); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
 }
 
 // ParseStreamScheme parses the -stream-scheme flag, defaulting to "wss" and
