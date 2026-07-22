@@ -29,11 +29,15 @@ import numpy as np
 import onnxruntime as ort
 
 HERE = pathlib.Path(__file__).parent
-# testdata/ -> telephony/ -> aatoolkit/ ; the vendored fork lives at aatoolkit/third_party
-# (was one level higher pre repo-split, when testdata sat under internal/telephony/).
-MODEL = HERE.parent.parent / "third_party" / "gonnx" / "sample_models" / "onnx_models" / "silero_vad.onnx"
+# testdata/ -> telephony/ ; the model is the embedded copy telephony/assets/silero_vad.onnx.
+# (SOP-146 repoints off third_party/gonnx/sample_models, which SOP-149 deletes. Once the
+# embed is removed too the model must be supplied out-of-tree to regenerate; the committed
+# fixtures below make that a dev-only step.)
+MODEL = HERE.parent / "assets" / "silero_vad.onnx"
 ULAW = HERE / "meetings_today.ulaw"
 GOLDENS = HERE / "meetings_today_goldens.json"
+SYNTHETIC = HERE / "silero_goldens.json"
+WIRE_FIXTURE = HERE / "silero_wire_fixture.json"
 
 SAMPLE_RATE = 8000
 WINDOW = 256  # samples per inference chunk at 8 kHz — the Silero window size
@@ -52,6 +56,36 @@ def checked_bytes(path: pathlib.Path, expected_sha256: str) -> bytes:
             "Refusing to generate goldens from an unexpected input."
         )
     return raw
+
+
+def wire_frames(sess, windows) -> list:
+    """Replay 256-sample windows through the VAD sidecar's exact wire contract and
+    return per-frame {index, request_hex, response_hex}.
+
+    This mirrors telephony/silero_http.go byte-for-byte (AATK-8): each request is the
+    64-sample carried context ++ the 256-sample window (= 320 float32) followed by the
+    current [2,1,128] recurrent state (256 float32), all little-endian; each response is
+    the speech probability (1 float32) followed by the new state (256 float32). Context
+    and state are threaded frame-to-frame exactly as the Go detector threads them, both
+    zero at frame 0. So a request is 320*4 + 256*4 = 2304 bytes (4608 hex chars) and a
+    response is 4 + 256*4 = 1028 bytes (2056 hex chars).
+    """
+    names = [o.name for o in sess.get_outputs()]
+    sr = np.array(SAMPLE_RATE, dtype=np.int64)
+    state = np.zeros((2, 1, 128), dtype=np.float32)
+    context = np.zeros(CONTEXT, dtype=np.float32)
+    out = []
+    for i, w in enumerate(windows):
+        w = np.asarray(w, dtype=np.float32)
+        inp = np.concatenate([context, w]).astype(np.float32)  # 320 samples
+        request = inp.astype("<f4").tobytes() + state.astype("<f4").tobytes()
+        d = dict(zip(names, sess.run(None, {"input": inp.reshape(1, CONTEXT + WINDOW), "state": state, "sr": sr})))
+        prob = np.asarray(d["output"], dtype=np.float32).reshape(-1)[:1]
+        state = np.asarray(d["stateN"], dtype=np.float32)
+        context = w[-CONTEXT:].astype(np.float32)
+        response = prob.astype("<f4").tobytes() + state.astype("<f4").tobytes()
+        out.append({"index": i, "request_hex": request.hex(), "response_hex": response.hex()})
+    return out
 
 
 def main() -> None:
@@ -96,6 +130,26 @@ def main() -> None:
     GOLDENS.write_text(json.dumps(doc, indent=0))
     probs = [f["output"] for f in out]
     print(f"wrote {GOLDENS.name}: {len(out)} frames, prob range [{min(probs):.4f}, {max(probs):.4f}]")
+
+    # --- wire fixture (SOP-146) ---------------------------------------------
+    # The byte-exact request/response oracle for the HTTP detector's tests (SOP-147):
+    # a separate file, generated from the same real ONNX Runtime inference, over both
+    # the real-audio (meetings_today) and synthetic (silero_goldens) window sets.
+    synthetic = json.loads(SYNTHETIC.read_text())
+    synthetic_windows = [f["input"] for f in synthetic["frames"]]
+    wire = {
+        "model_sha256": hashlib.sha256(model_raw).hexdigest(),
+        "wire": "request = input(context+window = 320 f32) ++ state(256 f32); "
+        "response = prob(1 f32) ++ stateN(256 f32); little-endian throughout. "
+        "Matches telephony/silero_http.go (AATK-8 320-sample input).",
+        "meetings_today": {"frames": wire_frames(sess, frames)},
+        "synthetic": {"frames": wire_frames(sess, synthetic_windows)},
+    }
+    WIRE_FIXTURE.write_text(json.dumps(wire, indent=0))
+    print(
+        f"wrote {WIRE_FIXTURE.name}: meetings_today={len(wire['meetings_today']['frames'])} "
+        f"synthetic={len(wire['synthetic']['frames'])} frames"
+    )
 
 
 if __name__ == "__main__":
