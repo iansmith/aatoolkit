@@ -184,4 +184,3 @@ func waitForHealthReady(t *testing.T, port int) {
 	}
 	t.Fatalf("%s never answered 200 within timeout", url)
 }
-

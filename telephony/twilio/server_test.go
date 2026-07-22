@@ -23,7 +23,15 @@ var _ http.Handler = (*twilio.Server)(nil)
 // can exercise ServeHTTP's post-signature logic (TwiML shape, From validation).
 func signedWebhookRequest(t *testing.T, authToken, scheme, host string, form url.Values) *http.Request {
 	t.Helper()
-	rawURL := scheme + "://" + host + "/webhook"
+	return signedTwilioRequest(t, authToken, scheme, host, "/webhook", form)
+}
+
+// signedTwilioRequest builds a POST to path whose X-Twilio-Signature is a valid
+// signature over scheme+host+path for authToken, so tests can exercise any
+// webhook handler's post-signature logic.
+func signedTwilioRequest(t *testing.T, authToken, scheme, host, path string, form url.Values) *http.Request {
+	t.Helper()
+	rawURL := scheme + "://" + host + path
 	req := httptest.NewRequest(http.MethodPost, rawURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-Twilio-Signature", computeSig(authToken, rawURL, form))
