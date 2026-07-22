@@ -109,7 +109,10 @@ func runSMSMode(args []string) {
 	fs.Parse(args)
 
 	from := fs.Arg(0)
-	body := strings.Join(fs.Args()[1:], " ")
+	var body string
+	if fs.NArg() > 1 {
+		body = strings.Join(fs.Args()[1:], " ")
+	}
 	if from == "" || body == "" {
 		fmt.Fprintf(os.Stderr, "usage: %s sms [flags] <FROM-e164> <BODY>\n", os.Args[0])
 		fs.PrintDefaults()
