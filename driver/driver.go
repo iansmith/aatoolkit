@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // ---------------------------------------------------------------------------
@@ -328,33 +330,48 @@ func (h *Host) SpeakSync(text []byte, voice string, speed float64) error {
 	return nil
 }
 
-func (h *Host) synthesizeAndPlay(plain, voice string, speed float64) error {
+// SynthesizeWAV fetches synthesized WAV bytes from the TTS server without playing them.
+func (h *Host) SynthesizeWAV(ctx context.Context, text []byte, voice string, speed float64) ([]byte, error) {
 	body, err := json.Marshal(map[string]any{
-		"text":            plain,
+		"text":            string(text),
 		"voice":           voice,
 		"lang":            h.tts.Lang,
 		"speed":           speed,
 		"response_format": h.tts.Format,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, "POST", h.tts.URL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("calling TTS %s: %w", h.tts.URL, err)
+		return nil, fmt.Errorf("calling TTS %s: %w", h.tts.URL, err)
 	}
 	defer resp.Body.Close()
+
 	audio, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("TTS %s: status %d: %.200s", h.tts.URL, resp.StatusCode, audio)
+		return nil, fmt.Errorf("TTS %s: status %d: %.200s", h.tts.URL, resp.StatusCode, audio)
 	}
+
+	return audio, nil
+}
+
+func (h *Host) synthesizeAndPlay(plain, voice string, speed float64) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	audio, err := h.SynthesizeWAV(ctx, []byte(plain), voice, speed)
+	if err != nil {
+		return err
+	}
+
 	return playAudio(audio, h.tts.Format)
 }
 
@@ -416,23 +433,18 @@ func padWAVSilence(wav []byte) []byte {
 	}
 	byteRate := 0
 	dataSizeOff, dataEnd := -1, -1
-	for i := 12; i+8 <= len(wav); {
-		id := string(wav[i : i+4])
-		sz := int(binary.LittleEndian.Uint32(wav[i+4 : i+8]))
-		body := i + 8
+	telephony.WalkWAVChunks(wav, func(id string, body, sz int) bool {
 		switch id {
 		case "fmt ":
 			if body+16 <= len(wav) {
 				byteRate = int(binary.LittleEndian.Uint32(wav[body+8 : body+12]))
 			}
 		case "data":
-			dataSizeOff, dataEnd = i+4, body+sz
+			dataSizeOff, dataEnd = body-4, body+sz
+			return false
 		}
-		if dataEnd >= 0 {
-			break
-		}
-		i = body + sz + (sz & 1)
-	}
+		return true
+	})
 	// dataEnd < dataSizeOff+4 guards a malformed chunk size with the high bit
 	// set (negative sz), which would wrap dataBytes below zero.
 	if byteRate <= 0 || dataSizeOff < 0 || dataEnd < dataSizeOff+4 || dataEnd > len(wav) {
