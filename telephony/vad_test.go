@@ -238,7 +238,7 @@ type fakeDetector struct {
 	resets atomic.Int32
 }
 
-func (f *fakeDetector) Detect(window []float32) (float32, error) {
+func (f *fakeDetector) Detect(_ context.Context, window []float32) (float32, error) {
 	p := float32(0)
 	if f.i < len(f.probs) {
 		p = f.probs[f.i]
