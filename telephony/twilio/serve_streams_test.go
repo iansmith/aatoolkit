@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -471,6 +472,68 @@ func TestServeStreams_StartFirst_StillWorks(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("handler not called within 2s after start frame")
+	}
+}
+
+// --- AATK-19: caller From threaded from the voice webhook to the stream ---
+
+// Frame.From is populated for an authorized voice call whose webhook fired
+// first: ServeHTTP records From keyed by CallSid, and ServeStreams looks it up
+// by the start frame's CallSID before calling HandleStream.
+func TestServeStreams_FromThreadedFromWebhook(t *testing.T) {
+	const from = "+15105550123"
+	s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss"}
+
+	form := url.Values{"From": {from}, "CallSid": {"CA1"}}
+	req := signedWebhookRequest(t, "authtoken", "https", "example.com", form)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("webhook status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+
+	received := make(chan twilio.Frame, 1)
+	s.HandleStream = func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
+		received <- f
+		return nil
+	}
+	srv := streamsServer(t, s)
+	conn := dialStreams(t, srv)
+	sendStart(t, conn, "SS1", "CA1")
+
+	select {
+	case f := <-received:
+		if f.From != from {
+			t.Fatalf("Frame.From = %q, want %q", f.From, from)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler not called within 2s")
+	}
+}
+
+// Adversary gap: Frame.From must be the empty string when no webhook ever
+// recorded the stream's CallSID (unknown/missing case named explicitly in the
+// ticket's Definition of done) — pins the zero-value default, not a panic or
+// a stale value from an unrelated CallSid.
+func TestServeStreams_FromEmptyWhenNoWebhookRecorded(t *testing.T) {
+	s := &twilio.Server{} // no ServeHTTP call ever made for this CallSid
+
+	received := make(chan twilio.Frame, 1)
+	s.HandleStream = func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
+		received <- f
+		return nil
+	}
+	srv := streamsServer(t, s)
+	conn := dialStreams(t, srv)
+	sendStart(t, conn, "SSunknown01", "CAunknown01")
+
+	select {
+	case f := <-received:
+		if f.From != "" {
+			t.Fatalf("Frame.From = %q, want \"\" (no webhook recorded this CallSid)", f.From)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler not called within 2s")
 	}
 }
 
