@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -100,89 +98,6 @@ func TestReplay_Deterministic(t *testing.T) {
 	}
 }
 
-// TestReplay_MatchesProduction is the fidelity gate (ticket SOP-153 DoD:
-// "Replay reproduces a captured call's live-log utterance boundaries at
-// that call's config... without it every number the harness prints is
-// about a pipeline that doesn't exist").
-//
-// The captured .ulaw is testdata/meetings_today.ulaw (SOP-96): a real
-// recording of "Can you show me my meetings today?", already the oracle
-// this package's own TestSileroE2ETimelineGolden (silero_e2e_test.go) pins
-// against a snapshot of the real, unmodified decodeMuLaw -> windower ->
-// sileroDetector.Detect -> vadMachine.step pipeline. That golden
-// (testdata/meetings_today_events.json) records exactly one
-// "end-of-utterance" event (the test reads its window from the golden, not a
-// literal) for this recording at the current default -- i.e. its real "live log" is
-// "one utterance." Replay is called here with no VAD override at all (the
-// real, default NewSileroDetector Session.Start already uses), so this is
-// literally the production VAD+STT path, driven from a byte stream instead
-// of a live WebSocket, with no override to fake anything on the VAD side.
-// This test does not re-derive the boundary independently; it relies on
-// the already-established, separately-tested golden as the oracle and
-// asserts Replay reproduces the *number of utterances* that boundary
-// implies -- exactly one FullPass dispatched, not more (no phantom
-// utterance) and not zero (no dropped utterance).
-func TestReplay_MatchesProduction(t *testing.T) {
-	ulaw, err := os.ReadFile(filepath.Join("testdata", "meetings_today.ulaw"))
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
-
-	sttClient := fixedTextSTTServer(t, "can you show me my meetings today")
-
-	// Generous: this drives the real Silero ONNX model over a 10s
-	// recording, and under -race that inference is measurably (several
-	// times) slower than un-instrumented -- not a hang, just real compute.
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	defer cancel()
-	results, err := telephony.Replay(ctx, "CA-prod-fixture", bytes.NewReader(ulaw), sttClient)
-	if err != nil {
-		t.Fatalf("Replay: %v", err)
-	}
-
-	// Derive the expected FullPass count from the committed golden rather than
-	// hardcoding a count or window: Replay dispatches one FullPass per
-	// end-of-utterance event, so reading the fixture keeps this in lockstep with
-	// the golden across a VAD retune (AATK-4).
-	euWindows := goldenEndOfUtteranceWindows(t)
-	if len(results) != len(euWindows) {
-		t.Fatalf("got %d FullPass results, want %d (golden end-of-utterance windows %v): %+v", len(results), len(euWindows), euWindows, results)
-	}
-	if results[0].Text != "can you show me my meetings today" {
-		t.Errorf("results[0].Text = %q, want the STT stub's canned reply", results[0].Text)
-	}
-}
-
-// goldenEndOfUtteranceWindows reads the committed meetings_today events golden and
-// returns the window index of every end-of-utterance event. Tests derive the
-// expected utterance count (and the boundary they cite) from the fixture instead of
-// hardcoding it, so they never drift out of sync with the golden on a VAD retune.
-// A local anonymous struct is used because the golden type in silero_e2e_test.go
-// lives in package telephony (internal), unreachable from this external test.
-func goldenEndOfUtteranceWindows(t *testing.T) []int {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "meetings_today_events.json"))
-	if err != nil {
-		t.Fatalf("read events golden: %v", err)
-	}
-	var golden struct {
-		Events []struct {
-			WindowIndex int    `json:"window_index"`
-			Kind        string `json:"kind"`
-		} `json:"events"`
-	}
-	if err := json.Unmarshal(raw, &golden); err != nil {
-		t.Fatalf("parse events golden: %v", err)
-	}
-	var windows []int
-	for _, e := range golden.Events {
-		if e.Kind == "end-of-utterance" {
-			windows = append(windows, e.WindowIndex)
-		}
-	}
-	return windows
-}
-
 // fakeReplayDetector is a minimal telephony.VADDetector: speechN windows
 // above SpeechThresh, then silenceN windows below SilenceThresh (and
 // silence forever once probs is exhausted) -- same shape as this package's
@@ -207,7 +122,7 @@ func newFakeReplayDetector(speechN, silenceN int) *fakeReplayDetector {
 	return &fakeReplayDetector{probs: probs}
 }
 
-func (f *fakeReplayDetector) Detect(window []float32) (float32, error) {
+func (f *fakeReplayDetector) Detect(_ context.Context, window []float32) (float32, error) {
 	p := float32(0)
 	if f.i < len(f.probs) {
 		p = f.probs[f.i]

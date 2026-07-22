@@ -497,18 +497,22 @@ func NewSession(ctx context.Context, callSID string, opts ...SessionOption) *Ses
 // It is idempotent: calling it again after the first success is a no-op
 // returning nil.
 //
-// Start constructs the session's vadDetector via its vadFactory (defaulting
-// to the production NewSileroDetector), failing hard: a factory error is
-// returned and nothing is started — no goroutines are spawned, so a caller
-// that gets an error can retry or abandon the session cleanly.
+// Start constructs the session's vadDetector via its vadFactory (required —
+// wired with WithVADFactory; there is no in-process default since SOP-147),
+// failing hard: a missing factory or a factory error is returned and nothing is
+// started — no goroutines are spawned, so a caller that gets an error can retry
+// or abandon the session cleanly.
 func (s *Session) Start() error {
 	if s.started {
 		return nil
 	}
 
+	// VAD runs out-of-process in the sidecar (SOP-147 retired the in-process
+	// ONNX detector), so there is no self-contained default: a consumer must
+	// wire a detector via WithVADFactory (e.g. NewVADClient(url).Detector()).
 	factory := s.vadFactory
 	if factory == nil {
-		factory = NewSileroDetector
+		return fmt.Errorf("Session.Start: no VAD factory wired — pass WithVADFactory (e.g. telephony.NewVADClient(url).Detector())")
 	}
 	det, err := factory()
 	if err != nil {
