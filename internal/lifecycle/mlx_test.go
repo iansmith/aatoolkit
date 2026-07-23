@@ -27,6 +27,29 @@ func TestMLXArgs_BuildsExpectedCommand(t *testing.T) {
 	}
 }
 
+func TestMLXArgs_AppendsDraftModelWhenSet(t *testing.T) {
+	s := config.Server{
+		Name:       "chat-llm",
+		Type:       config.TypeMLX,
+		Host:       "127.0.0.1",
+		Port:       1234,
+		Model:      "mlx-community/gemma-4-31b-it-8bit",
+		DraftModel: "mlx-community/gemma-4-2b-it-4bit",
+	}
+
+	_, args := MLXCommand(s)
+
+	want := []string{
+		"serve", "mlx-community/gemma-4-31b-it-8bit",
+		"--host", "127.0.0.1",
+		"--port", "1234",
+		"--draft-model", "mlx-community/gemma-4-2b-it-4bit",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("expected args %v, got %v", want, args)
+	}
+}
+
 func TestMLXArgs_NoAutoFlagsBeyondHostPort(t *testing.T) {
 	s := config.Server{
 		Name:  "code-llm",
