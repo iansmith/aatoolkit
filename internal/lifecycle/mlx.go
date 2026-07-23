@@ -9,10 +9,11 @@ import (
 // MLXCommand builds the mlx-serve invocation for s, per
 // design/aa-server-status.md §4:
 //
-//	mlx-serve serve <model> --host <host> --port <port> [--draft-model <model>]
+//	mlx-serve serve <model> --host <host> --port <port> [--drafter <path>]
 //
-// host/port are auto-appended; --draft-model is appended only when
-// s.DraftModel is set (speculative decoding). No other flags are added.
+// host/port are auto-appended; --drafter is appended only when s.Drafter is
+// set (Gemma-4-style assistant-checkpoint speculative decoding). No other
+// flags are added.
 func MLXCommand(s config.Server) (command string, args []string) {
 	args = []string{
 		"serve",
@@ -20,8 +21,8 @@ func MLXCommand(s config.Server) (command string, args []string) {
 		"--host", s.Host,
 		"--port", strconv.Itoa(s.Port),
 	}
-	if s.DraftModel != "" {
-		args = append(args, "--draft-model", s.DraftModel)
+	if s.Drafter != "" {
+		args = append(args, "--drafter", s.Drafter)
 	}
 	return "mlx-serve", args
 }

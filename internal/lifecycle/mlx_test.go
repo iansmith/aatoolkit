@@ -27,14 +27,14 @@ func TestMLXArgs_BuildsExpectedCommand(t *testing.T) {
 	}
 }
 
-func TestMLXArgs_AppendsDraftModelWhenSet(t *testing.T) {
+func TestMLXArgs_AppendsDrafterWhenSet(t *testing.T) {
 	s := config.Server{
-		Name:       "chat-llm",
-		Type:       config.TypeMLX,
-		Host:       "127.0.0.1",
-		Port:       1234,
-		Model:      "mlx-community/gemma-4-31b-it-8bit",
-		DraftModel: "mlx-community/gemma-4-2b-it-4bit",
+		Name:    "chat-llm",
+		Type:    config.TypeMLX,
+		Host:    "127.0.0.1",
+		Port:    1234,
+		Model:   "mlx-community/gemma-4-31b-it-8bit",
+		Drafter: "mlx-community/gemma-4-31B-it-assistant-bf16",
 	}
 
 	_, args := MLXCommand(s)
@@ -43,7 +43,7 @@ func TestMLXArgs_AppendsDraftModelWhenSet(t *testing.T) {
 		"serve", "mlx-community/gemma-4-31b-it-8bit",
 		"--host", "127.0.0.1",
 		"--port", "1234",
-		"--draft-model", "mlx-community/gemma-4-2b-it-4bit",
+		"--drafter", "mlx-community/gemma-4-31B-it-assistant-bf16",
 	}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("expected args %v, got %v", want, args)

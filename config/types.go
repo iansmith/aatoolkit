@@ -171,11 +171,14 @@ type Server struct {
 	// mlx
 	Model string `toml:"model"`
 
-	// mlx, optional: a smaller draft model for speculative decoding
-	// (mlx-serve's --draft-model). Empty (the zero value) means "no
-	// speculative decoding" — MLXCommand appends no draft-model flag, the
-	// launch invocation is unchanged from before this field existed.
-	DraftModel string `toml:"draft_model"`
+	// mlx, optional: a Gemma-4-style assistant drafter checkpoint path for
+	// speculative decoding (mlx-serve's --drafter DIR|none — see
+	// https://github.com/ddalcu/mlx-serve). Empty (the zero value) means
+	// "no drafter" — MLXCommand appends no --drafter flag, the launch
+	// invocation is unchanged from before this field existed. mlx-serve's
+	// model-agnostic PLD speculative decoding runs regardless of this
+	// field (it's on by default, unrelated to --drafter).
+	Drafter string `toml:"drafter"`
 
 	// python
 	Venv     string   `toml:"venv"`
