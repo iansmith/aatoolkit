@@ -69,6 +69,7 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 
 	dataIn := telephony.NewBufferedChan[[]byte](telephony.ComputeDepth(telephony.DataPlaneBufferMS, telephony.MuLawFrameMS))
 	controlIn := telephony.NewBufferedChan[telephony.ControlEvent](controlPlaneDepth)
+	responseIn := telephony.NewBufferedChan[telephony.ResponseEvent](4)
 
 	// The tap and the decision recorder both write files into the capture dir
 	// but neither creates it, so make it once here (before either is wired) --
@@ -95,6 +96,7 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	opts := []telephony.SessionOption{
 		telephony.WithTwilioDataInput(dataIn),
 		telephony.WithTwilioControlInput(controlIn),
+		telephony.WithResponseInput(responseIn),
 		telephony.WithTwilioDataOutput(dataOut),
 		telephony.WithTwilioControlOutput(NewControlPlaneOutput(conn, start.StreamSID)),
 		telephony.WithCloseFunc(func() {
@@ -127,7 +129,7 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	replyRouter, ok := ctx.Value(replyRouterKey).(*telephony.ReplyRouter)
 	var replySink *telephony.ReplySink
 	if ok && replyRouter != nil {
-		replySink = replyRouter.Register(start.CallSID, dataOut)
+		replySink = replyRouter.Register(start.CallSID, responseIn)
 	}
 
 	// The data and control pumps terminate differently at teardown.

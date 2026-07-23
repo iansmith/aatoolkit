@@ -43,6 +43,10 @@ const MaxTurnMS = 60000
 // Observable behavior #4).
 const MarkEchoGraceMS = 500
 
+// MaxResponseMS caps how long the session waits for a response to become
+// available before playing the farewell clip and terminating.
+const MaxResponseMS = 45000
+
 // MarkEchoTimeout derives how long to wait for Twilio's mark-echo after
 // sending the farewell clip: the clip's own playout duration (μ-law is 1
 // byte/sample at SampleRateHz) plus MarkEchoGraceMS. Genuinely derived from
@@ -71,7 +75,8 @@ const (
 	StateIdle SessionState = iota
 	StateListening
 	StateAwaitingFullResult
-	StateSpeaking
+	StateAwaitingResponse
+	StateAwaitingResponsePlayout
 	StateTerminating
 	StateAwaitingMarkEcho
 	StateClosed
@@ -85,7 +90,8 @@ var AllStates = []SessionState{
 	StateIdle,
 	StateListening,
 	StateAwaitingFullResult,
-	StateSpeaking,
+	StateAwaitingResponse,
+	StateAwaitingResponsePlayout,
 	StateTerminating,
 	StateAwaitingMarkEcho,
 	StateClosed,
@@ -108,8 +114,10 @@ func (s SessionState) String() string {
 		return "Listening"
 	case StateAwaitingFullResult:
 		return "AwaitingFullResult"
-	case StateSpeaking:
-		return "Speaking"
+	case StateAwaitingResponse:
+		return "AwaitingResponse"
+	case StateAwaitingResponsePlayout:
+		return "AwaitingResponsePlayout"
 	case StateTerminating:
 		return "Terminating"
 	case StateAwaitingMarkEcho:
@@ -152,6 +160,8 @@ var AllSources = []InputSource{
 	SourceUtteranceTimer,
 	SourceSimTurnTimer,
 	SourceTurnTimer,
+	SourceResponseReady,
+	SourceResponseTimer,
 }
 
 func (s InputSource) String() string {
@@ -283,20 +293,21 @@ func buildTransitionTable() transitionTable {
 	t[StateAwaitingFullResult][SourceVADEvent] = withSpeechReset(handleAwaitingFullResultVADEvent)
 	t[StateAwaitingFullResult][SourceSTTResult] = handleSTTResult
 
-	// StateSpeaking: playing the thinking bed during sim-turn (SOP-157).
-	// VAD events are absorbed UNwrapped by withSpeechReset (PRD D4.5): a real
-	// barge-in must not be routed through handleSpeechOnset/completeTurn --
-	// that would arm the utterance timer and flip turnActive back to true
-	// mid-bed, which is exactly the "handling" the ticket says barge-in must
-	// not get here. Twilio data and control events are absorbed (no further
-	// changes). When the sim-turn timer fires, return to Listening.
-	t[StateSpeaking][SourceTwilioData] = handleDataFrame
-	t[StateSpeaking][SourceTwilioControl] = handleControlEvent
-	t[StateSpeaking][SourceVADEvent] = handleUnexpected
-	t[StateSpeaking][SourceSTTResult] = handleSTTResult
-	t[StateSpeaking][SourceSimTurnTimer] = handleSimTurnTimeout
-	// Idle/utterance timers are cancelled during speaking, so they won't fire.
-	// If they somehow do (stale timer), absorb with handleUnexpected (already set).
+	// StateAwaitingResponse: waiting for a response (ok or failed) after turn completion.
+	// SourceResponseReady delivers the response event. SourceResponseTimer fires
+	// if no response arrives within MaxResponseMS. All other sources are unexpected.
+	t[StateAwaitingResponse][SourceResponseReady] = handleResponseReady
+	t[StateAwaitingResponse][SourceResponseTimer] = handleResponseTimeout
+
+	// StateAwaitingResponsePlayout: playing the response audio. Control-plane mark
+	// echoes for the response mark resume listening. The backstop timer (mark-echo
+	// timeout derived from response frame length) also resumes listening. Inbound
+	// media (data, VAD, STT) is expected teardown traffic and is absorbed.
+	t[StateAwaitingResponsePlayout][SourceTwilioData] = handleAbsorb
+	t[StateAwaitingResponsePlayout][SourceTwilioControl] = handleResponsePlayoutControlEvent
+	t[StateAwaitingResponsePlayout][SourceVADEvent] = handleAbsorb
+	t[StateAwaitingResponsePlayout][SourceSTTResult] = handleAbsorb
+	t[StateAwaitingResponsePlayout][SourceMarkEchoTimer] = handleResponsePlayoutBackstop
 
 	// Closed: terminal. Every source is absorbed with no state change.
 	for _, src := range AllSources {
@@ -420,7 +431,7 @@ func withSpeechReset(h transitionHandler) transitionHandler {
 				}
 				s.recordTurnEnd(vev)
 				s.completeTurn(TriggerSilenceTurnEnd)
-				return s.sendBedAndEnterSpeaking()
+				return s.enterAwaitingResponse()
 			}
 		}
 		return h(s, ev)
@@ -550,7 +561,7 @@ func handleSTTResult(s *Session, ev transitionEvent) SessionState {
 
 	if res.Kind == FullPass && s.State() == StateAwaitingFullResult {
 		if turnCompleted {
-			return s.sendBedAndEnterSpeaking()
+			return s.enterAwaitingResponse()
 		}
 		return StateListening
 	}
@@ -585,6 +596,51 @@ func handleTurnTimeout(s *Session, ev transitionEvent) SessionState {
 	log.Printf("telephony: session %s: max-turn cap reached, forcing stop", s.CallSID)
 	s.completeTurn(TriggerTurnCap)
 	return s.terminateWithClip(assets.AudioForcedStopULaw)
+}
+
+// handleResponseReady handles an incoming response in StateAwaitingResponse.
+// An ok response sends clear, frames, and response mark, then enters playout.
+// A failed response sends clear only and returns to listening.
+func handleResponseReady(s *Session, ev transitionEvent) SessionState {
+	respEv, _ := ev.payload.(ResponseEvent)
+	if !respEv.OK {
+		// Failed response: send clear and return to listening
+		s.sendClear()
+		s.armIdleTimer()
+		return StateListening
+	}
+
+	// Ok response: send clear, frames, mark
+	s.cancelResponseTimer()
+	s.sendClear()
+	s.sendResponseFrames(respEv.Frames)
+	s.sendResponseMark(respEv.Frames)
+	return StateAwaitingResponsePlayout
+}
+
+// handleResponseTimeout handles response cap expiry (no response within MaxResponseMS).
+func handleResponseTimeout(s *Session, ev transitionEvent) SessionState {
+	log.Printf("telephony: session %s: response cap reached, playing farewell", s.CallSID)
+	s.completeTurn(TriggerResponseCap)
+	return s.terminateWithClip(assets.FarewellULaw)
+}
+
+// handleResponsePlayoutBackstop handles the backstop timeout or mark echo in
+// StateAwaitingResponsePlayout, resuming listening with idle timer armed.
+func handleResponsePlayoutBackstop(s *Session, ev transitionEvent) SessionState {
+	s.cancelMarkEchoTimer()
+	s.armIdleTimer()
+	return StateListening
+}
+
+// handleResponsePlayoutControlEvent handles control events in StateAwaitingResponsePlayout.
+// A mark echo with MarkName == "response" resumes listening; anything else is unexpected.
+func handleResponsePlayoutControlEvent(s *Session, ev transitionEvent) SessionState {
+	cev, _ := ev.payload.(ControlEvent)
+	if cev.Kind == controlKindMark && cev.MarkName == responseMarkName {
+		return handleResponsePlayoutBackstop(s, ev)
+	}
+	return handleUnexpected(s, ev)
 }
 
 // onUtteranceEnd is the end-of-utterance bookkeeping shared by every path a

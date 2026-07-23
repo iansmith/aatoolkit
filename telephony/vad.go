@@ -25,6 +25,7 @@ const (
 	TriggerIdleTimeout    TurnTrigger = "idle-timeout"
 	TriggerUtteranceCap   TurnTrigger = "utterance-cap"
 	TriggerTurnCap        TurnTrigger = "turn-cap"
+	TriggerResponseCap    TurnTrigger = "response-cap"
 	TriggerCallEnd        TurnTrigger = "call-end"
 )
 
