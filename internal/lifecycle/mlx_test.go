@@ -1,6 +1,8 @@
 package lifecycle
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -28,25 +30,61 @@ func TestMLXArgs_BuildsExpectedCommand(t *testing.T) {
 }
 
 func TestMLXArgs_AppendsDrafterWhenSet(t *testing.T) {
+	// Names deliberately won't match any real cached directory on any
+	// machine, so this test deterministically exercises the pass-through
+	// branch (no matching local cache -> use the name as given) regardless
+	// of what happens to be downloaded on the machine running the test.
 	s := config.Server{
 		Name:    "chat-llm",
 		Type:    config.TypeMLX,
 		Host:    "127.0.0.1",
 		Port:    1234,
-		Model:   "mlx-community/gemma-4-31b-it-8bit",
-		Drafter: "mlx-community/gemma-4-31B-it-assistant-bf16",
+		Model:   "test-org/not-a-real-cached-model-xyz",
+		Drafter: "test-org/not-a-real-cached-drafter-xyz",
 	}
 
 	_, args := MLXCommand(s)
 
 	want := []string{
-		"serve", "mlx-community/gemma-4-31b-it-8bit",
+		"serve", "test-org/not-a-real-cached-model-xyz",
 		"--host", "127.0.0.1",
 		"--port", "1234",
-		"--drafter", "mlx-community/gemma-4-31B-it-assistant-bf16",
+		"--drafter", "test-org/not-a-real-cached-drafter-xyz",
 	}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("expected args %v, got %v", want, args)
+	}
+}
+
+func TestResolveMLXModelPath_ExpandsWhenCachedDirExists(t *testing.T) {
+	root := t.TempDir()
+	cached := filepath.Join(root, "mlx-community", "gemma-4-31B-it-assistant-bf16")
+	if err := os.MkdirAll(cached, 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	got := resolveMLXModelPath(root, "mlx-community/gemma-4-31B-it-assistant-bf16")
+	if got != cached {
+		t.Fatalf("expected resolved path %q, got %q", cached, got)
+	}
+}
+
+func TestResolveMLXModelPath_PassesThroughWhenNotCached(t *testing.T) {
+	root := t.TempDir()
+
+	got := resolveMLXModelPath(root, "mlx-community/never-pulled-model")
+	if got != "mlx-community/never-pulled-model" {
+		t.Fatalf("expected unchanged name, got %q", got)
+	}
+}
+
+func TestResolveMLXModelPath_PassesThroughAbsolutePaths(t *testing.T) {
+	root := t.TempDir()
+	abs := filepath.Join(root, "already", "a", "full", "path")
+
+	got := resolveMLXModelPath(root, abs)
+	if got != abs {
+		t.Fatalf("expected absolute path unchanged, got %q", got)
 	}
 }
 
