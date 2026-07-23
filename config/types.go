@@ -171,6 +171,12 @@ type Server struct {
 	// mlx
 	Model string `toml:"model"`
 
+	// mlx, optional: a smaller draft model for speculative decoding
+	// (mlx-serve's --draft-model). Empty (the zero value) means "no
+	// speculative decoding" — MLXCommand appends no draft-model flag, the
+	// launch invocation is unchanged from before this field existed.
+	DraftModel string `toml:"draft_model"`
+
 	// python
 	Venv     string   `toml:"venv"`
 	Entry    string   `toml:"entry"`
