@@ -16,6 +16,7 @@ type fakeEngine struct {
 	teardownReturn []string
 	downCalls      []string
 	upCalls        []string
+	bounceCalls    []string
 	deadCalls      []string
 	buildCalls     []string
 	logsCalls      []string
@@ -48,6 +49,14 @@ func (f *fakeEngine) Up(name string) error {
 
 func (f *fakeEngine) Down(name string) error {
 	f.downCalls = append(f.downCalls, name)
+	if f.failNotImplemented {
+		return fmt.Errorf("not implemented: lifecycle engine lands in SOP-11")
+	}
+	return nil
+}
+
+func (f *fakeEngine) Bounce(name string) error {
+	f.bounceCalls = append(f.bounceCalls, name)
 	if f.failNotImplemented {
 		return fmt.Errorf("not implemented: lifecycle engine lands in SOP-11")
 	}
@@ -533,5 +542,37 @@ func TestRun_HelpMentionsView(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "view") {
 		t.Fatalf("expected help text to mention 'view', got:\n%s", out.String())
+	}
+}
+
+// --- bounce (AATK-28) -----------------------------------------------------
+
+// TestDispatch_Bounce_CallsEngineBounce pins where the composition lives: the
+// REPL dispatch layer forwards "<name> bounce" to Engine.Bounce and nothing
+// else. A dispatch that "helpfully" called Down then Up itself would satisfy
+// the user-visible behavior while putting the composition in the wrong layer
+// — and would silently stop inheriting whatever Up grows later.
+func TestDispatch_Bounce_CallsEngineBounce(t *testing.T) {
+	eng := &fakeEngine{}
+	var out strings.Builder
+
+	dispatch(&out, eng, Command{Verb: VerbBounce, Target: "myserver"})
+
+	if len(eng.bounceCalls) != 1 || eng.bounceCalls[0] != "myserver" {
+		t.Fatalf("expected exactly one Bounce(\"myserver\") call, got %v", eng.bounceCalls)
+	}
+	if len(eng.downCalls) != 0 || len(eng.upCalls) != 0 {
+		t.Fatalf("expected the REPL to delegate composition to the engine, but it called Down=%v Up=%v itself", eng.downCalls, eng.upCalls)
+	}
+}
+
+// TestPrintHelp_ListsBounce pins the ticket's Definition-of-Done item that a
+// verb users cannot discover is a verb that does not exist for them.
+func TestPrintHelp_ListsBounce(t *testing.T) {
+	var out strings.Builder
+	printHelp(&out)
+
+	if !strings.Contains(out.String(), "bounce") {
+		t.Fatalf("expected help output to list the bounce verb, got:\n%s", out.String())
 	}
 }

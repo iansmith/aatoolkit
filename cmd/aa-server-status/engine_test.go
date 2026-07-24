@@ -662,3 +662,123 @@ func TestUp_SingleServerFailure_StillPrintsTailHint(t *testing.T) {
 		t.Fatalf("a failed server's log must be in the hint, got: %q", hint)
 	}
 }
+
+// --- bounce (AATK-28) -----------------------------------------------------
+
+// TestRealEngine_Bounce_UpServer_RestartsWithNewPID pins the core contract:
+// bouncing a healthy server is a real teardown + relaunch, not a no-op. A
+// changed PID is the only proof of that which cannot be faked by an
+// implementation that merely re-runs the health check; the new process must
+// also clear the same readiness gate a normal Up requires.
+func TestRealEngine_Bounce_UpServer_RestartsWithNewPID(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
+	}
+	eng := NewEngine(cfg)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error: %v", err)
+	}
+	before := eng.Status()[0]
+	if before.PID == 0 {
+		t.Fatalf("expected a live PID before bounce, got %+v", before)
+	}
+
+	if err := eng.Bounce("svc"); err != nil {
+		t.Fatalf("Bounce(\"svc\") error: %v", err)
+	}
+
+	after := eng.Status()[0]
+	if after.State != StateUp {
+		t.Fatalf("expected server up after bounce, got state %q (%+v)", after.State, after)
+	}
+	if after.PID == 0 {
+		t.Fatalf("expected a non-zero PID after bounce, got %+v", after)
+	}
+	if after.PID == before.PID {
+		t.Fatalf("expected bounce to relaunch with a NEW pid (proof of a real down+up, not a no-op), got %d both times", before.PID)
+	}
+}
+
+// TestRealEngine_Bounce_DownServer_IsSynonymForUp pins Observable behavior 2:
+// bounce on an already-down server is not an error case needing its own
+// branch in Bounce — it falls out of composing Down (a no-op when nothing is
+// running) with Up. The end state must be indistinguishable from a plain Up
+// from the same starting point.
+func TestRealEngine_Bounce_DownServer_IsSynonymForUp(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
+	}
+	eng := NewEngine(cfg)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	// Never brought up — Down's half of the bounce has nothing to tear down.
+	if err := eng.Bounce("svc"); err != nil {
+		t.Fatalf("Bounce(\"svc\") on a down server must not error (it is a synonym for up), got: %v", err)
+	}
+
+	status := eng.Status()[0]
+	if status.State != StateUp {
+		t.Fatalf("expected server up after bouncing a down server, got state %q (%+v)", status.State, status)
+	}
+	if status.PID == 0 {
+		t.Fatalf("expected a non-zero PID after bouncing a down server, got %+v", status)
+	}
+}
+
+// TestRealEngine_Bounce_DownFailureDoesNotAttemptUp pins Observable behavior 4's
+// fail-fast half: a teardown that cannot be verified clean must abort the
+// bounce, never launch on top of it.
+//
+// The teardown failure is injected exactly the way teardown.go's own
+// failure-path tests do it (TestTeardown_SurvivorAfterKill_IsLoudError):
+// a declared port held by an INDEPENDENT process outside the torn-down
+// group keeps portsFree false forever, so verify returns a loud
+// "still listening" error no matter what the kill achieved.
+//
+// Proving Up was never *attempted* needs more than "no new process": Up
+// would fail here too (checkPortConflict refuses a foreign-held port), so
+// the absence of a process is consistent with either ordering. Up's failure
+// path always writes to os.Stdout (printTailHint), so silent stdout is the
+// unambiguous discriminator.
+func TestRealEngine_Bounce_DownFailureDoesNotAttemptUp(t *testing.T) {
+	portA := freeTestPort(t)
+	portB := freeTestPort(t)
+
+	s := tdlistenerServer(t, "svc", portA, true)
+	// Both ports are declared, so teardown must verify both are free.
+	s.Listens = []int{portA, portB}
+
+	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}
+	eng := NewEngine(cfg)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	// portA's holder is what observedRunningPID finds and hands to teardown.
+	spawnForeignListener(t, portA)
+	// portB's holder is independent of that group and survives the kill,
+	// so the post-kill verification can never come back clean.
+	spawnForeignListener(t, portB)
+
+	var bounceErr error
+	stdout := captureStdout(t, func() {
+		bounceErr = eng.Bounce("svc")
+	})
+
+	if bounceErr == nil {
+		t.Fatalf("expected Bounce to report the teardown failure rather than swallowing it")
+	}
+	if !strings.Contains(bounceErr.Error(), "still listening") {
+		t.Fatalf("expected the surfaced error to be the teardown verification failure, got: %v", bounceErr)
+	}
+	if stdout != "" {
+		t.Fatalf("expected Up to never be attempted after a failed Down — Up's failure path always prints to stdout, but got: %q", stdout)
+	}
+	if pid := eng.Status()[0].PID; pid != 0 {
+		t.Fatalf("expected no server of ours running after a failed bounce, got pid %d", pid)
+	}
+}

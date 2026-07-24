@@ -20,6 +20,7 @@ const (
 	VerbKill
 	VerbCommand
 	VerbView
+	VerbBounce
 	VerbQuit
 	VerbExit
 	VerbBye

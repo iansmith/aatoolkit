@@ -291,3 +291,17 @@ func TestParseCommand_ViewWithExtraTokensIsError(t *testing.T) {
 		t.Fatal("expected error for too many tokens after view nowrap")
 	}
 }
+
+// --- bounce (AATK-28) -----------------------------------------------------
+
+// TestParseCommand_PerServerBounce pins bounce as a per-server verb in the
+// existing two-token "<name> <verb>" grammar.
+func TestParseCommand_PerServerBounce(t *testing.T) {
+	cmd, err := ParseCommand("myserver bounce")
+	if err != nil {
+		t.Fatalf("ParseCommand(\"myserver bounce\"): unexpected error: %v", err)
+	}
+	if cmd.Verb != VerbBounce || cmd.Target != "myserver" {
+		t.Fatalf("ParseCommand(\"myserver bounce\") = %+v, want verb=VerbBounce target=\"myserver\"", cmd)
+	}
+}

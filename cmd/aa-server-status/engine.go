@@ -705,6 +705,10 @@ func (e *RealEngine) Dead(name string) error {
 	return e.downOrDead(name, true)
 }
 
+func (e *RealEngine) Bounce(name string) error {
+	return fmt.Errorf("not implemented: bounce lands in AATK-28")
+}
+
 func (e *RealEngine) downOrDead(name string, killStrays bool) error {
 	if name != "" {
 		if _, ok := e.serverByName(name); !ok {
