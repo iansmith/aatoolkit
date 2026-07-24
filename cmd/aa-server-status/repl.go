@@ -18,36 +18,56 @@ const prompt = "aa-server-status> "
 // Run never returns a non-nil error for normal REPL operation (bad
 // commands and stub "not implemented" verb errors are printed to out, not
 // returned) — a non-nil error return is reserved for I/O failures on in.
-func Run(in io.Reader, out io.Writer, engine Engine) error {
+//
+// in is the caller's ALREADY-BUFFERED stdin, shared with the engine's
+// [server.prompt] path rather than wrapped again here. That sharing is the
+// whole point (AATK-29): a second buffer over the same stream reads ahead of
+// the first, so a prompt answer and the next command end up in whichever
+// buffer happened to grab them. One reader, one buffer, no race for input.
+func Run(in *bufio.Reader, out io.Writer, engine Engine) error {
 	// Before the first prompt, so the table on entry reflects the config as
 	// it is on disk right now — not as it was when main loaded it.
 	engine.ReloadConfigIfChanged(out)
 	printStatus(out, engine.Status())
 
-	scanner := bufio.NewScanner(in)
 	for {
 		fmt.Fprint(out, prompt)
-		if !scanner.Scan() {
+
+		// ReadString returns a final line lacking its newline TOGETHER with
+		// io.EOF, unlike Scanner which yielded the token first and reported
+		// EOF on the next call. Dispatching only on err == nil would silently
+		// drop that last command.
+		line, err := in.ReadString('\n')
+		if err != nil && line == "" {
 			teardown(out, engine)
-			return scanner.Err()
+			if err == io.EOF {
+				return nil
+			}
+			return err
 		}
+		lastLine := err != nil
 
-		line := scanner.Text()
-		cmd, err := ParseCommand(line)
-		if err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
-			continue
-		}
-
-		if isExitVerb(cmd.Verb) {
+		cmd, parseErr := ParseCommand(strings.TrimRight(line, "\r\n"))
+		switch {
+		case parseErr != nil:
+			fmt.Fprintf(out, "error: %v\n", parseErr)
+		case isExitVerb(cmd.Verb):
 			teardown(out, engine)
 			return nil
+		default:
+			// Before dispatch, not after: the command about to run is the one
+			// that should see the operator's latest edit.
+			engine.ReloadConfigIfChanged(out)
+			dispatch(out, engine, cmd)
 		}
 
-		// Before dispatch, not after: the command about to run is the one
-		// that should see the operator's latest edit.
-		engine.ReloadConfigIfChanged(out)
-		dispatch(out, engine, cmd)
+		if lastLine {
+			teardown(out, engine)
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
 	}
 }
 

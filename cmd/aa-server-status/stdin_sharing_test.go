@@ -38,11 +38,12 @@ func TestRun_PromptAnswerAndNextCommandShareOneStdin(t *testing.T) {
 	}
 
 	in := oneStdin("svc up\ny\nstatus\nquit\n")
-	var out strings.Builder
-	eng := NewEngine(cfg, in, &out)
+	out := &launchSnapshotWriter{}
+	eng := NewEngine(cfg, in, out)
+	out.snap = func() []string { return launchedArgsOrNil(eng, "svc") }
 	t.Cleanup(func() { eng.TeardownAll() })
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(in, out, eng); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -54,7 +55,7 @@ func TestRun_PromptAnswerAndNextCommandShareOneStdin(t *testing.T) {
 		t.Fatalf("the prompt answer leaked into the REPL and was dispatched as a command:\n%s", got)
 	}
 
-	args := strings.Join(launchedArgs(t, eng, "svc"), " ")
+	args := strings.Join(out.argsAtLaunch, " ")
 	if !strings.Contains(args, "-ignore-term") {
 		t.Fatalf("expected the prompt to have consumed \"y\" and taken the yes branch, got args %q", args)
 	}
@@ -81,11 +82,12 @@ func TestRun_PastedInputDoesNotMisrouteAnswer(t *testing.T) {
 	}
 
 	in := oneStdin("svc up\ny\nquit\n")
-	var out strings.Builder
-	eng := NewEngine(cfg, in, &out)
+	out := &launchSnapshotWriter{}
+	eng := NewEngine(cfg, in, out)
+	out.snap = func() []string { return launchedArgsOrNil(eng, "svc") }
 	t.Cleanup(func() { eng.TeardownAll() })
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(in, out, eng); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -93,7 +95,7 @@ func TestRun_PastedInputDoesNotMisrouteAnswer(t *testing.T) {
 	if strings.Contains(got, "reading answer") {
 		t.Fatalf("the prompt hit EOF because the REPL had already buffered the answer:\n%s", got)
 	}
-	if args := strings.Join(launchedArgs(t, eng, "svc"), " "); !strings.Contains(args, "-ignore-term") {
+	if args := strings.Join(out.argsAtLaunch, " "); !strings.Contains(args, "-ignore-term") {
 		t.Fatalf("expected the pasted \"y\" to reach the prompt, got args %q", args)
 	}
 	// "quit" must have been dispatched as a command, which is the only path
@@ -101,4 +103,39 @@ func TestRun_PastedInputDoesNotMisrouteAnswer(t *testing.T) {
 	if !strings.Contains(got, "tearing down") {
 		t.Fatalf("expected the pasted 'quit' to dispatch and tear down, got:\n%s", got)
 	}
+}
+
+// launchSnapshotWriter is the REPL's output sink, which also freezes the
+// launched process's argv the first time one exists.
+//
+// The snapshot has to happen mid-run: this script ends with "quit", so by the
+// time Run returns, TeardownAll has already cleared the process registry and
+// the argv is unrecoverable. Reading it afterwards is what the first version
+// of this test got wrong.
+type launchSnapshotWriter struct {
+	buf          strings.Builder
+	snap         func() []string
+	argsAtLaunch []string
+}
+
+func (w *launchSnapshotWriter) Write(p []byte) (int, error) {
+	n, err := w.buf.Write(p)
+	if w.argsAtLaunch == nil && w.snap != nil {
+		w.argsAtLaunch = w.snap()
+	}
+	return n, err
+}
+
+func (w *launchSnapshotWriter) String() string { return w.buf.String() }
+
+// launchedArgsOrNil is launchedArgs without the t.Fatalf — the snapshot writer
+// polls speculatively and a not-yet-launched server is the expected case, not
+// a failure.
+func launchedArgsOrNil(eng *RealEngine, name string) []string {
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	if proc, ok := eng.procs[name]; ok {
+		return proc.Cmd.Args
+	}
+	return nil
 }
