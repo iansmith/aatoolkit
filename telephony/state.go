@@ -164,8 +164,9 @@ const (
 	SourceResponseReady
 	SourceResponseTimer
 	SourceTurnTimer
+	SourceBedTick
 
-	numSources = int(SourceTurnTimer) + 1
+	numSources = int(SourceBedTick) + 1
 )
 
 // AllSources enumerates every InputSource, in declaration order. Used by
@@ -181,6 +182,7 @@ var AllSources = []InputSource{
 	SourceResponseReady,
 	SourceResponseTimer,
 	SourceTurnTimer,
+	SourceBedTick,
 }
 
 func (s InputSource) String() string {
@@ -205,6 +207,8 @@ func (s InputSource) String() string {
 		return "ResponseTimer"
 	case SourceTurnTimer:
 		return "TurnTimer"
+	case SourceBedTick:
+		return "BedTick"
 	default:
 		return fmt.Sprintf("InputSource(%d)", int(s))
 	}
@@ -330,6 +334,7 @@ func buildTransitionTable() transitionTable {
 	t[StateAwaitingResponse][SourceSTTResult] = handleSTTResult
 	t[StateAwaitingResponse][SourceResponseReady] = handleResponseReady
 	t[StateAwaitingResponse][SourceResponseTimer] = handleResponseTimeout
+	t[StateAwaitingResponse][SourceBedTick] = handleBedTick
 
 	// StateAwaitingResponsePlayout: the response is playing out; waiting for
 	// Twilio's mark echo (or its derived backstop) before returning to
@@ -646,7 +651,8 @@ func (s *Session) onUtteranceEnd() {
 }
 
 // handleResponseReady covers StateAwaitingResponse's SourceResponseReady row:
-// both outcomes cancel timerResponse and send "clear" first, flushing
+// both outcomes cancel timerResponse and the bed-tick timer (AATK-25 -- no
+// bed chunk may survive the "clear" below) and send "clear" first, flushing
 // anything Twilio may still be playing. An ok event then writes the response
 // frames and mark, and moves to StateAwaitingResponsePlayout; a failed event
 // writes nothing further and returns straight to Listening with the idle
@@ -654,6 +660,7 @@ func (s *Session) onUtteranceEnd() {
 func handleResponseReady(s *Session, ev transitionEvent) SessionState {
 	rev, _ := ev.payload.(ResponseEvent)
 	s.cancelResponseTimer()
+	s.cancelBedTimer()
 	s.sendControlClear()
 	if !rev.OK {
 		s.armIdleTimer()
@@ -666,11 +673,26 @@ func handleResponseReady(s *Session, ev transitionEvent) SessionState {
 
 // handleResponseTimeout runs when timerResponse expires with no response
 // event ever arriving: same exit as idle timeout -- play the farewell clip
-// and terminate through the mark-echo flow, recording the cap decision.
+// and terminate through the mark-echo flow, recording the cap decision. The
+// bed-tick timer is cancelled first (AATK-25) so no further bed chunk races
+// the farewell clip onto dataOut.
 func handleResponseTimeout(s *Session, ev transitionEvent) SessionState {
 	log.Printf("telephony: session %s: response cap reached, no response arrived", s.CallSID)
+	s.cancelBedTimer()
 	s.completeTurn(TriggerResponseCap)
 	return s.terminateWithClip(assets.FarewellULaw)
+}
+
+// handleBedTick covers StateAwaitingResponse's SourceBedTick row (AATK-25):
+// each tick writes one paced chunk of the looping "thinking" bed to dataOut
+// and re-arms the bed timer, so the bed keeps looping for as long as the
+// session remains in StateAwaitingResponse. State is never changed by a bed
+// tick -- only the three exits, implemented by handleResponseReady and
+// handleResponseTimeout, end the wait.
+func handleBedTick(s *Session, ev transitionEvent) SessionState {
+	s.sendBedChunk()
+	s.armBedTimer()
+	return s.State()
 }
 
 // handleResponsePlayoutEcho covers AwaitingResponsePlayout's happy path:

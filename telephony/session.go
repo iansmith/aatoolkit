@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony/assets"
 )
 
 // ControlEvent is a Twilio control-plane signal (e.g. "stop") routed to a
@@ -40,7 +42,20 @@ const (
 	timerUtterance = "utterance"
 	timerResponse  = "response"
 	timerTurn      = "turn"
+	timerBedTick   = "bedTick"
 )
+
+// bedTickMS is the paced thinking bed's tick interval (AATK-25): each tick
+// writes one chunk of assets.LLMThinkingULaw to dataOut while
+// StateAwaitingResponse waits for a response, and every bed timing (the tick
+// interval, and the chunk size below) derives from this single named
+// constant plus SampleRateHz -- never a hardcoded byte count.
+const bedTickMS = 200
+
+// bedChunkBytes is one bed tick's worth of μ-law audio (1 byte/sample at
+// SampleRateHz), derived from bedTickMS the same way farewellFrameBytes
+// derives a farewell frame from MuLawFrameMS.
+const bedChunkBytes = bedTickMS * SampleRateHz / 1000
 
 // responseMarkName is the mark name sent alongside the response's audio
 // frames, and the name expected back on its echo -- the
@@ -227,6 +242,13 @@ type Session struct {
 	// utterance (SOP-124 Observable behavior #1: the state machine owns this
 	// buffer, not a service).
 	turnBuf []byte
+
+	// bedOffset is the byte position within assets.LLMThinkingULaw the next
+	// bed tick resumes from (AATK-25). Reset to 0 each time the bed timer is
+	// (re-)armed on entering StateAwaitingResponse, so every wait starts the
+	// clip from its beginning; advances by one chunk per tick, wrapping via
+	// sendBedChunk so the clip loops.
+	bedOffset int
 
 	// timerFacility manages all named timers (idle, utterance, markEcho).
 	// Single mechanism per Charter R2.
@@ -636,19 +658,30 @@ func (s *Session) run() {
 			if !s.timerFacility.IsCurrent(completion) {
 				continue
 			}
-			switch completion.Name {
-			case timerIdle:
-				s.dispatch(SourceIdleTimer, nil)
-			case timerMarkEcho:
-				s.dispatch(SourceMarkEchoTimer, nil)
-			case timerUtterance:
-				s.dispatch(SourceUtteranceTimer, nil)
-			case timerResponse:
-				s.dispatch(SourceResponseTimer, nil)
-			case timerTurn:
-				s.dispatch(SourceTurnTimer, nil)
-			}
+			s.dispatchTimerCompletion(completion.Name)
 		}
+	}
+}
+
+// dispatchTimerCompletion maps a fired TimerFacility timer's name to its
+// InputSource and dispatches it. Split out of run()'s select loop (which
+// must stay a flat, low-complexity dispatcher per Charter R8) as the number
+// of named timers has grown across tickets (SOP-125, SOP-156, SOP-161,
+// AATK-24, AATK-25).
+func (s *Session) dispatchTimerCompletion(name string) {
+	switch name {
+	case timerIdle:
+		s.dispatch(SourceIdleTimer, nil)
+	case timerMarkEcho:
+		s.dispatch(SourceMarkEchoTimer, nil)
+	case timerUtterance:
+		s.dispatch(SourceUtteranceTimer, nil)
+	case timerResponse:
+		s.dispatch(SourceResponseTimer, nil)
+	case timerTurn:
+		s.dispatch(SourceTurnTimer, nil)
+	case timerBedTick:
+		s.dispatch(SourceBedTick, nil)
 	}
 }
 
@@ -765,6 +798,45 @@ func (s *Session) armResponseTimer() {
 // cancelResponseTimer stops and clears the response cap, if armed.
 func (s *Session) cancelResponseTimer() {
 	s.timerFacility.Cancel(timerResponse)
+}
+
+// armBedTimer starts (or re-arms) the bed-tick timer at bedTickMS (AATK-25).
+// Armed alongside armResponseTimer on entering StateAwaitingResponse, and
+// re-armed by handleBedTick after every tick so the bed keeps looping for as
+// long as the wait lasts.
+func (s *Session) armBedTimer() {
+	s.timerFacility.Arm(s.ctx, timerBedTick, bedTickMS*time.Millisecond)
+}
+
+// cancelBedTimer stops and clears the bed-tick timer, if armed. Called on
+// every exit from StateAwaitingResponse (handleResponseReady's ok and failed
+// branches, handleResponseTimeout) so no bed chunk is written after the
+// state has moved on.
+func (s *Session) cancelBedTimer() {
+	s.timerFacility.Cancel(timerBedTick)
+}
+
+// sendBedChunk writes one bedChunkBytes-sized chunk of assets.LLMThinkingULaw
+// to dataOut, starting from bedOffset and wrapping back to the start of the
+// clip when a chunk would run past its end -- looping the clip for as long
+// as the bed keeps ticking. A nil dataOut (unwired) is a no-op.
+func (s *Session) sendBedChunk() {
+	clip := assets.LLMThinkingULaw
+	if s.dataOut == nil || len(clip) == 0 {
+		return
+	}
+	chunk := make([]byte, 0, bedChunkBytes)
+	for len(chunk) < bedChunkBytes {
+		end := min(s.bedOffset+(bedChunkBytes-len(chunk)), len(clip))
+		chunk = append(chunk, clip[s.bedOffset:end]...)
+		s.bedOffset = end
+		if s.bedOffset >= len(clip) {
+			s.bedOffset = 0
+		}
+	}
+	if err := s.dataOut.Send(s.ctx, chunk); err != nil {
+		log.Printf("telephony: session %s: WARN bed chunk send failed: %v", s.CallSID, err)
+	}
 }
 
 // armResponseMarkEchoTimer starts the mark-echo timer for the response's
@@ -1094,11 +1166,15 @@ func (s *Session) flushTurnTranscripts(trigger TurnTrigger) {
 // enterAwaitingResponse cancels the idle timer -- the response cap
 // (timerResponse) replaces it while a response is pending, so the racing 15s
 // silence clock must not also be ticking -- and arms timerResponse at
-// MaxResponseMS (or its test-seam override). Meant to be called after
+// MaxResponseMS (or its test-seam override). It also arms the bed-tick timer
+// (AATK-25) and resets bedOffset so the looping "thinking" bed starts fresh
+// from the clip's beginning on every wait. Meant to be called after
 // completeTurn() when a turn ends.
 func (s *Session) enterAwaitingResponse() SessionState {
 	s.cancelIdleTimer()
 	s.armResponseTimer()
+	s.bedOffset = 0
+	s.armBedTimer()
 	return StateAwaitingResponse
 }
 
