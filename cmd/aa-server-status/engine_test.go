@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -808,5 +809,60 @@ func TestRealEngine_Bounce_EmptyNameIsRefused(t *testing.T) {
 	}
 	if pid := eng.Status()[0].PID; pid != 0 {
 		t.Fatalf("expected Bounce(\"\") to touch nothing, but a server is running (pid %d)", pid)
+	}
+}
+
+// --- config hot-reload (AATK-27) ------------------------------------------
+
+// TestRealEngine_ReplaceConfig_RacesInFlightUp is the race the ticket is
+// actually written against. Up fans its targets out across goroutines
+// (engine.go's per-target WaitGroup), and each of those goroutines reads the
+// engine's config on the way to launching — log dir, ready timeout, poll
+// interval, grace period. A reload landing from the dispatch loop while that
+// fan-out is in flight writes the same field those goroutines are reading.
+//
+// Under -race this fails loudly if config access is unsynchronized; it also
+// pins that the swap leaves a coherent final state rather than a torn one.
+func TestRealEngine_ReplaceConfig_RacesInFlightUp(t *testing.T) {
+	portA := freeTestPort(t)
+	portB := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers: []config.Server{
+			tdlistenerServer(t, "svc-a", portA, true),
+			tdlistenerServer(t, "svc-b", portB, true),
+		},
+	}
+	eng := NewEngine(cfg)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	// A replacement config that differs in a field the launch path reads, so
+	// a racing reader would observe a genuinely different value rather than
+	// an identical copy.
+	replacement := cfg
+	replacement.Supervisor.ReadyTimeout = config.Duration{Duration: 7 * time.Second}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Hammer the swap while Up's own goroutines read the config.
+		for i := 0; i < 200; i++ {
+			if i%2 == 0 {
+				eng.ReplaceConfig(replacement)
+			} else {
+				eng.ReplaceConfig(cfg)
+			}
+		}
+	}()
+
+	upErr := eng.Up("")
+	wg.Wait()
+
+	if upErr != nil {
+		t.Fatalf("Up(\"\") raced with ReplaceConfig: %v", upErr)
+	}
+	if got := len(eng.Status()); got != 2 {
+		t.Fatalf("expected a coherent config after the racing swaps (2 servers), got %d", got)
 	}
 }

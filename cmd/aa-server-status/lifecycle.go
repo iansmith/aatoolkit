@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/iansmith/aatoolkit/config"
 )
@@ -86,6 +87,14 @@ type Engine interface {
 	// any behavior added to Up (prompts, staleness rebuilds, health-gate
 	// changes) reaches bounce for free.
 	Bounce(name string) error
+
+	// ReloadConfigIfChanged re-reads the config files when they have
+	// changed on disk since the last load, replacing the engine's live
+	// config only on a successful parse+validate. A failed reload prints
+	// to out and leaves the previous config in effect. Called by the REPL
+	// before its first prompt and before every dispatch, so it must be
+	// cheap when nothing changed.
+	ReloadConfigIfChanged(out io.Writer)
 	Logs(name string) ([]string, error)
 	Kill(pid int) error
 	Command(name string) (string, []string, error)
@@ -138,8 +147,15 @@ func (e *StubEngine) Down(name string) error { return notImplementedErr("down") 
 // placeholder engine gets no real bounce support (AATK-28 fences that
 // explicitly); it fails loudly like every other stub verb above.
 func (e *StubEngine) Bounce(name string) error { return notImplementedErr("bounce") }
-func (e *StubEngine) Dead(name string) error   { return notImplementedErr("dead") }
-func (e *StubEngine) Build(name string) error  { return notImplementedErr("build") }
+
+// ReloadConfigIfChanged is a no-op here, and that is the honest
+// implementation rather than a placeholder: StubEngine is constructed from a
+// static config with no file paths behind it, so there is nothing to re-read.
+// AATK-27 fences out retrofitting reload *handling* into this superseded
+// engine; satisfying the interface with a no-op is not that.
+func (e *StubEngine) ReloadConfigIfChanged(out io.Writer) {}
+func (e *StubEngine) Dead(name string) error              { return notImplementedErr("dead") }
+func (e *StubEngine) Build(name string) error             { return notImplementedErr("build") }
 func (e *StubEngine) Logs(name string) ([]string, error) {
 	return nil, notImplementedErr("logs")
 }
