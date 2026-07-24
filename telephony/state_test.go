@@ -43,11 +43,11 @@ func (s *syncBuffer) String() string {
 // the transition table has an explicit, non-nil entry for it -- a new state
 // or source added without a corresponding table entry must fail this test.
 func TestTransitionTableIsTotal(t *testing.T) {
-	if len(telephony.AllStates) != 7 {
-		t.Fatalf("AllStates: got %d states, want 7", len(telephony.AllStates))
+	if len(telephony.AllStates) != 8 {
+		t.Fatalf("AllStates: got %d states, want 8", len(telephony.AllStates))
 	}
-	if len(telephony.AllSources) != 9 {
-		t.Fatalf("AllSources: got %d sources, want 9", len(telephony.AllSources))
+	if len(telephony.AllSources) != 10 {
+		t.Fatalf("AllSources: got %d sources, want 10", len(telephony.AllSources))
 	}
 	for _, st := range telephony.AllStates {
 		for _, src := range telephony.AllSources {

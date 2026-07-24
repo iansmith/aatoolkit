@@ -8,7 +8,7 @@ import (
 
 func TestReplyRouter_RoutesToRegisteredSession(t *testing.T) {
 	router := NewReplyRouter()
-	captured := &captureOutput{}
+	captured := &captureResponseInput{}
 	sessionID := "CA1"
 
 	sink := router.Register(sessionID, captured)
@@ -23,8 +23,14 @@ func TestReplyRouter_RoutesToRegisteredSession(t *testing.T) {
 		t.Fatalf("Route failed: %v", err)
 	}
 
-	if len(captured.written) != len(frames) {
-		t.Fatalf("expected %d writes, got %d", len(frames), len(captured.written))
+	if len(captured.events) != 1 {
+		t.Fatalf("expected 1 delivered response event, got %d", len(captured.events))
+	}
+	if !captured.events[0].OK {
+		t.Errorf("delivered event: OK = false, want true")
+	}
+	if len(captured.events[0].Frames) != len(frames) {
+		t.Fatalf("expected %d frames, got %d", len(frames), len(captured.events[0].Frames))
 	}
 }
 
@@ -52,7 +58,7 @@ func TestReplyRouter_ConcurrentRegisterDeregister(t *testing.T) {
 			defer wg.Done()
 			for op := 0; op < numOps; op++ {
 				sessionID := "CONCURRENT"
-				output := &captureOutput{}
+				output := &captureResponseInput{}
 				sink := router.Register(sessionID, output)
 				if sink != nil {
 					router.Deregister(sessionID)
@@ -63,21 +69,27 @@ func TestReplyRouter_ConcurrentRegisterDeregister(t *testing.T) {
 	wg.Wait()
 }
 
-type captureOutput struct {
-	mu      sync.Mutex
-	written [][]byte
+// captureResponseInput is a ResponseInput a test can inspect directly,
+// mirroring the pre-existing captureOutput fake's role for
+// TwilioDataPlaneOutput before ReplySink carried a response input instead of
+// dataOut.
+type captureResponseInput struct {
+	mu     sync.Mutex
+	events []ResponseEvent
 }
 
-func (c *captureOutput) Channel() <-chan []byte { return nil }
-func (c *captureOutput) Recv(ctx context.Context) ([]byte, error) {
+func (c *captureResponseInput) Channel() <-chan ResponseEvent { return nil }
+func (c *captureResponseInput) Recv(ctx context.Context) (ResponseEvent, error) {
 	<-ctx.Done()
-	return nil, ctx.Err()
+	return ResponseEvent{}, ctx.Err()
 }
-func (c *captureOutput) Send(ctx context.Context, payload []byte) error {
+func (c *captureResponseInput) Send(ctx context.Context, ev ResponseEvent) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	frame := make([]byte, len(payload))
-	copy(frame, payload)
-	c.written = append(c.written, frame)
+	frames := make([][]byte, len(ev.Frames))
+	for i, f := range ev.Frames {
+		frames[i] = append([]byte(nil), f...)
+	}
+	c.events = append(c.events, ResponseEvent{OK: ev.OK, Frames: frames})
 	return nil
 }

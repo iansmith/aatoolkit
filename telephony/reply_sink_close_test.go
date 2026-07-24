@@ -14,8 +14,8 @@ func TestReplySink_CloseOnlyRemovesOwnRegistration(t *testing.T) {
 	router := NewReplyRouter()
 	sessionID := "CA-shared"
 
-	oldSink := router.Register(sessionID, &captureOutput{})
-	newSink := router.Register(sessionID, &captureOutput{})
+	oldSink := router.Register(sessionID, &captureResponseInput{})
+	newSink := router.Register(sessionID, &captureResponseInput{})
 	if oldSink == newSink {
 		t.Fatal("expected distinct sinks from two Register calls")
 	}
@@ -36,7 +36,7 @@ func TestReplySink_CloseRemovesCurrentRegistration(t *testing.T) {
 	router := NewReplyRouter()
 	sessionID := "CA-solo"
 
-	sink := router.Register(sessionID, &captureOutput{})
+	sink := router.Register(sessionID, &captureResponseInput{})
 	sink.Close()
 
 	ctx := context.Background()

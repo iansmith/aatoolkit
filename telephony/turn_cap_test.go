@@ -140,7 +140,10 @@ func TestTurnCap_MultiUtteranceUnderCapCompletesNormally(t *testing.T) {
 	clock.waitArmed(t, turnTestDur()) // armed once, at the first utterance's onset
 	driveUtteranceToSTT(t, dataIn, sttIn, sttOut, "turn-undercap-multi", "done")
 
-	waitForSessionState(t, s, telephony.StateListening)
+	// The stopword completes the turn, which now enters StateAwaitingResponse
+	// (AATK-24) instead of returning straight to Listening -- no response
+	// input is wired in this fixture, so the session simply waits there.
+	waitForSessionState(t, s, telephony.StateAwaitingResponse)
 
 	turns := sink.turnTexts()
 	if len(turns) != 1 || turns[0] != "hello" {
@@ -406,7 +409,9 @@ func TestTurnCap_CancelledOnBothCompletionTriggers(t *testing.T) {
 		clock.waitArmed(t, turnTestDur())
 		driveUtteranceToSTT(t, dataIn, sttIn, sttOut, "turn-cancel-stopword", "done")
 
-		waitForSessionState(t, s, telephony.StateListening)
+		// The stopword completes the turn into StateAwaitingResponse (AATK-24)
+		// instead of Listening -- no response input is wired here.
+		waitForSessionState(t, s, telephony.StateAwaitingResponse)
 		if s.TurnActive() {
 			t.Fatal("TurnActive: got true, want false after stopword")
 		}

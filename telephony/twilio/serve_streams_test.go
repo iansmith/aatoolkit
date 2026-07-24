@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -583,55 +584,132 @@ type noopVAD struct{}
 func (noopVAD) Detect(_ context.Context, _ []float32) (float32, error) { return 0, nil }
 func (noopVAD) Reset()                                                 {}
 
-// New (AATK-22): a Server configured with a ReplyRouter must make it reachable
-// by a live session's real handleStream, not just accept the field silently.
-// This exercises the actual production wiring path (Server -> ServeStreams ->
-// DefaultHandleStream), not the ReplyRouter unit alone: Route must deliver the
-// frame through the session's existing dataPlaneOutput and out over the wire,
-// EncodeMedia-wrapped, to the connected client.
+// scriptedVAD returns probs[i] for the i-th Detect call (0 once exhausted) --
+// a fixed script rather than fakeVAD's cyclic one, so a single utterance
+// crosses end-of-utterance exactly once with no risk of a second onset
+// re-triggering from continued windowing.
+type scriptedVAD struct {
+	mu    sync.Mutex
+	probs []float32
+	i     int
+}
+
+func (d *scriptedVAD) Detect(_ context.Context, _ []float32) (float32, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	p := float32(0)
+	if d.i < len(d.probs) {
+		p = d.probs[d.i]
+	}
+	d.i++
+	return p, nil
+}
+func (d *scriptedVAD) Reset() {}
+
+// New (AATK-22, updated AATK-24): a Server configured with a ReplyRouter must
+// make it reachable by a live session's real handleStream, not just accept
+// the field silently. This exercises the actual production wiring path
+// (Server -> ServeStreams -> HandleStreamWithOpts -> ReplyRouter.Register),
+// not the ReplyRouter unit alone.
+//
+// AATK-24 changed what "reachable" means: Route no longer writes straight to
+// the wire from any state -- it delivers a ResponseEvent to the session's
+// response input, which only reaches the wire once the session is in
+// StateAwaitingResponse (a real response is being awaited). So this test now
+// drives one full turn (utterance -> end-of-utterance -> stopword "done") to
+// reach StateAwaitingResponse before calling Route, then asserts the outbound
+// order handleResponseReady produces: clear, then the routed frame(s), then
+// the "response" mark.
 func TestServeStreams_ReplyRouterRoutesToLiveSession(t *testing.T) {
 	router := telephony.NewReplyRouter()
+	sttIn := telephony.NewBufferedChan[telephony.STTRequest](10)
+	sttOut := telephony.NewBufferedChan[telephony.STTResult](10)
+	vad := &scriptedVAD{probs: append([]float32{0.9}, make([]float32, telephony.EndSilenceWindows())...)}
+
 	s := &twilio.Server{
 		HandleStream: func(ctx context.Context, conn *websocket.Conn, start twilio.Frame) error {
 			return twilio.HandleStreamWithOpts(ctx, conn, start,
 				telephony.WithVADFactory(func() (telephony.VADDetector, error) {
-					return noopVAD{}, nil
-				}))
+					return vad, nil
+				}),
+				telephony.WithSTTInput(sttIn),
+				telephony.WithSTTOutput(sttOut),
+				telephony.WithTurnEndPolicy(telephony.StopwordPolicy{}),
+			)
 		},
 		ReplyRouter: router,
 	}
 	srv := streamsServer(t, s)
 	conn := dialStreams(t, srv)
-	sendStart(t, conn, "SSreply01", "CAreply01")
+	streamSID, callSID := "SSreply01", "CAreply01"
+	sendStart(t, conn, streamSID, callSID)
+
+	// One media message carrying 1 speech window + EndSilenceWindows() silence
+	// windows -- enough to cross end-of-utterance exactly once (mirrors
+	// utterancePayload() in session_test.go).
+	windows := 1 + telephony.EndSilenceWindows()
+	media, err := twilio.EncodeMedia(streamSID, make([]byte, 256*windows))
+	if err != nil {
+		t.Fatalf("EncodeMedia: %v", err)
+	}
+	if err := conn.Write(context.Background(), websocket.MessageText, media); err != nil {
+		t.Fatalf("write media: %v", err)
+	}
+
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	req, err := sttIn.Recv(reqCtx)
+	reqCancel()
+	if err != nil {
+		t.Fatalf("no STTRequest dispatched within timeout: %v", err)
+	}
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err = sttOut.Send(sendCtx, telephony.STTResult{
+		SessionID: callSID,
+		RequestID: req.RequestID,
+		Kind:      telephony.FullPass,
+		Text:      "done",
+	})
+	sendCancel()
+	if err != nil {
+		t.Fatalf("send STT result: %v", err)
+	}
 
 	wantPayload := []byte{0x11, 0x22, 0x33}
 	deadline := time.Now().Add(2 * time.Second)
 	var routeErr error
 	for time.Now().Before(deadline) {
-		routeErr = router.Route(context.Background(), "CAreply01", [][]byte{wantPayload})
+		routeErr = router.Route(context.Background(), callSID, [][]byte{wantPayload})
 		if routeErr == nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if routeErr != nil {
-		t.Fatalf("session never registered with ReplyRouter: %v", routeErr)
+		t.Fatalf("Route never delivered (session may never have reached StateAwaitingResponse): %v", routeErr)
 	}
 
-	readCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_, raw, err := conn.Read(readCtx)
-	if err != nil {
-		t.Fatalf("read reply frame: %v", err)
+	readFrame := func() twilio.Frame {
+		t.Helper()
+		readCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, raw, err := conn.Read(readCtx)
+		if err != nil {
+			t.Fatalf("read reply frame: %v", err)
+		}
+		f, err := twilio.DecodeFrame(raw)
+		if err != nil {
+			t.Fatalf("decode reply frame: %v", err)
+		}
+		return f
 	}
-	f, err := twilio.DecodeFrame(raw)
-	if err != nil {
-		t.Fatalf("decode reply frame: %v", err)
+
+	if f := readFrame(); f.Event != twilio.EventClear {
+		t.Fatalf("first outbound event = %q, want %q", f.Event, twilio.EventClear)
 	}
-	if f.Event != twilio.EventMedia {
-		t.Fatalf("Event = %q, want %q", f.Event, twilio.EventMedia)
+	if f := readFrame(); f.Event != twilio.EventMedia || !bytes.Equal(f.Payload, wantPayload) {
+		t.Fatalf("second outbound event = %+v, want media payload %x", f, wantPayload)
 	}
-	if !bytes.Equal(f.Payload, wantPayload) {
-		t.Fatalf("Payload = %x, want %x", f.Payload, wantPayload)
+	if f := readFrame(); f.Event != twilio.EventMark || f.MarkName != "response" {
+		t.Fatalf("third outbound event = %+v, want mark %q", f, "response")
 	}
 }

@@ -108,8 +108,10 @@ func TestLivePath_StopwordEndsTurn(t *testing.T) {
 	if len(turns) > 0 && turns[0] != "hello world" {
 		t.Errorf("Turn text: got %q, want %q", turns[0], "hello world")
 	}
-	if got := s.State(); got != telephony.StateListening {
-		t.Errorf("State: got %s, want StateListening", got)
+	// AATK-24: turn completion now enters StateAwaitingResponse (a response
+	// is being generated), not Listening -- no response input is wired here.
+	if got := s.State(); got != telephony.StateAwaitingResponse {
+		t.Errorf("State: got %s, want StateAwaitingResponse", got)
 	}
 	if s.TurnActive() {
 		t.Errorf("TurnActive: got true, want false after turn completion")
@@ -187,8 +189,10 @@ func TestLivePath_SilenceTurnEndCompletesTurn(t *testing.T) {
 	if len(turns) > 0 && turns[0] != "hello there" {
 		t.Errorf("Turn text: got %q, want %q", turns[0], "hello there")
 	}
-	if got := s.State(); got != telephony.StateListening {
-		t.Errorf("State: got %s, want StateListening", got)
+	// AATK-24: turn completion now enters StateAwaitingResponse (a response
+	// is being generated), not Listening -- no response input is wired here.
+	if got := s.State(); got != telephony.StateAwaitingResponse {
+		t.Errorf("State: got %s, want StateAwaitingResponse", got)
 	}
 	if s.TurnActive() {
 		t.Errorf("TurnActive: got true, want false after turn completion")
