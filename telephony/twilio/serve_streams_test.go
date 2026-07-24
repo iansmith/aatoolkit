@@ -606,6 +606,23 @@ func (d *scriptedVAD) Detect(_ context.Context, _ []float32) (float32, error) {
 }
 func (d *scriptedVAD) Reset() {}
 
+// waitForSessionState polls (no session timer involved -- this is ordinary
+// cross-goroutine settling) until s reaches want or the backstop trips. Local
+// copy of the same pattern telephony/session_test.go's helper of the same
+// name establishes -- that one lives in package telephony_test and isn't
+// reachable from here.
+func waitForSessionState(t *testing.T, s *telephony.Session, want telephony.SessionState) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.State() == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("state: got %s, want %s within the backstop", s.State(), want)
+}
+
 // New (AATK-22, updated AATK-24): a Server configured with a ReplyRouter must
 // make it reachable by a live session's real handleStream, not just accept
 // the field silently. This exercises the actual production wiring path
@@ -626,6 +643,17 @@ func TestServeStreams_ReplyRouterRoutesToLiveSession(t *testing.T) {
 	sttOut := telephony.NewBufferedChan[telephony.STTResult](10)
 	vad := &scriptedVAD{probs: append([]float32{0.9}, make([]float32, telephony.EndSilenceWindows())...)}
 
+	// captureSession hands the live *telephony.Session back to the test so it
+	// can poll for StateAwaitingResponse (via the package-local
+	// waitForSessionState below) instead of racing Route against the
+	// session's own STT-result processing -- ReplyRouter.Register happens at
+	// session construction, well before the turn completes, so "registered"
+	// is not a proxy for "awaiting a response".
+	sessionReady := make(chan *telephony.Session, 1)
+	captureSession := telephony.SessionOption(func(sess *telephony.Session) {
+		sessionReady <- sess
+	})
+
 	s := &twilio.Server{
 		HandleStream: func(ctx context.Context, conn *websocket.Conn, start twilio.Frame) error {
 			return twilio.HandleStreamWithOpts(ctx, conn, start,
@@ -635,6 +663,7 @@ func TestServeStreams_ReplyRouterRoutesToLiveSession(t *testing.T) {
 				telephony.WithSTTInput(sttIn),
 				telephony.WithSTTOutput(sttOut),
 				telephony.WithTurnEndPolicy(telephony.StopwordPolicy{}),
+				captureSession,
 			)
 		},
 		ReplyRouter: router,
@@ -674,18 +703,17 @@ func TestServeStreams_ReplyRouterRoutesToLiveSession(t *testing.T) {
 		t.Fatalf("send STT result: %v", err)
 	}
 
-	wantPayload := []byte{0x11, 0x22, 0x33}
-	deadline := time.Now().Add(2 * time.Second)
-	var routeErr error
-	for time.Now().Before(deadline) {
-		routeErr = router.Route(context.Background(), callSID, [][]byte{wantPayload})
-		if routeErr == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	var sess *telephony.Session
+	select {
+	case sess = <-sessionReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session was never constructed within timeout")
 	}
-	if routeErr != nil {
-		t.Fatalf("Route never delivered (session may never have reached StateAwaitingResponse): %v", routeErr)
+	waitForSessionState(t, sess, telephony.StateAwaitingResponse)
+
+	wantPayload := []byte{0x11, 0x22, 0x33}
+	if err := router.Route(context.Background(), callSID, [][]byte{wantPayload}); err != nil {
+		t.Fatalf("Route: %v", err)
 	}
 
 	readFrame := func() twilio.Frame {

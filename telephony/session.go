@@ -777,8 +777,7 @@ func (s *Session) armResponseMarkEchoTimer(frames [][]byte) {
 
 // farewellFrameBytes is one 20ms (MuLawFrameMS) frame's worth of μ-law audio
 // (1 byte/sample at SampleRateHz) -- the same chunking Twilio itself uses for
-// inbound media frames. Used to chunk both the farewell clip (sendClip) and
-// the sim-turn thinking bed (sendBed).
+// inbound media frames. Used to chunk the farewell clip (sendClip).
 const farewellFrameBytes = SampleRateHz * MuLawFrameMS / 1000
 
 // sendClip writes a μ-law clip out on dataOut, one MuLawFrameMS-sized frame at
