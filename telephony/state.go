@@ -687,8 +687,8 @@ func handleResponseTimeout(s *Session, ev transitionEvent) SessionState {
 // each tick writes one paced chunk of the looping "thinking" bed to dataOut
 // and re-arms the bed timer, so the bed keeps looping for as long as the
 // session remains in StateAwaitingResponse. State is never changed by a bed
-// tick -- only the three exits handleResponseReady and handleResponseTimeout
-// implement end the wait.
+// tick -- only the three exits, implemented by handleResponseReady and
+// handleResponseTimeout, end the wait.
 func handleBedTick(s *Session, ev transitionEvent) SessionState {
 	s.sendBedChunk()
 	s.armBedTimer()
