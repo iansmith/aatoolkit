@@ -156,7 +156,14 @@ func (w *Warm) UnmarshalTOML(data any) error {
 
 // Server is one [[server]] entry — the schema is a union of all four
 // server-type shapes; Validate enforces per-type required fields.
-// PromptSpec is a stub until AATK-26 implements it.
+// PromptSpec makes a server's launch arguments an interactive choice instead
+// of a config line the operator has to remember to hand-edit between runs.
+// When present, bringing the server up asks Question and appends YesArgs or
+// NoArgs to whatever args its type already resolves.
+//
+// Declaring only one branch is legal: the omitted branch simply contributes no
+// extra args, which is the natural way to express "add this flag, or launch
+// normally".
 type PromptSpec struct {
 	Question string   `toml:"question"`
 	YesArgs  []string `toml:"yes_args"`
@@ -169,7 +176,11 @@ type Server struct {
 	Enabled bool       `toml:"enabled"`
 	Host    string     `toml:"host"`
 
-	// Prompt is a stub until AATK-26 implements it.
+	// Prompt, when set, makes this server ask a y/n question before it
+	// launches and append the chosen branch's args. Only server types whose
+	// launch path actually reads Args (exec, source) may declare one —
+	// Validate rejects the rest rather than letting the answer be silently
+	// discarded.
 	Prompt *PromptSpec `toml:"prompt"`
 
 	// mlx / python launch port.

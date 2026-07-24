@@ -165,6 +165,42 @@ health_timeout = "not-a-duration"
 
 // --- [server.prompt] (AATK-26) --------------------------------------------
 
+// TestLoad_ParsesServerPrompt pins the sub-table's decoding exactly as
+// written, including the partial case: declaring only one branch is legal and
+// must decode as "no extra args for the other branch" rather than a
+// missing-key error.
+func TestLoad_ParsesServerPrompt(t *testing.T) {
+	cfg, err := Load("testdata/prompt.toml", "testdata/does-not-exist.local.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Servers) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(cfg.Servers))
+	}
+
+	full := cfg.Servers[0]
+	if full.Prompt == nil {
+		t.Fatalf("expected server %q to carry a prompt spec", full.Name)
+	}
+	if full.Prompt.Question != "Use plaintext ws for this run?" {
+		t.Fatalf("question decoded as %q", full.Prompt.Question)
+	}
+	if got := strings.Join(full.Prompt.YesArgs, " "); got != "-stream-scheme ws" {
+		t.Fatalf("yes_args decoded as %q", got)
+	}
+	if got := strings.Join(full.Prompt.NoArgs, " "); got != "-stream-scheme wss" {
+		t.Fatalf("no_args decoded as %q", got)
+	}
+
+	partial := cfg.Servers[1]
+	if partial.Prompt == nil {
+		t.Fatalf("expected server %q to carry a prompt spec", partial.Name)
+	}
+	if len(partial.Prompt.NoArgs) != 0 {
+		t.Fatalf("an omitted no_args must decode as no extra args, got %v", partial.Prompt.NoArgs)
+	}
+}
+
 // TestValidate_RejectsPromptWithEmptyQuestion — a prompt with nothing to ask
 // would block the launch on a blank line.
 func TestValidate_RejectsPromptWithEmptyQuestion(t *testing.T) {

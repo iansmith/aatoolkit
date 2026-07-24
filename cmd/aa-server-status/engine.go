@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -44,13 +45,26 @@ type RealEngine struct {
 	// this engine never re-reads its config, which is the right default for
 	// every construction path that isn't main's.
 	reloader *configReloader
+
+	// promptIn/promptOut carry the streams a [server.prompt] is asked on.
+	// promptIn is wrapped once at construction rather than per question: a
+	// fresh bufio.Reader per prompt would read past its own line and eat the
+	// next prompt's answer, which is exactly the multi-prompt bulk-up case.
+	// Both are nil for engines constructed without them, which is safe as
+	// long as no target declares a prompt — askPrompts errors loudly if one
+	// does.
+	promptIn  *bufio.Reader
+	promptOut io.Writer
 }
 
 // NewEngine builds a RealEngine over cfg. No processes are launched by
 // construction — the registry starts empty, matching a freshly started
 // supervisor that hasn't reconciled anything yet.
 func NewEngine(cfg config.Config, promptIn io.Reader, promptOut io.Writer) *RealEngine {
-	e := &RealEngine{procs: make(map[string]*lifecycle.Process)}
+	e := &RealEngine{procs: make(map[string]*lifecycle.Process), promptOut: promptOut}
+	if promptIn != nil {
+		e.promptIn = bufio.NewReader(promptIn)
+	}
 	e.cfg.Store(&cfg)
 	return e
 }
@@ -403,6 +417,14 @@ func (e *RealEngine) Up(name string) error {
 	}
 	if len(targets) == 0 {
 		return nil
+	}
+
+	// Every [server.prompt] is asked and answered here, before the fan-out
+	// below starts a single goroutine. See askPrompts for why this cannot
+	// live inside upOne.
+	targets, err = e.askPrompts(targets)
+	if err != nil {
+		return err
 	}
 
 	var wg sync.WaitGroup

@@ -885,9 +885,24 @@ func promptedServer(t *testing.T, name string, port int, spec *config.PromptSpec
 func schemeSpec() *config.PromptSpec {
 	return &config.PromptSpec{
 		Question: "Use plaintext ws for this run?",
-		YesArgs:  []string{"-serve-health"},
-		NoArgs:   []string{"-ignore-term"},
+		YesArgs:  []string{"-ignore-term"},
+		NoArgs:   []string{"-child-port", "0"},
 	}
+}
+
+// launchedArgs reports the argv of the process the engine actually started.
+// This is the only honest oracle for "the chosen branch's args were appended":
+// Command() reports the args resolved from the STORED config, and the prompt
+// answer exists only at launch time, so Command() can never reflect it.
+func launchedArgs(t *testing.T, eng *RealEngine, name string) []string {
+	t.Helper()
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	proc, ok := eng.procs[name]
+	if !ok {
+		t.Fatalf("no launched process recorded for %q", name)
+	}
+	return proc.Cmd.Args
 }
 
 func TestRealEngine_Up_PromptedServer_YesAnswerAppendsYesArgs(t *testing.T) {
@@ -907,12 +922,12 @@ func TestRealEngine_Up_PromptedServer_YesAnswerAppendsYesArgs(t *testing.T) {
 		t.Fatalf("expected the question to be printed, got: %q", promptOut.String())
 	}
 
-	_, args, err := eng.Command("svc")
-	if err != nil {
-		t.Fatalf("Command(\"svc\"): %v", err)
-	}
-	if got := strings.Join(args, " "); !strings.Contains(got, "-serve-health") {
+	got := strings.Join(launchedArgs(t, eng, "svc"), " ")
+	if !strings.Contains(got, "-ignore-term") {
 		t.Fatalf("expected the yes branch's args appended to the resolved launch args, got %q", got)
+	}
+	if strings.Contains(got, "-child-port") {
+		t.Fatalf("a yes answer must not also take the no branch, got %q", got)
 	}
 }
 
@@ -929,16 +944,42 @@ func TestRealEngine_Up_PromptedServer_NoAnswerAppendsNoArgs(t *testing.T) {
 	if err := eng.Up("svc"); err != nil {
 		t.Fatalf("Up(\"svc\") error: %v", err)
 	}
+	got := strings.Join(launchedArgs(t, eng, "svc"), " ")
+	if !strings.Contains(got, "-child-port 0") {
+		t.Fatalf("expected the no branch's args appended, got %q", got)
+	}
+	if strings.Contains(got, "-ignore-term") {
+		t.Fatalf("a no answer must not take the yes branch, got %q", got)
+	}
+}
+
+// TestRealEngine_Up_UnpromptedServerUnchanged is the regression guard: a
+// server with no [server.prompt] must be byte-identical to today — nothing
+// printed, nothing appended.
+func TestRealEngine_Up_UnpromptedServerUnchanged(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
+	}
+	before := cfg.Servers[0].Args
+
+	var promptOut strings.Builder
+	eng := NewEngine(cfg, strings.NewReader("y\n"), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error: %v", err)
+	}
+	if promptOut.String() != "" {
+		t.Fatalf("an unprompted server must print nothing to the prompt stream, got %q", promptOut.String())
+	}
 	_, args, err := eng.Command("svc")
 	if err != nil {
 		t.Fatalf("Command(\"svc\"): %v", err)
 	}
-	got := strings.Join(args, " ")
-	if !strings.Contains(got, "-ignore-term") {
-		t.Fatalf("expected the no branch's args appended, got %q", got)
-	}
-	if strings.Contains(got, "-serve-health") && !strings.Contains(got, "-ignore-term") {
-		t.Fatalf("no answer must not take the yes branch, got %q", got)
+	if strings.Join(args, " ") != strings.Join(before, " ") {
+		t.Fatalf("an unprompted server's args must be unchanged: was %v, now %v", before, args)
 	}
 }
 
@@ -960,12 +1001,8 @@ func TestRealEngine_Up_RepromptsOnInvalidAnswer(t *testing.T) {
 	if n := strings.Count(promptOut.String(), "Use plaintext ws for this run?"); n != 2 {
 		t.Fatalf("expected the question asked exactly twice (initial + one reprompt), got %d in %q", n, promptOut.String())
 	}
-	_, args, err := eng.Command("svc")
-	if err != nil {
-		t.Fatalf("Command(\"svc\"): %v", err)
-	}
-	if !strings.Contains(strings.Join(args, " "), "-serve-health") {
-		t.Fatalf("expected the eventual y answer to take the yes branch, got %v", args)
+	if got := strings.Join(launchedArgs(t, eng, "svc"), " "); !strings.Contains(got, "-ignore-term") {
+		t.Fatalf("expected the eventual y answer to take the yes branch, got %q", got)
 	}
 }
 
