@@ -92,11 +92,13 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	tap := NewTap(tapDir, start.StreamSID, start.CallSID, tapLabelFromEnv(), startedAt)
 
 	dataOut := NewDataPlaneOutput(conn, start.StreamSID, tap)
+	responseIn := telephony.NewBufferedChan[telephony.ResponseEvent](responseInputDepth)
 	opts := []telephony.SessionOption{
 		telephony.WithTwilioDataInput(dataIn),
 		telephony.WithTwilioControlInput(controlIn),
 		telephony.WithTwilioDataOutput(dataOut),
 		telephony.WithTwilioControlOutput(NewControlPlaneOutput(conn, start.StreamSID)),
+		telephony.WithResponseInput(responseIn),
 		telephony.WithCloseFunc(func() {
 			// CloseNow, not Close: Close performs a close handshake and
 			// blocks up to ~10s waiting for the peer's close frame ack,
@@ -127,7 +129,7 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	replyRouter, ok := ctx.Value(replyRouterKey).(*telephony.ReplyRouter)
 	var replySink *telephony.ReplySink
 	if ok && replyRouter != nil {
-		replySink = replyRouter.Register(start.CallSID, dataOut)
+		replySink = replyRouter.Register(start.CallSID, responseIn)
 	}
 
 	// The data and control pumps terminate differently at teardown.

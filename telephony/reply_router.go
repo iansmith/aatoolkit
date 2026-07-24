@@ -10,9 +10,9 @@ import (
 var ErrUnknownSession = errors.New("telephony: reply router: unknown session")
 
 type ReplySink struct {
-	dataOut   TwilioDataPlaneOutput
-	router    *ReplyRouter
-	sessionID string
+	responseIn ResponseInput
+	router     *ReplyRouter
+	sessionID  string
 }
 
 type ReplyRouter struct {
@@ -26,7 +26,7 @@ func NewReplyRouter() *ReplyRouter {
 	}
 }
 
-func (r *ReplyRouter) Register(sessionID string, dataOut TwilioDataPlaneOutput) *ReplySink {
+func (r *ReplyRouter) Register(sessionID string, responseIn ResponseInput) *ReplySink {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -34,7 +34,7 @@ func (r *ReplyRouter) Register(sessionID string, dataOut TwilioDataPlaneOutput) 
 		log.Printf("telephony: reply router: WARN duplicate registration for session %s, replacing", sessionID)
 	}
 
-	sink := &ReplySink{dataOut: dataOut, router: r, sessionID: sessionID}
+	sink := &ReplySink{responseIn: responseIn, router: r, sessionID: sessionID}
 	r.sinks[sessionID] = sink
 	return sink
 }
@@ -68,6 +68,8 @@ func (s *ReplySink) Close() {
 	}
 }
 
+// Route delivers an ok ResponseEvent carrying frames to sessionID's response
+// input.
 func (r *ReplyRouter) Route(ctx context.Context, sessionID string, frames [][]byte) error {
 	r.mu.RLock()
 	sink, ok := r.sinks[sessionID]
@@ -78,11 +80,27 @@ func (r *ReplyRouter) Route(ctx context.Context, sessionID string, frames [][]by
 		return ErrUnknownSession
 	}
 
-	for _, frame := range frames {
-		if err := sink.dataOut.Send(ctx, frame); err != nil {
-			log.Printf("telephony: reply router: WARN send failed for session %s: %v", sessionID, err)
-			return err
-		}
+	if err := sink.responseIn.Send(ctx, ResponseEvent{OK: true, Frames: frames}); err != nil {
+		log.Printf("telephony: reply router: WARN send failed for session %s: %v", sessionID, err)
+		return err
+	}
+	return nil
+}
+
+// Fail delivers a failed ResponseEvent to sessionID's response input.
+func (r *ReplyRouter) Fail(ctx context.Context, sessionID string) error {
+	r.mu.RLock()
+	sink, ok := r.sinks[sessionID]
+	r.mu.RUnlock()
+
+	if !ok {
+		log.Printf("telephony: reply router: dropping fail for unregistered session %s", sessionID)
+		return ErrUnknownSession
+	}
+
+	if err := sink.responseIn.Send(ctx, ResponseEvent{OK: false}); err != nil {
+		log.Printf("telephony: reply router: WARN send failed for session %s: %v", sessionID, err)
+		return err
 	}
 	return nil
 }
