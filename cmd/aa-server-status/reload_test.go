@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -60,7 +61,7 @@ func TestRun_ReloadsConfigWhenFileMtimeChanges(t *testing.T) {
 		1: func() { writeConfig(t, cfgPath, "after", baseTime.Add(time.Minute)) },
 	}}
 	var out strings.Builder
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -94,7 +95,7 @@ func TestRun_FailedReloadKeepsPreviousConfig(t *testing.T) {
 		},
 	}}
 	var out strings.Builder
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run must not return an error when a reload fails, got: %v", err)
 	}
 
@@ -123,7 +124,7 @@ func TestRun_NoReloadWhenMtimeUnchanged(t *testing.T) {
 
 	in := &scriptedReader{lines: []string{"", "", "help", "", "quit"}}
 	var out strings.Builder
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 

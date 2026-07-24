@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"strings"
@@ -129,7 +130,7 @@ func TestRun_EmptyInputPrintsStatusOnLaunchAndOnBareEnter(t *testing.T) {
 	in := strings.NewReader("\nhelp\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if got := strings.Count(out.String(), "SERVER"); got != 2 {
@@ -205,7 +206,7 @@ func TestRun_EOFTearsDownAndExitsCleanly(t *testing.T) {
 	in := strings.NewReader("") // immediate EOF, no lines at all
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run on EOF: unexpected error: %v", err)
 	}
 	if eng.teardownCalls != 1 {
@@ -221,7 +222,7 @@ func TestRun_EOFAfterCommandsWithNoTrailingNewlineStillTearsDownOnce(t *testing.
 	in := strings.NewReader("myserver up")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if len(eng.upCalls) != 1 || eng.upCalls[0] != "myserver" {
@@ -237,7 +238,7 @@ func TestRun_QuitWithZeroOwnedServersStillCallsTeardownAll(t *testing.T) {
 	in := strings.NewReader("quit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if eng.teardownCalls != 1 {
@@ -252,7 +253,7 @@ func TestRun_UnknownCommandPrintsErrorAndContinuesLoop(t *testing.T) {
 	in := strings.NewReader("myserver up now\nquit\n") // 3 tokens: a syntax error, not just an unknown name
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if !strings.Contains(strings.ToLower(out.String()), "error") && !strings.Contains(strings.ToLower(out.String()), "unknown") {
@@ -271,7 +272,7 @@ func TestRun_UnknownServerNameIsLoudError(t *testing.T) {
 	in := strings.NewReader("frobnicate\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if !strings.Contains(strings.ToLower(out.String()), "error") && !strings.Contains(strings.ToLower(out.String()), "no such server") {
@@ -287,7 +288,7 @@ func TestRun_DownVerbDoesNotTriggerTeardownAll(t *testing.T) {
 	in := strings.NewReader("down\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if eng.teardownCalls != 1 {
@@ -307,7 +308,7 @@ func TestRun_DownVerbFailureDoesNotTriggerTeardownAll(t *testing.T) {
 	in := strings.NewReader("down\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if eng.teardownCalls != 1 {
@@ -323,7 +324,7 @@ func TestRun_DeadVerbDispatchesAndDoesNotTeardown(t *testing.T) {
 	in := strings.NewReader("dead\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if len(eng.deadCalls) != 1 {
@@ -339,7 +340,7 @@ func TestRun_HelpVerbPrintsUsageWithoutEngineCalls(t *testing.T) {
 	in := strings.NewReader("help\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if out.Len() == 0 {
@@ -361,7 +362,7 @@ func TestRun_QuitExitByeAllTriggerExactlyOneTeardown(t *testing.T) {
 			in := strings.NewReader(word + "\n")
 			var out strings.Builder
 
-			if err := Run(in, &out, eng); err != nil {
+			if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 				t.Fatalf("Run(%q): unexpected error: %v", word, err)
 			}
 			if eng.teardownCalls != 1 {
@@ -376,7 +377,7 @@ func TestRun_PerServerVerbDispatchesToEngine(t *testing.T) {
 	in := strings.NewReader("myserver up\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if len(eng.upCalls) != 1 || eng.upCalls[0] != "myserver" {
@@ -391,7 +392,7 @@ func TestRun_QuitExitsLoop(t *testing.T) {
 	in := strings.NewReader("quit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if eng.teardownCalls != 1 {
@@ -408,7 +409,7 @@ func TestRun_KillDispatchesToEngine(t *testing.T) {
 	in := strings.NewReader("kill 9999\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if len(eng.killCalls) != 1 || eng.killCalls[0] != 9999 {
@@ -421,7 +422,7 @@ func TestRun_KillErrorIsPrintedAndLoopContinues(t *testing.T) {
 	in := strings.NewReader("kill 9999\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if !strings.Contains(out.String(), "no such process") {
@@ -444,7 +445,7 @@ func TestRun_CommandDispatchesToEngine(t *testing.T) {
 	in := strings.NewReader("command chat-llm\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if len(eng.commandCalls) != 1 || eng.commandCalls[0] != "chat-llm" {
@@ -460,7 +461,7 @@ func TestRun_CommandErrorIsPrintedAndLoopContinues(t *testing.T) {
 	in := strings.NewReader("command nonexistent\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if !strings.Contains(out.String(), "no such server") {
@@ -475,7 +476,7 @@ func TestRun_HelpMentionsKillAndCommand(t *testing.T) {
 	in := strings.NewReader("help\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	output := out.String()
@@ -494,7 +495,7 @@ func TestRun_ViewDispatchesToEngine(t *testing.T) {
 	in := strings.NewReader("chat-llm view\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if len(eng.viewCalls) != 1 || eng.viewCalls[0].name != "chat-llm" || eng.viewCalls[0].nowrap != false {
@@ -513,7 +514,7 @@ func TestRun_ViewNowrapDispatchesToEngine(t *testing.T) {
 	in := strings.NewReader("server view nowrap\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if len(eng.viewCalls) != 1 || eng.viewCalls[0].name != "server" || eng.viewCalls[0].nowrap != true {
@@ -526,7 +527,7 @@ func TestRun_ViewErrorIsPrintedAndLoopContinues(t *testing.T) {
 	in := strings.NewReader("chat-llm view\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	output := out.String()
@@ -543,7 +544,7 @@ func TestRun_HelpMentionsView(t *testing.T) {
 	in := strings.NewReader("help\nquit\n")
 	var out strings.Builder
 
-	if err := Run(in, &out, eng); err != nil {
+	if err := Run(bufio.NewReader(in), &out, eng); err != nil {
 		t.Fatalf("Run: unexpected error: %v", err)
 	}
 	if !strings.Contains(out.String(), "view") {

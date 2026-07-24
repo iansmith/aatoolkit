@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
@@ -74,10 +75,15 @@ func main() {
 	}
 	defer lock.Release()
 
-	engine := NewEngine(cfg, os.Stdin, os.Stdout)
+	// One buffered reader over stdin, shared by the REPL loop and the
+	// engine's [server.prompt] path. Two buffers over the same stream race
+	// each other for input (AATK-29), so this must stay a single instance.
+	stdin := bufio.NewReader(os.Stdin)
+
+	engine := NewEngine(cfg, stdin, os.Stdout)
 	engine.WatchConfig(basePath, localPath)
 	go watchSignals(os.Stdout, engine)
-	if err := Run(os.Stdin, os.Stdout, engine); err != nil {
+	if err := Run(stdin, os.Stdout, engine); err != nil {
 		fmt.Fprintf(os.Stderr, "aa-server-status: %v\n", err)
 		os.Exit(1)
 	}

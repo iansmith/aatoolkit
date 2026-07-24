@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -912,7 +913,7 @@ func TestRealEngine_Up_PromptedServer_YesAnswerAppendsYesArgs(t *testing.T) {
 		Servers:    []config.Server{promptedServer(t, "svc", port, schemeSpec())},
 	}
 	var promptOut strings.Builder
-	eng := NewEngine(cfg, strings.NewReader("y\n"), &promptOut)
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("y\n")), &promptOut)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up("svc"); err != nil {
@@ -938,7 +939,7 @@ func TestRealEngine_Up_PromptedServer_NoAnswerAppendsNoArgs(t *testing.T) {
 		Servers:    []config.Server{promptedServer(t, "svc", port, schemeSpec())},
 	}
 	var promptOut strings.Builder
-	eng := NewEngine(cfg, strings.NewReader("n\n"), &promptOut)
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("n\n")), &promptOut)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up("svc"); err != nil {
@@ -965,7 +966,7 @@ func TestRealEngine_Up_UnpromptedServerUnchanged(t *testing.T) {
 	before := cfg.Servers[0].Args
 
 	var promptOut strings.Builder
-	eng := NewEngine(cfg, strings.NewReader("y\n"), &promptOut)
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("y\n")), &promptOut)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up("svc"); err != nil {
@@ -992,7 +993,7 @@ func TestRealEngine_Up_RepromptsOnInvalidAnswer(t *testing.T) {
 		Servers:    []config.Server{promptedServer(t, "svc", port, schemeSpec())},
 	}
 	var promptOut strings.Builder
-	eng := NewEngine(cfg, strings.NewReader("maybe\ny\n"), &promptOut)
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("maybe\ny\n")), &promptOut)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up("svc"); err != nil {
@@ -1028,7 +1029,7 @@ func TestRealEngine_Up_BulkUp_PromptsSequentialBeforeAnyLaunch(t *testing.T) {
 	// watchedWriter records the prompt text as it is written, and snapshots
 	// what had been written at the moment the first child process appeared.
 	out := &watchedWriter{}
-	eng := NewEngine(cfg, strings.NewReader("y\ny\n"), out)
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("y\ny\n")), out)
 	t.Cleanup(func() { eng.TeardownAll() })
 	out.firstLaunchSeen = func() bool {
 		for _, s := range eng.Status() {

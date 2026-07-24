@@ -47,9 +47,10 @@ type RealEngine struct {
 	reloader *configReloader
 
 	// promptIn/promptOut carry the streams a [server.prompt] is asked on.
-	// promptIn is wrapped once at construction rather than per question: a
-	// fresh bufio.Reader per prompt would read past its own line and eat the
-	// next prompt's answer, which is exactly the multi-prompt bulk-up case.
+	// promptIn is the caller's reader, stored as-is and never re-wrapped:
+	// wrapping it here would create a second buffer over the same stream,
+	// racing the REPL loop's own reads for input (AATK-29). When stdin is
+	// the source, main hands the same *bufio.Reader to both.
 	// Both are nil for engines constructed without them, which is safe as
 	// long as no target declares a prompt — askPrompts errors loudly if one
 	// does.
@@ -60,11 +61,8 @@ type RealEngine struct {
 // NewEngine builds a RealEngine over cfg. No processes are launched by
 // construction — the registry starts empty, matching a freshly started
 // supervisor that hasn't reconciled anything yet.
-func NewEngine(cfg config.Config, promptIn io.Reader, promptOut io.Writer) *RealEngine {
-	e := &RealEngine{procs: make(map[string]*lifecycle.Process), promptOut: promptOut}
-	if promptIn != nil {
-		e.promptIn = bufio.NewReader(promptIn)
-	}
+func NewEngine(cfg config.Config, promptIn *bufio.Reader, promptOut io.Writer) *RealEngine {
+	e := &RealEngine{procs: make(map[string]*lifecycle.Process), promptIn: promptIn, promptOut: promptOut}
 	e.cfg.Store(&cfg)
 	return e
 }
