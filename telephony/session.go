@@ -658,21 +658,30 @@ func (s *Session) run() {
 			if !s.timerFacility.IsCurrent(completion) {
 				continue
 			}
-			switch completion.Name {
-			case timerIdle:
-				s.dispatch(SourceIdleTimer, nil)
-			case timerMarkEcho:
-				s.dispatch(SourceMarkEchoTimer, nil)
-			case timerUtterance:
-				s.dispatch(SourceUtteranceTimer, nil)
-			case timerResponse:
-				s.dispatch(SourceResponseTimer, nil)
-			case timerTurn:
-				s.dispatch(SourceTurnTimer, nil)
-			case timerBedTick:
-				s.dispatch(SourceBedTick, nil)
-			}
+			s.dispatchTimerCompletion(completion.Name)
 		}
+	}
+}
+
+// dispatchTimerCompletion maps a fired TimerFacility timer's name to its
+// InputSource and dispatches it. Split out of run()'s select loop (which
+// must stay a flat, low-complexity dispatcher per Charter R8) as the number
+// of named timers has grown across tickets (SOP-125, SOP-156, SOP-161,
+// AATK-24, AATK-25).
+func (s *Session) dispatchTimerCompletion(name string) {
+	switch name {
+	case timerIdle:
+		s.dispatch(SourceIdleTimer, nil)
+	case timerMarkEcho:
+		s.dispatch(SourceMarkEchoTimer, nil)
+	case timerUtterance:
+		s.dispatch(SourceUtteranceTimer, nil)
+	case timerResponse:
+		s.dispatch(SourceResponseTimer, nil)
+	case timerTurn:
+		s.dispatch(SourceTurnTimer, nil)
+	case timerBedTick:
+		s.dispatch(SourceBedTick, nil)
 	}
 }
 
