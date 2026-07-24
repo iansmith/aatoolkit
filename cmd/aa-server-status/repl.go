@@ -65,10 +65,11 @@ var actionVerbs = map[Verb]struct {
 	progressive string
 	call        func(Engine, string) error
 }{
-	VerbUp:    {"up", "starting", Engine.Up},
-	VerbDown:  {"down", "stopping", Engine.Down},
-	VerbDead:  {"dead", "reaping", Engine.Dead},
-	VerbBuild: {"build", "building", Engine.Build},
+	VerbUp:     {"up", "starting", Engine.Up},
+	VerbDown:   {"down", "stopping", Engine.Down},
+	VerbDead:   {"dead", "reaping", Engine.Dead},
+	VerbBuild:  {"build", "building", Engine.Build},
+	VerbBounce: {"bounce", "bouncing", Engine.Bounce},
 }
 
 func dispatch(out io.Writer, engine Engine, cmd Command) {
@@ -162,5 +163,6 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  <name>              show one server's status")
 	fmt.Fprintln(out, "  <name> view [nowrap]   show last 50 lines of server log")
 	fmt.Fprintln(out, "  <name> up|down|build   act on one server")
+	fmt.Fprintln(out, "  <name> bounce       take one server down, then straight back up")
 	fmt.Fprintln(out, "  (bare Enter)        show status")
 }

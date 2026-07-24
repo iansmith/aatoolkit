@@ -291,3 +291,35 @@ func TestParseCommand_ViewWithExtraTokensIsError(t *testing.T) {
 		t.Fatal("expected error for too many tokens after view nowrap")
 	}
 }
+
+// --- bounce (AATK-28) -----------------------------------------------------
+
+// TestParseCommand_PerServerBounce pins bounce as a per-server verb in the
+// existing two-token "<name> <verb>" grammar.
+func TestParseCommand_PerServerBounce(t *testing.T) {
+	cmd, err := ParseCommand("myserver bounce")
+	if err != nil {
+		t.Fatalf("ParseCommand(\"myserver bounce\"): unexpected error: %v", err)
+	}
+	if cmd.Verb != VerbBounce || cmd.Target != "myserver" {
+		t.Fatalf("ParseCommand(\"myserver bounce\") = %+v, want verb=VerbBounce target=\"myserver\"", cmd)
+	}
+}
+
+// TestParseCommand_BareBounceIsNotAFleetVerb pins Observable behavior 5:
+// whole-fleet bounce is deliberately out of scope, so bare "bounce" must NOT
+// join globalVerbs. It falls through to the bare-name form (per-server status
+// for a server named "bounce"), which the engine then rejects as no-such-server
+// — never a fleet-wide restart.
+func TestParseCommand_BareBounceIsNotAFleetVerb(t *testing.T) {
+	cmd, err := ParseCommand("bounce")
+	if err != nil {
+		t.Fatalf("ParseCommand(\"bounce\"): unexpected error: %v", err)
+	}
+	if cmd.Verb == VerbBounce {
+		t.Fatalf("bare \"bounce\" must not parse as a fleet-wide bounce verb (whole-fleet bounce is out of scope), got %+v", cmd)
+	}
+	if cmd.Verb != VerbStatus || cmd.Target != "bounce" {
+		t.Fatalf("expected bare \"bounce\" to fall through to the bare-name status form, got %+v", cmd)
+	}
+}

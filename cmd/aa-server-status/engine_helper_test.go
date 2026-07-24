@@ -108,9 +108,30 @@ func (f *foreignProc) forceKill() {
 // of any RealEngine instance, and waits for it to report readiness.
 func spawnForeignListener(t *testing.T, port int) *foreignProc {
 	t.Helper()
+	return spawnForeignListenerOpts(t, port, false)
+}
+
+// spawnForeignListenerIgnoringTerm is spawnForeignListener with the fixture's
+// -ignore-term flag set, so the process survives SIGTERM and the teardown path
+// is driven all the way to SIGKILL — the same lever internal/lifecycle's own
+// failure-path tests pull (see TestTeardown_SurvivorAfterKill_IsLoudError).
+// Reaching post-SIGKILL verification is the only way to exercise the
+// "verified clean" failure rather than an incidental signal error against an
+// already-dead group.
+func spawnForeignListenerIgnoringTerm(t *testing.T, port int) *foreignProc {
+	t.Helper()
+	return spawnForeignListenerOpts(t, port, true)
+}
+
+func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool) *foreignProc {
+	t.Helper()
 	bin := tdlistenerBinary(t)
 
-	cmd := exec.Command(bin, "-port", strconv.Itoa(port))
+	args := []string{"-port", strconv.Itoa(port)}
+	if ignoreTerm {
+		args = append(args, "-ignore-term")
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = os.Stderr
 

@@ -80,6 +80,12 @@ type Engine interface {
 	Down(name string) error
 	Dead(name string) error
 	Build(name string) error
+
+	// Bounce takes one named server down and immediately back up, by
+	// composing Down then Up — never a parallel teardown/launch path, so
+	// any behavior added to Up (prompts, staleness rebuilds, health-gate
+	// changes) reaches bounce for free.
+	Bounce(name string) error
 	Logs(name string) ([]string, error)
 	Kill(pid int) error
 	Command(name string) (string, []string, error)
@@ -125,10 +131,15 @@ func (e *StubEngine) Status() []ServerStatus {
 	return out
 }
 
-func (e *StubEngine) Up(name string) error    { return notImplementedErr("up") }
-func (e *StubEngine) Down(name string) error  { return notImplementedErr("down") }
-func (e *StubEngine) Dead(name string) error  { return notImplementedErr("dead") }
-func (e *StubEngine) Build(name string) error { return notImplementedErr("build") }
+func (e *StubEngine) Up(name string) error   { return notImplementedErr("up") }
+func (e *StubEngine) Down(name string) error { return notImplementedErr("down") }
+
+// Bounce is the interface's compile-time obligation, nothing more — this
+// placeholder engine gets no real bounce support (AATK-28 fences that
+// explicitly); it fails loudly like every other stub verb above.
+func (e *StubEngine) Bounce(name string) error { return notImplementedErr("bounce") }
+func (e *StubEngine) Dead(name string) error   { return notImplementedErr("dead") }
+func (e *StubEngine) Build(name string) error  { return notImplementedErr("build") }
 func (e *StubEngine) Logs(name string) ([]string, error) {
 	return nil, notImplementedErr("logs")
 }
