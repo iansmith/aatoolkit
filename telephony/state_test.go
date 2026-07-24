@@ -46,8 +46,8 @@ func TestTransitionTableIsTotal(t *testing.T) {
 	if len(telephony.AllStates) != 8 {
 		t.Fatalf("AllStates: got %d states, want 8", len(telephony.AllStates))
 	}
-	if len(telephony.AllSources) != 10 {
-		t.Fatalf("AllSources: got %d sources, want 10", len(telephony.AllSources))
+	if len(telephony.AllSources) != 11 {
+		t.Fatalf("AllSources: got %d sources, want 11", len(telephony.AllSources))
 	}
 	for _, st := range telephony.AllStates {
 		for _, src := range telephony.AllSources {
