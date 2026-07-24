@@ -593,3 +593,46 @@ func TestIdleDecisionRecordsResolvedOverride(t *testing.T) {
 		t.Fatal("no idle-timeout decision recorded")
 	}
 }
+
+// TestResponseReadyAbsorbedOutsideAwaitingResponse pins the second half of
+// Observable behavior #2: a SourceResponseReady event in any state OTHER
+// than StateAwaitingResponse is absorbed and logged -- frames dropped, no
+// clear/mark, state unchanged. (Adversary gap: the other 9 tests only ever
+// send a response event from StateAwaitingResponse.)
+func TestResponseReadyAbsorbedOutsideAwaitingResponse(t *testing.T) {
+	spy := &outSpy{}
+	dataIn := telephony.NewBufferedChan[[]byte](256)
+	responseIn := telephony.NewBufferedChan[telephony.ResponseEvent](4)
+	s := telephony.NewSession(context.Background(), "resp-outside-awaiting",
+		telephony.WithVADFactory(func() (telephony.VADDetector, error) { return &fakeDetector{}, nil }),
+		telephony.WithTwilioDataInput(dataIn),
+		telephony.WithTwilioDataOutput(spyDataOut{spy}),
+		telephony.WithTwilioControlOutput(spyCtlOut{spy}),
+		telephony.WithResponseInput(responseIn),
+	)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	sendData(t, dataIn, windowFrame(0x01), recvTimeout)
+	waitForSessionState(t, s, telephony.StateListening)
+
+	ctx, cancel := context.WithTimeout(context.Background(), recvTimeout)
+	if err := responseIn.Send(ctx, telephony.ResponseEvent{OK: true, Frames: [][]byte{{0xAA}}}); err != nil {
+		t.Fatalf("send response event: %v", err)
+	}
+	cancel()
+
+	// No timer or channel event distinguishes "absorbed" from "not yet
+	// processed" -- bounded settle, then assert nothing changed, the same
+	// pattern TestSpeechOnsetCancelsIdleTimer already uses to prove a negative.
+	time.Sleep(150 * time.Millisecond)
+
+	if got := s.State(); got != telephony.StateListening {
+		t.Errorf("state after a response event outside StateAwaitingResponse: got %s, want Listening (unchanged)", got)
+	}
+	if events := spy.events(); len(events) != 0 {
+		t.Errorf("outbound events after a response event outside StateAwaitingResponse: got %+v, want none (frames dropped, per Observable behavior #2)", events)
+	}
+}
