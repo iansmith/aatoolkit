@@ -47,6 +47,7 @@ Rationale: a single in-process owner is the most accurate identity model (it hol
 | `dead` | same as `down`, **plus** kill the strays too |
 | `build` | rebuild all `source` servers; restart those that were running (see §5) |
 | `<name> build` | rebuild one source server (`build` on a non-source server → loud error) |
+| `<name> bounce` | imperative down-then-up for one server, composing `<name> down` and `<name> up` through their exact code paths. No bare `bounce`: cycling the whole fleet is a materially different risk (long warm-ups, externally-facing ports) than any other bare verb, and is deliberately not offered |
 | `logs <name>` | point at the current `build/logs/<name>-<ts>.log` |
 | `details <name>` | everything known about a server, incl. log path — **deferred** |
 | `help` | command help |
