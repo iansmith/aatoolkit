@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,25 +29,48 @@ import (
 // seam through which every fleet verb (up/down/dead/build/status) actually
 // touches child processes.
 type RealEngine struct {
-	cfg config.Config
+	// cfg is replaced wholesale by the config hot-reload (AATK-27), never
+	// mutated in place. It is an atomic.Pointer rather than a mu-guarded
+	// field because Up fans its targets out across goroutines that each
+	// read config on the way to launching: guarding it with mu would put a
+	// lock acquisition on those hot paths and raise a lock-ordering
+	// question with the procs registry mu already protects.
+	cfg atomic.Pointer[config.Config]
 
 	mu    sync.Mutex
 	procs map[string]*lifecycle.Process // server name -> our live child, if any
+
+	// reloader is nil unless WatchConfig was called; a nil reloader means
+	// this engine never re-reads its config, which is the right default for
+	// every construction path that isn't main's.
+	reloader *configReloader
 }
 
 // NewEngine builds a RealEngine over cfg. No processes are launched by
 // construction — the registry starts empty, matching a freshly started
 // supervisor that hasn't reconciled anything yet.
 func NewEngine(cfg config.Config) *RealEngine {
-	return &RealEngine{cfg: cfg, procs: make(map[string]*lifecycle.Process)}
+	e := &RealEngine{procs: make(map[string]*lifecycle.Process)}
+	e.cfg.Store(&cfg)
+	return e
 }
+
+// config returns a snapshot of the engine's live configuration. Callers that
+// read more than one field must capture the snapshot once rather than calling
+// this per field: a reload landing mid-operation would otherwise let a single
+// operation observe two different configs.
+//
+// The returned value shares slice backing arrays with the stored config, which
+// is safe precisely because a stored config is never mutated in place — the
+// reload path swaps the whole pointer.
+func (e *RealEngine) config() config.Config { return *e.cfg.Load() }
 
 var _ Engine = (*RealEngine)(nil)
 
 // serverByName returns the configured server named name, or ok=false if no
 // such server exists.
 func (e *RealEngine) serverByName(name string) (config.Server, bool) {
-	for _, s := range e.cfg.Servers {
+	for _, s := range e.config().Servers {
 		if s.Name == name {
 			return s, true
 		}
@@ -76,8 +100,9 @@ func (e *RealEngine) Status() []ServerStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	out := make([]ServerStatus, 0, len(e.cfg.Servers))
-	for _, s := range e.cfg.Servers {
+	servers := e.config().Servers
+	out := make([]ServerStatus, 0, len(servers))
+	for _, s := range servers {
 		out = append(out, e.statusForLocked(s))
 	}
 	return out
@@ -140,7 +165,7 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 	if status.State == StateUp || status.State == StateStray {
 		if s.Health.Path != "" {
 			spec := health.ResolveSpec(s.Health, s.Host, s.Port)
-			result := health.Probe(context.Background(), spec, resolveHealthTimeout(e.cfg.Supervisor))
+			result := health.Probe(context.Background(), spec, resolveHealthTimeout(e.config().Supervisor))
 			status.Health = result.Rendered
 		}
 	}
@@ -432,7 +457,7 @@ func (e *RealEngine) resolveUpTargets(name string) ([]config.Server, error) {
 	}
 
 	var targets []config.Server
-	for _, s := range e.cfg.Servers {
+	for _, s := range e.config().Servers {
 		if !s.Enabled {
 			continue
 		}
@@ -613,7 +638,7 @@ func (e *RealEngine) rebuildIfStaleCold(s config.Server) (outcome verbOutcome, h
 // launch dispatches to the per-type launcher (internal/lifecycle), using the
 // supervisor's configured log directory.
 func (e *RealEngine) launch(s config.Server) (*lifecycle.Process, error) {
-	logDir := e.cfg.Supervisor.LogDir
+	logDir := e.config().Supervisor.LogDir
 	switch s.Type {
 	case config.TypeMLX:
 		return lifecycle.LaunchMLX(logDir, s)
@@ -642,7 +667,7 @@ func (e *RealEngine) warmUp(s config.Server, proc *lifecycle.Process, budget tim
 	}
 	_, err := health.Warm(context.Background(), health.WarmConfig{
 		Spec:         health.ResolveWarmSpec(s.Warm, s.Host, s.Port),
-		PollInterval: resolvePollInterval(e.cfg.Supervisor),
+		PollInterval: resolvePollInterval(e.config().Supervisor),
 		Timeout:      budget,
 		ServerName:   s.Name,
 		LogPath:      proc.LogPath,
@@ -659,7 +684,8 @@ func (e *RealEngine) warmUp(s config.Server, proc *lifecycle.Process, budget tim
 // 180s take 360s before `up` reports anything, which is neither what the knob
 // says nor what an operator watching a REPL would assume.
 func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
-	deadline := time.Now().Add(resolveReadyTimeout(s, e.cfg.Supervisor))
+	sup := e.config().Supervisor
+	deadline := time.Now().Add(resolveReadyTimeout(s, sup))
 
 	if err := e.warmUp(s, proc, time.Until(deadline)); err != nil {
 		return err
@@ -675,8 +701,8 @@ func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 	spec := health.ResolveSpec(s.Health, s.Host, s.Port)
 	cfg := health.PollConfig{
 		Spec:         spec,
-		ProbeTimeout: resolveHealthTimeout(e.cfg.Supervisor),
-		PollInterval: resolvePollInterval(e.cfg.Supervisor),
+		ProbeTimeout: resolveHealthTimeout(sup),
+		PollInterval: resolvePollInterval(sup),
 		ReadyTimeout: time.Until(deadline),
 		ServerName:   s.Name,
 		LogPath:      proc.LogPath,
@@ -740,7 +766,7 @@ func (e *RealEngine) downOrDead(name string, killStrays bool) error {
 	}
 
 	var outcomes []verbOutcome
-	for _, s := range e.cfg.Servers {
+	for _, s := range e.config().Servers {
 		e.mu.Lock()
 		_, isOurs := e.livePIDLocked(s.Name)
 		e.mu.Unlock()
@@ -860,7 +886,7 @@ func (e *RealEngine) teardownPID(s config.Server, pid int32) error {
 		Ports:  lifecycle.DeclaredPorts(s),
 		Health: healthSpec,
 	}
-	grace := lifecycle.ResolveGracePeriod(s, e.cfg.Supervisor)
+	grace := lifecycle.ResolveGracePeriod(s, e.config().Supervisor)
 	_, err := lifecycle.Teardown(context.Background(), target, grace)
 	return err
 }
@@ -877,7 +903,7 @@ func (e *RealEngine) killForeignOrOwned(s config.Server, pid int32, isOurs bool)
 		delete(e.procs, s.Name)
 		e.mu.Unlock()
 	} else {
-		grace := lifecycle.ResolveGracePeriod(s, e.cfg.Supervisor)
+		grace := lifecycle.ResolveGracePeriod(s, e.config().Supervisor)
 		_, err = lifecycle.TeardownForeign(context.Background(), s.Name, pid, lifecycle.DeclaredPorts(s), grace)
 	}
 	return verbOutcome{Name: s.Name, Err: err}
@@ -981,7 +1007,7 @@ func (e *RealEngine) View(name string, nowrap bool) ([]string, error) {
 	if _, ok := e.serverByName(name); !ok {
 		return nil, fmt.Errorf("view %s: unknown server", name)
 	}
-	logPath, ok, err := lifecycle.NewestLog(e.cfg.Supervisor.LogDir, name)
+	logPath, ok, err := lifecycle.NewestLog(e.config().Supervisor.LogDir, name)
 	if err != nil {
 		return nil, fmt.Errorf("view %s: %w", name, err)
 	}
@@ -1116,7 +1142,8 @@ func (e *RealEngine) TeardownAll() []string {
 	}
 	e.mu.Unlock()
 
-	_, err := lifecycle.TeardownAll(context.Background(), e.cfg.Servers, e.cfg.Supervisor, pids)
+	cfg := e.config()
+	_, err := lifecycle.TeardownAll(context.Background(), cfg.Servers, cfg.Supervisor, pids)
 
 	e.mu.Lock()
 	for name := range pids {

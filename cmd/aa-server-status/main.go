@@ -75,6 +75,7 @@ func main() {
 	defer lock.Release()
 
 	engine := NewEngine(cfg)
+	engine.WatchConfig(basePath, localPath)
 	go watchSignals(os.Stdout, engine)
 	if err := Run(os.Stdin, os.Stdout, engine); err != nil {
 		fmt.Fprintf(os.Stderr, "aa-server-status: %v\n", err)

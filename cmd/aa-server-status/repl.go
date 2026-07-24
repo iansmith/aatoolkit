@@ -19,6 +19,9 @@ const prompt = "aa-server-status> "
 // commands and stub "not implemented" verb errors are printed to out, not
 // returned) — a non-nil error return is reserved for I/O failures on in.
 func Run(in io.Reader, out io.Writer, engine Engine) error {
+	// Before the first prompt, so the table on entry reflects the config as
+	// it is on disk right now — not as it was when main loaded it.
+	engine.ReloadConfigIfChanged(out)
 	printStatus(out, engine.Status())
 
 	scanner := bufio.NewScanner(in)
@@ -41,6 +44,9 @@ func Run(in io.Reader, out io.Writer, engine Engine) error {
 			return nil
 		}
 
+		// Before dispatch, not after: the command about to run is the one
+		// that should see the operator's latest edit.
+		engine.ReloadConfigIfChanged(out)
 		dispatch(out, engine, cmd)
 	}
 }
