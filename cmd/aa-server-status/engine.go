@@ -705,8 +705,29 @@ func (e *RealEngine) Dead(name string) error {
 	return e.downOrDead(name, true)
 }
 
+// Bounce takes one named server down and immediately back up. It is a
+// literal composition of the public Down and Up — deliberately not a
+// parallel teardown/launch path — so everything Up already does (port
+// preconditions, stale-source rebuilds, readiness polling) and everything
+// it grows later reaches bounce for free, with no maintenance here.
+//
+// A Down failure aborts the bounce and Up is never attempted: never launch
+// on top of an incomplete teardown. Bouncing an already-down server needs
+// no special case — Down is a no-op there, leaving a plain Up.
+//
+// A named target is required. Every other bare verb acts on the whole
+// fleet, but cycling every enabled server is a materially different risk
+// (long warm-ups, externally-facing ports) than any of them, so it is
+// refused here rather than silently inherited from Down/Up's own
+// empty-name fleet semantics.
 func (e *RealEngine) Bounce(name string) error {
-	return fmt.Errorf("not implemented: bounce lands in AATK-28")
+	if name == "" {
+		return fmt.Errorf("bounce: a server name is required (whole-fleet bounce is not supported)")
+	}
+	if err := e.Down(name); err != nil {
+		return err
+	}
+	return e.Up(name)
 }
 
 func (e *RealEngine) downOrDead(name string, killStrays bool) error {

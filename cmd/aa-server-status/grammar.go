@@ -36,7 +36,9 @@ type Command struct {
 
 // globalVerbs maps the bare-verb tokens to their Verb value. Per-server
 // verbs (a subset: up, down, build) are also recognized as the SECOND
-// token of a two-token "<name> <verb>" line — see ParseCommand.
+// token of a two-token "<name> <verb>" line — see ParseCommand. Note that
+// bounce is deliberately absent here: it is per-server only, since a
+// whole-fleet restart is a materially different risk than any bare verb.
 var globalVerbs = map[string]Verb{
 	"status": VerbStatus,
 	"up":     VerbUp,
@@ -51,10 +53,11 @@ var globalVerbs = map[string]Verb{
 
 // perServerVerbs are the verbs valid in "<name> <verb>" form.
 var perServerVerbs = map[string]Verb{
-	"up":    VerbUp,
-	"down":  VerbDown,
-	"build": VerbBuild,
-	"view":  VerbView,
+	"up":     VerbUp,
+	"down":   VerbDown,
+	"build":  VerbBuild,
+	"view":   VerbView,
+	"bounce": VerbBounce,
 }
 
 // ParseCommand parses one REPL input line into a Command. Recognizes:
@@ -62,7 +65,7 @@ var perServerVerbs = map[string]Verb{
 //   - a bare global verb            -> that verb, no target
 //   - "logs <name>"                 -> VerbLogs with target (name required)
 //   - "<name>"                      -> VerbStatus with target (per-server status)
-//   - "<name> up|down|build"        -> that verb with target
+//   - "<name> up|down|build|bounce" -> that verb with target
 //
 // Anything else — including extra trailing tokens on any of the above
 // forms — is a loud parse error naming the offending input.
@@ -111,7 +114,7 @@ func ParseCommand(line string) (Command, error) {
 		if verb, ok := perServerVerbs[fields[1]]; ok {
 			return Command{Verb: verb, Target: first}, nil
 		}
-		return Command{}, fmt.Errorf("unknown command %q: %q is not a valid verb for %q (want up|down|build|view)", line, fields[1], first)
+		return Command{}, fmt.Errorf("unknown command %q: %q is not a valid verb for %q (want up|down|build|view|bounce)", line, fields[1], first)
 	}
 
 	if len(fields) == 3 {

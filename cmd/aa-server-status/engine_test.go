@@ -759,7 +759,9 @@ func TestRealEngine_Bounce_DownFailureDoesNotAttemptUp(t *testing.T) {
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	// portA's holder is what observedRunningPID finds and hands to teardown.
-	spawnForeignListener(t, portA)
+	// It ignores SIGTERM so teardown is driven through to SIGKILL and on to
+	// the post-kill verification — the same lever the reference test pulls.
+	spawnForeignListenerIgnoringTerm(t, portA)
 	// portB's holder is independent of that group and survives the kill,
 	// so the post-kill verification can never come back clean.
 	spawnForeignListener(t, portB)
@@ -780,5 +782,31 @@ func TestRealEngine_Bounce_DownFailureDoesNotAttemptUp(t *testing.T) {
 	}
 	if pid := eng.Status()[0].PID; pid != 0 {
 		t.Fatalf("expected no server of ours running after a failed bounce, got pid %d", pid)
+	}
+}
+
+// TestRealEngine_Bounce_EmptyNameIsRefused guards the engine seam behind the
+// grammar's: Down("") and Up("") both mean "the whole fleet", so a Bounce that
+// merely forwarded an empty name would silently cycle every enabled server —
+// exactly the out-of-scope whole-fleet bounce, reachable by accident from any
+// non-REPL caller.
+func TestRealEngine_Bounce_EmptyNameIsRefused(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
+	}
+	eng := NewEngine(cfg)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	err := eng.Bounce("")
+	if err == nil {
+		t.Fatalf("expected Bounce(\"\") to be refused rather than bouncing the whole fleet")
+	}
+	if !strings.Contains(err.Error(), "server name is required") {
+		t.Fatalf("expected the refusal to name the missing argument, got: %v", err)
+	}
+	if pid := eng.Status()[0].PID; pid != 0 {
+		t.Fatalf("expected Bounce(\"\") to touch nothing, but a server is running (pid %d)", pid)
 	}
 }
