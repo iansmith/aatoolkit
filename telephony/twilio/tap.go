@@ -28,12 +28,10 @@ const defaultFrameBytes = telephony.SampleRateHz * telephony.MuLawFrameMS / 1000
 // real inbound frame arrival) can catch up. This bound is deliberately NOT
 // real-time flow control: it is a safety net against a genuine runaway (a
 // bug causing endless WriteOut calls unrelated to any real clip), sized
-// generously above every currently known clip (the longest is the ~5s
-// llm-thinking bed) so drop-oldest never fires in normal operation. Once
-// SOP-157 lands and wires in AATOOLKIT_SIM_TURN_MS -- an operator-configurable
-// clip duration with no inherent cap -- this bound should be derived from
-// that config instead of a fixed constant; until then, 5 minutes of frames
-// is a generous, cheap floor (~2.4MB worst case at ~160 bytes/frame).
+// generously above every currently known clip (farewell, forced-stop, and a
+// generated response bounded by MaxResponseMS) so drop-oldest never fires in
+// normal operation. 5 minutes of frames is a generous, cheap floor (~2.4MB
+// worst case at ~160 bytes/frame).
 const maxOutQueueFrames = 5 * 60 * 1000 / telephony.MuLawFrameMS // same bufferMS/frameMS derivation as telephony.ComputeDepth
 
 func tapDirFromEnv() string {
