@@ -171,7 +171,7 @@ func newTestEngineWatching(t *testing.T, cfgPath string) *RealEngine {
 	if err != nil {
 		t.Fatalf("initial config.Load(%s): %v", cfgPath, err)
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 	eng.WatchConfig(cfgPath, localConfigPath(cfgPath))
 	return eng

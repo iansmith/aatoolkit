@@ -1,0 +1,32 @@
+[supervisor]
+log_dir = "build/logs"
+
+[[server]]
+name = "prompted"
+type = "exec"
+enabled = true
+command = "/bin/true"
+port = 18081
+args = ["-base"]
+
+[server.health]
+path = "/healthz"
+
+[server.prompt]
+question = "Use plaintext ws for this run?"
+yes_args = ["-stream-scheme", "ws"]
+no_args = ["-stream-scheme", "wss"]
+
+[[server]]
+name = "partial"
+type = "exec"
+enabled = true
+command = "/bin/true"
+port = 18082
+
+[server.health]
+path = "/healthz"
+
+[server.prompt]
+question = "Only the yes branch is declared?"
+yes_args = ["-only-yes"]

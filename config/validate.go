@@ -34,6 +34,9 @@ func Validate(cfg Config) error {
 		if err := validateHealth(s); err != nil {
 			return err
 		}
+		if err := validatePrompt(s); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -117,6 +120,34 @@ func validateHealth(s Server) error {
 	ports := serverPortSet(s)
 	if !slices.Contains(ports, s.Health.Port) {
 		return fmt.Errorf("server %q: health.port %d is not one of the server's declared ports %v", s.Name, s.Health.Port, ports)
+	}
+	return nil
+}
+
+// promptCapableTypes are the server types whose launch path actually reads
+// Server.Args, and therefore the only ones a [server.prompt] can affect.
+// ExecCommand and SourceCommand return Args verbatim; MLXCommand and
+// PythonCommand build their arguments from model/entry/venv and never look at
+// Args at all.
+var promptCapableTypes = []ServerType{TypeExec, TypeSource}
+
+// validatePrompt rejects a [server.prompt] that could not do what it says.
+//
+// The type check is the interesting one: without it, declaring a prompt on an
+// mlx or python server would print a question, block for an answer, and then
+// discard it — the launch args are built from other fields entirely. That is
+// far worse than a config error, because it looks like it works.
+func validatePrompt(s Server) error {
+	if s.Prompt == nil {
+		return nil
+	}
+	if s.Prompt.Question == "" {
+		return fmt.Errorf("server %q: prompt.question is required", s.Name)
+	}
+	if !slices.Contains(promptCapableTypes, s.Type) {
+		return fmt.Errorf(
+			"server %q: prompt is not supported for type %q (its launch args ignore args); supported types: %v",
+			s.Name, s.Type, promptCapableTypes)
 	}
 	return nil
 }

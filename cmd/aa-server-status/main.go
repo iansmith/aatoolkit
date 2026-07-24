@@ -74,7 +74,7 @@ func main() {
 	}
 	defer lock.Release()
 
-	engine := NewEngine(cfg)
+	engine := NewEngine(cfg, os.Stdin, os.Stdout)
 	engine.WatchConfig(basePath, localPath)
 	go watchSignals(os.Stdout, engine)
 	if err := Run(os.Stdin, os.Stdout, engine); err != nil {

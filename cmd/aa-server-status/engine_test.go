@@ -51,7 +51,7 @@ func TestRealEngine_Up_LaunchesEnabledDownServer(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up(""); err != nil {
@@ -116,7 +116,7 @@ func TestRealEngine_Up_ColdLaunch_RebuildsStaleSourceServerBeforeLaunching(t *te
 
 	s := tdlistenerSourceServer(t, "svc", port, binPath)
 	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	var upErr error
@@ -159,7 +159,7 @@ func TestRealEngine_Up_ColdLaunch_NotStale_LaunchesNormally(t *testing.T) {
 
 	s := tdlistenerSourceServer(t, "svc", port, binPath)
 	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up(""); err != nil {
@@ -180,7 +180,7 @@ func TestRealEngine_Up_AlreadyUpIsIdempotentSkip(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up(""); err != nil {
@@ -213,7 +213,7 @@ func TestRealEngine_Up_PortConflictRefusesAndNamesHolder(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	err := eng.Up("")
@@ -241,7 +241,7 @@ func TestRealEngine_Up_OwnLiveChildOnPort_IsNotAConflict(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up(""); err != nil {
@@ -268,7 +268,7 @@ func TestRealEngine_Down_StopsEnabledRunning_WarnsButDoesNotTouchStrays(t *testi
 			tdlistenerServer(t, "stray-svc", strayPort, false),
 		},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	// Bring both up via imperative up (disabled server started for test
@@ -322,7 +322,7 @@ func TestRealEngine_Dead_KillsEnabledAndStrays(t *testing.T) {
 			tdlistenerServer(t, "stray-svc", strayPort, false),
 		},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up("enabled-svc"); err != nil {
@@ -351,7 +351,7 @@ func TestRealEngine_ImperativeUp_StartsDisabledServer(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "disabled-svc", port, false)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	// A plain reconcile-up must NOT start a disabled server.
@@ -384,7 +384,7 @@ func TestRealEngine_ImperativeDown_StopsDisabledServer(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "disabled-svc", port, false)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up("disabled-svc"); err != nil {
@@ -415,7 +415,7 @@ func TestRealEngine_Up_MultiServer_OneFails_OthersStillAttemptedAndAggregateName
 			tdlistenerServer(t, "bad-svc", badPort, true),
 		},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	err := eng.Up("")
@@ -455,7 +455,7 @@ func TestRealEngine_Up_SingleServer_PrintsLogPathOnSuccess(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	var upErr error
@@ -483,7 +483,7 @@ func TestRun_ImperativeUp_SingleServer_PrintsTailHint(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	cmd, err := ParseCommand("svc up")
@@ -514,7 +514,7 @@ func TestRealEngine_Up_MultiServer_AllSucceed_PrintsEachLogPath(t *testing.T) {
 			tdlistenerServer(t, "svc-b", portB, true),
 		},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	var upErr error
@@ -595,7 +595,7 @@ func TestRun_Up_MultiServer_PartialFailure_DispatchPrintsEachLineOnce(t *testing
 			tdlistenerServer(t, "bad-svc", badPort, true),
 		},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	cmd, err := ParseCommand("up")
@@ -677,7 +677,7 @@ func TestRealEngine_Bounce_UpServer_RestartsWithNewPID(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up("svc"); err != nil {
@@ -715,7 +715,7 @@ func TestRealEngine_Bounce_DownServer_IsSynonymForUp(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	// Never brought up — Down's half of the bounce has nothing to tear down.
@@ -756,7 +756,7 @@ func TestRealEngine_Bounce_DownFailureDoesNotAttemptUp(t *testing.T) {
 	s.Listens = []int{portA, portB}
 
 	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	// portA's holder is what observedRunningPID finds and hands to teardown.
@@ -797,7 +797,7 @@ func TestRealEngine_Bounce_EmptyNameIsRefused(t *testing.T) {
 		Supervisor: testSupervisor(t),
 		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	err := eng.Bounce("")
@@ -833,7 +833,7 @@ func TestRealEngine_ReplaceConfig_RacesInFlightUp(t *testing.T) {
 			tdlistenerServer(t, "svc-b", portB, true),
 		},
 	}
-	eng := NewEngine(cfg)
+	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
 
 	// A replacement config that differs in a field the launch path reads, so
@@ -865,4 +865,219 @@ func TestRealEngine_ReplaceConfig_RacesInFlightUp(t *testing.T) {
 	if got := len(eng.Status()); got != 2 {
 		t.Fatalf("expected a coherent config after the racing swaps (2 servers), got %d", got)
 	}
+}
+
+// --- [server.prompt] (AATK-26) --------------------------------------------
+
+// promptedServer is a tdlistener exec fixture carrying a [server.prompt], so
+// the launched process's own argv is the evidence of which branch was taken:
+// tdlistener rejects unknown flags, so an arg that reached it is an arg that
+// was actually on the command line.
+func promptedServer(t *testing.T, name string, port int, spec *config.PromptSpec) config.Server {
+	t.Helper()
+	s := tdlistenerServer(t, name, port, true)
+	s.Prompt = spec
+	return s
+}
+
+// schemeSpec branches on an argument tdlistener understands, so the answer is
+// observable in the child's behavior rather than only in our own bookkeeping.
+func schemeSpec() *config.PromptSpec {
+	return &config.PromptSpec{
+		Question: "Use plaintext ws for this run?",
+		YesArgs:  []string{"-ignore-term"},
+		NoArgs:   []string{"-child-port", "0"},
+	}
+}
+
+// launchedArgs reports the argv of the process the engine actually started.
+// This is the only honest oracle for "the chosen branch's args were appended":
+// Command() reports the args resolved from the STORED config, and the prompt
+// answer exists only at launch time, so Command() can never reflect it.
+func launchedArgs(t *testing.T, eng *RealEngine, name string) []string {
+	t.Helper()
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	proc, ok := eng.procs[name]
+	if !ok {
+		t.Fatalf("no launched process recorded for %q", name)
+	}
+	return proc.Cmd.Args
+}
+
+func TestRealEngine_Up_PromptedServer_YesAnswerAppendsYesArgs(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{promptedServer(t, "svc", port, schemeSpec())},
+	}
+	var promptOut strings.Builder
+	eng := NewEngine(cfg, strings.NewReader("y\n"), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error: %v", err)
+	}
+	if !strings.Contains(promptOut.String(), "Use plaintext ws for this run?") {
+		t.Fatalf("expected the question to be printed, got: %q", promptOut.String())
+	}
+
+	got := strings.Join(launchedArgs(t, eng, "svc"), " ")
+	if !strings.Contains(got, "-ignore-term") {
+		t.Fatalf("expected the yes branch's args appended to the resolved launch args, got %q", got)
+	}
+	if strings.Contains(got, "-child-port") {
+		t.Fatalf("a yes answer must not also take the no branch, got %q", got)
+	}
+}
+
+func TestRealEngine_Up_PromptedServer_NoAnswerAppendsNoArgs(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{promptedServer(t, "svc", port, schemeSpec())},
+	}
+	var promptOut strings.Builder
+	eng := NewEngine(cfg, strings.NewReader("n\n"), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error: %v", err)
+	}
+	got := strings.Join(launchedArgs(t, eng, "svc"), " ")
+	if !strings.Contains(got, "-child-port 0") {
+		t.Fatalf("expected the no branch's args appended, got %q", got)
+	}
+	if strings.Contains(got, "-ignore-term") {
+		t.Fatalf("a no answer must not take the yes branch, got %q", got)
+	}
+}
+
+// TestRealEngine_Up_UnpromptedServerUnchanged is the regression guard: a
+// server with no [server.prompt] must be byte-identical to today — nothing
+// printed, nothing appended.
+func TestRealEngine_Up_UnpromptedServerUnchanged(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{tdlistenerServer(t, "svc", port, true)},
+	}
+	before := cfg.Servers[0].Args
+
+	var promptOut strings.Builder
+	eng := NewEngine(cfg, strings.NewReader("y\n"), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error: %v", err)
+	}
+	if promptOut.String() != "" {
+		t.Fatalf("an unprompted server must print nothing to the prompt stream, got %q", promptOut.String())
+	}
+	_, args, err := eng.Command("svc")
+	if err != nil {
+		t.Fatalf("Command(\"svc\"): %v", err)
+	}
+	if strings.Join(args, " ") != strings.Join(before, " ") {
+		t.Fatalf("an unprompted server's args must be unchanged: was %v, now %v", before, args)
+	}
+}
+
+// TestRealEngine_Up_RepromptsOnInvalidAnswer pins that a typo is recoverable
+// rather than fatal or silently defaulted.
+func TestRealEngine_Up_RepromptsOnInvalidAnswer(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{promptedServer(t, "svc", port, schemeSpec())},
+	}
+	var promptOut strings.Builder
+	eng := NewEngine(cfg, strings.NewReader("maybe\ny\n"), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error after a reprompt: %v", err)
+	}
+	if n := strings.Count(promptOut.String(), "Use plaintext ws for this run?"); n != 2 {
+		t.Fatalf("expected the question asked exactly twice (initial + one reprompt), got %d in %q", n, promptOut.String())
+	}
+	if got := strings.Join(launchedArgs(t, eng, "svc"), " "); !strings.Contains(got, "-ignore-term") {
+		t.Fatalf("expected the eventual y answer to take the yes branch, got %q", got)
+	}
+}
+
+// TestRealEngine_Up_BulkUp_PromptsSequentialBeforeAnyLaunch is behavior 4, and
+// the reason the prompt pre-pass exists at all. Asking inside upOne would put
+// concurrent reads on one stdin from the WaitGroup fan-out.
+//
+// Asserting "both eventually launched" would not catch that. The discriminator
+// is ordering: every question must appear on the prompt stream before the
+// FIRST process starts, so the check is against launch time, not launch count.
+func TestRealEngine_Up_BulkUp_PromptsSequentialBeforeAnyLaunch(t *testing.T) {
+	portA, portB := freeTestPort(t), freeTestPort(t)
+	specA := &config.PromptSpec{Question: "QUESTION-A?", YesArgs: []string{"-serve-health"}}
+	specB := &config.PromptSpec{Question: "QUESTION-B?", YesArgs: []string{"-serve-health"}}
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers: []config.Server{
+			promptedServer(t, "svc-a", portA, specA),
+			promptedServer(t, "svc-b", portB, specB),
+		},
+	}
+
+	// watchedWriter records the prompt text as it is written, and snapshots
+	// what had been written at the moment the first child process appeared.
+	out := &watchedWriter{}
+	eng := NewEngine(cfg, strings.NewReader("y\ny\n"), out)
+	t.Cleanup(func() { eng.TeardownAll() })
+	out.firstLaunchSeen = func() bool {
+		for _, s := range eng.Status() {
+			if s.PID != 0 {
+				return true
+			}
+		}
+		return false
+	}
+
+	if err := eng.Up(""); err != nil {
+		t.Fatalf("bulk Up(\"\") error: %v", err)
+	}
+
+	atFirstLaunch := out.snapshotAtFirstLaunch()
+	if !strings.Contains(atFirstLaunch, "QUESTION-A?") || !strings.Contains(atFirstLaunch, "QUESTION-B?") {
+		t.Fatalf("both questions must be asked before ANY server launches; prompt output at first launch was: %q", atFirstLaunch)
+	}
+}
+
+// watchedWriter is the prompt-output sink for the sequencing test. Every write
+// checks whether a child process has appeared yet, and the first time one has,
+// it freezes a copy of everything written so far.
+type watchedWriter struct {
+	mu              sync.Mutex
+	buf             strings.Builder
+	snapshot        string
+	snapped         bool
+	firstLaunchSeen func() bool
+}
+
+func (w *watchedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.buf.Write(p)
+	if !w.snapped && w.firstLaunchSeen != nil && w.firstLaunchSeen() {
+		w.snapshot = w.buf.String()
+		w.snapped = true
+	}
+	return n, err
+}
+
+func (w *watchedWriter) snapshotAtFirstLaunch() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.snapped {
+		return w.snapshot
+	}
+	// No launch was ever observed mid-write, which means every write
+	// completed before the first process started — the property under test.
+	return w.buf.String()
 }

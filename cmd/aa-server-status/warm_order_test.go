@@ -61,7 +61,7 @@ func TestPollReady_WarmsBeforeHealth(t *testing.T) {
 		order []string
 	)
 	host, port := recordingServer(t, &order, &mu, nil)
-	eng := NewEngine(config.Config{Supervisor: testSupervisor(t)})
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t)}, nil, nil)
 
 	if err := eng.pollReady(warmServer(t, host, port), &lifecycle.Process{LogPath: "warmed.log"}); err != nil {
 		t.Fatalf("pollReady: %v", err)
@@ -91,7 +91,7 @@ func TestPollReady_HealthNeverProbedIfWarmFails(t *testing.T) {
 
 	sup := testSupervisor(t)
 	sup.ReadyTimeout = config.Duration{Duration: 40 * time.Millisecond}
-	eng := NewEngine(config.Config{Supervisor: sup})
+	eng := NewEngine(config.Config{Supervisor: sup}, nil, nil)
 
 	err := eng.pollReady(warmServer(t, host, port), &lifecycle.Process{LogPath: "warmed.log"})
 	if err == nil {
@@ -119,7 +119,7 @@ func TestPollReady_NoWarmKeySkipsStraightToHealth(t *testing.T) {
 	s := warmServer(t, host, port)
 	s.Warm = config.Warm{} // no warm key
 
-	eng := NewEngine(config.Config{Supervisor: testSupervisor(t)})
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t)}, nil, nil)
 	if err := eng.pollReady(s, &lifecycle.Process{LogPath: "plain.log"}); err != nil {
 		t.Fatalf("pollReady: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestPollReady_WarmAndHealthShareOneReadyTimeout(t *testing.T) {
 
 	sup := testSupervisor(t)
 	sup.ReadyTimeout = config.Duration{Duration: budget}
-	eng := NewEngine(config.Config{Supervisor: sup})
+	eng := NewEngine(config.Config{Supervisor: sup}, nil, nil)
 
 	start := time.Now()
 	if err := eng.pollReady(warmServer(t, h, port), &lifecycle.Process{LogPath: "shared.log"}); err == nil {
