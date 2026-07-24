@@ -40,7 +40,7 @@ func writeViewLog(t *testing.T, logDir, name, content string) string {
 func TestRealEngine_View_FewerThan50Lines(t *testing.T) {
 	cfg, logDir := viewTestCfg(t)
 	writeViewLog(t, logDir, "svc", "line 0\nline 1\nline 2\n")
-	lines, err := NewEngine(cfg).View("svc", false)
+	lines, err := NewEngine(cfg, nil, nil).View("svc", false)
 	if err != nil {
 		t.Fatalf("View: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestRealEngine_View_Exactly50Lines(t *testing.T) {
 		fmt.Fprintf(&sb, "line %d\n", i)
 	}
 	writeViewLog(t, logDir, "svc", sb.String())
-	lines, err := NewEngine(cfg).View("svc", false)
+	lines, err := NewEngine(cfg, nil, nil).View("svc", false)
 	if err != nil {
 		t.Fatalf("View: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestRealEngine_View_Exactly50Lines(t *testing.T) {
 // Unknown server name → error that names the server.
 func TestRealEngine_View_UnknownServer(t *testing.T) {
 	cfg, _ := viewTestCfg(t)
-	_, err := NewEngine(cfg).View("nosuch", false)
+	_, err := NewEngine(cfg, nil, nil).View("nosuch", false)
 	if err == nil {
 		t.Fatal("want error for unknown server, got nil")
 	}
@@ -83,7 +83,7 @@ func TestRealEngine_View_UnknownServer(t *testing.T) {
 // Known server with no log file → error that names the server.
 func TestRealEngine_View_NoLogFile(t *testing.T) {
 	cfg, _ := viewTestCfg(t)
-	_, err := NewEngine(cfg).View("svc", false)
+	_, err := NewEngine(cfg, nil, nil).View("svc", false)
 	if err == nil {
 		t.Fatal("want error when no log file exists, got nil")
 	}
@@ -102,7 +102,7 @@ func TestRealEngine_View_ReturnsLast50Lines(t *testing.T) {
 		fmt.Fprintf(&sb, "line %d\n", i)
 	}
 	writeViewLog(t, logDir, "svc", sb.String())
-	lines, err := NewEngine(cfg).View("svc", false)
+	lines, err := NewEngine(cfg, nil, nil).View("svc", false)
 	if err != nil {
 		t.Fatalf("View: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestRealEngine_View_NoNowrapPreservesFullLine(t *testing.T) {
 	cfg, logDir := viewTestCfg(t)
 	longLine := strings.Repeat("x", 120)
 	writeViewLog(t, logDir, "svc", longLine+"\n")
-	lines, err := NewEngine(cfg).View("svc", false)
+	lines, err := NewEngine(cfg, nil, nil).View("svc", false)
 	if err != nil {
 		t.Fatalf("View: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRealEngine_View_NowrapTruncatesAt80Runes(t *testing.T) {
 	cfg, logDir := viewTestCfg(t)
 	longLine := strings.Repeat("x", 120)
 	writeViewLog(t, logDir, "svc", longLine+"\n")
-	lines, err := NewEngine(cfg).View("svc", true)
+	lines, err := NewEngine(cfg, nil, nil).View("svc", true)
 	if err != nil {
 		t.Fatalf("View: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestRealEngine_View_NowrapShortLineUnchanged(t *testing.T) {
 	cfg, logDir := viewTestCfg(t)
 	shortLine := strings.Repeat("y", 40)
 	writeViewLog(t, logDir, "svc", shortLine+"\n")
-	lines, err := NewEngine(cfg).View("svc", true)
+	lines, err := NewEngine(cfg, nil, nil).View("svc", true)
 	if err != nil {
 		t.Fatalf("View: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestRealEngine_View_NowrapShortLineUnchanged(t *testing.T) {
 func TestRealEngine_View_EmptyLogFile(t *testing.T) {
 	cfg, logDir := viewTestCfg(t)
 	writeViewLog(t, logDir, "svc", "")
-	lines, err := NewEngine(cfg).View("svc", false)
+	lines, err := NewEngine(cfg, nil, nil).View("svc", false)
 	if err != nil {
 		t.Fatalf("empty log file must not error: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestRealEngine_View_EmptyLogFile(t *testing.T) {
 func TestRealEngine_View_NoTrailingNewline(t *testing.T) {
 	cfg, logDir := viewTestCfg(t)
 	writeViewLog(t, logDir, "svc", "first\nsecond")
-	lines, err := NewEngine(cfg).View("svc", false)
+	lines, err := NewEngine(cfg, nil, nil).View("svc", false)
 	if err != nil {
 		t.Fatalf("View: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestRealEngine_View_NowrapExact80Runes(t *testing.T) {
 	cfg, logDir := viewTestCfg(t)
 	line80 := strings.Repeat("z", 80)
 	writeViewLog(t, logDir, "svc", line80+"\n")
-	lines, err := NewEngine(cfg).View("svc", true)
+	lines, err := NewEngine(cfg, nil, nil).View("svc", true)
 	if err != nil {
 		t.Fatalf("View: %v", err)
 	}

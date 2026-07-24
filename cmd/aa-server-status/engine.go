@@ -49,7 +49,7 @@ type RealEngine struct {
 // NewEngine builds a RealEngine over cfg. No processes are launched by
 // construction — the registry starts empty, matching a freshly started
 // supervisor that hasn't reconciled anything yet.
-func NewEngine(cfg config.Config) *RealEngine {
+func NewEngine(cfg config.Config, promptIn io.Reader, promptOut io.Writer) *RealEngine {
 	e := &RealEngine{procs: make(map[string]*lifecycle.Process)}
 	e.cfg.Store(&cfg)
 	return e

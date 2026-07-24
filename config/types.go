@@ -156,11 +156,21 @@ func (w *Warm) UnmarshalTOML(data any) error {
 
 // Server is one [[server]] entry — the schema is a union of all four
 // server-type shapes; Validate enforces per-type required fields.
+// PromptSpec is a stub until AATK-26 implements it.
+type PromptSpec struct {
+	Question string   `toml:"question"`
+	YesArgs  []string `toml:"yes_args"`
+	NoArgs   []string `toml:"no_args"`
+}
+
 type Server struct {
 	Name    string     `toml:"name"`
 	Type    ServerType `toml:"type"`
 	Enabled bool       `toml:"enabled"`
 	Host    string     `toml:"host"`
+
+	// Prompt is a stub until AATK-26 implements it.
+	Prompt *PromptSpec `toml:"prompt"`
 
 	// mlx / python launch port.
 	Port int `toml:"port"`

@@ -162,3 +162,41 @@ health_timeout = "not-a-duration"
 		t.Fatal("expected error for invalid duration string, got nil")
 	}
 }
+
+// --- [server.prompt] (AATK-26) --------------------------------------------
+
+// TestValidate_RejectsPromptWithEmptyQuestion — a prompt with nothing to ask
+// would block the launch on a blank line.
+func TestValidate_RejectsPromptWithEmptyQuestion(t *testing.T) {
+	cfg := Config{Servers: []Server{{
+		Name: "svc", Type: TypeExec, Command: "/bin/true", Port: 1234,
+		Health: Health{Path: "/healthz"},
+		Prompt: &PromptSpec{YesArgs: []string{"-x"}},
+	}}}
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatalf("expected Validate to reject a prompt with an empty question")
+	}
+	if !strings.Contains(err.Error(), "svc") {
+		t.Fatalf("expected the error to name the offending server, got: %v", err)
+	}
+}
+
+// TestValidate_RejectsPromptOnTypeThatIgnoresArgs guards the silent no-op:
+// MLXCommand and PythonCommand build their args from model/entry and never
+// read s.Args, so a prompt on those types would ask the operator a question
+// and then discard the answer. A loud config error beats that.
+func TestValidate_RejectsPromptOnTypeThatIgnoresArgs(t *testing.T) {
+	cfg := Config{Servers: []Server{{
+		Name: "brain", Type: TypeMLX, Model: "some/model", Port: 1234,
+		Health: Health{Path: "/healthz"},
+		Prompt: &PromptSpec{Question: "which?", YesArgs: []string{"-x"}},
+	}}}
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatalf("expected Validate to reject a prompt on an mlx server, whose launch args ignore args")
+	}
+	if !strings.Contains(err.Error(), "brain") {
+		t.Fatalf("expected the error to name the offending server, got: %v", err)
+	}
+}
