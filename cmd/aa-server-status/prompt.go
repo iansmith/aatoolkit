@@ -30,8 +30,12 @@ func (e *RealEngine) askPrompts(targets []config.Server) ([]config.Server, error
 	if !slices.ContainsFunc(targets, func(s config.Server) bool { return s.Prompt != nil }) {
 		return targets, nil
 	}
-	if e.promptIn == nil {
-		return nil, fmt.Errorf("server %q declares a prompt but this engine has no input stream to ask on",
+	// Both streams are checked, not just the input one: a nil io.Writer is
+	// not a no-op writer, it panics on the first Fprintf. Refusing loudly
+	// here turns a latent nil-deref deep in the launch path into a clear
+	// error naming the server that needed asking.
+	if e.promptIn == nil || e.promptOut == nil {
+		return nil, fmt.Errorf("server %q declares a prompt but this engine has no input/output streams to ask on",
 			firstPromptedName(targets))
 	}
 
