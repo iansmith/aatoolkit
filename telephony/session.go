@@ -825,9 +825,6 @@ func (s *Session) sendBedChunk() {
 	if s.dataOut == nil || len(clip) == 0 {
 		return
 	}
-	if s.bedOffset >= len(clip) {
-		s.bedOffset = 0
-	}
 	chunk := make([]byte, 0, bedChunkBytes)
 	for len(chunk) < bedChunkBytes {
 		end := min(s.bedOffset+(bedChunkBytes-len(chunk)), len(clip))
