@@ -22,6 +22,12 @@ var errPlaneClosed = errors.New("twilio: demux: data plane closed")
 // events (start/stop/mark/clear) are rare, so a small depth is generous.
 const controlPlaneDepth = 16
 
+// responseInputDepth is the buffer depth for a session's response input: at
+// most one response is ever pending per turn, so a small fixed buffer is
+// generous headroom without being a call-duration-scaled tuning knob --
+// mirrors sttDispatchDepth's rationale (telephony/session.go).
+const responseInputDepth = 4
+
 // TwilioDataPlaneInput is the SOP-116 ServiceInput pattern specialized to
 // Frame for the Twilio data plane (audio media frames). Its concrete
 // implementation (dropOldestPlane) evicts the oldest buffered frame rather

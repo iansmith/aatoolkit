@@ -31,10 +31,8 @@ var FarewellULaw []byte
 var AudioForcedStopULaw []byte
 
 // LLMThinkingULaw is a loopable "thinking" bed, μ-law at 8 kHz. SOP-156
-// embedded it with no playback path yet; SOP-157 plays it on the outbound
-// data plane during the sim-turn collection stand-in (Session.sendBed),
-// looping to fill the configured duration ahead of the real LLM-composed
-// reply (SOP-115/G,H), which will eventually replace this fixed clip.
+// embedded it with no playback path yet, for a future LLM-composed reply
+// (SOP-115/G,H) to loop while it waits for the real response.
 //
 //go:embed llm-thinking.ulaw
 var LLMThinkingULaw []byte

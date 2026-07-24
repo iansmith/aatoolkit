@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/iansmith/aatoolkit/telephony/assets"
 )
 
 // ControlEvent is a Twilio control-plane signal (e.g. "stop") routed to a
@@ -40,9 +38,27 @@ const (
 	timerIdle      = "idle"
 	timerMarkEcho  = "markEcho"
 	timerUtterance = "utterance"
-	timerSimTurn   = "simTurn"
+	timerResponse  = "response"
 	timerTurn      = "turn"
 )
+
+// responseMarkName is the mark name sent alongside the response's audio
+// frames, and the name expected back on its echo -- the
+// StateAwaitingResponsePlayout counterpart to farewellMarkName.
+const responseMarkName = "response"
+
+// ResponseEvent carries a response-delivery signal dispatched as
+// SourceResponseReady: OK=true with Frames for a response that generated
+// successfully, OK=false (Frames empty) for one that failed.
+type ResponseEvent struct {
+	OK     bool
+	Frames [][]byte
+}
+
+// ResponseInput is the receive side of the channel a Session reads
+// response-delivery events from: produced externally (by a ReplyRouter's
+// ReplySink) and read by the session.
+type ResponseInput = ServiceOutput[ResponseEvent]
 
 // sttDispatchDepth is sttDispatchCh's buffer size: at most one FullPass is
 // ever pending per utterance, so a small fixed buffer is generous headroom
@@ -155,9 +171,10 @@ type Session struct {
 	// of them may be nil (unwired) -- run()'s select treats a nil channel as
 	// a case that never fires, so an unwired source is simply inert rather
 	// than a crash.
-	dataIn    TwilioDataPlaneInput
-	controlIn TwilioControlPlaneInput
-	sttOut    STTOutput
+	dataIn     TwilioDataPlaneInput
+	controlIn  TwilioControlPlaneInput
+	sttOut     STTOutput
+	responseIn ResponseInput
 
 	// dataOut and ctlOut are where the SOP-125 termination flow writes the
 	// farewell clip's audio frames and its mark, respectively. Both may be
@@ -171,9 +188,10 @@ type Session struct {
 	// nil is a safe no-op -- Session itself is transport-agnostic.
 	closeFunc func()
 
-	// idleTimeoutMS overrides MaxSilenceMS for this session when > 0 (test
-	// seam only -- MaxSilenceMS's real multi-second default is too slow to
-	// wait out in a test).
+	// idleTimeoutMS overrides MaxSilenceMS for this session when > 0. A
+	// production knob as well as a test seam: MaxSilenceMS's real
+	// multi-second default is too slow to wait out in a test, and an
+	// operator may also want a smaller live value.
 	idleTimeoutMS int
 
 	// utteranceTimeoutMS overrides MaxUtteranceMS for this session when > 0
@@ -186,9 +204,10 @@ type Session struct {
 	// the operator sets a small value for live testing.
 	turnTimeoutMS int
 
-	// simTurnMS is the duration for playing the thinking bed when sim-turn
-	// is enabled (SOP-157). <= 0 means sim-turn is disabled.
-	simTurnMS int
+	// responseTimeoutMS overrides MaxResponseMS for this session when > 0
+	// (test seam). The 45s production default is impractical to wait out in
+	// a test.
+	responseTimeoutMS int
 
 	// sttIn is where drainSTTDispatch sends full-pass STTRequests (SOP-124).
 	// sttDispatchCh is dispatchSTT's non-blocking handoff to the dedicated
@@ -404,6 +423,13 @@ func WithTwilioControlOutput(out TwilioControlPlaneOutput) SessionOption {
 	return func(s *Session) { s.ctlOut = out }
 }
 
+// WithResponseInput wires in the source of response-delivery events --
+// production wires a ReplyRouter's ReplySink to the same channel via
+// ReplyRouter.Register; tests inject a bare BufferedChan directly.
+func WithResponseInput(in ResponseInput) SessionOption {
+	return func(s *Session) { s.responseIn = in }
+}
+
 // WithCloseFunc overrides how the session tears down its underlying
 // transport once Closed via the termination flow. Production wires this to
 // the Twilio WebSocket's close; tests inject a fake to observe it was
@@ -434,9 +460,13 @@ func WithDecisionClock(now func() time.Time) SessionOption {
 	return func(s *Session) { s.now = now }
 }
 
-// WithMaxSilenceMS overrides MaxSilenceMS for this session. Test seam only:
-// MaxSilenceMS's real multi-second default is impractical to wait out in a
-// test.
+// WithMaxSilenceMS overrides MaxSilenceMS for this session: a production
+// knob for an operator who wants a smaller/larger idle bound on a live call,
+// and the test seam that makes MaxSilenceMS's real multi-second default
+// practical to wait out in a test. The override is reflected in the
+// idle-timeout cap decision's recorded value (recordTurnCompletion); it does
+// not affect Session.Start's config-sanity check (validateOrdering), which
+// still validates the bare MaxSilenceMS production constant.
 func WithMaxSilenceMS(ms int) SessionOption {
 	return func(s *Session) { s.idleTimeoutMS = ms }
 }
@@ -453,10 +483,10 @@ func WithMaxTurnMS(ms int) SessionOption {
 	return func(s *Session) { s.turnTimeoutMS = ms }
 }
 
-// WithSimTurnMS enables sim-turn bed playback (SOP-157) for the configured
-// duration (ms). <= 0 disables it (production default).
-func WithSimTurnMS(ms int) SessionOption {
-	return func(s *Session) { s.simTurnMS = ms }
+// WithMaxResponseMS overrides MaxResponseMS for this session. Test seam: the
+// 45s production default is impractical to wait out in a test.
+func WithMaxResponseMS(ms int) SessionOption {
+	return func(s *Session) { s.responseTimeoutMS = ms }
 }
 
 // NewSession builds a session for callSID with a cancel derived from ctx. It
@@ -597,6 +627,11 @@ func (s *Session) run() {
 				return
 			}
 			s.dispatch(SourceSTTResult, res)
+		case rev, ok := <-responseChannel(s.responseIn):
+			if !ok {
+				return
+			}
+			s.dispatch(SourceResponseReady, rev)
 		case completion := <-s.timerFacility.Completions():
 			if !s.timerFacility.IsCurrent(completion) {
 				continue
@@ -608,8 +643,8 @@ func (s *Session) run() {
 				s.dispatch(SourceMarkEchoTimer, nil)
 			case timerUtterance:
 				s.dispatch(SourceUtteranceTimer, nil)
-			case timerSimTurn:
-				s.dispatch(SourceSimTurnTimer, nil)
+			case timerResponse:
+				s.dispatch(SourceResponseTimer, nil)
 			case timerTurn:
 				s.dispatch(SourceTurnTimer, nil)
 			}
@@ -647,6 +682,14 @@ func sttChannel(out STTOutput) <-chan STTResult {
 		return nil
 	}
 	return out.Channel()
+}
+
+// responseChannel returns in's receive channel, or nil if in is unwired.
+func responseChannel(in ResponseInput) <-chan ResponseEvent {
+	if in == nil {
+		return nil
+	}
+	return in.Channel()
 }
 
 // armIdleTimer starts the idle timer at idleTimeoutMS (test seam) or
@@ -711,23 +754,30 @@ func (s *Session) cancelMarkEchoTimer() {
 	s.timerFacility.Cancel(timerMarkEcho)
 }
 
-// armSimTurnTimer starts the bed-playback timer for sim-turn (SOP-157).
-func (s *Session) armSimTurnTimer() {
-	if s.simTurnMS <= 0 {
-		return
-	}
-	s.timerFacility.Arm(s.ctx, timerSimTurn, time.Duration(s.simTurnMS)*time.Millisecond)
+// armResponseTimer starts the response cap at responseTimeoutMS (test seam)
+// or MaxResponseMS (production default). Armed on entry into
+// StateAwaitingResponse (enterAwaitingResponse), cancelled by the response
+// event that ends the wait, ok or failed (handleResponseReady).
+func (s *Session) armResponseTimer() {
+	s.timerFacility.Arm(s.ctx, timerResponse, time.Duration(resolvedMS(s.responseTimeoutMS, MaxResponseMS))*time.Millisecond)
 }
 
-// cancelSimTurnTimer stops and clears the sim-turn timer, if armed.
-func (s *Session) cancelSimTurnTimer() {
-	s.timerFacility.Cancel(timerSimTurn)
+// cancelResponseTimer stops and clears the response cap, if armed.
+func (s *Session) cancelResponseTimer() {
+	s.timerFacility.Cancel(timerResponse)
+}
+
+// armResponseMarkEchoTimer starts the mark-echo timer for the response's
+// playout (StateAwaitingResponsePlayout), derived from the response frames'
+// total byte length -- reuses timerMarkEcho, safe because AwaitingMarkEcho
+// and AwaitingResponsePlayout are mutually exclusive states.
+func (s *Session) armResponseMarkEchoTimer(frames [][]byte) {
+	s.timerFacility.Arm(s.ctx, timerMarkEcho, responseMarkEchoTimeout(frames))
 }
 
 // farewellFrameBytes is one 20ms (MuLawFrameMS) frame's worth of μ-law audio
 // (1 byte/sample at SampleRateHz) -- the same chunking Twilio itself uses for
-// inbound media frames. Used to chunk both the farewell clip (sendClip) and
-// the sim-turn thinking bed (sendBed).
+// inbound media frames. Used to chunk the farewell clip (sendClip).
 const farewellFrameBytes = SampleRateHz * MuLawFrameMS / 1000
 
 // sendClip writes a μ-law clip out on dataOut, one MuLawFrameMS-sized frame at
@@ -1041,51 +1091,57 @@ func (s *Session) flushTurnTranscripts(trigger TurnTrigger) {
 	}
 }
 
-// sendBedAndEnterSpeaking plays the thinking bed if sim-turn is enabled,
-// cancels the idle timer, arms the sim-turn timer, and transitions to
-// StateSpeaking. Returns StateSpeaking if enabled, StateListening otherwise.
-// Meant to be called after completeTurn() when a turn ends and we would
-// normally return to Listening.
-func (s *Session) sendBedAndEnterSpeaking() SessionState {
-	if s.simTurnMS <= 0 {
-		return StateListening
-	}
-	s.sendBed()
+// enterAwaitingResponse cancels the idle timer -- the response cap
+// (timerResponse) replaces it while a response is pending, so the racing 15s
+// silence clock must not also be ticking -- and arms timerResponse at
+// MaxResponseMS (or its test-seam override). Meant to be called after
+// completeTurn() when a turn ends.
+func (s *Session) enterAwaitingResponse() SessionState {
 	s.cancelIdleTimer()
-	s.armSimTurnTimer()
-	return StateSpeaking
+	s.armResponseTimer()
+	return StateAwaitingResponse
 }
 
-// sendBed plays the thinking bed on the data plane, looping the clip as needed
-// to fill the configured duration (simTurnMS).
-func (s *Session) sendBed() {
-	if s.dataOut == nil || s.simTurnMS <= 0 || len(assets.LLMThinkingULaw) == 0 {
-		// The empty-clip guard isn't reachable with the real embedded asset,
-		// but without it an empty clip would spin the outer loop below
-		// forever: the inner loop never executes, sentMS never advances, and
-		// this runs synchronously on the single sequencer goroutine (run()) --
-		// a permanent hang of the whole session, not just a dropped bed.
+// sendResponseFrames writes the response's audio frames to dataOut, one Send
+// per already-chunked frame -- unlike sendClip, which chunks a flat clip
+// itself, the response arrives pre-chunked by its producer. A nil dataOut
+// (unwired) is a no-op.
+func (s *Session) sendResponseFrames(frames [][]byte) {
+	if s.dataOut == nil {
 		return
 	}
-	totalMS := s.simTurnMS
-
-	var sentMS int
-	for sentMS < totalMS {
-		for i := 0; i < len(assets.LLMThinkingULaw); i += farewellFrameBytes {
-			end := i + farewellFrameBytes
-			if end > len(assets.LLMThinkingULaw) {
-				end = len(assets.LLMThinkingULaw)
-			}
-			if err := s.dataOut.Send(s.ctx, assets.LLMThinkingULaw[i:end]); err != nil {
-				return
-			}
-			frameMS := (end - i) * 1000 / SampleRateHz
-			sentMS += frameMS
-			if sentMS >= totalMS {
-				return
-			}
+	for _, frame := range frames {
+		if err := s.dataOut.Send(s.ctx, frame); err != nil {
+			log.Printf("telephony: session %s: WARN response frame send failed: %v", s.CallSID, err)
+			return
 		}
 	}
+}
+
+// sendControlClear sends a Twilio "clear" control message on ctlOut (a nil
+// ctlOut is a no-op), flushing any audio Twilio may still be playing from
+// before the response arrived.
+func (s *Session) sendControlClear() {
+	if s.ctlOut == nil {
+		return
+	}
+	if err := s.ctlOut.Send(s.ctx, ControlOutMessage{Kind: ControlOutClear}); err != nil {
+		log.Printf("telephony: session %s: WARN clear send failed: %v", s.CallSID, err)
+	}
+}
+
+// sendResponseMarkAndArmEcho sends the response mark on ctlOut (a nil ctlOut
+// is a no-op) and arms the mark-echo backstop derived from the response
+// frames' total byte length, mirroring sendMarkAndArmEcho's farewell-clip
+// pattern.
+func (s *Session) sendResponseMarkAndArmEcho(frames [][]byte) {
+	if s.ctlOut != nil {
+		msg := ControlOutMessage{Kind: ControlOutMark, MarkName: responseMarkName}
+		if err := s.ctlOut.Send(s.ctx, msg); err != nil {
+			log.Printf("telephony: session %s: WARN response mark send failed: %v", s.CallSID, err)
+		}
+	}
+	s.armResponseMarkEchoTimer(frames)
 }
 
 // completeTurn flushes the current turn's transcripts and clears the active
@@ -1106,14 +1162,17 @@ func (s *Session) completeTurn(trigger TurnTrigger) {
 }
 
 // recordTurnCompletion records the decision for the turn-completion triggers
-// whose decision comes from session state alone -- the three timer-driven caps
-// (SOP-166) and the stopword turn-end (SOP-168) -- all of which take their audio
-// position from the last VAD window, not a triggering event. The utterance and
-// turn caps record their resolved (operator-tunable) bound; the idle timeout
-// records the MaxSilenceMS constant (idle is not a tunable knob). The stopword
-// records a turn-end decision naming its cause. Silence-turn-end is NOT here: it
-// needs the triggering VADEvent (prob/silence/position), so it is recorded at
-// its own site (recordTurnEnd). Call-end records nothing (a mid-turn hangup).
+// whose decision comes from session state alone -- the four timer-driven caps
+// and the stopword turn-end (SOP-168) -- all of which take their audio
+// position from the last VAD window, not a triggering event. The utterance,
+// turn, and response caps record their resolved (operator-tunable) bound; the
+// idle timeout's decision also follows its resolved bound (D8's silence-knob
+// production-ization) -- this is the idle cap DECISION RECORDING, distinct
+// from validateOrdering at Session.Start, which still validates against the
+// bare MaxSilenceMS constant unconditionally. The stopword records a
+// turn-end decision naming its cause. Silence-turn-end is NOT here: it needs
+// the triggering VADEvent (prob/silence/position), so it is recorded at its
+// own site (recordTurnEnd). Call-end records nothing (a mid-turn hangup).
 func (s *Session) recordTurnCompletion(trigger TurnTrigger) {
 	switch trigger {
 	case TriggerUtteranceCap:
@@ -1121,7 +1180,9 @@ func (s *Session) recordTurnCompletion(trigger TurnTrigger) {
 	case TriggerTurnCap:
 		s.recordCap(DecisionKindTurnCap, DecisionParamMaxTurn, resolvedMS(s.turnTimeoutMS, MaxTurnMS), "forced turn end")
 	case TriggerIdleTimeout:
-		s.recordCap(DecisionKindIdleTimeout, DecisionParamMaxSilence, MaxSilenceMS, "call ended (idle)")
+		s.recordCap(DecisionKindIdleTimeout, DecisionParamMaxSilence, resolvedMS(s.idleTimeoutMS, MaxSilenceMS), "call ended (idle)")
+	case TriggerResponseCap:
+		s.recordCap(DecisionKindResponseCap, DecisionParamMaxResponse, resolvedMS(s.responseTimeoutMS, MaxResponseMS), "forced response end")
 	case TriggerStopword:
 		s.recordStopwordTurnEnd()
 	}
@@ -1137,7 +1198,7 @@ func (s *Session) Close() {
 		s.cancelIdleTimer()
 		s.cancelUtteranceTimer()
 		s.cancelMarkEchoTimer()
-		s.cancelSimTurnTimer()
+		s.cancelResponseTimer()
 		s.cancelTurnTimer()
 		s.vad.Close()
 	}

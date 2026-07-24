@@ -267,8 +267,13 @@ func TestDecisionRecorder_IdleTimeout(t *testing.T) {
 	if e.Param != "MaxSilenceMS" {
 		t.Errorf("Param: got %q, want MaxSilenceMS", e.Param)
 	}
-	if e.ParamValue != telephony.MaxSilenceMS {
-		t.Errorf("ParamValue: got %v, want %d (the MaxSilenceMS constant, not the test-seam override)", e.ParamValue, telephony.MaxSilenceMS)
+	// AATK-24 (D8 silence-knob production-ization, Addendum V3): the idle
+	// cap decision now follows the resolved bound (the WithMaxSilenceMS
+	// override, here idleTestMS), not the bare MaxSilenceMS constant --
+	// distinct from Session.Start's validateOrdering check, which is
+	// unaffected and still validates against the bare constant.
+	if e.ParamValue != idleTestMS {
+		t.Errorf("ParamValue: got %v, want %d (the resolved override, not the bare MaxSilenceMS constant)", e.ParamValue, idleTestMS)
 	}
 	if !strings.Contains(e.Effect, "idle") {
 		t.Errorf("Effect: got %q, want a mention of the idle call-end", e.Effect)

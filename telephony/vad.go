@@ -12,8 +12,8 @@ import (
 // events. OnSpeechStart fires when the caller starts talking (SOP-95 wires
 // this as a no-op stub — barge-in behavior beyond that is out of scope);
 // OnEndOfUtterance fires when the caller's utterance is judged complete.
-// TurnTrigger names which of completeTurn's seven call sites (state.go, six
-// distinct trigger values — silence-turn-end covers two of the seven: the
+// TurnTrigger names which of completeTurn's eight call sites (state.go, seven
+// distinct trigger values — silence-turn-end covers two of the eight: the
 // immediate and the deferred-while-a-pass-was-in-flight paths) ended a turn
 // (SOP-162 DoD: "trigger type" in every TurnSink.OnTurnComplete
 // log line).
@@ -26,6 +26,7 @@ const (
 	TriggerUtteranceCap   TurnTrigger = "utterance-cap"
 	TriggerTurnCap        TurnTrigger = "turn-cap"
 	TriggerCallEnd        TurnTrigger = "call-end"
+	TriggerResponseCap    TurnTrigger = "response-cap"
 )
 
 // OnTurnComplete delivers the fused text of a completed turn (SOP-150):

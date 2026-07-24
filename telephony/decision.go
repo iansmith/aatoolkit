@@ -56,6 +56,7 @@ const (
 	DecisionKindUtteranceCap = "utterance-cap"
 	DecisionKindTurnCap      = "turn-cap"
 	DecisionKindIdleTimeout  = "idle-timeout"
+	DecisionKindResponseCap  = "response-cap"
 
 	DecisionParamSpeechThresh   = "SpeechThresh"
 	DecisionParamSilenceThresh  = "SilenceThresh"
@@ -64,6 +65,7 @@ const (
 	DecisionParamMaxUtterance   = "MaxUtteranceMS"
 	DecisionParamMaxTurn        = "MaxTurnMS"
 	DecisionParamMaxSilence     = "MaxSilenceMS"
+	DecisionParamMaxResponse    = "MaxResponseMS"
 )
 
 // DecisionEvent is one recorded decision. The shape is deliberately flat and

@@ -121,19 +121,21 @@ func sttEvent(sessionID string, requestID int, kind STTPassKind, text string) tr
 // and that frame moves Idle -> Listening; its VAD row is deliberately
 // unwired.
 //
-// StateSpeaking (SOP-157) is here for a different reason: the caller CAN
-// still be talking during the bed, but the ticket's Observable behavior #5
-// requires barge-in to be absorbed, not handled -- a VAD event there must not
-// reset the idle timer or notify OnSpeechStart. The idle timer is deliberately
-// cancelled at bed-start and stays inert for the bed's whole duration
-// regardless of caller speech; only resume (the sim-turn timer firing)
-// re-arms it (state.go's handleSimTurnTimeout).
+// StateAwaitingResponse and StateAwaitingResponsePlayout (AATK-24) are here
+// for a different reason: the caller CAN still be talking while a response
+// is generated or played out, but barge-in is explicitly out of scope
+// (deferrals 1/3) -- a VAD event there must not reset the idle timer or
+// notify OnSpeechStart. The idle timer is deliberately cancelled on entry
+// into StateAwaitingResponse and stays inert through the whole
+// response-delivery cycle regardless of caller speech; only the return to
+// Listening (via the response-playout echo or its backstop) re-arms it.
 var notLiveStates = map[SessionState]bool{
-	StateIdle:             true,
-	StateTerminating:      true,
-	StateAwaitingMarkEcho: true,
-	StateClosed:           true,
-	StateSpeaking:         true,
+	StateIdle:                    true,
+	StateTerminating:             true,
+	StateAwaitingMarkEcho:        true,
+	StateClosed:                  true,
+	StateAwaitingResponse:        true,
+	StateAwaitingResponsePlayout: true,
 }
 
 // liveSpeechStates is derived from the state list rather than written out, so
@@ -760,7 +762,9 @@ func TestTurnLifecycle_TurnEndDefersWhileFullPassInFlight(t *testing.T) {
 	if len(spy.turns) != 1 || spy.turns[0] != "hello world" {
 		t.Errorf("delivered turns: got %v, want [\"hello world\"] (the in-flight pass's own text must be included, not lost)", spy.turns)
 	}
-	if next != StateListening {
-		t.Errorf("state after the deferred pass returned: got %s, want Listening", next)
+	// AATK-24: turn completion now enters StateAwaitingResponse (a response
+	// is being generated), not Listening.
+	if next != StateAwaitingResponse {
+		t.Errorf("state after the deferred pass returned: got %s, want AwaitingResponse", next)
 	}
 }
