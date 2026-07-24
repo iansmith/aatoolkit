@@ -60,6 +60,10 @@ func NewEngine(cfg config.Config) *RealEngine {
 // this per field: a reload landing mid-operation would otherwise let a single
 // operation observe two different configs.
 //
+// Assumes construction went through NewEngine, which always stores a config —
+// a zero-value RealEngine would nil-deref here (as it would already panic on
+// its nil procs map).
+//
 // The returned value shares slice backing arrays with the stored config, which
 // is safe precisely because a stored config is never mutated in place — the
 // reload path swaps the whole pointer.
