@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ type fakeEngine struct {
 	downCalls      []string
 	upCalls        []string
 	bounceCalls    []string
+	reloadChecks   int
 	deadCalls      []string
 	buildCalls     []string
 	logsCalls      []string
@@ -61,6 +63,10 @@ func (f *fakeEngine) Bounce(name string) error {
 		return fmt.Errorf("not implemented: lifecycle engine lands in SOP-11")
 	}
 	return nil
+}
+
+func (f *fakeEngine) ReloadConfigIfChanged(out io.Writer) {
+	f.reloadChecks++
 }
 
 func (f *fakeEngine) Dead(name string) error {
