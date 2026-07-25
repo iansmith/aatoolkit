@@ -1419,3 +1419,33 @@ func TestRealEngine_Build_PromptedServerRefusesWhenTheAnswerCannotBeRead(t *test
 		t.Errorf("error %q does not name the offending server", err)
 	}
 }
+
+// TestRealEngine_Build_UnpromptedServerAsksNothing is a guard, not a red test:
+// it passes before AATK-34 and after. It is here because the fix put an
+// askPrompts call on the rebuild path, and askPrompts errors when it has no
+// streams to ask on — so the way to get this wrong is to ask unconditionally and
+// break every rebuild of every unprompted server, including from an engine
+// constructed with nil streams as most tests do.
+func TestRealEngine_Build_UnpromptedServerAsksNothing(t *testing.T) {
+	port := freeTestPort(t)
+	binPath := filepath.Join(t.TempDir(), "tdlistener-unprompted")
+	srv := tdlistenerSourceServer(t, "svc", port, binPath)
+
+	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{srv}}
+	eng := NewEngine(cfg, nil, nil) // no streams at all
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\"): %v", err)
+	}
+	if err := os.WriteFile(binPath, []byte("stale"), 0o755); err != nil {
+		t.Fatalf("staling the binary: %v", err)
+	}
+
+	if err := eng.Build("svc"); err != nil {
+		t.Fatalf("Build on an unprompted server must not need streams to ask on: %v", err)
+	}
+	if got := eng.Status(); len(got) != 1 || got[0].State != StateUp {
+		t.Errorf("expected the rebuilt server back up, got %+v", got)
+	}
+}

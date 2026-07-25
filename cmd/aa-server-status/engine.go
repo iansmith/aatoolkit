@@ -965,14 +965,39 @@ func (e *RealEngine) Build(name string) error {
 				return err
 			},
 			Start: func() error {
-				proc, err := e.launch(s)
+				// Re-ask the server's [server.prompt], if it has one, and
+				// relaunch on the freshly chosen branch. s came from the
+				// stored config, where no answer exists — launching it
+				// directly is what silently put a rebuilt server on the
+				// other branch (AATK-34).
+				//
+				// Resolved here rather than at the top of Build because
+				// PerformBuild returns early when nothing is stale: asking
+				// up front would question the operator on every `build`,
+				// including the common case where it then does nothing at
+				// all. The cost is that the question arrives after the
+				// teardown; the operator asked for a rebuild, so activity
+				// at that point is expected.
+				//
+				// A prompt that cannot be answered fails the relaunch
+				// rather than falling back to a default. The binary has
+				// already been replaced by then and the server is left
+				// down, which is the honest outcome of a refused relaunch
+				// — better than guessing which branch was wanted.
+				resolved, err := e.askPrompts([]config.Server{s})
+				if err != nil {
+					return err
+				}
+				launchable := resolved[0]
+
+				proc, err := e.launch(launchable)
 				if err != nil {
 					return err
 				}
 				e.mu.Lock()
-				e.procs[s.Name] = proc
+				e.procs[launchable.Name] = proc
 				e.mu.Unlock()
-				return e.pollReady(s, proc)
+				return e.pollReady(launchable, proc)
 			},
 		}
 	}
