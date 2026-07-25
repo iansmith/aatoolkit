@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -87,16 +88,34 @@ type smsCaptureServer struct {
 
 // newSMSCaptureServer starts a new capture server listening on the requested
 // port of 127.0.0.1, returning an error naming that port if the bind fails.
-// The port must be fixed and known before the CLI runs, because the server
-// whose reply is being captured reads TWILIO_API_BASE_URL once at startup.
 //
-// TODO(AATK-31): Phase 0 stub — still binds an ephemeral port and never
-// reports a bind failure.
+// The bind is deliberately explicit rather than ephemeral: the server whose
+// reply is being captured reads TWILIO_API_BASE_URL once at startup, so the
+// capture URL has to be nameable before this process runs at all. It keeps the
+// embedded *httptest.Server — only the listener is swapped — so URL and Close
+// behave exactly as callers already expect, and a bind failure returns an error
+// instead of the panic httptest.NewServer would raise.
 func newSMSCaptureServer(port int) (*smsCaptureServer, error) {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return nil, fmt.Errorf("bind SMS capture server on port %d: %w (pick a free port with -capture-port)", port, err)
+	}
+
 	c := &smsCaptureServer{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/2010-04-01/Accounts/", c.handleMessages)
-	c.Server = httptest.NewServer(mux)
+
+	srv := httptest.NewUnstartedServer(mux)
+	// NewUnstartedServer has already bound an ephemeral listener of its own;
+	// discard it in favour of the one on the requested port.
+	if err := srv.Listener.Close(); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("discard the default capture listener: %w", err)
+	}
+	srv.Listener = ln
+	srv.Start()
+
+	c.Server = srv
 	return c, nil
 }
 
