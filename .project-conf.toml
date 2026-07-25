@@ -65,6 +65,11 @@ merge_target_state  = "auto"    # advance the ticket exactly one state, never fo
 # "claude" → in-house /code-review (Skill); "coderabbit" → CodeRabbit bot;
 # "greptile" → Greptile bot.
 [pr_review]
+# Stays "claude" deliberately. Greptile is being trialled on the sophie repo
+# (backend = "greptile" there, 2026-07-25) and the GitHub App is NOT installed
+# here — aatoolkit PRs report no checks at all. Do not install it or switch this
+# until Greptile has earned confidence on sophie; the point of the trial is to
+# have one repo's worth of evidence before spending it on two.
 backend = "claude"
 effort = "high"
 fix    = true
