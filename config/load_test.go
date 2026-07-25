@@ -236,3 +236,97 @@ func TestValidate_RejectsPromptOnTypeThatIgnoresArgs(t *testing.T) {
 		t.Fatalf("expected the error to name the offending server, got: %v", err)
 	}
 }
+
+// promptEnvProbeVar is the key both prompt branches set in the env fixtures. A
+// single name, so a test asserting "the yes value" and one asserting "the no
+// value" cannot silently be looking at different variables.
+const promptEnvProbeVar = "AATOOLKIT_PROMPT_ENV_PROBE"
+
+// TestLoad_ParsesPromptYesEnvAndNoEnv pins AATK-32 observable behavior 1: the
+// prompt sub-table accepts yes_env/no_env as TOML tables. Strict decode is what
+// makes this a real assertion — an untagged or misnamed field leaves `yes_env`
+// in MetaData.Undecoded(), so Load fails outright rather than silently handing
+// back an empty map.
+func TestLoad_ParsesPromptYesEnvAndNoEnv(t *testing.T) {
+	cfg, err := Load("testdata/prompt-env.toml", "testdata/does-not-exist.local.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(cfg.Servers))
+	}
+
+	spec := cfg.Servers[0].Prompt
+	if spec == nil {
+		t.Fatalf("expected server %q to carry a prompt spec", cfg.Servers[0].Name)
+	}
+	if len(spec.YesEnv) != 1 {
+		t.Fatalf("yes_env decoded as %v, want exactly one entry", spec.YesEnv)
+	}
+	if got := spec.YesEnv[promptEnvProbeVar]; got != "yes-value" {
+		t.Errorf("yes_env[%s] = %q, want %q", promptEnvProbeVar, got, "yes-value")
+	}
+	if len(spec.NoEnv) != 1 {
+		t.Fatalf("no_env decoded as %v, want exactly one entry", spec.NoEnv)
+	}
+	if got := spec.NoEnv[promptEnvProbeVar]; got != "no-value" {
+		t.Errorf("no_env[%s] = %q, want %q", promptEnvProbeVar, got, "no-value")
+	}
+}
+
+// TestValidate_PromptTypeGateFollowsArgsNotEnv pins observable behavior 4, both
+// halves of it.
+//
+// The existing type gate rejects a prompt on mlx/python because their launch
+// paths build args from model/entry and never read s.Args — a discarded answer
+// that looks like it worked. That reasoning is specific to *args*: Env reaches
+// every type through launchWithCommand, so an env-only prompt on an mlx server
+// takes effect and must be allowed. The args rows are in the same table
+// deliberately: they are what stops the relaxation from widening into the
+// silent no-op the gate exists to prevent.
+func TestValidate_PromptTypeGateFollowsArgsNotEnv(t *testing.T) {
+	// Minimal per-type valid server (validateType's required fields), so a
+	// failure can only come from validatePrompt.
+	base := map[ServerType]Server{
+		TypeMLX:    {Name: "svc", Type: TypeMLX, Model: "some/model"},
+		TypePython: {Name: "svc", Type: TypePython, Venv: ".venv", Entry: "svc serve", Packages: []string{"svc"}},
+		TypeExec:   {Name: "svc", Type: TypeExec, Command: "/bin/true"},
+		TypeSource: {Name: "svc", Type: TypeSource, Build: "go build ./cmd/svc", Binary: "build/svc"},
+	}
+
+	envOnly := &PromptSpec{
+		Question: "Use the local endpoint for this run?",
+		YesEnv:   map[string]string{promptEnvProbeVar: "yes-value"},
+	}
+	argsOnly := &PromptSpec{Question: "which?", YesArgs: []string{"-x"}}
+
+	cases := []struct {
+		typ     ServerType
+		spec    *PromptSpec
+		wantErr bool
+		desc    string
+	}{
+		{TypeMLX, envOnly, false, "env-only prompt on mlx: env reaches every type, so it takes effect"},
+		{TypePython, envOnly, false, "env-only prompt on python"},
+		{TypeExec, envOnly, false, "env-only prompt on exec"},
+		{TypeSource, envOnly, false, "env-only prompt on source"},
+		{TypeMLX, argsOnly, true, "args on mlx: still a discarded answer, still rejected"},
+		{TypePython, argsOnly, true, "args on python: still rejected"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			s := base[tc.typ]
+			s.Port = 1234
+			s.Health = Health{Path: "/healthz"}
+			s.Prompt = tc.spec
+
+			err := Validate(Config{Servers: []Server{s}})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "not supported for type") {
+				t.Errorf("error %q is not the type-gate error — the gate must reject args, not fail for some other reason", err)
+			}
+		})
+	}
+}

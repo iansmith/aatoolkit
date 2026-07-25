@@ -168,6 +168,11 @@ type PromptSpec struct {
 	Question string   `toml:"question"`
 	YesArgs  []string `toml:"yes_args"`
 	NoArgs   []string `toml:"no_args"`
+
+	// TODO(AATK-32): no toml tags yet, so `yes_env`/`no_env` are still
+	// rejected as unknown keys by strict decode.
+	YesEnv map[string]string
+	NoEnv  map[string]string
 }
 
 type Server struct {

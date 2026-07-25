@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1081,4 +1082,131 @@ func (w *watchedWriter) snapshotAtFirstLaunch() string {
 	// No launch was ever observed mid-write, which means every write
 	// completed before the first process started — the property under test.
 	return w.buf.String()
+}
+
+// launchedEnv reports the environment of the process the engine actually
+// started. The env sibling of launchedArgs, and the same oracle argument
+// applies: the prompt answer exists only at launch time, so nothing derived
+// from the stored config can reflect it.
+func launchedEnv(t *testing.T, eng *RealEngine, name string) []string {
+	t.Helper()
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	proc, ok := eng.procs[name]
+	if !ok {
+		t.Fatalf("no launched process recorded for %q", name)
+	}
+	return proc.Cmd.Env
+}
+
+// promptEnvProbeVar is the variable the env-branching specs below set. One
+// name, so "the yes value" and "the no value" cannot drift onto different keys.
+const promptEnvProbeVar = "AATOOLKIT_PROMPT_ENV_PROBE"
+
+// envSpec branches on an environment variable rather than an argument — the env
+// counterpart of schemeSpec.
+func envSpec() *config.PromptSpec {
+	return &config.PromptSpec{
+		Question: "Use the local endpoint for this run?",
+		YesEnv:   map[string]string{promptEnvProbeVar: "yes-value"},
+		NoEnv:    map[string]string{promptEnvProbeVar: "no-value"},
+	}
+}
+
+// TestRealEngine_Up_PromptedServer_YesAnswerAppliesYesEnv pins AATK-32
+// observable behavior 2 on the yes branch, end to end: the answer has to reach
+// the child's environment, not merely the resolved config. Asserting on
+// Cmd.Env covers the whole chain — askPrompts -> Server.Env -> LaunchSpec.Env
+// -> mergeEnv -> cmd.Env — so no hop can quietly drop the value.
+func TestRealEngine_Up_PromptedServer_YesAnswerAppliesYesEnv(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{promptedServer(t, "svc", port, envSpec())},
+	}
+	var promptOut strings.Builder
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("y\n")), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error: %v", err)
+	}
+
+	env := launchedEnv(t, eng, "svc")
+	want := promptEnvProbeVar + "=yes-value"
+	if !slices.Contains(env, want) {
+		t.Fatalf("expected %q in the launched child's env, got %v", want, promptEnvEntries(env))
+	}
+	if notWant := promptEnvProbeVar + "=no-value"; slices.Contains(env, notWant) {
+		t.Fatalf("a yes answer must not also take the no branch, but found %q", notWant)
+	}
+}
+
+// TestRealEngine_Up_PromptedServer_NoAnswerAppliesNoEnv is the same for the no
+// branch — the branch not taken contributes nothing.
+func TestRealEngine_Up_PromptedServer_NoAnswerAppliesNoEnv(t *testing.T) {
+	port := freeTestPort(t)
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers:    []config.Server{promptedServer(t, "svc", port, envSpec())},
+	}
+	var promptOut strings.Builder
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("n\n")), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error: %v", err)
+	}
+
+	env := launchedEnv(t, eng, "svc")
+	want := promptEnvProbeVar + "=no-value"
+	if !slices.Contains(env, want) {
+		t.Fatalf("expected %q in the launched child's env, got %v", want, promptEnvEntries(env))
+	}
+	if notWant := promptEnvProbeVar + "=yes-value"; slices.Contains(env, notWant) {
+		t.Fatalf("a no answer must not also take the yes branch, but found %q", notWant)
+	}
+}
+
+// TestRealEngine_Up_PromptedServer_BranchEnvOverridesStaticEnv is the
+// interaction case: the same key declared both statically and by the chosen
+// branch. The branch wins, and it wins by *replacing* — exactly one entry for
+// the key reaches the child, because a duplicate would leave which value the
+// child reads up to os/exec's last-wins behavior rather than to this config.
+func TestRealEngine_Up_PromptedServer_BranchEnvOverridesStaticEnv(t *testing.T) {
+	port := freeTestPort(t)
+	srv := promptedServer(t, "svc", port, &config.PromptSpec{
+		Question: "Use the local endpoint for this run?",
+		YesEnv:   map[string]string{promptEnvProbeVar: "chosen"},
+	})
+	srv.Env = map[string]string{promptEnvProbeVar: "static"}
+
+	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{srv}}
+	var promptOut strings.Builder
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("y\n")), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error: %v", err)
+	}
+
+	got := promptEnvEntries(launchedEnv(t, eng, "svc"))
+	if len(got) != 1 {
+		t.Fatalf("child env has %d entries for %s (%v), want exactly 1 — a duplicate leaves the winner to os/exec", len(got), promptEnvProbeVar, got)
+	}
+	if want := promptEnvProbeVar + "=chosen"; got[0] != want {
+		t.Errorf("child env has %q, want %q — the chosen branch must beat the static env", got[0], want)
+	}
+}
+
+// promptEnvEntries filters an environment down to the probe variable, so a
+// failure message shows the relevant entries instead of the whole environment.
+func promptEnvEntries(env []string) []string {
+	var out []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, promptEnvProbeVar+"=") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
