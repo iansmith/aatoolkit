@@ -174,7 +174,7 @@ func newTestEngineWatching(t *testing.T, cfgPath string) *RealEngine {
 	}
 	eng := NewEngine(cfg, nil, nil)
 	t.Cleanup(func() { eng.TeardownAll() })
-	eng.WatchConfig(cfgPath, localConfigPath(cfgPath))
+	eng.WatchConfig(cfgPath)
 	return eng
 }
 
@@ -187,4 +187,35 @@ func serverNames(eng *RealEngine) []string {
 		names = append(names, s.Name)
 	}
 	return names
+}
+
+// TestNewConfigReloader_WatchesTheSinglePath is the reloader's half of AATK-33's
+// arity guard, and it does assert something real: that a change to the one
+// watched file is still detected after the second stamp was removed. A removal
+// that dropped the overlay stamp and the detection with it would pass a
+// compile-only check and fail this one.
+func TestNewConfigReloader_WatchesTheSinglePath(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "aa-server-status.toml")
+	if err := os.WriteFile(cfgPath, []byte("[supervisor]\nlog_dir = \"build/logs\"\n"), 0o644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	r := newConfigReloader(cfgPath)
+	if r.changed() {
+		t.Error("changed() reported a change immediately after construction — the stamp was not taken")
+	}
+
+	// A distinct mtime, not just distinct content: detection is mtime+size
+	// based, and rewriting identical bytes within the clock's resolution is
+	// documented as invisible.
+	if err := os.WriteFile(cfgPath, []byte("[supervisor]\nlog_dir = \"build/other-logs\"\n"), 0o644); err != nil {
+		t.Fatalf("rewriting config: %v", err)
+	}
+	if !r.changed() {
+		t.Error("changed() missed a modification to the single watched path")
+	}
+	if r.changed() {
+		t.Error("changed() reported the same modification twice — the stamp was not updated on detection")
+	}
 }

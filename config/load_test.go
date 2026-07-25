@@ -433,3 +433,19 @@ command = "overlay-wins"
 		t.Errorf("command = %q, want the base value %q — the overlay was read", srv.Command, "run")
 	}
 }
+
+// TestLoad_TakesASinglePath is a compile-shape guard rather than a behavioral
+// one: it cannot fail at runtime, and it could not have been red before the
+// signature changed. It is here so that reintroducing a second path — an
+// overlay, an include, a "local" argument — breaks a test with this name and
+// this comment, rather than passing quietly because no test ever pinned the
+// arity.
+func TestLoad_TakesASinglePath(t *testing.T) {
+	cfg, err := Load("testdata/valid_base.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Servers) != 4 {
+		t.Fatalf("expected 4 servers from the base fixture, got %d", len(cfg.Servers))
+	}
+}

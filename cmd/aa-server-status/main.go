@@ -10,15 +10,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/iansmith/aatoolkit/config"
 )
 
 const (
-	defaultLockPath  = "build/run/aa-server-status.lock"
-	defaultBasePath  = "aa-server-status.toml"
-	defaultLocalPath = "aa-server-status.local.toml"
+	defaultLockPath = "build/run/aa-server-status.lock"
+	defaultBasePath = "aa-server-status.toml"
 )
 
 // parseFlags parses command-line arguments and returns the base config
@@ -34,17 +32,6 @@ func parseFlags(args []string) (string, error) {
 		return "", err
 	}
 	return basePath, nil
-}
-
-// localConfigPath derives the local overlay path from the base config
-// path by convention: a ".toml" suffix is swapped for ".local.toml";
-// otherwise ".local.toml" is appended. The overlay file itself remains
-// optional — config.Load skips it if it doesn't exist.
-func localConfigPath(basePath string) string {
-	if strings.HasSuffix(basePath, ".toml") {
-		return strings.TrimSuffix(basePath, ".toml") + ".local.toml"
-	}
-	return basePath + ".local.toml"
 }
 
 func main() {
@@ -80,7 +67,7 @@ func main() {
 	stdin := bufio.NewReader(os.Stdin)
 
 	engine := NewEngine(cfg, stdin, os.Stdout)
-	engine.WatchConfig(basePath, localConfigPath(basePath))
+	engine.WatchConfig(basePath)
 	go watchSignals(os.Stdout, engine)
 	if err := Run(stdin, os.Stdout, engine); err != nil {
 		fmt.Fprintf(os.Stderr, "aa-server-status: %v\n", err)

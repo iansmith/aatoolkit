@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -31,41 +30,30 @@ func decodeStrict(data []byte, path string) (Config, error) {
 // result. Any failure is a hard error — callers should treat a non-nil error as
 // fatal (config errors abort the whole program).
 //
-// TODO(AATK-33): Phase 0 stub. Still derives a sibling ".local.toml" and merges
-// it — the half-removal TestLoad_IgnoresALocalOverlayFileIfPresent exists to
-// catch. Only the signature has moved so far.
+// One file, one path. There was once a second, gitignored ".local.toml" deep-
+// merged on top of this one; AATK-33 removed it. It had been silently dropping
+// any [server.prompt] declared only in the overlay since prompts were
+// introduced, and nobody noticed — which was the clearest evidence available
+// that nothing depended on it. Per-machine and secret values come from the
+// environment the supervisor inherits and passes to its children, not from a
+// second config file.
 func Load(path string) (Config, error) {
-	baseData, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("reading %s: %w", path, err)
 	}
-	base, err := decodeStrict(baseData, path)
+	cfg, err := decodeStrict(data, path)
 	if err != nil {
 		return Config{}, err
 	}
 
-	localPath := strings.TrimSuffix(path, ".toml") + ".local.toml"
-	merged := base
-	if localData, err := os.ReadFile(localPath); err == nil {
-		local, err := decodeStrict(localData, localPath)
-		if err != nil {
-			return Config{}, err
-		}
-		merged, err = mergeOverlay(base, local)
-		if err != nil {
-			return Config{}, err
-		}
-	} else if !os.IsNotExist(err) {
-		return Config{}, fmt.Errorf("reading %s: %w", localPath, err)
-	}
+	cfg.Supervisor.resolveBaseDir(filepath.Dir(path))
+	cfg.Supervisor.applyDefaults()
 
-	merged.Supervisor.resolveBaseDir(filepath.Dir(path))
-	merged.Supervisor.applyDefaults()
-
-	if err := Validate(merged); err != nil {
+	if err := Validate(cfg); err != nil {
 		return Config{}, err
 	}
-	return merged, nil
+	return cfg, nil
 }
 
 // resolveBaseDir anchors LogDir/LockFile to BaseDir, per
