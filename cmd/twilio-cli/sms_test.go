@@ -466,3 +466,90 @@ func TestPostSMSWebhook_WrongAuthToken403s(t *testing.T) {
 		t.Fatal("expected an error POSTing with a mismatched auth token, got nil")
 	}
 }
+
+// TestNewSMSCaptureServer_RejectsUnusablePorts covers the review finding that
+// port 0 fails open. net.Listen accepts it and assigns an ephemeral port, which
+// is precisely the defect -capture-port exists to remove: the URL becomes
+// unknowable before this process runs, and the guidance prints a ":0" the
+// operator cannot point anything at. Out-of-range values net.Listen rejects on
+// its own, but they are asserted here too so the boundary is pinned in one place.
+func TestNewSMSCaptureServer_RejectsUnusablePorts(t *testing.T) {
+	for _, port := range []int{0, -1, 65536} {
+		t.Run(fmt.Sprintf("port %d", port), func(t *testing.T) {
+			capture, err := newSMSCaptureServer(port)
+			if err == nil {
+				capture.Close()
+				t.Fatalf("newSMSCaptureServer(%d) succeeded, want a rejection", port)
+			}
+			if got := err.Error(); !strings.Contains(got, strconv.Itoa(port)) {
+				t.Errorf("error %q does not name the offending port %d", got, port)
+			}
+		})
+	}
+}
+
+// TestRunSMS_SecondCallWaitsForItsOwnReply covers the review finding that a
+// reused capture server returned a stale reply and reported success.
+//
+// The wait signal says "something arrived", not "your message arrived", so a
+// second call has to wait for the recorded count to grow past what it saw at
+// entry. Against the original one-shot signal this test observes "reply-1"
+// twice — a false pass that would have quietly invalidated any future test
+// reusing one server across two round trips.
+func TestRunSMS_SecondCallWaitsForItsOwnReply(t *testing.T) {
+	const authToken = "test-auth-token"
+	const from, to = "+15551234567", "+15105559999"
+
+	// Enough that the second reply cannot already be recorded when the second
+	// call takes its watermark.
+	const replyDelay = 150 * time.Millisecond
+
+	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	if err != nil {
+		t.Fatalf("newSMSCaptureServer: %v", err)
+	}
+	defer capture.Close()
+
+	var turns int
+	sendErrs := make(chan error, 2)
+	srv := &twilio.Server{
+		AuthToken:    authToken,
+		StreamScheme: "ws",
+		HandleSMS: func(_ context.Context, msg twilio.InboundSMS) {
+			turns++
+			reply := fmt.Sprintf("reply-%d", turns)
+			go func() {
+				time.Sleep(replyDelay)
+				rest := &twilio.RESTClient{AccountSID: defaultAccountSid, BaseURL: capture.URL}
+				sendErrs <- rest.SendSMS(context.Background(), to, msg.From, reply)
+			}()
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sms/inbound", srv.ServeSMS)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	webhookURL := ts.URL + "/sms/inbound"
+	first, err := runSMS(context.Background(), webhookURL, authToken, from, to, "first", capture)
+	if err != nil {
+		t.Fatalf("first runSMS: %v", err)
+	}
+	if first.Body != "reply-1" {
+		t.Fatalf("first runSMS returned %q, want %q", first.Body, "reply-1")
+	}
+
+	second, err := runSMS(context.Background(), webhookURL, authToken, from, to, "second", capture)
+	if err != nil {
+		t.Fatalf("second runSMS: %v", err)
+	}
+	if second.Body != "reply-2" {
+		t.Errorf("second runSMS returned %q, want %q — it re-read the earlier reply instead of waiting for its own", second.Body, "reply-2")
+	}
+
+	for i := range 2 {
+		if err := <-sendErrs; err != nil {
+			t.Fatalf("reply %d SendSMS: %v", i+1, err)
+		}
+	}
+}

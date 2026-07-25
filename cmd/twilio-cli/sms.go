@@ -93,11 +93,16 @@ type smsCaptureServer struct {
 	mu   sync.Mutex
 	msgs []capturedSMS
 
-	// first is closed when the first message is recorded, so a waiter is woken
-	// by the arrival itself rather than by polling for it. once guards the
-	// close, since further messages may well follow.
-	first chan struct{}
-	once  sync.Once
+	// notify carries a wake-up on every recorded message, so a waiter is woken
+	// by the arrival itself rather than by polling for it.
+	//
+	// It signals "something arrived", not "your message arrived" — the waiter
+	// re-reads the recorded count to decide. That is what lets a second runSMS
+	// against the same server wait for its own reply instead of re-reading the
+	// first one. Buffered by one and sent to without blocking: a dropped send
+	// only ever means a wake-up is already pending, and recording a message
+	// must never block the handler on nobody listening.
+	notify chan struct{}
 }
 
 // newSMSCaptureServer starts a new capture server listening on the requested
@@ -110,12 +115,20 @@ type smsCaptureServer struct {
 // behave exactly as callers already expect, and a bind failure returns an error
 // instead of the panic httptest.NewServer would raise.
 func newSMSCaptureServer(port int) (*smsCaptureServer, error) {
+	// Port 0 is the one value net.Listen would accept while defeating the whole
+	// point: it binds an ephemeral port, so the URL is again unknowable before
+	// this process runs, and the guidance would print a :0 the operator cannot
+	// use. Everything else out of range net.Listen rejects for us.
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("SMS capture port %d is not a usable port (want 1-65535; -capture-port 0 would bind an ephemeral port, which the server cannot be pointed at in advance)", port)
+	}
+
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("bind SMS capture server on port %d: %w (pick a free port with -capture-port)", port, err)
 	}
 
-	c := &smsCaptureServer{first: make(chan struct{})}
+	c := &smsCaptureServer{notify: make(chan struct{}, 1)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/2010-04-01/Accounts/", c.handleMessages)
 
@@ -151,7 +164,11 @@ func (c *smsCaptureServer) handleMessages(w http.ResponseWriter, r *http.Request
 	c.mu.Lock()
 	c.msgs = append(c.msgs, msg)
 	c.mu.Unlock()
-	c.once.Do(func() { close(c.first) })
+
+	select {
+	case c.notify <- struct{}{}:
+	default: // a wake-up is already pending; the waiter re-reads the count
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -206,6 +223,12 @@ func runSMS(ctx context.Context, webhookURL, authToken, from, to, body string, c
 		opt(&cfg)
 	}
 
+	// Anything already recorded belongs to an earlier call, so this run waits
+	// for the count to grow past it rather than for "any message at all". That
+	// is what makes a second runSMS against the same capture server return its
+	// own reply instead of re-reporting the first one.
+	before := len(capture.captured())
+
 	messageSid := newSID("SM")
 	if err := postSMSWebhook(ctx, webhookURL, authToken, messageSid, from, to, body); err != nil {
 		return capturedSMS{}, err
@@ -214,17 +237,16 @@ func runSMS(ctx context.Context, webhookURL, authToken, from, to, body string, c
 	timeout := time.NewTimer(cfg.captureWait)
 	defer timeout.Stop()
 
-	select {
-	case <-capture.first:
-		msgs := capture.captured()
-		if len(msgs) == 0 {
-			// Unreachable: first closes only after a message is appended.
-			return capturedSMS{}, fmt.Errorf("capture server signalled a reply but recorded none")
+	for {
+		select {
+		case <-capture.notify:
+			if msgs := capture.captured(); len(msgs) > before {
+				return msgs[before], nil
+			}
+		case <-timeout.C:
+			return capturedSMS{}, fmt.Errorf("no reply reached the capture server within %s — check the server was launched with %s", cfg.captureWait, captureBaseURLEnv(capture.URL))
+		case <-ctx.Done():
+			return capturedSMS{}, fmt.Errorf("waiting for the reply: %w", ctx.Err())
 		}
-		return msgs[0], nil
-	case <-timeout.C:
-		return capturedSMS{}, fmt.Errorf("no reply reached the capture server within %s — check the server was launched with %s", cfg.captureWait, captureBaseURLEnv(capture.URL))
-	case <-ctx.Done():
-		return capturedSMS{}, fmt.Errorf("waiting for the reply: %w", ctx.Err())
 	}
 }
