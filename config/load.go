@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -26,20 +27,24 @@ func decodeStrict(data []byte, path string) (Config, error) {
 	return cfg, nil
 }
 
-// Load reads the committed config at basePath, optionally deep-merges the
-// local overlay at localPath if it exists, applies supervisor defaults, and
-// validates the result. Any failure is a hard error — callers should treat
-// a non-nil error as fatal (config errors abort the whole program).
-func Load(basePath, localPath string) (Config, error) {
-	baseData, err := os.ReadFile(basePath)
+// Load reads the config at path, applies supervisor defaults, and validates the
+// result. Any failure is a hard error — callers should treat a non-nil error as
+// fatal (config errors abort the whole program).
+//
+// TODO(AATK-33): Phase 0 stub. Still derives a sibling ".local.toml" and merges
+// it — the half-removal TestLoad_IgnoresALocalOverlayFileIfPresent exists to
+// catch. Only the signature has moved so far.
+func Load(path string) (Config, error) {
+	baseData, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("reading %s: %w", basePath, err)
+		return Config{}, fmt.Errorf("reading %s: %w", path, err)
 	}
-	base, err := decodeStrict(baseData, basePath)
+	base, err := decodeStrict(baseData, path)
 	if err != nil {
 		return Config{}, err
 	}
 
+	localPath := strings.TrimSuffix(path, ".toml") + ".local.toml"
 	merged := base
 	if localData, err := os.ReadFile(localPath); err == nil {
 		local, err := decodeStrict(localData, localPath)
@@ -54,7 +59,7 @@ func Load(basePath, localPath string) (Config, error) {
 		return Config{}, fmt.Errorf("reading %s: %w", localPath, err)
 	}
 
-	merged.Supervisor.resolveBaseDir(filepath.Dir(basePath))
+	merged.Supervisor.resolveBaseDir(filepath.Dir(path))
 	merged.Supervisor.applyDefaults()
 
 	if err := Validate(merged); err != nil {

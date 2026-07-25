@@ -1,3 +1,0 @@
-[[server]]
-name = "server"
-args = ["-stream-scheme", "ws"]

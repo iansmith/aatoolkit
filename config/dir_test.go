@@ -34,7 +34,7 @@ health = { port = 9000, path = "/healthz" }
 		t.Fatalf("writing fixture: %v", err)
 	}
 
-	cfg, err := Load(basePath, filepath.Join(confDir, "missing-local.toml"))
+	cfg, err := Load(basePath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -83,7 +83,7 @@ func (r *configReloader) maybeReload(out io.Writer, engine *RealEngine) {
 	}
 	r.reloads.Add(1)
 
-	cfg, err := config.Load(r.basePath, r.localPath)
+	cfg, err := config.Load(r.basePath)
 	if err != nil {
 		fmt.Fprintf(out, "config reload failed, keeping the previous config: %v\n", err)
 		return

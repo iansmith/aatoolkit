@@ -46,7 +46,7 @@ func localConfigPath(basePath string) string {
 // from its host and webhook port. Shared by webhookTarget and
 // smsWebhookTarget, which differ only in which route they need.
 func resolveTarget(basePath, pathSuffix string) (string, error) {
-	cfg, err := config.Load(basePath, localConfigPath(basePath))
+	cfg, err := config.Load(basePath)
 	if err != nil {
 		return "", err
 	}

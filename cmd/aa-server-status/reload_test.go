@@ -168,7 +168,7 @@ func (r *scriptedReader) Read(p []byte) (int, error) {
 // overlay, which these tests never create).
 func newTestEngineWatching(t *testing.T, cfgPath string) *RealEngine {
 	t.Helper()
-	cfg, err := config.Load(cfgPath, localConfigPath(cfgPath))
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("initial config.Load(%s): %v", cfgPath, err)
 	}

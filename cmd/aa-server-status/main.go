@@ -52,9 +52,8 @@ func main() {
 	if err != nil {
 		os.Exit(2)
 	}
-	localPath := localConfigPath(basePath)
 
-	cfg, err := config.Load(basePath, localPath)
+	cfg, err := config.Load(basePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aa-server-status: config error: %v\n", err)
 		os.Exit(1)
@@ -81,7 +80,7 @@ func main() {
 	stdin := bufio.NewReader(os.Stdin)
 
 	engine := NewEngine(cfg, stdin, os.Stdout)
-	engine.WatchConfig(basePath, localPath)
+	engine.WatchConfig(basePath, localConfigPath(basePath))
 	go watchSignals(os.Stdout, engine)
 	if err := Run(stdin, os.Stdout, engine); err != nil {
 		fmt.Fprintf(os.Stderr, "aa-server-status: %v\n", err)
