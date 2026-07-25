@@ -31,22 +31,12 @@ const (
 	serverName      = "the server"
 )
 
-// localConfigPath derives the local overlay path from the base config path
-// by convention: a ".toml" suffix is swapped for ".local.toml"; otherwise
-// ".local.toml" is appended. Mirrors cmd/aa-server-status/main.go.
-func localConfigPath(basePath string) string {
-	if trimmed, ok := strings.CutSuffix(basePath, ".toml"); ok {
-		return trimmed + ".local.toml"
-	}
-	return basePath + ".local.toml"
-}
-
 // resolveTarget loads the merged aa-server-status config at basePath and
 // derives the server's URL for pathSuffix (e.g. "/webhook" or "/sms/inbound")
 // from its host and webhook port. Shared by webhookTarget and
 // smsWebhookTarget, which differ only in which route they need.
 func resolveTarget(basePath, pathSuffix string) (string, error) {
-	cfg, err := config.Load(basePath, localConfigPath(basePath))
+	cfg, err := config.Load(basePath)
 	if err != nil {
 		return "", err
 	}

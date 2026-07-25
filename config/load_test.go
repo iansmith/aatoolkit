@@ -47,19 +47,9 @@ log_dr = "build/logs"
 }
 
 func TestLoad_MissingBaseFileIsHardError(t *testing.T) {
-	_, err := Load(filepath.Join(t.TempDir(), "does-not-exist.toml"), filepath.Join(t.TempDir(), "local.toml"))
+	_, err := Load(filepath.Join(t.TempDir(), "does-not-exist.toml"))
 	if err == nil {
 		t.Fatal("expected error for missing base config file, got nil")
-	}
-}
-
-func TestLoad_MissingLocalOverlayIsFine(t *testing.T) {
-	cfg, err := Load("testdata/valid_base.toml", filepath.Join(t.TempDir(), "does-not-exist.local.toml"))
-	if err != nil {
-		t.Fatalf("expected missing local overlay to be tolerated, got error: %v", err)
-	}
-	if len(cfg.Servers) != 4 {
-		t.Fatalf("expected base servers to load unmodified, got %d", len(cfg.Servers))
 	}
 }
 
@@ -78,7 +68,7 @@ health = { port = 9000, path = "/healthz" }
 `), 0o644); err != nil {
 		t.Fatalf("writing fixture: %v", err)
 	}
-	cfg, err := Load(basePath, filepath.Join(dir, "missing-local.toml"))
+	cfg, err := Load(basePath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -115,7 +105,7 @@ health = { port = 9001, path = "/healthz" }
 `), 0o644); err != nil {
 		t.Fatalf("writing fixture: %v", err)
 	}
-	_, err := Load(basePath, filepath.Join(dir, "missing-local.toml"))
+	_, err := Load(basePath)
 	if err == nil {
 		t.Fatal("expected validation error for duplicate server names, got nil")
 	}
@@ -139,7 +129,7 @@ health = { port = 9000, path = "/healthz" }
 `), 0o644); err != nil {
 		t.Fatalf("writing fixture: %v", err)
 	}
-	cfg, err := Load(basePath, filepath.Join(dir, "missing-local.toml"))
+	cfg, err := Load(basePath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -157,7 +147,7 @@ health_timeout = "not-a-duration"
 `), 0o644); err != nil {
 		t.Fatalf("writing fixture: %v", err)
 	}
-	_, err := Load(basePath, filepath.Join(dir, "missing-local.toml"))
+	_, err := Load(basePath)
 	if err == nil {
 		t.Fatal("expected error for invalid duration string, got nil")
 	}
@@ -170,7 +160,7 @@ health_timeout = "not-a-duration"
 // must decode as "no extra args for the other branch" rather than a
 // missing-key error.
 func TestLoad_ParsesServerPrompt(t *testing.T) {
-	cfg, err := Load("testdata/prompt.toml", "testdata/does-not-exist.local.toml")
+	cfg, err := Load("testdata/prompt.toml")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -248,7 +238,7 @@ const promptEnvProbeVar = "AATOOLKIT_PROMPT_ENV_PROBE"
 // in MetaData.Undecoded(), so Load fails outright rather than silently handing
 // back an empty map.
 func TestLoad_ParsesPromptYesEnvAndNoEnv(t *testing.T) {
-	cfg, err := Load("testdata/prompt-env.toml", "testdata/does-not-exist.local.toml")
+	cfg, err := Load("testdata/prompt-env.toml")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -387,5 +377,75 @@ func TestValidate_RejectsBranchlessPrompt(t *testing.T) {
 				t.Errorf("error %q does not name the offending server", err)
 			}
 		})
+	}
+}
+
+// TestLoad_IgnoresALocalOverlayFileIfPresent pins AATK-33 observable behaviors
+// 1 and 2: the overlay is gone, and a leftover file is inert rather than an
+// error.
+//
+// The fixture's overlay would change a value if it were read, which is what
+// makes this the test that catches a half-removal — a Load that took one path
+// but still derived and merged a sibling would satisfy every other assertion in
+// this package while quietly keeping the machinery alive. It must also not
+// error: an operator with a stale file from before this change gets the base
+// config, not a failure telling them to delete something they had been told to
+// create.
+func TestLoad_IgnoresALocalOverlayFileIfPresent(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "aa-server-status.toml")
+	if err := os.WriteFile(basePath, []byte(`
+[[server]]
+name = "solo"
+type = "exec"
+enabled = true
+host = "127.0.0.1"
+listens = [9000]
+command = "run"
+health = { port = 9000, path = "/healthz" }
+`), 0o644); err != nil {
+		t.Fatalf("writing base: %v", err)
+	}
+	// Same server name, different host and command: if this file is read at
+	// all, the assertions below fail.
+	if err := os.WriteFile(filepath.Join(dir, "aa-server-status.local.toml"), []byte(`
+[[server]]
+name = "solo"
+host = "10.0.0.1"
+command = "overlay-wins"
+`), 0o644); err != nil {
+		t.Fatalf("writing overlay: %v", err)
+	}
+
+	cfg, err := Load(basePath)
+	if err != nil {
+		t.Fatalf("Load with a leftover overlay present must not error: %v", err)
+	}
+
+	srv, ok := cfg.ServerByName("solo")
+	if !ok {
+		t.Fatalf("expected the base server %q, got %+v", "solo", cfg.Servers)
+	}
+	if srv.Host != "127.0.0.1" {
+		t.Errorf("host = %q, want the base value %q — the overlay was read", srv.Host, "127.0.0.1")
+	}
+	if srv.Command != "run" {
+		t.Errorf("command = %q, want the base value %q — the overlay was read", srv.Command, "run")
+	}
+}
+
+// TestLoad_TakesASinglePath is a compile-shape guard rather than a behavioral
+// one: it cannot fail at runtime, and it could not have been red before the
+// signature changed. It is here so that reintroducing a second path — an
+// overlay, an include, a "local" argument — breaks a test with this name and
+// this comment, rather than passing quietly because no test ever pinned the
+// arity.
+func TestLoad_TakesASinglePath(t *testing.T) {
+	cfg, err := Load("testdata/valid_base.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Servers) != 4 {
+		t.Fatalf("expected 4 servers from the base fixture, got %d", len(cfg.Servers))
 	}
 }

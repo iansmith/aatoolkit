@@ -2,45 +2,11 @@ package main
 
 import "testing"
 
-// These tests describe the expected --config flag behavior for SOP-32.
-// They fail against the Phase 0 stubs in main.go (parseFlags/localConfigPath
-// currently ignore their inputs).
-
-// --- localConfigPath: derivation convention (edge/boundary cases first) ---
-
-func TestLocalConfigPath_SwapsTomlSuffix(t *testing.T) {
-	got := localConfigPath("custom.toml")
-	want := "custom.local.toml"
-	if got != want {
-		t.Errorf("localConfigPath(%q) = %q, want %q", "custom.toml", got, want)
-	}
-}
-
-func TestLocalConfigPath_AppendsWhenNoTomlSuffix(t *testing.T) {
-	got := localConfigPath("customconfig")
-	want := "customconfig.local.toml"
-	if got != want {
-		t.Errorf("localConfigPath(%q) = %q, want %q", "customconfig", got, want)
-	}
-}
-
-func TestLocalConfigPath_DefaultMatchesExistingConvention(t *testing.T) {
-	// Cross-feature interaction: the derived local path for the default
-	// base path must equal the pre-existing defaultLocalPath constant, so
-	// omitting --config keeps today's behavior unchanged.
-	got := localConfigPath(defaultBasePath)
-	if got != defaultLocalPath {
-		t.Errorf("localConfigPath(%q) = %q, want %q (defaultLocalPath)", defaultBasePath, got, defaultLocalPath)
-	}
-}
-
-func TestLocalConfigPath_NestedPathSwapsOnlyFinalSuffix(t *testing.T) {
-	got := localConfigPath("configs/fleet.toml")
-	want := "configs/fleet.local.toml"
-	if got != want {
-		t.Errorf("localConfigPath(%q) = %q, want %q", "configs/fleet.toml", got, want)
-	}
-}
+// These tests describe the expected --config flag behavior.
+//
+// They once covered localConfigPath alongside parseFlags — the helper that
+// derived a sibling ".local.toml" from the config path. AATK-33 deleted the
+// overlay, so that helper and its four tests went with it.
 
 // --- parseFlags: default, happy path, and error/rejection cases ---
 

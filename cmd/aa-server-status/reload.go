@@ -27,8 +27,9 @@ func stampOf(path string) fileStamp {
 	return fileStamp{exists: true, modTime: info.ModTime()}
 }
 
-// configReloader watches the base config and its optional local overlay, and
-// re-loads them when either changes on disk.
+// configReloader watches the config file and re-loads it when it changes on
+// disk. It watched a second, gitignored overlay alongside it until AATK-33
+// deleted that mechanism; one path is now the whole story.
 //
 // Detection is mtime-based, per the ticket: a poll on the dispatch path, not a
 // filesystem watcher. That makes the no-change case an os.Stat pair and nothing
@@ -37,11 +38,9 @@ func stampOf(path string) fileStamp {
 // filesystem's mtime resolution is invisible; on APFS that resolution is
 // nanoseconds, so it is not a practical concern here.
 type configReloader struct {
-	basePath  string
-	localPath string
+	path string
 
-	base  fileStamp
-	local fileStamp
+	stamp fileStamp
 
 	// reloads counts config.Load calls the watcher triggered, successful or
 	// not. It exists so "nothing is re-parsed when nothing changed" is an
@@ -49,30 +48,25 @@ type configReloader struct {
 	reloads atomic.Int64
 }
 
-func newConfigReloader(basePath, localPath string) *configReloader {
-	return &configReloader{
-		basePath:  basePath,
-		localPath: localPath,
-		base:      stampOf(basePath),
-		local:     stampOf(localPath),
-	}
+func newConfigReloader(path string) *configReloader {
+	return &configReloader{path: path, stamp: stampOf(path)}
 }
 
-// changed reports whether either watched file differs from the last stamp
-// taken, and updates the stamps. Updating on detection rather than after a
+// changed reports whether the watched file differs from the last stamp taken,
+// and updates the stamp. Updating on detection rather than after a
 // successful load is deliberate: a config that fails to parse should be
 // reported once, not re-reported before every subsequent command until the
 // operator finishes fixing it.
 func (r *configReloader) changed() bool {
-	base, local := stampOf(r.basePath), stampOf(r.localPath)
-	if base == r.base && local == r.local {
+	stamp := stampOf(r.path)
+	if stamp == r.stamp {
 		return false
 	}
-	r.base, r.local = base, local
+	r.stamp = stamp
 	return true
 }
 
-// maybeReload re-reads the config when the watched files have changed, and
+// maybeReload re-reads the config when the watched file has changed, and
 // installs it on engine only if it parses and validates. A failed reload is
 // reported to out and otherwise changes nothing: the previously loaded config
 // stays live and the REPL keeps going. Catching the operator midway through an
@@ -83,7 +77,7 @@ func (r *configReloader) maybeReload(out io.Writer, engine *RealEngine) {
 	}
 	r.reloads.Add(1)
 
-	cfg, err := config.Load(r.basePath, r.localPath)
+	cfg, err := config.Load(r.path)
 	if err != nil {
 		fmt.Fprintf(out, "config reload failed, keeping the previous config: %v\n", err)
 		return
@@ -91,15 +85,15 @@ func (r *configReloader) maybeReload(out io.Writer, engine *RealEngine) {
 	engine.ReplaceConfig(cfg)
 }
 
-// WatchConfig points the engine's reload check at the config files it was
+// WatchConfig points the engine's reload check at the config file it was
 // loaded from. Without it the engine simply never reloads, which is what every
 // test that does not care about reloading gets by default.
 //
 // This is a separate call rather than a NewEngine parameter so the existing
 // NewEngine(cfg) call sites stay valid, and so "not watching" is the
 // zero-value behavior rather than something each caller must opt out of.
-func (e *RealEngine) WatchConfig(basePath, localPath string) {
-	e.reloader = newConfigReloader(basePath, localPath)
+func (e *RealEngine) WatchConfig(path string) {
+	e.reloader = newConfigReloader(path)
 }
 
 // ReplaceConfig atomically installs cfg as the engine's live configuration.

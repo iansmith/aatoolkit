@@ -148,11 +148,13 @@ aa-server-status only ever manages processes it launched.
 
 ## 7. Configuration
 
-Split by sensitivity, deep-merged at load (local wins):
+One file, read from the `--config` path:
 
-- **`aa-server-status.toml`** — *committed.* Server topology + all **non-secret** env (tuning vars, model names, ports).
-- **`aa-server-status.local.toml`** — *gitignored.* Same schema, **secret** env only (provider creds, API keys).
-- **`aa-server-status.local.toml.example`** — *committed.* Documents expected secrets.
+- **`aa-server-status.toml`** — *committed.* Server topology plus all **non-secret** env (tuning vars, model names, ports).
+
+Secret and per-machine values are **not** in config. They are exported into the supervisor's own environment and inherited by every child it launches (`mergeEnv` layers a server's declared `env` on top). Nothing here reads a credential out of a file.
+
+There was once a second, gitignored `aa-server-status.local.toml`, deep-merged on top of the committed one. AATK-33 deleted it: it had been silently dropping any `[server.prompt]` declared only in the overlay ever since prompts were introduced, and nobody noticed — which was the clearest evidence available that nothing depended on it. A leftover file on disk is now inert rather than an error, so an operator who still has one gets the committed config.
 
 **Strict decode:** unknown/misspelled keys are a **hard error**. Structural validation (all hard-exit): duplicate server names; port collisions across `{port} ∪ listens` sets; per-type required fields (mlx→`model`; python→`venv`+`entry`+`packages`; source→`build`+`binary`; exec→`command`; all need a health spec + at least one port); `health.port` must be a member of that server's declared port set.
 
@@ -240,7 +242,7 @@ Field notes:
 - **`port`** (scalar, optional) — the launch/health port for mlx & python; `--port <port>` auto-appended.
 - **`listens`** (list, optional) — ports a self-listening server (source/exec) should be verified on; no launch flags.
 - **`health`** = `{ host?, port?, path }` — `host` defaults to `host`, `port` defaults to `port` (must name a member of `listens` for source/exec).
-- **`env`** — per-server map exported into the child at launch. Secrets go in the `.local.toml` overlay.
+- **`env`** — per-server map exported into the child at launch, layered on top of the environment the supervisor itself inherited. Secrets belong in that inherited environment, not in this file — the committed config is the only config there is.
 - **`prompt`** = `{ question, yes_args?, no_args?, yes_env?, no_env? }` — makes a server's launch args and environment an interactive y/n choice instead of a config line the operator has to hand-edit between runs. Every question is asked before *any* server launches, so a bulk `up` can't interleave two readers on one stdin. Declaring only one branch is legal; the omitted branch contributes nothing. `yes_args`/`no_args` require a type whose launch path actually reads args (`exec`, `source`) — declaring them on `mlx`/`python` is a hard config error rather than a silently discarded answer. `yes_env`/`no_env` carry no such restriction: env reaches every type, so an env-only prompt is valid on all four. The chosen branch's env merges *over* the server's static `env` for the keys it names and leaves every other key alone.
 
 **A prompt env value that restates a default defined in another module goes stale silently.** When a branch sets a variable whose default lives in another module's code — a flag default, a fallback constant — the two definitions sit either side of a module boundary and cannot be single-sourced. Change one and nothing breaks loudly: this config goes on naming a value the other side no longer uses, and the mismatch surfaces only as behavior nobody asked for. There is no mechanism that catches it, so comment both sides with a pointer to the other.
