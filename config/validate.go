@@ -125,18 +125,36 @@ func validateHealth(s Server) error {
 }
 
 // promptCapableTypes are the server types whose launch path actually reads
-// Server.Args, and therefore the only ones a [server.prompt] can affect.
-// ExecCommand and SourceCommand return Args verbatim; MLXCommand and
-// PythonCommand build their arguments from model/entry/venv and never look at
-// Args at all.
+// Server.Args, and therefore the only ones a [server.prompt] can affect
+// *through its args branches*. ExecCommand and SourceCommand return Args
+// verbatim; MLXCommand and PythonCommand build their arguments from
+// model/entry/venv and never look at Args at all.
+//
+// There is no equivalent restriction for the env branches: every LaunchXxx
+// funnels through launchWithCommand, which always passes Server.Env, so a
+// prompt's env reaches all four types.
 var promptCapableTypes = []ServerType{TypeExec, TypeSource}
+
+// promptDeclaresArgs reports whether either branch would append launch args —
+// the part of a prompt that only some server types can honor.
+func promptDeclaresArgs(p *PromptSpec) bool {
+	return len(p.YesArgs) > 0 || len(p.NoArgs) > 0
+}
 
 // validatePrompt rejects a [server.prompt] that could not do what it says.
 //
-// The type check is the interesting one: without it, declaring a prompt on an
-// mlx or python server would print a question, block for an answer, and then
-// discard it — the launch args are built from other fields entirely. That is
-// far worse than a config error, because it looks like it works.
+// The type check is the interesting one: without it, declaring an args-carrying
+// prompt on an mlx or python server would print a question, block for an
+// answer, and then discard it — the launch args are built from other fields
+// entirely. That is far worse than a config error, because it looks like it
+// works.
+//
+// It is gated on the args branches rather than on the prompt's mere presence,
+// because that is exactly what the rationale covers. Env reaches every type, so
+// an env-only prompt on an mlx server does take effect and rejecting it would
+// forbid a working config. An args-carrying prompt stays rejected on those
+// types even when it also declares env: the args half is still discarded, and
+// "some of your answer was silently dropped" is the same failure in a costume.
 func validatePrompt(s Server) error {
 	if s.Prompt == nil {
 		return nil
@@ -144,7 +162,15 @@ func validatePrompt(s Server) error {
 	if s.Prompt.Question == "" {
 		return fmt.Errorf("server %q: prompt.question is required", s.Name)
 	}
-	if !slices.Contains(promptCapableTypes, s.Type) {
+	// A prompt with no branch at all asks a question and then does nothing with
+	// the answer — the same silent no-op the type check below exists to prevent,
+	// just arrived at from the other direction. Gating that check on args (so
+	// env-only prompts pass) would otherwise have made a branchless prompt newly
+	// legal on mlx and python, widening the hole rather than narrowing it.
+	if !promptDeclaresArgs(s.Prompt) && len(s.Prompt.YesEnv) == 0 && len(s.Prompt.NoEnv) == 0 {
+		return fmt.Errorf("server %q: prompt declares no yes_args/no_args/yes_env/no_env, so the answer would change nothing", s.Name)
+	}
+	if promptDeclaresArgs(s.Prompt) && !slices.Contains(promptCapableTypes, s.Type) {
 		return fmt.Errorf(
 			"server %q: prompt is not supported for type %q (its launch args ignore args); supported types: %v",
 			s.Name, s.Type, promptCapableTypes)

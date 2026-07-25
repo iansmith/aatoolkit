@@ -1,0 +1,19 @@
+[supervisor]
+log_dir = "build/logs"
+
+# Both branches select an environment variable rather than an argument. The
+# partial case is covered by prompt.toml; this fixture is about env decoding.
+[[server]]
+name = "env-branched"
+type = "exec"
+enabled = true
+command = "/bin/true"
+port = 18083
+
+[server.health]
+path = "/healthz"
+
+[server.prompt]
+question = "Use the local endpoint for this run?"
+yes_env = { AATOOLKIT_PROMPT_ENV_PROBE = "yes-value" }
+no_env = { AATOOLKIT_PROMPT_ENV_PROBE = "no-value" }

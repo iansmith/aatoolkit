@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 
@@ -11,7 +12,8 @@ import (
 )
 
 // askPrompts resolves every target's [server.prompt] before any of them
-// launches, returning the targets with the chosen branch's args appended.
+// launches, returning the targets with the chosen branch's args appended and its
+// env merged.
 //
 // Sequencing is the whole point. Up launches its targets on concurrent
 // goroutines, so asking inside the per-target path would put two readers on one
@@ -19,13 +21,21 @@ import (
 // happened to win the race. Collecting every answer first makes that
 // impossible by construction rather than by careful locking.
 //
-// The chosen args are appended to the target's own Args field rather than
-// threaded separately down to the launcher. config.Server travels by value, so
-// this mutates only the copy about to be launched, and the args then flow
+// The chosen args and env are written onto the target's own Args and Env fields
+// rather than threaded separately down to the launcher. config.Server travels by
+// value, so this mutates only the copy about to be launched, and both then flow
 // through the real LaunchExec/LaunchSource — keeping their type-specific
 // pre-work (source's absolute-path resolution, python's preflight) intact,
 // which a hand-rolled "resolve and launch generically" path would have
 // silently dropped.
+//
+// "Only the copy" needs care for env, though, and is why mergedEnv exists: the
+// slice copy below is shallow, so each resolved[i].Env starts out as the very
+// same map header the caller holds. Writing into it would rewrite live config,
+// and every subsequent launch — or a reload — would read the mutated version.
+//
+// Known limitation: relaunch paths that resolve from the stored config rather
+// than from these copies (the `build` verb) do not carry the chosen branch.
 func (e *RealEngine) askPrompts(targets []config.Server) ([]config.Server, error) {
 	if !slices.ContainsFunc(targets, func(s config.Server) bool { return s.Prompt != nil }) {
 		return targets, nil
@@ -49,13 +59,36 @@ func (e *RealEngine) askPrompts(targets []config.Server) ([]config.Server, error
 		if err != nil {
 			return nil, fmt.Errorf("up %s: %w", s.Name, err)
 		}
-		extra := s.Prompt.NoArgs
+		extraArgs, extraEnv := s.Prompt.NoArgs, s.Prompt.NoEnv
 		if yes {
-			extra = s.Prompt.YesArgs
+			extraArgs, extraEnv = s.Prompt.YesArgs, s.Prompt.YesEnv
 		}
-		resolved[i].Args = append(append([]string{}, s.Args...), extra...)
+		resolved[i].Args = append(append([]string{}, s.Args...), extraArgs...)
+		resolved[i].Env = mergedEnv(s.Env, extraEnv)
 	}
 	return resolved, nil
+}
+
+// mergedEnv returns base overlaid with extra, always as a NEW map — never
+// either input, and with no fast path that hands one back. The result is the
+// caller's to own unconditionally, which is the only version of that contract
+// worth having: one that holds "except when the branch is empty" is one a caller
+// cannot rely on, and the exception is exactly the case a reader would not think
+// to check.
+//
+// Both inputs are read-only on purpose, and each for its own reason. base is the
+// caller's live Server.Env, aliased into the resolved copy by a shallow slice
+// copy. extra is the PromptSpec's own branch map, so the tempting shape —
+// overlay the statics onto the branch and hand that back — would fold static
+// keys permanently into the config's branch, and a later reload of one of those
+// keys would then be ignored as "already present".
+//
+// The allocation is once per prompted server per `up`, which is nothing.
+func mergedEnv(base, extra map[string]string) map[string]string {
+	out := make(map[string]string, len(base)+len(extra))
+	maps.Copy(out, base)
+	maps.Copy(out, extra)
+	return out
 }
 
 func firstPromptedName(targets []config.Server) string {

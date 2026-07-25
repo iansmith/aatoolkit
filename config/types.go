@@ -156,18 +156,32 @@ func (w *Warm) UnmarshalTOML(data any) error {
 
 // Server is one [[server]] entry — the schema is a union of all four
 // server-type shapes; Validate enforces per-type required fields.
-// PromptSpec makes a server's launch arguments an interactive choice instead
-// of a config line the operator has to remember to hand-edit between runs.
-// When present, bringing the server up asks Question and appends YesArgs or
-// NoArgs to whatever args its type already resolves.
+// PromptSpec makes a server's launch arguments and environment an interactive
+// choice instead of a config line the operator has to remember to hand-edit
+// between runs. When present, bringing the server up asks Question, appends
+// YesArgs or NoArgs to whatever args its type already resolves, and merges
+// YesEnv or NoEnv into its Env.
 //
-// Declaring only one branch is legal: the omitted branch simply contributes no
-// extra args, which is the natural way to express "add this flag, or launch
+// Declaring only one branch is legal: the omitted branch simply contributes
+// nothing, which is the natural way to express "add this flag, or launch
 // normally".
 type PromptSpec struct {
 	Question string   `toml:"question"`
 	YesArgs  []string `toml:"yes_args"`
 	NoArgs   []string `toml:"no_args"`
+
+	// YesEnv and NoEnv are merged into the server's Env when their branch is
+	// chosen, overriding a static Env entry of the same key and leaving every
+	// other key alone.
+	//
+	// Env exists because the args half only covers choices a server takes on
+	// its command line; much of what a child reads comes from its environment,
+	// and a question whose answer cannot reach that is a question the operator
+	// has to remember to act on twice. Unlike args, Env reaches every server
+	// type, so a prompt declaring only env is valid on any of them — see
+	// validatePrompt.
+	YesEnv map[string]string `toml:"yes_env"`
+	NoEnv  map[string]string `toml:"no_env"`
 }
 
 type Server struct {

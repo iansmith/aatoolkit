@@ -236,3 +236,156 @@ func TestValidate_RejectsPromptOnTypeThatIgnoresArgs(t *testing.T) {
 		t.Fatalf("expected the error to name the offending server, got: %v", err)
 	}
 }
+
+// promptEnvProbeVar is the key both prompt branches set in the env fixtures. A
+// single name, so a test asserting "the yes value" and one asserting "the no
+// value" cannot silently be looking at different variables.
+const promptEnvProbeVar = "AATOOLKIT_PROMPT_ENV_PROBE"
+
+// TestLoad_ParsesPromptYesEnvAndNoEnv pins AATK-32 observable behavior 1: the
+// prompt sub-table accepts yes_env/no_env as TOML tables. Strict decode is what
+// makes this a real assertion — an untagged or misnamed field leaves `yes_env`
+// in MetaData.Undecoded(), so Load fails outright rather than silently handing
+// back an empty map.
+func TestLoad_ParsesPromptYesEnvAndNoEnv(t *testing.T) {
+	cfg, err := Load("testdata/prompt-env.toml", "testdata/does-not-exist.local.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(cfg.Servers))
+	}
+
+	spec := cfg.Servers[0].Prompt
+	if spec == nil {
+		t.Fatalf("expected server %q to carry a prompt spec", cfg.Servers[0].Name)
+	}
+	if len(spec.YesEnv) != 1 {
+		t.Fatalf("yes_env decoded as %v, want exactly one entry", spec.YesEnv)
+	}
+	if got := spec.YesEnv[promptEnvProbeVar]; got != "yes-value" {
+		t.Errorf("yes_env[%s] = %q, want %q", promptEnvProbeVar, got, "yes-value")
+	}
+	if len(spec.NoEnv) != 1 {
+		t.Fatalf("no_env decoded as %v, want exactly one entry", spec.NoEnv)
+	}
+	if got := spec.NoEnv[promptEnvProbeVar]; got != "no-value" {
+		t.Errorf("no_env[%s] = %q, want %q", promptEnvProbeVar, got, "no-value")
+	}
+}
+
+// TestValidate_PromptTypeGateFollowsArgsNotEnv pins observable behavior 4, both
+// halves of it.
+//
+// The existing type gate rejects a prompt on mlx/python because their launch
+// paths build args from model/entry and never read s.Args — a discarded answer
+// that looks like it worked. That reasoning is specific to *args*: Env reaches
+// every type through launchWithCommand, so an env-only prompt on an mlx server
+// takes effect and must be allowed. The args rows are in the same table
+// deliberately: they are what stops the relaxation from widening into the
+// silent no-op the gate exists to prevent.
+func TestValidate_PromptTypeGateFollowsArgsNotEnv(t *testing.T) {
+	// Minimal per-type valid server (validateType's required fields), so a
+	// failure can only come from validatePrompt.
+	base := map[ServerType]Server{
+		TypeMLX:    {Name: "svc", Type: TypeMLX, Model: "some/model"},
+		TypePython: {Name: "svc", Type: TypePython, Venv: ".venv", Entry: "svc serve", Packages: []string{"svc"}},
+		TypeExec:   {Name: "svc", Type: TypeExec, Command: "/bin/true"},
+		TypeSource: {Name: "svc", Type: TypeSource, Build: "go build ./cmd/svc", Binary: "build/svc"},
+	}
+
+	envOnly := &PromptSpec{
+		Question: "Use the local endpoint for this run?",
+		YesEnv:   map[string]string{promptEnvProbeVar: "yes-value"},
+	}
+	envOnlyNoBranch := &PromptSpec{
+		Question: "Use the local endpoint for this run?",
+		NoEnv:    map[string]string{promptEnvProbeVar: "no-value"},
+	}
+	argsOnly := &PromptSpec{Question: "which?", YesArgs: []string{"-x"}}
+	argsOnNoBranch := &PromptSpec{Question: "which?", NoArgs: []string{"-x"}}
+	argsAndEnv := &PromptSpec{
+		Question: "which?",
+		YesArgs:  []string{"-x"},
+		YesEnv:   map[string]string{promptEnvProbeVar: "yes-value"},
+	}
+
+	cases := []struct {
+		typ     ServerType
+		spec    *PromptSpec
+		wantErr bool
+		desc    string
+	}{
+		{TypeMLX, envOnly, false, "env-only prompt on mlx: env reaches every type, so it takes effect"},
+		{TypePython, envOnly, false, "env-only prompt on python"},
+		{TypeExec, envOnly, false, "env-only prompt on exec"},
+		{TypeSource, envOnly, false, "env-only prompt on source"},
+		// Env declared on the no side only is just as legal — a gate keyed on
+		// YesEnv alone would reject a valid config.
+		{TypeMLX, envOnlyNoBranch, false, "env on the no branch only, on mlx"},
+		{TypeMLX, argsOnly, true, "args on mlx: still a discarded answer, still rejected"},
+		{TypePython, argsOnly, true, "args on python: still rejected"},
+		// Args on the no side are discarded exactly as readily as on the yes
+		// side; a gate that inspects only YesArgs would let this through.
+		{TypeMLX, argsOnNoBranch, true, "args on the no branch only, on mlx: equally discarded"},
+		// The trap: adding an env key must not buy an args-carrying prompt its
+		// way onto a type whose launch path ignores args. A gate written as
+		// "exempt if any env is declared" accepts this and reintroduces the
+		// silent no-op the gate exists to prevent.
+		{TypeMLX, argsAndEnv, true, "args AND env on mlx: the args half is still discarded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			s := base[tc.typ]
+			s.Port = 1234
+			s.Health = Health{Path: "/healthz"}
+			s.Prompt = tc.spec
+
+			err := Validate(Config{Servers: []Server{s}})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "not supported for type") {
+				t.Errorf("error %q is not the type-gate error — the gate must reject args, not fail for some other reason", err)
+			}
+		})
+	}
+}
+
+// TestValidate_RejectsBranchlessPrompt covers the review finding that gating the
+// type check on args made a branchless prompt newly legal on mlx and python.
+//
+// A prompt with a question but no yes_args/no_args/yes_env/no_env asks the
+// operator something and then does nothing with the answer — the same silent
+// no-op the type check exists to prevent, reached from the other direction. It
+// is rejected on every type, including the two where it used to be caught only
+// as a side effect of the type gate.
+func TestValidate_RejectsBranchlessPrompt(t *testing.T) {
+	for _, typ := range []ServerType{TypeMLX, TypePython, TypeExec, TypeSource} {
+		t.Run(string(typ), func(t *testing.T) {
+			s := Server{
+				Name: "svc", Type: typ, Port: 1234,
+				Health: Health{Path: "/healthz"},
+				Prompt: &PromptSpec{Question: "does this change anything?"},
+			}
+			switch typ {
+			case TypeMLX:
+				s.Model = "some/model"
+			case TypePython:
+				s.Venv, s.Entry, s.Packages = ".venv", "svc serve", []string{"svc"}
+			case TypeExec:
+				s.Command = "/bin/true"
+			case TypeSource:
+				s.Build, s.Binary = "go build ./cmd/svc", "build/svc"
+			}
+
+			err := Validate(Config{Servers: []Server{s}})
+			if err == nil {
+				t.Fatalf("Validate accepted a branchless prompt on %s, want a rejection", typ)
+			}
+			if !strings.Contains(err.Error(), "svc") {
+				t.Errorf("error %q does not name the offending server", err)
+			}
+		})
+	}
+}
