@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -319,6 +320,133 @@ func TestRunSMSMode_PrintsActionableBaseURLGuidance(t *testing.T) {
 	}
 	if strings.Contains(got, "RESTClient.BaseURL") {
 		t.Errorf("guidance = %q, still names RESTClient.BaseURL — an internal field the operator cannot set", got)
+	}
+}
+
+// TestSMSCaptureGuidance_ReflectsNonDefaultPort closes a false-negative hole in
+// TestRunSMSMode_PrintsActionableBaseURLGuidance: that test only ever asks for
+// the default port, so a guidance function that ignored its argument and
+// hardcoded 9750 would satisfy it while printing a URL the operator's
+// -capture-port run is not listening on.
+func TestSMSCaptureGuidance_ReflectsNonDefaultPort(t *testing.T) {
+	const port = 9751 // any port that is not defaultCapturePort
+
+	got := smsCaptureGuidance(port)
+
+	want := fmt.Sprintf("TWILIO_API_BASE_URL=http://127.0.0.1:%d", port)
+	if !strings.Contains(got, want) {
+		t.Errorf("guidance for -capture-port %d = %q, want it to contain %q", port, got, want)
+	}
+	if strings.Contains(got, strconv.Itoa(defaultCapturePort)) {
+		t.Errorf("guidance for -capture-port %d = %q, still names the default port %d", port, got, defaultCapturePort)
+	}
+}
+
+// TestRunSMS_CancelledContextDuringWaitReturnsPromptly is the third exit from
+// the wait, and the one no ticket expectation names: Ctrl-C must not leave the
+// operator staring at the command for the rest of a 35s bound. The assertion is
+// on the error identity rather than on elapsed time, so it cannot pass by being
+// slow, and it rejects a cancellation that happened during the webhook POST
+// instead of during the wait.
+func TestRunSMS_CancelledContextDuringWaitReturnsPromptly(t *testing.T) {
+	const authToken = "test-auth-token"
+	const from, to, body = "+15551234567", "+15105559999", "hello there"
+
+	// Long enough that an implementation ignoring ctx fails on the error
+	// identity rather than racing the cancellation.
+	const wait = 2 * time.Second
+	// Margin over the loopback round trip, so the webhook POST has certainly
+	// completed and the cancellation lands in the wait, not in the request.
+	const cancelDelay = 200 * time.Millisecond
+
+	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	if err != nil {
+		t.Fatalf("newSMSCaptureServer: %v", err)
+	}
+	defer capture.Close()
+
+	// A server that accepts the webhook and never replies.
+	srv := &twilio.Server{AuthToken: authToken, StreamScheme: "ws"}
+	webhookReturned := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sms/inbound", func(w http.ResponseWriter, r *http.Request) {
+		srv.ServeSMS(w, r)
+		close(webhookReturned)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-webhookReturned
+		time.Sleep(cancelDelay)
+		cancel()
+	}()
+
+	_, err = runSMS(ctx, ts.URL+"/sms/inbound", authToken, from, to, body, capture, withCaptureWait(wait))
+	if err == nil {
+		t.Fatal("runSMS succeeded after its context was cancelled, want a cancellation error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("runSMS error = %v, want it to wrap context.Canceled (the wait must honour ctx, not burn the full bound)", err)
+	}
+	if strings.Contains(err.Error(), "SMS webhook") {
+		t.Errorf("runSMS error = %v — the cancellation was observed during the webhook POST, so this exercised the wrong path", err)
+	}
+}
+
+// TestRunSMS_ReturnsFirstReplyWhenMoreArrive pins the contract change the wait
+// introduces. The old code demanded exactly one POST and errored on two; the
+// new contract is "the first captured message", so a second reply — a
+// follow-up, or a failure report chasing a late turn — must not turn a
+// successful round trip into an error.
+func TestRunSMS_ReturnsFirstReplyWhenMoreArrive(t *testing.T) {
+	const authToken = "test-auth-token"
+	const from, to, body = "+15551234567", "+15105559999", "hello there"
+	const firstReply, secondReply = "first out", "second out"
+
+	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	if err != nil {
+		t.Fatalf("newSMSCaptureServer: %v", err)
+	}
+	defer capture.Close()
+
+	webhookReturned := make(chan struct{})
+	sendErrs := make(chan error, 2)
+
+	srv := &twilio.Server{
+		AuthToken:    authToken,
+		StreamScheme: "ws",
+		HandleSMS: func(_ context.Context, msg twilio.InboundSMS) {
+			go func() {
+				<-webhookReturned
+				rest := &twilio.RESTClient{AccountSID: defaultAccountSid, BaseURL: capture.URL}
+				// Sequential sends, so the capture order is deterministic.
+				sendErrs <- rest.SendSMS(context.Background(), to, msg.From, firstReply)
+				sendErrs <- rest.SendSMS(context.Background(), to, msg.From, secondReply)
+			}()
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sms/inbound", func(w http.ResponseWriter, r *http.Request) {
+		srv.ServeSMS(w, r)
+		close(webhookReturned)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	msg, err := runSMS(context.Background(), ts.URL+"/sms/inbound", authToken, from, to, body, capture)
+	if err != nil {
+		t.Fatalf("runSMS: %v (a second reply must not fail the round trip)", err)
+	}
+	if got := msg.Body; got != firstReply {
+		t.Errorf("captured Body = %q, want the first reply %q", got, firstReply)
+	}
+	for i := range 2 {
+		if err := <-sendErrs; err != nil {
+			t.Fatalf("async reply %d SendSMS: %v", i+1, err)
+		}
 	}
 }
 
