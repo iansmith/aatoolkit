@@ -99,6 +99,25 @@ func smsCaptureGuidance(port int) string {
 		port, captureBaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", port)))
 }
 
+// startCapture binds the reply-capture server on port and returns it together
+// with the guidance line naming that same port.
+//
+// The pairing is the point. When runSMSMode called newSMSCaptureServer and
+// smsCaptureGuidance separately, nothing stopped them being given different
+// ports — and nothing could catch it, because runSMSMode ends in
+// log.Fatalf/os.Exit and cannot be driven from a test at all. The two would then
+// disagree in the worst possible way: the operator follows a correct-looking
+// instruction naming one port while the CLI listens on another, and gets a
+// timeout with no hint why. One port in, both artifacts out, and a test can
+// assert they agree.
+func startCapture(port int) (*smsCaptureServer, string, error) {
+	capture, err := newSMSCaptureServer(port)
+	if err != nil {
+		return nil, "", err
+	}
+	return capture, smsCaptureGuidance(port), nil
+}
+
 // runSMSMode implements the `twilio-cli sms <FROM-e164> <BODY>` subcommand:
 // it posts a signed inbound-SMS webhook to the server, starts a local capture
 // server for the outbound REST reply, and prints the captured To/Body.
@@ -144,12 +163,12 @@ func runSMSMode(args []string) {
 
 	authToken := os.Getenv("TWILIO_AUTH_TOKEN")
 
-	capture, err := newSMSCaptureServer(*capturePort)
+	capture, guidance, err := startCapture(*capturePort)
 	if err != nil {
 		log.Fatalf("twilio-cli: sms: %v", err)
 	}
 	defer capture.Close()
-	fmt.Println(smsCaptureGuidance(*capturePort))
+	fmt.Println(guidance)
 
 	msg, err := runSMS(context.Background(), target, authToken, from, *toNumber, body, capture)
 	if err != nil {

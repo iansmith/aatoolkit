@@ -553,3 +553,62 @@ func TestRunSMS_SecondCallWaitsForItsOwnReply(t *testing.T) {
 		}
 	}
 }
+
+// TestStartCapture_GuidanceNamesThePortActuallyBound closes the review finding
+// that nothing tied -capture-port to the real bind.
+//
+// The strong assertion is against capture.URL — the URL of the listener that is
+// genuinely accepting connections — rather than against the port variable the
+// test passed in. An implementation that bound one port and printed another
+// cannot satisfy it, which is exactly the divergence the operator would follow
+// straight into a timeout. A mutation splitting the two now has nowhere to hide:
+// startCapture takes one port, and runSMSMode has no second value to give it.
+func TestStartCapture_GuidanceNamesThePortActuallyBound(t *testing.T) {
+	// Deliberately not defaultCapturePort: a guidance line that hardcoded the
+	// default would pass against the default and fail here.
+	port := freeTCPPort(t)
+
+	capture, guidance, err := startCapture(port)
+	if err != nil {
+		t.Fatalf("startCapture(%d): %v", port, err)
+	}
+	defer capture.Close()
+
+	if !strings.Contains(guidance, capture.URL) {
+		t.Errorf("guidance %q does not name the URL actually bound (%s) — the printed port and the listening port must agree", guidance, capture.URL)
+	}
+	if want := captureBaseURLEnv(capture.URL); !strings.Contains(guidance, want) {
+		t.Errorf("guidance %q does not contain the copy-pasteable assignment %q", guidance, want)
+	}
+	if !strings.Contains(guidance, strconv.Itoa(port)) {
+		t.Errorf("guidance %q does not name the requested port %d", guidance, port)
+	}
+}
+
+// TestStartCapture_PropagatesBindFailure pins the error path: a held port must
+// surface newSMSCaptureServer's message verbatim rather than being wrapped into
+// something that no longer names -capture-port, and must not hand back a
+// half-built capture server for the caller to close.
+func TestStartCapture_PropagatesBindFailure(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a port: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	capture, guidance, err := startCapture(port)
+	if err == nil {
+		capture.Close()
+		t.Fatalf("startCapture(%d) succeeded against a held port, want a bind error", port)
+	}
+	if capture != nil {
+		t.Error("startCapture returned a non-nil capture server alongside an error")
+	}
+	if guidance != "" {
+		t.Errorf("startCapture returned guidance %q alongside an error", guidance)
+	}
+	if got := err.Error(); !strings.Contains(got, "-capture-port") {
+		t.Errorf("error %q lost the -capture-port suggestion on the way up", got)
+	}
+}
