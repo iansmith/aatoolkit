@@ -71,7 +71,27 @@ engine generic: mechanism here, meaning in the consumer.
   `enable-aatoolkit.example`); the real file holds secrets and is gitignored — keep it out of
   the repo (best kept one directory up, at the workspace root).
 
-### 8. Documentation layout
+### 8. Ticket and PR text obey the same boundary as the code
+- The pre-commit leak guard keeps this repo's tree free of the closed consuming project's
+  identity, secrets, and content. **Ticket and pull-request text — titles, descriptions, and
+  comments — is held to the same standard.**
+- The two surfaces are exposed differently, and the ticket one is the easier to misjudge. A PR
+  is public the moment it is posted. The tracker is private, so the exposure there is
+  *indirect*: ticket prose gets lifted into commit messages, PR bodies, and doc comments as
+  work proceeds, and those are as public as the code. A leak written once in a ticket tends to
+  arrive in the repo later, quoted by someone who trusted the source.
+- Do not name the closed project, its ticket prefix, its file paths, its symbol names, or its
+  data (phone numbers, prompts, real message text). Say what the engine actually sees: "the
+  consuming server", "a depending project", "the operator".
+- Where a change is needed on the consumer's side, describe it generically and leave it to be
+  tracked wherever that project tracks its work. Never cross-reference its tickets from one of
+  ours. The reverse direction is fine — the closed side may reference these freely.
+- Evidence from a manual end-to-end run is the usual trap: real numbers and real message text
+  belong in local notes, redacted before they reach a PR body.
+- No hook reaches the tracker or a PR body, so this rule is unenforced by construction. Scan
+  prose for the same tokens the guard scans a diff for, before saving.
+
+### 9. Documentation layout
 - `docs/` is **gitignored** — personal notes, scratch, drafts. Not committed.
 - `design/` is **tracked**, but don't add files to it without explicit confirmation — design
   docs are deliberate artifacts.
