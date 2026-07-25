@@ -66,6 +66,14 @@ func postSMSWebhook(ctx context.Context, webhookURL, authToken, messageSid, from
 	return nil
 }
 
+// captureBaseURLEnv renders the environment assignment that points a server's
+// outbound Twilio REST client at captureURL. Single-sourced here because two
+// places have to agree on it exactly: the guidance the operator copies before
+// launching the server, and the timeout error reminding them they didn't.
+func captureBaseURLEnv(captureURL string) string {
+	return "TWILIO_API_BASE_URL=" + captureURL
+}
+
 // capturedSMS is one outbound Messages.json POST recorded by smsCaptureServer.
 type capturedSMS struct {
 	AccountSID string
@@ -84,6 +92,12 @@ type smsCaptureServer struct {
 
 	mu   sync.Mutex
 	msgs []capturedSMS
+
+	// first is closed when the first message is recorded, so a waiter is woken
+	// by the arrival itself rather than by polling for it. once guards the
+	// close, since further messages may well follow.
+	first chan struct{}
+	once  sync.Once
 }
 
 // newSMSCaptureServer starts a new capture server listening on the requested
@@ -101,7 +115,7 @@ func newSMSCaptureServer(port int) (*smsCaptureServer, error) {
 		return nil, fmt.Errorf("bind SMS capture server on port %d: %w (pick a free port with -capture-port)", port, err)
 	}
 
-	c := &smsCaptureServer{}
+	c := &smsCaptureServer{first: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/2010-04-01/Accounts/", c.handleMessages)
 
@@ -137,6 +151,7 @@ func (c *smsCaptureServer) handleMessages(w http.ResponseWriter, r *http.Request
 	c.mu.Lock()
 	c.msgs = append(c.msgs, msg)
 	c.mu.Unlock()
+	c.once.Do(func() { close(c.first) })
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -177,16 +192,14 @@ func withCaptureWait(d time.Duration) smsOption {
 
 // runSMS performs the SMS fake-mode round trip: it posts a signed inbound-SMS
 // webhook to webhookURL, then waits up to defaultCaptureWait for the outbound
-// REST reply to land on capture and returns it.
+// REST reply to land on capture and returns the first one that does.
 //
 // The wait is required, not defensive. The server answers the webhook from a
 // buffered queue and runs the turn on a detached goroutine, so the outbound
-// Messages.json POST lands after postSMSWebhook has already returned. The
-// caller is responsible for having launched the target server with
-// TWILIO_API_BASE_URL pointed at capture.URL.
-//
-// TODO(AATK-31): Phase 0 stub — still checks the capture immediately, so the
-// wait bound is accepted and ignored.
+// Messages.json POST lands after postSMSWebhook has already returned. It is
+// signalled by the capture server rather than polled, so the reply is returned
+// the moment it arrives. The caller is responsible for having launched the
+// target server with TWILIO_API_BASE_URL pointed at capture.URL.
 func runSMS(ctx context.Context, webhookURL, authToken, from, to, body string, capture *smsCaptureServer, opts ...smsOption) (capturedSMS, error) {
 	cfg := smsOptions{captureWait: defaultCaptureWait}
 	for _, opt := range opts {
@@ -198,9 +211,20 @@ func runSMS(ctx context.Context, webhookURL, authToken, from, to, body string, c
 		return capturedSMS{}, err
 	}
 
-	msgs := capture.captured()
-	if len(msgs) != 1 {
-		return capturedSMS{}, fmt.Errorf("capture server: got %d Messages.json POSTs, want 1", len(msgs))
+	timeout := time.NewTimer(cfg.captureWait)
+	defer timeout.Stop()
+
+	select {
+	case <-capture.first:
+		msgs := capture.captured()
+		if len(msgs) == 0 {
+			// Unreachable: first closes only after a message is appended.
+			return capturedSMS{}, fmt.Errorf("capture server signalled a reply but recorded none")
+		}
+		return msgs[0], nil
+	case <-timeout.C:
+		return capturedSMS{}, fmt.Errorf("no reply reached the capture server within %s — check the server was launched with %s", cfg.captureWait, captureBaseURLEnv(capture.URL))
+	case <-ctx.Done():
+		return capturedSMS{}, fmt.Errorf("waiting for the reply: %w", ctx.Err())
 	}
-	return msgs[0], nil
 }
