@@ -71,7 +71,22 @@ engine generic: mechanism here, meaning in the consumer.
   `enable-aatoolkit.example`); the real file holds secrets and is gitignored — keep it out of
   the repo (best kept one directory up, at the workspace root).
 
-### 8. Documentation layout
+### 8. Ticket text obeys the same boundary as the code
+- The pre-commit leak guard keeps this repo's tree free of the closed consuming project's
+  identity, secrets, and content. **Ticket titles, descriptions, and comments are held to the
+  same standard** — they are read by the same public audience as the code, and prose is where a
+  leak is easiest to write without noticing.
+- Do not name the closed project, its ticket prefix, its file paths, its symbol names, or its
+  data (phone numbers, prompts, real message text) in any ticket for this repo. Say what the
+  engine actually sees: "the consuming server", "a depending project", "the operator".
+- Where a change is needed on the consumer's side, describe it generically and leave it to be
+  tracked wherever that project tracks its work. Never cross-reference its tickets from one of
+  ours. The reverse direction is fine — the closed side may reference these tickets freely.
+- No hook reaches the ticket tracker, so this one is unenforced by construction. That is
+  precisely why it has to be a habit: scan ticket prose for the same tokens the guard scans a
+  diff for, before saving.
+
+### 9. Documentation layout
 - `docs/` is **gitignored** — personal notes, scratch, drafts. Not committed.
 - `design/` is **tracked**, but don't add files to it without explicit confirmation — design
   docs are deliberate artifacts.
