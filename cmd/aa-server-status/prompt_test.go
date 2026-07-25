@@ -164,3 +164,43 @@ func TestAskPrompts_UndeclaredBranchLeavesStaticEnvIntact(t *testing.T) {
 		t.Errorf("resolved Env[%s] took the yes branch's value on a no answer", key)
 	}
 }
+
+// TestAskPrompts_ResolvedEnvIsAlwaysTheCallersToOwn covers the review finding
+// that mergedEnv's "never either input" contract had an exception: when the
+// chosen branch declared no env it returned the caller's own map, so a caller
+// writing to the resolved Env corrupted live config — in exactly the case a
+// reader would not think to check. The branch taken here is the empty one.
+func TestAskPrompts_ResolvedEnvIsAlwaysTheCallersToOwn(t *testing.T) {
+	const key = "AATOOLKIT_PROMPT_ENV_PROBE"
+	const sentinel = "AATOOLKIT_PROMPT_ENV_SENTINEL"
+
+	input := []config.Server{{
+		Name:    "svc",
+		Type:    config.TypeExec,
+		Command: "/bin/true",
+		Env:     map[string]string{key: "static"},
+		Prompt: &config.PromptSpec{
+			Question: "Use the local endpoint for this run?",
+			YesEnv:   map[string]string{key: "chosen"},
+			// NoEnv absent, and the answer below is "n" — the empty branch.
+		},
+	}}
+	inputEnv := input[0].Env
+
+	var promptOut strings.Builder
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t)},
+		bufio.NewReader(strings.NewReader("n\n")), &promptOut)
+
+	resolved, err := eng.askPrompts(input)
+	if err != nil {
+		t.Fatalf("askPrompts: %v", err)
+	}
+
+	resolved[0].Env[sentinel] = "x"
+	if _, leaked := inputEnv[sentinel]; leaked {
+		t.Errorf("writing to the resolved Env reached the caller's config — the returned map must always be the caller's to own, empty branch included")
+	}
+	if got := resolved[0].Env[key]; got != "static" {
+		t.Errorf("resolved Env[%s] = %q, want %q", key, got, "static")
+	}
+}

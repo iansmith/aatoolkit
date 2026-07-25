@@ -69,9 +69,12 @@ func (e *RealEngine) askPrompts(targets []config.Server) ([]config.Server, error
 	return resolved, nil
 }
 
-// mergedEnv returns base overlaid with extra, as a NEW map — never either input.
-// An empty extra (the branch not taken, or a prompt that only selects args)
-// yields base untouched.
+// mergedEnv returns base overlaid with extra, always as a NEW map — never
+// either input, and with no fast path that hands one back. The result is the
+// caller's to own unconditionally, which is the only version of that contract
+// worth having: one that holds "except when the branch is empty" is one a caller
+// cannot rely on, and the exception is exactly the case a reader would not think
+// to check.
 //
 // Both inputs are read-only on purpose, and each for its own reason. base is the
 // caller's live Server.Env, aliased into the resolved copy by a shallow slice
@@ -79,10 +82,9 @@ func (e *RealEngine) askPrompts(targets []config.Server) ([]config.Server, error
 // overlay the statics onto the branch and hand that back — would fold static
 // keys permanently into the config's branch, and a later reload of one of those
 // keys would then be ignored as "already present".
+//
+// The allocation is once per prompted server per `up`, which is nothing.
 func mergedEnv(base, extra map[string]string) map[string]string {
-	if len(extra) == 0 {
-		return base
-	}
 	out := make(map[string]string, len(base)+len(extra))
 	maps.Copy(out, base)
 	maps.Copy(out, extra)

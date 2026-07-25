@@ -351,3 +351,41 @@ func TestValidate_PromptTypeGateFollowsArgsNotEnv(t *testing.T) {
 		})
 	}
 }
+
+// TestValidate_RejectsBranchlessPrompt covers the review finding that gating the
+// type check on args made a branchless prompt newly legal on mlx and python.
+//
+// A prompt with a question but no yes_args/no_args/yes_env/no_env asks the
+// operator something and then does nothing with the answer — the same silent
+// no-op the type check exists to prevent, reached from the other direction. It
+// is rejected on every type, including the two where it used to be caught only
+// as a side effect of the type gate.
+func TestValidate_RejectsBranchlessPrompt(t *testing.T) {
+	for _, typ := range []ServerType{TypeMLX, TypePython, TypeExec, TypeSource} {
+		t.Run(string(typ), func(t *testing.T) {
+			s := Server{
+				Name: "svc", Type: typ, Port: 1234,
+				Health: Health{Path: "/healthz"},
+				Prompt: &PromptSpec{Question: "does this change anything?"},
+			}
+			switch typ {
+			case TypeMLX:
+				s.Model = "some/model"
+			case TypePython:
+				s.Venv, s.Entry, s.Packages = ".venv", "svc serve", []string{"svc"}
+			case TypeExec:
+				s.Command = "/bin/true"
+			case TypeSource:
+				s.Build, s.Binary = "go build ./cmd/svc", "build/svc"
+			}
+
+			err := Validate(Config{Servers: []Server{s}})
+			if err == nil {
+				t.Fatalf("Validate accepted a branchless prompt on %s, want a rejection", typ)
+			}
+			if !strings.Contains(err.Error(), "svc") {
+				t.Errorf("error %q does not name the offending server", err)
+			}
+		})
+	}
+}

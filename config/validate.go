@@ -162,6 +162,14 @@ func validatePrompt(s Server) error {
 	if s.Prompt.Question == "" {
 		return fmt.Errorf("server %q: prompt.question is required", s.Name)
 	}
+	// A prompt with no branch at all asks a question and then does nothing with
+	// the answer — the same silent no-op the type check below exists to prevent,
+	// just arrived at from the other direction. Gating that check on args (so
+	// env-only prompts pass) would otherwise have made a branchless prompt newly
+	// legal on mlx and python, widening the hole rather than narrowing it.
+	if !promptDeclaresArgs(s.Prompt) && len(s.Prompt.YesEnv) == 0 && len(s.Prompt.NoEnv) == 0 {
+		return fmt.Errorf("server %q: prompt declares no yes_args/no_args/yes_env/no_env, so the answer would change nothing", s.Name)
+	}
 	if promptDeclaresArgs(s.Prompt) && !slices.Contains(promptCapableTypes, s.Type) {
 		return fmt.Errorf(
 			"server %q: prompt is not supported for type %q (its launch args ignore args); supported types: %v",
