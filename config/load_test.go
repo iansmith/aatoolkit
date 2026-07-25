@@ -298,7 +298,17 @@ func TestValidate_PromptTypeGateFollowsArgsNotEnv(t *testing.T) {
 		Question: "Use the local endpoint for this run?",
 		YesEnv:   map[string]string{promptEnvProbeVar: "yes-value"},
 	}
+	envOnlyNoBranch := &PromptSpec{
+		Question: "Use the local endpoint for this run?",
+		NoEnv:    map[string]string{promptEnvProbeVar: "no-value"},
+	}
 	argsOnly := &PromptSpec{Question: "which?", YesArgs: []string{"-x"}}
+	argsOnNoBranch := &PromptSpec{Question: "which?", NoArgs: []string{"-x"}}
+	argsAndEnv := &PromptSpec{
+		Question: "which?",
+		YesArgs:  []string{"-x"},
+		YesEnv:   map[string]string{promptEnvProbeVar: "yes-value"},
+	}
 
 	cases := []struct {
 		typ     ServerType
@@ -310,8 +320,19 @@ func TestValidate_PromptTypeGateFollowsArgsNotEnv(t *testing.T) {
 		{TypePython, envOnly, false, "env-only prompt on python"},
 		{TypeExec, envOnly, false, "env-only prompt on exec"},
 		{TypeSource, envOnly, false, "env-only prompt on source"},
+		// Env declared on the no side only is just as legal — a gate keyed on
+		// YesEnv alone would reject a valid config.
+		{TypeMLX, envOnlyNoBranch, false, "env on the no branch only, on mlx"},
 		{TypeMLX, argsOnly, true, "args on mlx: still a discarded answer, still rejected"},
 		{TypePython, argsOnly, true, "args on python: still rejected"},
+		// Args on the no side are discarded exactly as readily as on the yes
+		// side; a gate that inspects only YesArgs would let this through.
+		{TypeMLX, argsOnNoBranch, true, "args on the no branch only, on mlx: equally discarded"},
+		// The trap: adding an env key must not buy an args-carrying prompt its
+		// way onto a type whose launch path ignores args. A gate written as
+		// "exempt if any env is declared" accepts this and reintroduces the
+		// silent no-op the gate exists to prevent.
+		{TypeMLX, argsAndEnv, true, "args AND env on mlx: the args half is still discarded"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {

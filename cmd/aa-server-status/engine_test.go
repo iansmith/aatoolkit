@@ -1210,3 +1210,105 @@ func promptEnvEntries(env []string) []string {
 	}
 	return out
 }
+
+// TestRealEngine_Up_PromptedServer_BranchEnvKeepsUnrelatedStaticEnv is the
+// merge-versus-replace test, and the reason the rest of the env suite is not
+// sufficient on its own.
+//
+// Every other env test uses a single key, with the static env either nil or
+// holding only that same key — which makes "merge the branch into Env" and
+// "replace Env with the branch" observationally identical. An implementation
+// that assigns the branch map wholesale passes all of them while silently
+// dropping every static key the branch does not restate: tap settings, model
+// names, PYTHONPATH, credentials. So this server declares a static key the
+// branch never mentions, and a branch carrying a second key of its own.
+func TestRealEngine_Up_PromptedServer_BranchEnvKeepsUnrelatedStaticEnv(t *testing.T) {
+	const keepVar, secondVar = "AATOOLKIT_PROMPT_ENV_KEEP", "AATOOLKIT_PROMPT_ENV_SECOND"
+
+	port := freeTestPort(t)
+	srv := promptedServer(t, "svc", port, &config.PromptSpec{
+		Question: "Use the local endpoint for this run?",
+		YesEnv: map[string]string{
+			promptEnvProbeVar: "chosen",
+			secondVar:         "two",
+		},
+	})
+	srv.Env = map[string]string{
+		promptEnvProbeVar: "static",  // overridden by the branch
+		keepVar:           "keep-me", // untouched by the branch — must survive
+	}
+
+	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{srv}}
+	var promptOut strings.Builder
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("y\n")), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\") error: %v", err)
+	}
+
+	env := launchedEnv(t, eng, "svc")
+	for _, want := range []string{
+		promptEnvProbeVar + "=chosen",
+		secondVar + "=two",
+		keepVar + "=keep-me",
+	} {
+		if !slices.Contains(env, want) {
+			t.Errorf("missing %q from the launched child's env — the branch must MERGE into the static env, not replace it", want)
+		}
+	}
+}
+
+// TestRealEngine_Up_BulkUp_EachServerGetsItsOwnAnswersEnv pins the answers to
+// their own servers across a bulk Up, and rules out a whole class of wrong
+// implementation the single-server tests cannot see.
+//
+// Two things are being caught. First, mispairing: the branch resolved once
+// outside the loop, or written to resolved[0], gives both servers the same
+// value. The existing sequencing test cannot detect that — its two specs carry
+// identical YesArgs and both are answered yes. Second, and worse, an
+// implementation that "injects" the branch with os.Setenv on the supervisor
+// itself would satisfy every other test here, because mergeEnv bases on
+// os.Environ() — while leaking the chosen value into every server launched
+// afterwards and persisting for the life of the REPL. The unprompted sibling is
+// what makes that leak visible.
+func TestRealEngine_Up_BulkUp_EachServerGetsItsOwnAnswersEnv(t *testing.T) {
+	portA, portB, portC := freeTestPort(t), freeTestPort(t), freeTestPort(t)
+	specA := &config.PromptSpec{
+		Question: "QUESTION-A?",
+		YesEnv:   map[string]string{promptEnvProbeVar: "a-yes"},
+		NoEnv:    map[string]string{promptEnvProbeVar: "a-no"},
+	}
+	specB := &config.PromptSpec{
+		Question: "QUESTION-B?",
+		YesEnv:   map[string]string{promptEnvProbeVar: "b-yes"},
+		NoEnv:    map[string]string{promptEnvProbeVar: "b-no"},
+	}
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers: []config.Server{
+			promptedServer(t, "svc-a", portA, specA),
+			promptedServer(t, "svc-b", portB, specB),
+			tdlistenerServer(t, "svc-c", portC, true), // no prompt at all
+		},
+	}
+
+	var promptOut strings.Builder
+	// Answers are consumed in declaration order: yes for svc-a, no for svc-b.
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("y\nn\n")), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up(""); err != nil {
+		t.Fatalf("bulk Up(\"\") error: %v", err)
+	}
+
+	if got := promptEnvEntries(launchedEnv(t, eng, "svc-a")); len(got) != 1 || got[0] != promptEnvProbeVar+"=a-yes" {
+		t.Errorf("svc-a env = %v, want exactly [%s=a-yes] — its own yes answer", got, promptEnvProbeVar)
+	}
+	if got := promptEnvEntries(launchedEnv(t, eng, "svc-b")); len(got) != 1 || got[0] != promptEnvProbeVar+"=b-no" {
+		t.Errorf("svc-b env = %v, want exactly [%s=b-no] — its own no answer", got, promptEnvProbeVar)
+	}
+	if got := promptEnvEntries(launchedEnv(t, eng, "svc-c")); len(got) != 0 {
+		t.Errorf("svc-c env = %v, want none — an unprompted server must not inherit another server's answer", got)
+	}
+}
