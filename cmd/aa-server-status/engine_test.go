@@ -1312,3 +1312,140 @@ func TestRealEngine_Up_BulkUp_EachServerGetsItsOwnAnswersEnv(t *testing.T) {
 		t.Errorf("svc-c env = %v, want none — an unprompted server must not inherit another server's answer", got)
 	}
 }
+
+// promptedSourceServer is the source-type counterpart of promptedServer: a
+// genuinely buildable, health-checkable server that also declares a prompt, so
+// the build verb's relaunch path can be exercised against a real rebuild rather
+// than a stub.
+func promptedSourceServer(t *testing.T, name string, port int, binPath string, spec *config.PromptSpec) config.Server {
+	t.Helper()
+	s := tdlistenerSourceServer(t, name, port, binPath)
+	s.Prompt = spec
+	return s
+}
+
+// TestRealEngine_Build_PromptedServerReAsksAndAppliesTheNewAnswer pins AATK-34's
+// contract: the build verb re-asks the prompt and relaunches on the freshly
+// chosen branch.
+//
+// The server comes up on the yes branch, then is rebuilt with "n" queued. Both
+// halves matter. The question must be asked again — Build resolved its target
+// from the STORED config, where no answer exists, so without re-asking the
+// rebuilt child carries neither branch. And the answer that takes effect must be
+// the new one: a fix that cached the first answer would satisfy "the branch
+// survived a rebuild" while quietly reintroducing exactly the remembered state
+// the prompt design exists to avoid.
+//
+// The binary is corrupted between the up and the build on purpose. PerformBuild
+// returns early when nothing is stale, so a build against the freshly-built
+// binary would never reach the stop/start path at all and this test would assert
+// nothing about a relaunch. Making it genuinely stale is what puts the relaunch
+// on the path being tested.
+func TestRealEngine_Build_PromptedServerReAsksAndAppliesTheNewAnswer(t *testing.T) {
+	port := freeTestPort(t)
+	binPath := filepath.Join(t.TempDir(), "tdlistener-prompted")
+	srv := promptedSourceServer(t, "svc", port, binPath, envSpec())
+
+	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{srv}}
+	var promptOut strings.Builder
+	// "y" for the initial up, then "n" for the rebuild.
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("y\nn\n")), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\"): %v", err)
+	}
+	if got := promptEnvEntries(launchedEnv(t, eng, "svc")); len(got) != 1 || got[0] != promptEnvProbeVar+"=yes-value" {
+		t.Fatalf("after up, child env = %v, want exactly [%s=yes-value]", got, promptEnvProbeVar)
+	}
+	asksAfterUp := strings.Count(promptOut.String(), "Use the local endpoint for this run?")
+
+	// Diverge the on-disk binary from what a fresh build produces, so the
+	// staleness probe fires and the rebuild actually stops and relaunches.
+	if err := os.WriteFile(binPath, []byte("stale"), 0o755); err != nil {
+		t.Fatalf("staling the binary: %v", err)
+	}
+
+	if err := eng.Build("svc"); err != nil {
+		t.Fatalf("Build(\"svc\"): %v", err)
+	}
+
+	if asks := strings.Count(promptOut.String(), "Use the local endpoint for this run?"); asks <= asksAfterUp {
+		t.Errorf("the question was asked %d time(s) total, same as after up — build must re-ask, since the stored config carries no answer", asks)
+	}
+	got := promptEnvEntries(launchedEnv(t, eng, "svc"))
+	if len(got) != 1 || got[0] != promptEnvProbeVar+"=no-value" {
+		t.Errorf("after build, child env = %v, want exactly [%s=no-value] — the rebuilt server must run on the freshly chosen branch", got, promptEnvProbeVar)
+	}
+}
+
+// TestRealEngine_Build_PromptedServerRefusesWhenTheAnswerCannotBeRead is the
+// error path: when the rebuild needs an answer and cannot get one, it must refuse
+// and name the server rather than relaunch on whatever the binary's own defaults
+// are — which is exactly today's silent behavior.
+//
+// Input is exhausted deliberately: one answer is queued, the up consumes it, and
+// the build's question then hits EOF. That is the honest way to reach this path.
+// An engine constructed with nil streams cannot be used, because with no process
+// of ours running there is no lifecycle at all — PerformBuild replaces the binary
+// and returns without ever calling Start, so nothing would ask and nothing would
+// fail.
+//
+// The server is left down with the binary replaced. That is the correct outcome
+// of a refused relaunch, and better than the alternative of guessing a branch.
+func TestRealEngine_Build_PromptedServerRefusesWhenTheAnswerCannotBeRead(t *testing.T) {
+	port := freeTestPort(t)
+	binPath := filepath.Join(t.TempDir(), "tdlistener-prompted")
+	srv := promptedSourceServer(t, "svc", port, binPath, envSpec())
+
+	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{srv}}
+	var promptOut strings.Builder
+	// Exactly one answer: the up takes it, the build finds EOF.
+	eng := NewEngine(cfg, bufio.NewReader(strings.NewReader("y\n")), &promptOut)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\"): %v", err)
+	}
+	if err := os.WriteFile(binPath, []byte("stale"), 0o755); err != nil {
+		t.Fatalf("staling the binary: %v", err)
+	}
+
+	err := eng.Build("svc")
+	if err == nil {
+		t.Fatal("Build succeeded with no answer available, want a refusal rather than a relaunch on defaults")
+	}
+	if !strings.Contains(err.Error(), "svc") {
+		t.Errorf("error %q does not name the offending server", err)
+	}
+}
+
+// TestRealEngine_Build_UnpromptedServerAsksNothing is a guard, not a red test:
+// it passes before AATK-34 and after. It is here because the fix put an
+// askPrompts call on the rebuild path, and askPrompts errors when it has no
+// streams to ask on — so the way to get this wrong is to ask unconditionally and
+// break every rebuild of every unprompted server, including from an engine
+// constructed with nil streams as most tests do.
+func TestRealEngine_Build_UnpromptedServerAsksNothing(t *testing.T) {
+	port := freeTestPort(t)
+	binPath := filepath.Join(t.TempDir(), "tdlistener-unprompted")
+	srv := tdlistenerSourceServer(t, "svc", port, binPath)
+
+	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{srv}}
+	eng := NewEngine(cfg, nil, nil) // no streams at all
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up(\"svc\"): %v", err)
+	}
+	if err := os.WriteFile(binPath, []byte("stale"), 0o755); err != nil {
+		t.Fatalf("staling the binary: %v", err)
+	}
+
+	if err := eng.Build("svc"); err != nil {
+		t.Fatalf("Build on an unprompted server must not need streams to ask on: %v", err)
+	}
+	if got := eng.Status(); len(got) != 1 || got[0].State != StateUp {
+		t.Errorf("expected the rebuilt server back up, got %+v", got)
+	}
+}
