@@ -118,3 +118,49 @@ func TestAskPrompts_DoesNotMutateThePromptSpecBranchMap(t *testing.T) {
 		t.Errorf("resolved Env aliases the prompt spec's YesEnv map — a write to the launched server's env reached live config")
 	}
 }
+
+// TestAskPrompts_UndeclaredBranchLeavesStaticEnvIntact is a guard, not a red
+// test: it passes before this feature exists, because "no env at all" and "the
+// branch contributed nothing" look identical from outside. It is here because it
+// fails loudly against the two most likely wrong implementations.
+//
+// Declaring only one branch is legal, so a spec may carry YesEnv while the
+// operator answers no. An implementation that assigns the chosen branch
+// wholesale then hands the launcher an empty map, and the server comes up with
+// its entire static environment wiped — because of a branch it did not take. One
+// that writes keys into resolved[i].Env directly instead panics on a nil map.
+func TestAskPrompts_UndeclaredBranchLeavesStaticEnvIntact(t *testing.T) {
+	const key = "AATOOLKIT_PROMPT_ENV_PROBE"
+	const keepVar = "AATOOLKIT_PROMPT_ENV_KEEP"
+
+	input := []config.Server{{
+		Name:    "svc",
+		Type:    config.TypeExec,
+		Command: "/bin/true",
+		Env:     map[string]string{key: "static", keepVar: "keep-me"},
+		Prompt: &config.PromptSpec{
+			Question: "Use the local endpoint for this run?",
+			YesEnv:   map[string]string{key: "chosen"},
+			// NoEnv deliberately absent — the branch about to be taken.
+		},
+	}}
+
+	var promptOut strings.Builder
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t)},
+		bufio.NewReader(strings.NewReader("n\n")), &promptOut)
+
+	resolved, err := eng.askPrompts(input)
+	if err != nil {
+		t.Fatalf("askPrompts: %v", err)
+	}
+
+	if got := resolved[0].Env[key]; got != "static" {
+		t.Errorf("resolved Env[%s] = %q, want %q — an undeclared branch must contribute nothing", key, got, "static")
+	}
+	if got := resolved[0].Env[keepVar]; got != "keep-me" {
+		t.Errorf("resolved Env[%s] = %q, want %q — taking an undeclared branch must not wipe the static env", keepVar, got, "keep-me")
+	}
+	if got := resolved[0].Env[key]; got == "chosen" {
+		t.Errorf("resolved Env[%s] took the yes branch's value on a no answer", key)
+	}
+}
