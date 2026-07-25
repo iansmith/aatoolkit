@@ -83,6 +83,23 @@ func smsWebhookTarget(explicit, basePath string) (string, error) {
 	return resolveTarget(basePath, "/sms/inbound")
 }
 
+// defaultCapturePort is the port the SMS capture server binds unless
+// -capture-port overrides it. Fixed rather than ephemeral so the operator can
+// launch the server with TWILIO_API_BASE_URL pointed at it *before* the CLI
+// runs; free against every port aa-server-status.toml declares, and adjacent
+// to the server's own 9730/9740 pair.
+const defaultCapturePort = 9750
+
+// smsCaptureGuidance returns the operator-facing line printed before the
+// round trip. It must state the env var assignment the operator can actually
+// act on, because the destination is read once at server startup.
+//
+// TODO(AATK-31): Phase 0 stub — still names an internal field the operator
+// cannot set.
+func smsCaptureGuidance(port int) string {
+	return fmt.Sprintf("capture server listening at http://127.0.0.1:%d — point the server's RESTClient.BaseURL there", port)
+}
+
 // runSMSMode implements the `twilio-cli sms <FROM-e164> <BODY>` subcommand:
 // it posts a signed inbound-SMS webhook to the server, starts a local capture
 // server for the outbound REST reply, and prints the captured To/Body.
@@ -116,9 +133,12 @@ func runSMSMode(args []string) {
 
 	authToken := os.Getenv("TWILIO_AUTH_TOKEN")
 
-	capture := newSMSCaptureServer()
+	capture, err := newSMSCaptureServer(defaultCapturePort)
+	if err != nil {
+		log.Fatalf("twilio-cli: sms: %v", err)
+	}
 	defer capture.Close()
-	fmt.Printf("capture server listening at %s — point the server's RESTClient.BaseURL there\n", capture.URL)
+	fmt.Println(smsCaptureGuidance(defaultCapturePort))
 
 	msg, err := runSMS(context.Background(), target, authToken, from, *toNumber, body, capture)
 	if err != nil {

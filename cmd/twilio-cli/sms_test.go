@@ -2,13 +2,33 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
+
+// freeTCPPort returns a port that was bindable on 127.0.0.1 a moment ago, by
+// binding one and closing it again. Used to exercise an *explicit* bind
+// without hardcoding a port number the machine may already be using.
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a free port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("release the reserved port: %v", err)
+	}
+	return port
+}
 
 // TestTwilioCLI_SMSRoundTrip pins AATK-23's observable behaviors: the SMS mode
 // posts a correctly-signed inbound-SMS webhook to the server's /sms/inbound
@@ -21,7 +41,10 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 	const from, to, body = "+15551234567", "+15105559999", "hello there"
 	const replyBody = "hi back"
 
-	capture := newSMSCaptureServer()
+	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	if err != nil {
+		t.Fatalf("newSMSCaptureServer: %v", err)
+	}
 	defer capture.Close()
 
 	rest := &twilio.RESTClient{
@@ -126,6 +149,176 @@ func TestPostSMSWebhook_SignatureURLMismatch403s(t *testing.T) {
 
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("want 403 (signature bound to a different URL than the one posted to), got %d", resp.StatusCode)
+	}
+}
+
+// TestNewSMSCaptureServer_BindsRequestedPort pins AATK-31 observable behavior
+// 1: the capture server binds the port it was asked for, rather than an
+// ephemeral one. The whole point is that the operator must be able to name the
+// URL before the CLI runs — an ephemeral port makes that impossible, because
+// the server reads TWILIO_API_BASE_URL once at startup.
+func TestNewSMSCaptureServer_BindsRequestedPort(t *testing.T) {
+	port := freeTCPPort(t)
+
+	capture, err := newSMSCaptureServer(port)
+	if err != nil {
+		t.Fatalf("newSMSCaptureServer(%d): %v", port, err)
+	}
+	defer capture.Close()
+
+	want := fmt.Sprintf(":%d", port)
+	if !strings.Contains(capture.URL, want) {
+		t.Errorf("capture server URL = %q, want it to contain %q (an explicit bind, not an ephemeral port)", capture.URL, want)
+	}
+}
+
+// TestNewSMSCaptureServer_PortInUseNamesThePort is the error/rejection edge
+// case for observable behavior 4: an occupied port fails immediately with an
+// error the operator can act on — it names the port and the flag that changes
+// it — rather than panicking the way httptest.NewServer does.
+func TestNewSMSCaptureServer_PortInUseNamesThePort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a port: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	capture, err := newSMSCaptureServer(port)
+	if err == nil {
+		capture.Close()
+		t.Fatalf("newSMSCaptureServer(%d) succeeded against a held port, want a bind error", port)
+	}
+	if got := err.Error(); !strings.Contains(got, strconv.Itoa(port)) {
+		t.Errorf("bind error %q does not name the port %d", got, port)
+	}
+	if got := err.Error(); !strings.Contains(got, "-capture-port") {
+		t.Errorf("bind error %q does not mention -capture-port, the flag that changes it", got)
+	}
+}
+
+// TestRunSMS_CapturesReplyPostedAfterWebhookReturns pins AATK-31 observable
+// behaviors 2 and 3, and is the test that fails against a no-wait runSMS.
+//
+// It mirrors the real responder rather than the convenient case: the webhook
+// handler returns immediately (the responder only enqueues), and the outbound
+// Messages.json POST is made from a separate goroutine *after* ServeSMS has
+// answered. A version that posts synchronously from inside the handler would
+// pass against the racy implementation and prove nothing.
+func TestRunSMS_CapturesReplyPostedAfterWebhookReturns(t *testing.T) {
+	const authToken = "test-auth-token"
+	const from, to, body = "+15551234567", "+15105559999", "hello there"
+	const replyBody = "hi back, later"
+
+	// A margin over the loopback webhook round trip: an implementation that
+	// checks the capture the instant postSMSWebhook returns must observe zero
+	// messages, even though the reply is on its way.
+	const replyDelay = 200 * time.Millisecond
+
+	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	if err != nil {
+		t.Fatalf("newSMSCaptureServer: %v", err)
+	}
+	defer capture.Close()
+
+	// Closed once ServeSMS has returned, so the reply provably leaves after
+	// the webhook has been answered — not merely "probably later".
+	webhookReturned := make(chan struct{})
+	sendErr := make(chan error, 1)
+
+	srv := &twilio.Server{
+		AuthToken:    authToken,
+		StreamScheme: "ws",
+		HandleSMS: func(_ context.Context, msg twilio.InboundSMS) {
+			go func() {
+				<-webhookReturned
+				time.Sleep(replyDelay)
+				rest := &twilio.RESTClient{AccountSID: defaultAccountSid, BaseURL: capture.URL}
+				sendErr <- rest.SendSMS(context.Background(), to, msg.From, replyBody)
+			}()
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sms/inbound", func(w http.ResponseWriter, r *http.Request) {
+		srv.ServeSMS(w, r)
+		close(webhookReturned)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	msg, err := runSMS(context.Background(), ts.URL+"/sms/inbound", authToken, from, to, body, capture)
+	if err != nil {
+		t.Fatalf("runSMS: %v (a reply posted after the webhook returned must still be captured)", err)
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("async reply SendSMS: %v", err)
+	}
+
+	if got := msg.To; got != from {
+		t.Errorf("captured To = %q, want %q (the FROM arg — the server replies to the sender)", got, from)
+	}
+	if got := msg.Body; got != replyBody {
+		t.Errorf("captured Body = %q, want %q", got, replyBody)
+	}
+}
+
+// TestRunSMS_TimesOutWithActionableError pins observable behavior 4's other
+// half: when no reply ever arrives, the wait expires with an error that names
+// the bound it waited and points at the env var the operator most likely
+// forgot — and never the old count-based phrasing, which described the symptom
+// rather than the cause.
+func TestRunSMS_TimesOutWithActionableError(t *testing.T) {
+	const authToken = "test-auth-token"
+	const from, to, body = "+15551234567", "+15105559999", "hello there"
+
+	// The production bound is defaultCaptureWait; the seam exists so this
+	// path is exercised without waiting it out.
+	const wait = 50 * time.Millisecond
+
+	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	if err != nil {
+		t.Fatalf("newSMSCaptureServer: %v", err)
+	}
+	defer capture.Close()
+
+	// A server that accepts the webhook and never replies.
+	srv := &twilio.Server{AuthToken: authToken, StreamScheme: "ws"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sms/inbound", srv.ServeSMS)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, err = runSMS(context.Background(), ts.URL+"/sms/inbound", authToken, from, to, body, capture, withCaptureWait(wait))
+	if err == nil {
+		t.Fatal("runSMS succeeded with no reply ever posted, want a wait-expiry error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, wait.String()) {
+		t.Errorf("timeout error %q does not name the wait bound %s it waited", got, wait)
+	}
+	if !strings.Contains(got, "TWILIO_API_BASE_URL") {
+		t.Errorf("timeout error %q does not mention TWILIO_API_BASE_URL, the most likely cause", got)
+	}
+	if strings.Contains(got, "got 0 Messages.json POSTs") {
+		t.Errorf("timeout error %q still uses the old count phrasing, which named the symptom rather than the cause", got)
+	}
+}
+
+// TestRunSMSMode_PrintsActionableBaseURLGuidance pins observable behavior 5:
+// the guidance names the exact environment assignment the operator has to make
+// before launching the server, not an internal Go field they have no way to
+// set. The literal below is the contract — the default port and the shape of
+// the line the operator copies.
+func TestRunSMSMode_PrintsActionableBaseURLGuidance(t *testing.T) {
+	const want = "TWILIO_API_BASE_URL=http://127.0.0.1:9750"
+
+	got := smsCaptureGuidance(defaultCapturePort)
+
+	if !strings.Contains(got, want) {
+		t.Errorf("guidance = %q, want it to contain %q", got, want)
+	}
+	if strings.Contains(got, "RESTClient.BaseURL") {
+		t.Errorf("guidance = %q, still names RESTClient.BaseURL — an internal field the operator cannot set", got)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
@@ -84,14 +85,19 @@ type smsCaptureServer struct {
 	msgs []capturedSMS
 }
 
-// newSMSCaptureServer starts a new capture server listening on a local
-// ephemeral port.
-func newSMSCaptureServer() *smsCaptureServer {
+// newSMSCaptureServer starts a new capture server listening on the requested
+// port of 127.0.0.1, returning an error naming that port if the bind fails.
+// The port must be fixed and known before the CLI runs, because the server
+// whose reply is being captured reads TWILIO_API_BASE_URL once at startup.
+//
+// TODO(AATK-31): Phase 0 stub — still binds an ephemeral port and never
+// reports a bind failure.
+func newSMSCaptureServer(port int) (*smsCaptureServer, error) {
 	c := &smsCaptureServer{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/2010-04-01/Accounts/", c.handleMessages)
 	c.Server = httptest.NewServer(mux)
-	return c
+	return c, nil
 }
 
 // handleMessages records the outbound SMS-send POST and answers with the
@@ -130,15 +136,44 @@ func (c *smsCaptureServer) captured() []capturedSMS {
 	return out
 }
 
-// runSMS performs the SMS fake-mode round trip: it starts a local capture
-// server implementing the Twilio Messages API shape, posts a signed inbound-
-// SMS webhook to webhookURL, and returns the outbound REST reply the server
-// sent back. Server.ServeSMS calls HandleSMS synchronously before answering
-// the webhook POST, so any REST call the handler makes has already landed on
-// the capture server by the time postSMSWebhook returns — no polling needed.
-// The caller (a test, or the CLI) is responsible for pointing the target
-// server's RESTClient.BaseURL at capture.URL before calling runSMS.
-func runSMS(ctx context.Context, webhookURL, authToken, from, to, body string, capture *smsCaptureServer) (capturedSMS, error) {
+// defaultCaptureWait bounds how long runSMS waits for the outbound reply. It
+// must exceed the responder's own 30s delivery deadline, because a turn that
+// hits that deadline still emits a failure-report SMS — a shorter wait would
+// report "no reply" for a turn still legitimately in flight.
+const defaultCaptureWait = 35 * time.Second
+
+// smsOptions configures optional runSMS behavior.
+type smsOptions struct {
+	captureWait time.Duration
+}
+
+// smsOption configures smsOptions.
+type smsOption func(*smsOptions)
+
+// withCaptureWait overrides defaultCaptureWait, so a test can exercise the
+// wait-expiry path without waiting out the production bound.
+func withCaptureWait(d time.Duration) smsOption {
+	return func(o *smsOptions) { o.captureWait = d }
+}
+
+// runSMS performs the SMS fake-mode round trip: it posts a signed inbound-SMS
+// webhook to webhookURL, then waits up to defaultCaptureWait for the outbound
+// REST reply to land on capture and returns it.
+//
+// The wait is required, not defensive. The server answers the webhook from a
+// buffered queue and runs the turn on a detached goroutine, so the outbound
+// Messages.json POST lands after postSMSWebhook has already returned. The
+// caller is responsible for having launched the target server with
+// TWILIO_API_BASE_URL pointed at capture.URL.
+//
+// TODO(AATK-31): Phase 0 stub — still checks the capture immediately, so the
+// wait bound is accepted and ignored.
+func runSMS(ctx context.Context, webhookURL, authToken, from, to, body string, capture *smsCaptureServer, opts ...smsOption) (capturedSMS, error) {
+	cfg := smsOptions{captureWait: defaultCaptureWait}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	messageSid := newSID("SM")
 	if err := postSMSWebhook(ctx, webhookURL, authToken, messageSid, from, to, body); err != nil {
 		return capturedSMS{}, err
