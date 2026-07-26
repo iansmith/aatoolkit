@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -29,7 +30,10 @@ func decodeHealthErr(t *testing.T, tomlSrc string) error {
 func TestHealth_UnmarshalTOML_TableForm(t *testing.T) {
 	h := decodeHealth(t, `health = { host = "127.0.0.1", port = 2019, path = "/config/" }`)
 	want := Health{Host: "127.0.0.1", Port: 2019, Path: "/config/"}
-	if h != want {
+	// DeepEqual rather than !=: Health carries an Exec slice since the exec
+	// form landed, and a struct containing a slice is not comparable. Same
+	// assertion — every field, including the one that must stay unset here.
+	if !reflect.DeepEqual(h, want) {
 		t.Errorf("got %+v, want %+v", h, want)
 	}
 }
@@ -37,7 +41,7 @@ func TestHealth_UnmarshalTOML_TableForm(t *testing.T) {
 func TestHealth_UnmarshalTOML_StringForm(t *testing.T) {
 	h := decodeHealth(t, `health = "GET /spend?prefix=SOP"`)
 	want := Health{Path: "/spend?prefix=SOP"}
-	if h != want {
+	if !reflect.DeepEqual(h, want) {
 		t.Errorf("got %+v, want %+v (host/port left unset, default to the server's own)", h, want)
 	}
 }

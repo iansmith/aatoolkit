@@ -204,9 +204,11 @@ func verify(ctx context.Context, target Target, signal KillSignal) (Result, erro
 		// ctx here first.
 		result := health.Probe(ctx, *target.Health, 2*time.Second)
 		if result.Healthy {
+			// Describe, not URL: an exec check has no URL, and rendering one
+			// would point the operator at "http://:0".
 			return Result{Name: target.Name, Signal: signal}, fmt.Errorf(
-				"teardown %q: health probe %s still answering 2xx after SIGKILL — kill not achieved",
-				target.Name, target.Health.URL())
+				"teardown %q: health probe %s still reports ready after SIGKILL — kill not achieved",
+				target.Name, target.Health.Describe())
 		}
 	}
 
@@ -278,17 +280,11 @@ func TeardownAll(ctx context.Context, servers []config.Server, supervisor config
 			continue
 		}
 
-		var healthSpec *health.Spec
-		if s.Health.Path != "" {
-			spec := health.ResolveSpec(s.Health, s.Host, s.Port)
-			healthSpec = &spec
-		}
-
 		target := Target{
 			Name:   s.Name,
 			PID:    pid,
 			Ports:  DeclaredPorts(s),
-			Health: healthSpec,
+			Health: health.SpecFor(s),
 		}
 		grace := ResolveGracePeriod(s, supervisor)
 

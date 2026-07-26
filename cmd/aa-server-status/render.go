@@ -211,9 +211,10 @@ func formatPID(pid int) string {
 }
 
 // formatHealth renders the HEALTH column. Empty means "not probed yet" (the
-// stub engine's placeholder); once wired, this is expected to already be in
-// the "path code" form (internal/health.Result.Rendered produces exactly
-// that, e.g. "/v1/models 200").
+// stub engine's placeholder); anything else is passed through verbatim,
+// already rendered by internal/health.Result.Rendered — "/v1/models 200" for
+// an HTTP check, "db-probe exit 0" for an exec one. Nothing here parses it,
+// so a new check form needs no change on this side.
 func formatHealth(health string) string {
 	if health == "" {
 		return "-"

@@ -106,10 +106,47 @@ func validateType(s Server) error {
 	return nil
 }
 
+// validateHealth enforces exactly one readiness form per server
+// (design/aa-server-status.md §7, strict decode). Health stays mandatory: a
+// server nobody checks is precisely the failure this validation exists to
+// prevent.
+//
+// Two forms are rejected rather than resolved by precedence. A precedence rule
+// would mean one of the two the operator wrote is silently ignored, which is
+// the same class of failure validatePrompt exists to prevent: config that looks
+// like it works.
 func validateHealth(s Server) error {
-	if s.Health.Path == "" {
-		return fmt.Errorf("server %q: health.path is required", s.Name)
+	if s.Health.Path != "" && s.Health.IsExec() {
+		return fmt.Errorf(
+			"server %q: health declares both path and exec — a server has one readiness check, not two; drop whichever is not the real one", s.Name)
 	}
+	if !s.Health.Declared() {
+		// Naming both alternatives matters: the operator who hits this is
+		// usually adding a non-HTTP dependency and has no reason to guess that
+		// anything but a path exists.
+		return fmt.Errorf(
+			"server %q: a readiness check is required — declare health.path for an HTTP GET, or health.exec for a command whose exit 0 means ready", s.Name)
+	}
+	if s.Health.IsExec() {
+		// Host and port cannot reach an exec probe. Accepting them would
+		// discard a value the operator wrote on purpose.
+		if s.Health.Host != "" {
+			return fmt.Errorf("server %q: health.host has no meaning for an exec check — remove it", s.Name)
+		}
+		if s.Health.Port != 0 {
+			return fmt.Errorf("server %q: health.port has no meaning for an exec check — remove it", s.Name)
+		}
+		// A warm-up is an HTTP request to the server's own port, so declaring
+		// one on a server that does not speak HTTP is a launch-time failure
+		// waiting to happen — caught here instead, per §6.5.
+		if s.Warm.Path != "" {
+			return fmt.Errorf(
+				"server %q: warm is an HTTP request, so it cannot be combined with an exec health check — the probe program is where a real request belongs", s.Name)
+		}
+		return nil
+	}
+
+	// From here the HTTP form is the only one left.
 	if s.Health.Port == 0 {
 		// Defaults to the server's own port — must have one to default to.
 		if s.Port == 0 {
