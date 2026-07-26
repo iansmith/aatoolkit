@@ -148,6 +148,11 @@ func newSMSCaptureServer(port int) (*smsCaptureServer, error) {
 
 // handleMessages records the outbound SMS-send POST and answers with the
 // minimal 201 JSON shape SendSMS treats as success.
+//
+// The "sid" key is a contract, not decoration: RESTClient.SendSMS parses it to
+// return the message id, and a 2xx carrying none yields an empty id rather than
+// an error — so dropping it here would go unnoticed. TestTwilioCLI_SMSRoundTrip
+// asserts the id makes it back, which is what keeps the two ends honest.
 func (c *smsCaptureServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
