@@ -131,12 +131,21 @@ type cappedBuffer struct {
 	overflow bool
 }
 
+// Write is safe without a lock even though probeExec assigns it to both
+// Stdout and Stderr: os/exec guarantees that when those two are the same
+// writer and its type is comparable with ==, at most one goroutine calls
+// Write at a time.
 func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := maxProbeOutput - len(c.buf); room > 0 {
-		c.buf = append(c.buf, p[:min(room, len(p))]...)
-	}
-	if len(c.buf) == maxProbeOutput {
+	room := maxProbeOutput - len(c.buf)
+	// Set overflow on bytes actually dropped, not on reaching the cap exactly.
+	// A probe writing precisely maxProbeOutput bytes lost nothing, and marking
+	// its output truncated would send the reader hunting for a rest that does
+	// not exist.
+	if len(p) > room {
 		c.overflow = true
+	}
+	if room > 0 {
+		c.buf = append(c.buf, p[:min(room, len(p))]...)
 	}
 	// Always report a full write: a short count would make the probe program
 	// see a write error on its own stdout, changing the behaviour we are
@@ -213,7 +222,7 @@ func probeExec(ctx context.Context, spec Spec, timeout time.Duration) Result {
 	switch {
 	case err == nil:
 		result.Healthy = true
-		result.Rendered = fmt.Sprintf("%s 0", spec.Exec[0])
+		result.Rendered = fmt.Sprintf("%s exit 0", spec.Exec[0])
 	case errors.As(err, &exitErr):
 		result.Rendered = fmt.Sprintf("%s exit %d", spec.Exec[0], exitErr.ExitCode())
 	default:

@@ -51,9 +51,9 @@ type ServerStatus struct {
 	Ports []PortStatus
 	// PID is 0 when the server isn't running (nothing observed yet).
 	PID int
-	// Health is the pre-rendered "path code" HEALTH cell (e.g.
-	// "/v1/models 200", matching internal/health.Result.Rendered) — empty
-	// means not yet probed.
+	// Health is the pre-rendered HEALTH cell, matching
+	// internal/health.Result.Rendered — "/v1/models 200" for an HTTP check,
+	// "db-probe exit 0" for an exec one. Empty means not yet probed.
 	Health string
 
 	// OwnedDisabled is true only when Enabled is false AND this server is

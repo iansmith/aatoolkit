@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -133,6 +134,24 @@ func TestProbe_ExecOutputIsCapped(t *testing.T) {
 	}
 }
 
+// The truncation marker must mean bytes were dropped, not merely that the cap
+// was reached. A probe whose output is exactly maxProbeOutput lost nothing, and
+// telling the reader otherwise sends them hunting for a rest that never
+// existed.
+func TestProbe_ExecOutputAtExactlyTheCapIsNotMarkedTruncated(t *testing.T) {
+	// head -c writes exactly the cap; tr keeps it non-whitespace so TrimSpace
+	// cannot shorten it.
+	script := fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'; exit 1", maxProbeOutput)
+	result := Probe(context.Background(), shSpec(script), execProbeTimeout)
+
+	if len(result.Output) != maxProbeOutput {
+		t.Fatalf("Output is %d bytes, want exactly the cap (%d) retained", len(result.Output), maxProbeOutput)
+	}
+	if strings.Contains(result.Output, "truncated") {
+		t.Error("output filling the cap exactly lost no bytes and must not claim truncation")
+	}
+}
+
 func TestProbe_ExecMissingProgramIsNotReady(t *testing.T) {
 	result := Probe(context.Background(), Spec{Exec: []string{"aatoolkit-no-such-probe-program"}}, execProbeTimeout)
 	if result.Healthy {
@@ -145,14 +164,22 @@ func TestProbe_ExecMissingProgramIsNotReady(t *testing.T) {
 
 // The status table renders Result.Rendered verbatim, so the exec form needs one
 // that is meaningful rather than an empty HTTP path.
+// Both outcomes render the same way — "<program> exit <status>" — so the
+// column does not silently change shape between a ready and a failing probe.
 func TestProbe_ExecRenderedFormForStatusTable(t *testing.T) {
-	ready := Probe(context.Background(), shSpec("exit 0"), execProbeTimeout)
-	if ready.Rendered == "" {
-		t.Error("Rendered = empty for a successful exec probe")
-	}
-	failed := Probe(context.Background(), shSpec("exit 3"), execProbeTimeout)
-	if !strings.Contains(failed.Rendered, "3") {
-		t.Errorf("Rendered = %q, want the exit status visible in the status table", failed.Rendered)
+	for _, tc := range []struct{ script, want string }{
+		{"exit 0", "exit 0"},
+		{"exit 3", "exit 3"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			r := Probe(context.Background(), shSpec(tc.script), execProbeTimeout)
+			if !strings.HasSuffix(r.Rendered, tc.want) {
+				t.Errorf("Rendered = %q, want it to end in %q", r.Rendered, tc.want)
+			}
+			if !strings.Contains(r.Rendered, "/bin/sh") {
+				t.Errorf("Rendered = %q, want the probe program named", r.Rendered)
+			}
+		})
 	}
 }
 
