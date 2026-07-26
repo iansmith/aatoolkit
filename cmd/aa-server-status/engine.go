@@ -179,7 +179,7 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 	}
 
 	if status.State == StateUp || status.State == StateStray {
-		if s.Health.Path != "" {
+		if s.Health.Declared() {
 			spec := health.ResolveSpec(s.Health, s.Host, s.Port)
 			result := health.Probe(context.Background(), spec, resolveHealthTimeout(e.config().Supervisor))
 			status.Health = result.Rendered
@@ -714,7 +714,7 @@ func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 	if err := e.warmUp(s, proc, time.Until(deadline)); err != nil {
 		return err
 	}
-	if s.Health.Path == "" {
+	if !s.Health.Declared() {
 		return nil
 	}
 
@@ -899,16 +899,11 @@ func (e *RealEngine) teardownOne(s config.Server) error {
 }
 
 func (e *RealEngine) teardownPID(s config.Server, pid int32) error {
-	var healthSpec *health.Spec
-	if s.Health.Path != "" {
-		spec := health.ResolveSpec(s.Health, s.Host, s.Port)
-		healthSpec = &spec
-	}
 	target := lifecycle.Target{
 		Name:   s.Name,
 		PID:    pid,
 		Ports:  lifecycle.DeclaredPorts(s),
-		Health: healthSpec,
+		Health: health.SpecFor(s),
 	}
 	grace := lifecycle.ResolveGracePeriod(s, e.config().Supervisor)
 	_, err := lifecycle.Teardown(context.Background(), target, grace)

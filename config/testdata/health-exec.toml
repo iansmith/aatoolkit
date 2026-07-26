@@ -1,0 +1,28 @@
+[supervisor]
+log_dir       = "build/logs"
+lock_file     = "build/run/aa-server-status.lock"
+
+# An HTTP server, alongside the datastore below, so the fixture proves the two
+# forms coexist in one fleet rather than each needing a config of its own.
+[[server]]
+name  = "chat-llm"
+type  = "mlx"
+enabled = true
+host  = "127.0.0.1"
+port  = 1235
+model = "mlx-community/gemma-4-31b-it-8bit"
+health = { path = "/v1/models" }
+
+# A datastore speaks its own wire protocol, so no path can be supplied
+# truthfully. Readiness is a command instead: exit 0 means ready. The
+# supervisor learns nothing about the protocol — that knowledge lives in the
+# probe program, which this project does not ship.
+[[server]]
+name = "datastore"
+type = "exec"
+enabled = true
+host = "127.0.0.1"
+port = 5432
+command = "docker"
+args = ["compose", "up"]
+health = { exec = ["/usr/local/bin/db-probe", "--host", "127.0.0.1", "--port", "5432"] }

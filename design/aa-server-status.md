@@ -110,9 +110,20 @@ Three-stage gate, all required:
 
 1. **Port listening** — a *necessary precondition*.
 2. **Process identity** — for children the supervisor started, it holds the handle (trivial). For processes it did *not* start (strays, foreign holders), identity is matched via **cmdline** (see §6.2).
-3. **Health probe** — a **mandatory** `GET` health endpoint returns 2xx. This is the authoritative "serving" signal. No `any_http` fallback.
+3. **Health probe** — a **mandatory** readiness check reports ready. This is the authoritative "serving" signal. No fallback to a lesser one.
 
-Health path is per-server: `/healthz` wherever we control the server (spelled out in the TOML), `/v1/models` for mlx-serve, admin `/config/` on `:2019` for the proxy.
+The check takes one of two forms, and every server declares exactly one:
+
+- **HTTP** (`health.path`) — a `GET` returning 2xx. No `any_http` fallback, and no configurable verb: GET is the only method. Health path is per-server: `/healthz` wherever we control the server (spelled out in the TOML), `/v1/models` for mlx-serve, admin `/config/` on `:2019` for the proxy.
+- **exec** (`health.exec`) — a command the supervisor runs, where **exit 0 means ready** and any other status means not ready.
+
+The exec form exists because a datastore, queue, or cache does not speak HTTP, so no path can be supplied for it truthfully. Inventing one (`health = { path = "/" }`) yields a check that fails forever, which is worse than no check: it teaches an operator to ignore the one indicator meant to mean something, and it will mask a real outage of that server later.
+
+**Why exec and not a TCP connect.** A TCP check is protocol-agnostic and trivial, but it is *optimistic* — postgres binds and accepts connections before it can serve queries, most visibly on first run while `initdb` builds the cluster — so it reports ready while every query still fails. That is the same failure `warm` (§7.1) already exists to prevent for HTTP servers, where the endpoint answers before the model behind it can. An exec probe generalises the fix past HTTP: the probe program issues a real request, and the protocol knowledge lives in that program rather than in the supervisor, which only ever runs a command and reads a status code.
+
+**Bounded, and never silent.** The probe is killed at `health_timeout`, and its output pipes are given the same budget again to drain — a probe process can exit promptly while a child it spawned still holds them, which would otherwise hang the supervisor one level down from where it was looking. A failing probe's combined stdout and stderr travels with the ready-timeout error, because the probe is a separate process and the supervised server's own log never sees it.
+
+aa-server-status ships no probe programs. The mechanism is the deliverable; a consumer supplies its own.
 
 ### 6.2 Observed state via `gopsutil`
 
@@ -157,6 +168,8 @@ Secret and per-machine values are **not** in config. They are exported into the 
 There was once a second, gitignored `aa-server-status.local.toml`, deep-merged on top of the committed one. AATK-33 deleted it: it had been silently dropping any `[server.prompt]` declared only in the overlay ever since prompts were introduced, and nobody noticed — which was the clearest evidence available that nothing depended on it. A leftover file on disk is now inert rather than an error, so an operator who still has one gets the committed config.
 
 **Strict decode:** unknown/misspelled keys are a **hard error**. Structural validation (all hard-exit): duplicate server names; port collisions across `{port} ∪ listens` sets; per-type required fields (mlx→`model`; python→`venv`+`entry`+`packages`; source→`build`+`binary`; exec→`command`; all need a health spec + at least one port); `health.port` must be a member of that server's declared port set.
+
+**Exactly one health form.** A server declaring neither `health.path` nor `health.exec` is rejected — health stays mandatory, and the error names both alternatives so the operator adding a non-HTTP dependency is not left guessing that exec exists. A server declaring *both* is rejected as ambiguous rather than resolved by precedence: a precedence rule would silently ignore one of the two things the operator wrote, which is config that looks like it works. `health.host` and `health.port` alongside `health.exec` are rejected for the same reason — they cannot reach a command. So is `warm`: a warm-up is an HTTP request to the server's own port (§7.1), which a server declaring an exec check by definition does not answer, and for that form the probe program is already where a real request belongs.
 
 ### 7.1 Schema
 
@@ -236,12 +249,23 @@ listens = [80, 443, 2019]
 health = { host = "127.0.0.1", port = 2019, path = "/config/" }  # admin endpoint
 command = "go"
 args = ["tool", "caddy", "run", "--config", "Caddyfile"]
+
+# --- exec: a datastore, whose readiness is a command, not a GET ---
+[[server]]
+name = "datastore"                                    # speaks its own wire protocol
+type = "exec"
+enabled = true
+host = "127.0.0.1"
+port = 5432
+command = "docker"
+args = ["compose", "up"]
+health = { exec = ["db-probe", "--port", "5432"] }    # exit 0 = ready; we ship no such program
 ```
 
 Field notes:
 - **`port`** (scalar, optional) — the launch/health port for mlx & python; `--port <port>` auto-appended.
 - **`listens`** (list, optional) — ports a self-listening server (source/exec) should be verified on; no launch flags.
-- **`health`** = `{ host?, port?, path }` — `host` defaults to `host`, `port` defaults to `port` (must name a member of `listens` for source/exec).
+- **`health`** = `{ host?, port?, path }` **or** `{ exec = [...] }` — exactly one form (§7 strict decode). In the HTTP form, `host` defaults to `host` and `port` defaults to `port` (must name a member of `listens` for source/exec); a `"GET /path"` string is accepted as shorthand for it. The exec form is argv, **never a shell line** — the supervisor runs the program directly, so an argument containing a space survives as one argument. There is deliberately no string shorthand for it: splitting a command line on spaces would break exactly that case, and TOML already spells argv as a list. `host`/`port` have no meaning there and are rejected.
 - **`env`** — per-server map exported into the child at launch, layered on top of the environment the supervisor itself inherited. Secrets belong in that inherited environment, not in this file — the committed config is the only config there is.
 - **`prompt`** = `{ question, yes_args?, no_args?, yes_env?, no_env? }` — makes a server's launch args and environment an interactive y/n choice instead of a config line the operator has to hand-edit between runs. Every question is asked before *any* server launches, so a bulk `up` can't interleave two readers on one stdin. Declaring only one branch is legal; the omitted branch contributes nothing. `yes_args`/`no_args` require a type whose launch path actually reads args (`exec`, `source`) — declaring them on `mlx`/`python` is a hard config error rather than a silently discarded answer. `yes_env`/`no_env` carry no such restriction: env reaches every type, so an env-only prompt is valid on all four. The chosen branch's env merges *over* the server's static `env` for the keys it names and leaves every other key alone. A prompt answer is per-launch and never remembered, so the `build` verb re-asks before it relaunches — and only when the staleness probe means it is actually going to relaunch, so a `build` that finds nothing to do asks nothing. A prompt that cannot be answered there refuses the relaunch rather than guessing a branch, leaving the server down with its binary replaced.
 

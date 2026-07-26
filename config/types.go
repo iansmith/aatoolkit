@@ -60,20 +60,45 @@ const (
 	TypeSource ServerType = "source"
 )
 
-// Health describes a server's health-check endpoint.
+// Health describes a server's readiness check, in one of the two forms
+// design/aa-server-status.md §6.1 defines: the HTTP form (Host/Port/Path), a
+// GET whose 2xx answer means serving, or the exec form (Exec), a command whose
+// exit 0 means ready. §6.1 carries the rationale for the second — in short,
+// nothing that speaks its own wire protocol can supply a path truthfully.
+//
+// Exactly one form may be declared; Validate rejects both zero and two.
 type Health struct {
 	Host string `toml:"host"`
 	Port int    `toml:"port"`
 	Path string `toml:"path"`
+
+	// Exec is argv, never a shell line — the supervisor runs the program
+	// directly, exactly as lifecycle.ExecCommand does for an exec server. An
+	// argument containing a space therefore survives as one argument.
+	Exec []string `toml:"exec"`
 }
 
+// Declared reports whether the server declares a readiness check at all, and
+// IsExec reports which form it is. Between them they are the only place either
+// question is answered: every call site asks here rather than inspecting a
+// particular form's field, so adding a third form later cannot leave a site
+// silently checking the wrong one.
+func (h Health) Declared() bool { return h.Path != "" || h.IsExec() }
+
+// IsExec reports whether the check is the command form. See Declared.
+func (h Health) IsExec() bool { return len(h.Exec) > 0 }
+
 // UnmarshalTOML implements toml.Unmarshaler, accepting either the existing
-// table form (`health = { host = "...", port = ..., path = "..." }`) or a
-// shorthand string form (`health = "GET /spend?prefix=SOP"`), where host
-// and port default to the server's own (internal/health.ResolveSpec).
-// Only GET is accepted in the string form — the health package's probe is
-// a mandatory GET with no method fallback (design/aa-server-status.md §6.1), so
-// the method name is documentation, not a configurable verb.
+// table form (`health = { host = "...", port = ..., path = "..." }`, or
+// `health = { exec = ["pg_isready", "-p", "5432"] }`) or a shorthand string
+// form (`health = "GET /spend?prefix=SOP"`), where host and port default to the
+// server's own (internal/health.ResolveSpec).
+//
+// Only GET is accepted in the string form — the HTTP probe has no method
+// fallback (design/aa-server-status.md §6.1), so the method name is
+// documentation, not a configurable verb. There is deliberately no string
+// shorthand for the exec form: splitting a command line on spaces would break
+// the argv property the Exec field documents.
 func (h *Health) UnmarshalTOML(data any) error {
 	switch v := data.(type) {
 	case string:
@@ -96,10 +121,41 @@ func (h *Health) UnmarshalTOML(data any) error {
 		if path, ok := v["path"].(string); ok {
 			h.Path = path
 		}
+		if raw, ok := v["exec"]; ok {
+			argv, err := execArgv(raw)
+			if err != nil {
+				return err
+			}
+			h.Exec = argv
+		}
 		return nil
 	default:
 		return fmt.Errorf("health: expected a table or a \"METHOD /path\" string, got %T", data)
 	}
+}
+
+// execArgv converts a decoded TOML array into argv, rejecting anything that
+// would not survive as a command: a non-array, a non-string element, or an
+// empty list. Rejecting these here rather than at launch means a typo is a
+// config error at read time (design/aa-server-status.md §6.5) instead of a
+// probe that can never succeed.
+func execArgv(raw any) ([]string, error) {
+	elems, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("health: exec must be an array of strings, got %T", raw)
+	}
+	if len(elems) == 0 {
+		return nil, fmt.Errorf("health: exec is empty — it must name a command to run")
+	}
+	argv := make([]string, len(elems))
+	for i, e := range elems {
+		s, ok := e.(string)
+		if !ok {
+			return nil, fmt.Errorf("health: exec[%d] must be a string, got %T (%v)", i, e, e)
+		}
+		argv[i] = s
+	}
+	return argv, nil
 }
 
 // Warm is an optional request aa-server-status sends once after launching a
