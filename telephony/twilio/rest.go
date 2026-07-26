@@ -65,6 +65,11 @@ type OutboundSMS struct {
 	// The URL is used verbatim, so a caller that wants its own correlation id
 	// can carry one in the query string. It is never read from the environment
 	// (charter R8): endpoints, like credentials, come from the caller.
+	//
+	// Keep it free of secrets. A provider rejecting the URL echoes it back in
+	// the response body, which SendSMS puts verbatim into the returned error —
+	// so anything in the query string can reach a caller's logs. A correlation
+	// id is the intended use; a bearer token is not.
 	StatusCallback string
 }
 
