@@ -1,0 +1,19 @@
+[supervisor]
+log_dir       = "build/logs"
+lock_file     = "build/run/aa-server-status.lock"
+
+# A datastore whose readiness probe is a program the consuming project builds
+# from its own source (AATK-41) — the source-exec form health.source
+# declares. Launch is "docker compose up", not something this fleet compiles;
+# the probe is. build/db-probe does not exist anywhere in this repo — reaching
+# a healthy fleet from this fixture depends entirely on the fleet building it,
+# never on an out-of-band build step.
+[[server]]
+name = "datastore"
+type = "exec"
+enabled = true
+host = "127.0.0.1"
+port = 5432
+command = "docker"
+args = ["compose", "up", "-d"]
+health = { exec = ["build/db-probe"], source = { build = "go build -o build/db-probe ./cmd/db-probe", binary = "build/db-probe" } }
