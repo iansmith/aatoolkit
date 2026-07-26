@@ -50,17 +50,26 @@ func StartHealthServer(addr string) *http.Server {
 
 // newTwilioMux builds the Twilio-facing routes: /webhook (the Twilio call
 // webhook, s.ServeHTTP), /streams (the Media Streams WebSocket upgrade,
-// s.ServeStreams), and /sms/inbound (the inbound-SMS webhook, s.ServeSMS).
+// s.ServeStreams), /sms/inbound (the inbound-SMS webhook, s.ServeSMS), and
+// /sms/status (the delivery-status callback, s.ServeSMSStatus).
+//
+// /sms/status belongs on this mux rather than a consumer's own because it is
+// the URL a consumer puts in OutboundSMS.StatusCallback, and this listener is
+// already the one the provider reaches. Left off, a consumer's only options are
+// to rebuild this route table on a mux of its own — a copy that stops matching
+// the day a route here changes — or to run a second listener on another port.
 func newTwilioMux(s *twilio.Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook", s.ServeHTTP)
 	mux.HandleFunc("/streams", s.ServeStreams)
 	mux.HandleFunc("/sms/inbound", s.ServeSMS)
+	mux.HandleFunc("/sms/status", s.ServeSMSStatus)
 	return mux
 }
 
 // StartTwilioServer launches the Twilio-facing HTTP listener in the background,
-// serving the routes built by newTwilioMux (/webhook, /streams, /sms/inbound).
+// serving the routes built by newTwilioMux — which is where they are listed, so
+// adding one is not a two-comment edit.
 // Bind failures are reported to stderr but do not crash the process.
 func StartTwilioServer(addr string, s *twilio.Server) *http.Server {
 	mux := newTwilioMux(s)
