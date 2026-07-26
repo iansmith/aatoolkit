@@ -76,7 +76,41 @@ type Health struct {
 	// directly, exactly as lifecycle.ExecCommand does for an exec server. An
 	// argument containing a space therefore survives as one argument.
 	Exec []string `toml:"exec"`
+
+	// Source, when declared, means Exec names a program built from source —
+	// the source-exec form (design/aa-server-status.md §6.1, AATK-41) —
+	// rather than a path assumed to already exist. It exists for the case
+	// AATK-36's exec form meets: a probe program a consuming project builds
+	// from its own source, which nothing in the fleet otherwise builds. Only
+	// meaningful alongside Exec; Validate rejects it declared with the HTTP
+	// form, since there is no program to build for a GET.
+	Source SourceExec `toml:"source"`
 }
+
+// SourceExec declares that an executable is built from source before it is
+// used — "this source, built when stale, then run" (design/aa-server-status.md
+// §6.1) — rather than assumed to already exist on disk. It carries the same
+// build+output-path shape as a TypeSource server's own Build/Binary pair
+// (a full `go build -o <path> ...` command plus the resulting binary's
+// path): building this executable is the same operation as building a
+// TypeSource server's own binary, so internal/lifecycle reuses that
+// machinery (buildToTemp, ProbeStaleness, PerformBuild) rather than
+// restating a second build path.
+//
+// Binary duplicates Health.Exec[0] in the same sense Build's own "-o <path>"
+// duplicates it — exactly the redundancy the existing TypeSource Build/Binary
+// pair already carries (§5), kept here for the same reason: Validate can
+// then reject the two paths drifting apart (health.exec[0] must equal
+// Binary) instead of silently building one artifact and probing another.
+type SourceExec struct {
+	Build  string `toml:"build"`
+	Binary string `toml:"binary"`
+}
+
+// Declared reports whether se names a source-exec build at all. Build and
+// Binary are required together once either is set — see
+// config/validate.go's validateSourceExec.
+func (se SourceExec) Declared() bool { return se.Build != "" || se.Binary != "" }
 
 // Declared reports whether the server declares a readiness check at all, and
 // IsExec reports which form it is. Between them they are the only place either
@@ -128,6 +162,13 @@ func (h *Health) UnmarshalTOML(data any) error {
 			}
 			h.Exec = argv
 		}
+		if raw, ok := v["source"]; ok {
+			src, err := sourceExecFrom(raw)
+			if err != nil {
+				return err
+			}
+			h.Source = src
+		}
 		return nil
 	default:
 		return fmt.Errorf("health: expected a table or a \"METHOD /path\" string, got %T", data)
@@ -156,6 +197,25 @@ func execArgv(raw any) ([]string, error) {
 		argv[i] = s
 	}
 	return argv, nil
+}
+
+// sourceExecFrom decodes health.source's nested table
+// (`health = { exec = [...], source = { build = "...", binary = "..." } }`)
+// into a SourceExec. Both build and binary are optional at decode time —
+// config.Validate enforces they arrive together (validateSourceExec).
+func sourceExecFrom(raw any) (SourceExec, error) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return SourceExec{}, fmt.Errorf("health: source must be a table, got %T", raw)
+	}
+	var se SourceExec
+	if b, ok := m["build"].(string); ok {
+		se.Build = b
+	}
+	if b, ok := m["binary"].(string); ok {
+		se.Binary = b
+	}
+	return se, nil
 }
 
 // Warm is an optional request aa-server-status sends once after launching a

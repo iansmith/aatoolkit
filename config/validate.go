@@ -127,6 +127,12 @@ func validateHealth(s Server) error {
 		return fmt.Errorf(
 			"server %q: a readiness check is required — declare health.path for an HTTP GET, or health.exec for a command whose exit 0 means ready", s.Name)
 	}
+	if s.Health.Source.Declared() && !s.Health.IsExec() {
+		// health.source builds the exec probe's program — declaring it
+		// alongside the HTTP form leaves nothing for it to build for.
+		return fmt.Errorf(
+			"server %q: health.source requires health.exec — it builds the exec probe's program, and the path form has no program to build", s.Name)
+	}
 	if s.Health.IsExec() {
 		// Host and port cannot reach an exec probe. Accepting them would
 		// discard a value the operator wrote on purpose.
@@ -143,6 +149,11 @@ func validateHealth(s Server) error {
 			return fmt.Errorf(
 				"server %q: warm is an HTTP request, so it cannot be combined with an exec health check — the probe program is where a real request belongs", s.Name)
 		}
+		if s.Health.Source.Declared() {
+			if err := validateSourceExec(s); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -157,6 +168,27 @@ func validateHealth(s Server) error {
 	ports := serverPortSet(s)
 	if !slices.Contains(ports, s.Health.Port) {
 		return fmt.Errorf("server %q: health.port %d is not one of the server's declared ports %v", s.Name, s.Health.Port, ports)
+	}
+	return nil
+}
+
+// validateSourceExec enforces health.source's required-together fields and
+// its consistency with health.exec (AATK-41), mirroring how validateHealth
+// itself rejects both-zero and both-forms for Health. Called only once
+// s.Health.Source.Declared() and s.Health.IsExec() are both already known
+// true.
+func validateSourceExec(s Server) error {
+	se := s.Health.Source
+	switch {
+	case se.Build == "":
+		return fmt.Errorf("server %q: health.source declares binary but not build — both are required", s.Name)
+	case se.Binary == "":
+		return fmt.Errorf("server %q: health.source declares build but not binary — both are required", s.Name)
+	}
+	if s.Health.Exec[0] != se.Binary {
+		return fmt.Errorf(
+			"server %q: health.exec[0] (%q) must equal health.source.binary (%q) — the probe's argv must name the executable being built",
+			s.Name, s.Health.Exec[0], se.Binary)
 	}
 	return nil
 }

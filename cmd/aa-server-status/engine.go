@@ -537,10 +537,28 @@ func (e *RealEngine) upOne(s config.Server) verbOutcome {
 	e.procs[s.Name] = proc
 	e.mu.Unlock()
 
-	if err := e.pollReady(s, proc); err != nil {
+	if err := e.buildProbeAndPollReady(s, proc); err != nil {
 		return verbOutcome{Name: s.Name, Err: err, LogPath: proc.LogPath}
 	}
 	return verbOutcome{Name: s.Name, LogPath: proc.LogPath}
+}
+
+// buildProbeAndPollReady runs the two steps that must happen, in order,
+// after a server's process has started and been registered, and before it
+// can be reported up: build s's declared health-probe source (AATK-41), if
+// any — a no-op when Health.Source isn't declared — then poll health.
+//
+// This must run once here, not inside the probe itself: probeExec has no
+// build step to run against, by design (design/aa-server-status.md §6.1).
+// The three launch paths that reach this point (upOne's cold-launch body,
+// and rebuildIfStaleOwned/rebuildIfStaleCold's Start callbacks) all funnel
+// through this one function rather than repeating the sequence, so a future
+// change to the ordering can't land in two of the three and miss the third.
+func (e *RealEngine) buildProbeAndPollReady(s config.Server, proc *lifecycle.Process) error {
+	if _, err := lifecycle.EnsureHealthProbeBuilt(s); err != nil {
+		return err
+	}
+	return e.pollReady(s, proc)
 }
 
 // checkPortConflict implements the §6.3 precondition gate for one server: if
@@ -612,7 +630,7 @@ func (e *RealEngine) rebuildIfStaleOwned(s config.Server) (outcome verbOutcome, 
 			e.mu.Lock()
 			e.procs[s.Name] = proc
 			e.mu.Unlock()
-			return e.pollReady(s, proc)
+			return e.buildProbeAndPollReady(s, proc)
 		},
 	}
 
@@ -649,7 +667,7 @@ func (e *RealEngine) rebuildIfStaleCold(s config.Server) (outcome verbOutcome, h
 			e.mu.Lock()
 			e.procs[s.Name] = proc
 			e.mu.Unlock()
-			return e.pollReady(s, proc)
+			return e.buildProbeAndPollReady(s, proc)
 		},
 	}
 

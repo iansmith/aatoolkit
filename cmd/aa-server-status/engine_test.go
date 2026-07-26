@@ -174,6 +174,62 @@ func TestRealEngine_Up_ColdLaunch_NotStale_LaunchesNormally(t *testing.T) {
 	}
 }
 
+// TestRealEngine_Up_BuildsHealthProbeFromSourceBeforeReachingHealthy is
+// AATK-41's DoD #1: a fleet entry whose readiness check is a source-built
+// probe program (health.source, the source-exec form) reaches healthy on
+// Up() from a tree with no build artifacts — the probe binary does not exist
+// anywhere until Up() itself builds it, exactly as the ticket's own datastore
+// example describes (launch = "docker compose up", not something this fleet
+// compiles; the probe is).
+//
+// The launch command here is the tdlistener fixture (a stand-in for "docker
+// compose up" — an exec-type launch requiring no build of its own), while
+// the health probe is the internal/lifecycle buildable_v1 fixture, declared
+// via health.source rather than assumed to already exist.
+func TestRealEngine_Up_BuildsHealthProbeFromSourceBeforeReachingHealthy(t *testing.T) {
+	port := freeTestPort(t)
+	bin := tdlistenerBinary(t)
+	probeBin := filepath.Join(t.TempDir(), "db-probe")
+
+	if _, err := os.Stat(probeBin); !os.IsNotExist(err) {
+		t.Fatalf("precondition: probe binary must not exist yet, stat err: %v", err)
+	}
+
+	s := config.Server{
+		Name:    "datastore",
+		Type:    config.TypeExec,
+		Enabled: true,
+		Host:    "127.0.0.1",
+		Listens: []int{port},
+		Command: bin,
+		Args:    []string{"-port", strconv.Itoa(port)},
+		Health: config.Health{
+			Exec: []string{probeBin},
+			Source: config.SourceExec{
+				Build:  "go build -o " + probeBin + " ../../internal/lifecycle/testdata/buildable_v1",
+				Binary: probeBin,
+			},
+		},
+	}
+
+	cfg := config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}
+	eng := NewEngine(cfg, nil, nil)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up(""); err != nil {
+		t.Fatalf("Up(\"\") error (health probe should be built from source, not require a pre-existing binary): %v", err)
+	}
+
+	if _, err := os.Stat(probeBin); err != nil {
+		t.Fatalf("expected Up() to have built the health-probe binary, stat err: %v", err)
+	}
+
+	statuses := eng.Status()
+	if len(statuses) != 1 || statuses[0].State != StateUp {
+		t.Fatalf("expected server up (health probe built + probe passing), got %+v", statuses)
+	}
+}
+
 // --- edge / boundary -----------------------------------------------------
 
 func TestRealEngine_Up_AlreadyUpIsIdempotentSkip(t *testing.T) {

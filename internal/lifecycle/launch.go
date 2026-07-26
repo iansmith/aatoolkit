@@ -126,6 +126,48 @@ func ResolveCommand(s config.Server) (string, []string, error) {
 	}
 }
 
+// EnsureHealthProbeBuilt builds s's Health.Source-declared probe program, if
+// declared, so it exists (and is fresh) before the caller's first health
+// probe — the source-exec form (design/aa-server-status.md §6.1, AATK-41).
+// It is a no-op (zero BuildResult, nil error) when Health.Source isn't
+// declared, so a Server{} written before this field existed is unaffected.
+//
+// Building reuses PerformBuild's build-to-temp/hash-compare/replace
+// machinery (source.go) via a synthetic TypeSource server value — building
+// this probe program is exactly that operation, just for an artifact that is
+// not the entry's own launch binary. A nil BuildLifecycle is passed: the
+// probe has no running process of its own to stop/start around a replace.
+//
+// s.Dir is deliberately NOT threaded into the synthetic server: s.Dir sets
+// the entry's own launch cwd (a docker-compose Dir, say), an unrelated
+// concern from where the probe's Go source lives. health.source carries no
+// Dir of its own (its Build string is a complete, self-contained `go build`
+// invocation), so reusing s.Dir here would silently point the probe's build
+// at the wrong -C directory for any entry that sets one for its own launch.
+//
+// Callers must invoke this once, during the start sequence, before the
+// entry's first health probe — never from inside the probe itself. Building
+// on every probe tick is the rejected design (design/aa-server-status.md
+// §6.1: 0.13s warm, 4.72s cold against the 2s health_timeout cap); hoisting
+// the build out of the probe and into the one-time start step is the whole
+// point of this field.
+func EnsureHealthProbeBuilt(s config.Server) (BuildResult, error) {
+	if !s.Health.Source.Declared() {
+		return BuildResult{}, nil
+	}
+	probe := config.Server{
+		Name:   s.Name,
+		Type:   config.TypeSource,
+		Build:  s.Health.Source.Build,
+		Binary: s.Health.Source.Binary,
+	}
+	result, err := PerformBuild(probe, nil)
+	if err != nil {
+		return result, fmt.Errorf("building health probe for %q: %w", s.Name, err)
+	}
+	return result, nil
+}
+
 // mergeEnv overlays override onto base ("KEY=VALUE" pairs, os.Environ()
 // shape), with override's keys winning on collision.
 func mergeEnv(base []string, override map[string]string) []string {

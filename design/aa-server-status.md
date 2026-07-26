@@ -125,6 +125,28 @@ The exec form exists because a datastore, queue, or cache does not speak HTTP, s
 
 aa-server-status ships no probe programs. The mechanism is the deliverable; a consumer supplies its own.
 
+**The source-exec form: a probe program the fleet builds, not just runs (AATK-41).** A consumer's probe program is often something *this fleet's own tree* builds from source — a datastore's readiness check is code the consuming project wrote, not a system binary already on `$PATH`. Nothing joined `health.exec` to a build step, so a clean checkout (or any `clean` target) left the supervisor trying to exec an argv that did not exist, and reported that as *the datastore being unhealthy* — the operator goes looking at a database that is fine while the actual fault is an unbuilt artifact in the fleet's own tree.
+
+`health.source` declares exactly that: `{ build, binary }`, the same build-command-plus-output-path shape a `source` server's own `build`/`binary` pair already uses (§5) — building this probe is the same operation as building a `source` server's own binary, so the existing build machinery (staleness probe, hash-compare, atomic replace) is reused rather than restated. `health.exec[0]` must name exactly the path `health.source.binary` builds:
+
+```toml
+[[server]]
+name = "datastore"
+type = "exec"                                          # launch is "docker compose up", not something this fleet compiles
+enabled = true
+host = "127.0.0.1"
+port = 5432
+command = "docker"
+args = ["compose", "up", "-d"]
+health = { exec = ["build/db-probe"], source = { build = "go build -o build/db-probe ./cmd/db-probe", binary = "build/db-probe" } }
+```
+
+**Why the build is hoisted out of the probe, not run inside it.** The obvious alternative — `health.exec = ["go", "run", "./cmd/db-probe"]`, letting the toolchain build on demand — was measured and rejected. Every probe is capped at `health_timeout` (default **2s**, §7.1), and a real probe program measured **0.13s warm, 4.72s cold**. The cold case — a fresh checkout, a cleaned build cache, a toolchain bump — is exactly the case on-demand building exists to serve, and it exceeds the 2s cap: the build is killed mid-compile, and a missing artifact is reported as a *timeout*, reading as an unresponsive dependency rather than what it is.
+
+`health.source` instead builds **once, during `up`'s start sequence, before the entry's first health probe** — a step with no 2s cap, since it is not itself a probe. A probe therefore never contains a compile: the 2s cap only ever bounds an exec that's already an existing binary. And the build only happens when the on-disk artifact is stale relative to a fresh compile (§5's same hash-compare, reused): a fresh artifact costs nothing on repeated starts, so the common case — every `up` after the first — pays no build cost at all.
+
+aa-server-status still ships no probe programs; `health.source` only gives a consumer's probe an owner for *building* it, not a probe of its own.
+
 ### 6.2 Observed state via `gopsutil`
 
 Actual OS state is observed with **`github.com/shirou/gopsutil/v4`** (a committed dependency), which gives per-PID **cmdline** (identity) and **listening ports** (introspection) without aa-server-status parsing `lsof` text itself.
