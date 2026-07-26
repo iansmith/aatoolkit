@@ -15,6 +15,13 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
+// replyTo builds the outbound answer to an inbound message by swapping the two
+// numbers: the Twilio number the message was addressed to becomes the sender,
+// and its sender becomes the recipient.
+func replyTo(msg twilio.InboundSMS, body string) twilio.OutboundSMS {
+	return twilio.OutboundSMS{From: msg.To, To: msg.From, Body: body}
+}
+
 // freeTCPPort returns a port that was bindable on 127.0.0.1 a moment ago, by
 // binding one and closing it again. Used to exercise an *explicit* bind
 // without hardcoding a port number the machine may already be using.
@@ -53,13 +60,20 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 		BaseURL:    capture.URL,
 	}
 
+	// Buffered by one and read with a timeout below, because HandleSMS is
+	// fire-and-forget: runSMS can return as soon as the capture server records
+	// the POST, which is before SendSMS has finished reading its response.
+	replySID := make(chan string, 1)
+
 	srv := &twilio.Server{
 		AuthToken:    authToken,
 		StreamScheme: "ws",
 		HandleSMS: func(ctx context.Context, msg twilio.InboundSMS) {
-			if err := rest.SendSMS(ctx, to, msg.From, replyBody); err != nil {
+			sid, err := rest.SendSMS(ctx, replyTo(msg, replyBody))
+			if err != nil {
 				t.Errorf("stub HandleSMS: SendSMS: %v", err)
 			}
+			replySID <- sid
 		},
 	}
 	mux := http.NewServeMux()
@@ -81,6 +95,20 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 	}
 	if got := msgs[0].Body; got != replyBody {
 		t.Errorf("captured Body = %q, want %q", got, replyBody)
+	}
+
+	// The capture server's response shape is load-bearing now that SendSMS
+	// parses it for the message id. Nothing else in this package would notice
+	// if the fake stopped emitting a "sid" — SendSMS would simply return "" and
+	// every other assertion here would still pass — so the round trip has to
+	// carry the id back for the two sides to stay in agreement.
+	select {
+	case sid := <-replySID:
+		if !strings.HasPrefix(sid, "SM") {
+			t.Errorf("SendSMS returned message SID %q, want the capture server's SM-prefixed id — the fake's response shape and SendSMS's parse have diverged", sid)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("HandleSMS never reported a message SID")
 	}
 }
 
@@ -235,7 +263,8 @@ func TestRunSMS_CapturesReplyPostedAfterWebhookReturns(t *testing.T) {
 				<-webhookReturned
 				time.Sleep(replyDelay)
 				rest := &twilio.RESTClient{AccountSID: defaultAccountSid, BaseURL: capture.URL}
-				sendErr <- rest.SendSMS(context.Background(), to, msg.From, replyBody)
+				_, err := rest.SendSMS(context.Background(), replyTo(msg, replyBody))
+				sendErr <- err
 			}()
 		},
 	}
@@ -423,8 +452,10 @@ func TestRunSMS_ReturnsFirstReplyWhenMoreArrive(t *testing.T) {
 				<-webhookReturned
 				rest := &twilio.RESTClient{AccountSID: defaultAccountSid, BaseURL: capture.URL}
 				// Sequential sends, so the capture order is deterministic.
-				sendErrs <- rest.SendSMS(context.Background(), to, msg.From, firstReply)
-				sendErrs <- rest.SendSMS(context.Background(), to, msg.From, secondReply)
+				_, firstErr := rest.SendSMS(context.Background(), replyTo(msg, firstReply))
+				sendErrs <- firstErr
+				_, secondErr := rest.SendSMS(context.Background(), replyTo(msg, secondReply))
+				sendErrs <- secondErr
 			}()
 		},
 	}
@@ -521,7 +552,8 @@ func TestRunSMS_SecondCallWaitsForItsOwnReply(t *testing.T) {
 			go func() {
 				time.Sleep(replyDelay)
 				rest := &twilio.RESTClient{AccountSID: defaultAccountSid, BaseURL: capture.URL}
-				sendErrs <- rest.SendSMS(context.Background(), to, msg.From, reply)
+				_, err := rest.SendSMS(context.Background(), replyTo(msg, reply))
+				sendErrs <- err
 			}()
 		},
 	}
