@@ -155,13 +155,21 @@ func TestEnsureHealthProbeBuilt_BuildFailure_SurfacesCompilerOutput(t *testing.T
 
 // ---- EnsureHealthProbeBuilt: DoD #2, build-before-probe ordering ----
 
-// TestEnsureHealthProbeBuilt_ProbeSucceedsOnlyAfterBuild proves the ordering
-// property directly, not merely that both steps happened: probing the
-// declared exec spec BEFORE calling EnsureHealthProbeBuilt must fail (the
-// artifact does not exist yet), and probing again AFTER must succeed. A
-// probe that could pass beforehand would mean the build was never actually a
-// precondition — exactly the property the 2s-health-timeout-vs-cold-build
-// gap (design/aa-server-status.md §6.1) depends on getting right.
+// TestEnsureHealthProbeBuilt_ProbeSucceedsOnlyAfterBuild establishes that the
+// build is a genuine precondition of a passing probe: probing the declared
+// exec spec BEFORE calling EnsureHealthProbeBuilt must fail (the artifact does
+// not exist yet), and probing again AFTER must succeed. A probe that could
+// pass beforehand would mean the build was never load-bearing at all — the
+// property the 2s-health-timeout-vs-cold-build gap
+// (design/aa-server-status.md §6.1) depends on getting right.
+//
+// It does NOT prove the production call order. This test drives the two steps
+// itself, so it stays green even if buildProbeAndPollReady is reversed. The
+// test that pins the real wiring is
+// TestRealEngine_Up_BuildsHealthProbeFromSourceBeforeReachingHealthy in
+// cmd/aa-server-status — verified by reversing that call order and watching it,
+// and not this one, go red. Do not delete that test believing this one covers
+// the ordering.
 func TestEnsureHealthProbeBuilt_ProbeSucceedsOnlyAfterBuild(t *testing.T) {
 	dir := t.TempDir()
 	binPath := filepath.Join(dir, "probe")
