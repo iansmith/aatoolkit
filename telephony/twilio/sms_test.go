@@ -362,3 +362,33 @@ func TestServeSMSStatus_DoesNotGateOnAuthorize(t *testing.T) {
 	// empty ack.
 	assertEmptyTwiML(t, w)
 }
+
+// A callback URL carrying a query string must still validate.
+//
+// This is the documented way a caller correlates an outcome with something of
+// its own: OutboundSMS.StatusCallback says the URL is used verbatim, so a
+// consumer can hang its own id off it. That only works if the signature check
+// survives the query string — authenticate reconstructs the URL from
+// r.URL.RequestURI(), which includes it, and Twilio signs the full URL the same
+// way. Pinned here because the send side advertises the capability and nothing
+// on the receive side proved it.
+func TestServeSMSStatus_CallbackURLWithQueryStringValidates(t *testing.T) {
+	called := 0
+	s := &twilio.Server{
+		AuthToken:       "authtoken",
+		HandleSMSStatus: func(context.Context, twilio.SMSStatus) { called++ },
+	}
+	form := url.Values{"MessageSid": {"SM123"}, "MessageStatus": {"delivered"}}
+	rawURL := "https://webhook.example.com/sms/status?turn=abc123"
+	req := httptest.NewRequest(http.MethodPost, rawURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", twilio.ComputeSignature("authtoken", rawURL, form))
+	w := httptest.NewRecorder()
+
+	s.ServeSMSStatus(w, req)
+
+	if called != 1 {
+		t.Fatalf("HandleSMSStatus called %d times, want 1 — a correlation id in the callback URL broke signature validation (status %d)", called, w.Code)
+	}
+	assertEmptyTwiML(t, w)
+}
