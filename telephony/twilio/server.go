@@ -38,15 +38,62 @@ type InboundSMS struct {
 // a synchronous reply is not modeled here (a future reply path is a separate change).
 type SMSHandler func(ctx context.Context, msg InboundSMS)
 
+// SMSStatus is the parsed subset of a Twilio delivery-status callback — the POST
+// a message's OutboundSMS.StatusCallback URL receives once the provider knows
+// what became of it.
+//
+// It is the other half of SendSMS's contract. A 2xx from the send means the
+// message was *accepted for delivery*, not delivered; the real outcome, carrier
+// rejections included, only ever arrives here. MessageSID is what ties the two
+// together: it is the same id SendSMS returned, and without it a caller has an
+// outcome it cannot attribute to any particular send.
+//
+// Field names mirror InboundSMS, with the direction reversed — on a callback
+// From is the number the message was sent *from* (ours) and To is the
+// recipient, the opposite of an inbound webhook.
+type SMSStatus struct {
+	MessageSID string // Twilio MessageSid — the id SendSMS returned for this message
+	Status     string // MessageStatus: queued, sent, delivered, undelivered, failed
+	// ErrorCode is the provider's own error code, empty when the callback
+	// carried none — which is every non-failure status, since the field is
+	// omitted rather than sent blank.
+	//
+	// A string, not an int, on purpose. Parsing would need somewhere to put its
+	// own failure on a route whose whole job is to hand the outcome over without
+	// editorializing, and an operator looking a code up wants the characters the
+	// provider actually sent. It also keeps the struct all-strings, like
+	// InboundSMS.
+	ErrorCode string
+	To        string // recipient, E.164
+	From      string // the Twilio number it was sent from, E.164
+}
+
+// SMSStatusHandler is called by ServeSMSStatus for each validated
+// delivery-status callback. Fire-and-forget for the same reason as SMSHandler:
+// the route always acknowledges, and the provider has no use for a reply.
+//
+// What to do with an outcome — log it, alert on it, ignore it — is the
+// consumer's decision, not the engine's. In particular the engine draws no
+// conclusion from a callback that never arrives: many carriers never send a
+// delivery receipt, so a perfectly fine message simply stops at "sent", and
+// reading absence as failure would manufacture failures that did not happen.
+type SMSStatusHandler func(ctx context.Context, status SMSStatus)
+
 // Server handles Twilio HTTP webhook requests and WebSocket Media Streams connections.
 // Set AuthToken to the Twilio auth token for the account; every inbound webhook
 // request is validated against the X-Twilio-Signature header before processing.
-// Set HandleStream to handle incoming Media Streams WebSocket connections, and
-// HandleSMS to handle inbound SMS webhooks.
+// Set HandleStream to handle incoming Media Streams WebSocket connections,
+// HandleSMS to handle inbound SMS webhooks, and HandleSMSStatus to handle
+// delivery-status callbacks for messages sent via SendSMS.
 type Server struct {
 	AuthToken    string
 	HandleStream StreamHandler
 	HandleSMS    SMSHandler
+
+	// HandleSMSStatus receives each validated delivery-status callback. Nil
+	// means the route still answers and nothing is dispatched, so a Server
+	// built before this field existed behaves exactly as it did.
+	HandleSMSStatus SMSStatusHandler
 
 	// StreamScheme selects the scheme advertised in the TwiML <Stream url>
 	// and, correspondingly, the scheme used to reconstruct the URL for
@@ -215,8 +262,50 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 		s.HandleSMS(r.Context(), msg)
 	}
 
+	writeEmptyTwiML(w)
+}
+
+// writeEmptyTwiML acknowledges a webhook without asking Twilio to do anything.
+//
+// One definition, because it is one decision: the content type and the empty
+// <Response/> together are what stop Twilio adding an automatic reply of its
+// own. Answering with a blank body or a non-XML content type instead is not
+// silently fine — Twilio logs it as a 11200/12300 document-parse warning and
+// the consumer never sees it.
+func writeEmptyTwiML(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/xml")
 	fmt.Fprint(w, "<Response></Response>")
+}
+
+// ServeSMSStatus handles a Twilio delivery-status callback. It validates the
+// request signature (403 on failure, including an empty AuthToken), parses the
+// outcome into SMSStatus, hands it to HandleSMSStatus if set, and acknowledges
+// with empty TwiML.
+//
+// It deliberately does not run Authorize, and copying that gate across from
+// ServeSMS would break every callback. On an inbound message From is the
+// sender, so gating on it is the roster check. Here From is the account's own
+// number and To is the recipient — so a consumer whose Authorize answers "is
+// this caller someone I know" says no to every delivery outcome it will ever
+// receive, silently, while the send side keeps working. The signature is the
+// security boundary on this route; the caller's identity is not in question,
+// because the only party that POSTs here is the provider we just sent through.
+func (s *Server) ServeSMSStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.authenticate(w, r) {
+		return
+	}
+
+	if s.HandleSMSStatus != nil {
+		s.HandleSMSStatus(r.Context(), SMSStatus{
+			MessageSID: r.PostForm.Get("MessageSid"),
+			Status:     r.PostForm.Get("MessageStatus"),
+			ErrorCode:  r.PostForm.Get("ErrorCode"),
+			To:         r.PostForm.Get("To"),
+			From:       r.PostForm.Get("From"),
+		})
+	}
+
+	writeEmptyTwiML(w)
 }
 
 // ServeStreams handles a Twilio Media Streams WebSocket connection. It upgrades
