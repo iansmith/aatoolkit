@@ -74,15 +74,17 @@ func drainFramesWithDiscard(ctx context.Context, r io.Reader, frameSize int, sen
 		if !warmupFired && isSilence && discarded < discardCap {
 			// Discard this silence frame
 			discarded++
+			if discarded >= discardCap {
+				warmupFired = true
+				capHit = true
+				onMicWarm(capHit)
+			}
 			continue
 		}
 
 		// Either this is a real frame or we've hit the cap
 		if !warmupFired {
 			warmupFired = true
-			if discarded >= discardCap {
-				capHit = true
-			}
 			onMicWarm(capHit)
 		}
 
