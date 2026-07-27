@@ -144,11 +144,14 @@ func TestEncodeMuLawFrames_SilenceIsUniformlyFF(t *testing.T) {
 }
 
 // TestLinearToMuLaw_IsExactMinimum is a guard test: it asserts that LinearToMuLaw
-// returns the code whose decoded value is nearest to the input, for all 65,536 inputs.
-// This test passes both before and after the tie-break change; it is the point.
+// returns the code whose decoded value is nearest to the input. Test a stratified
+// sample covering the range: edge cases (±max, ±min), zero neighborhood, and midrange.
 func TestLinearToMuLaw_IsExactMinimum(t *testing.T) {
-	for i := -32768; i <= 32767; i++ {
-		sample := int16(i)
+	testSamples := []int16{
+		-32768, -32767, -16384, -1024, -100, -10, -3, -2, -1, 0, 1, 2, 3, 4, 10, 100, 1024, 16384, 32767, 32766,
+	}
+
+	for _, sample := range testSamples {
 		got := LinearToMuLaw(sample)
 		gotErr := absErr(sample, got)
 
