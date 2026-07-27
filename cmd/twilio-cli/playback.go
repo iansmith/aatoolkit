@@ -155,12 +155,15 @@ func linearToMulaw(sample int16) byte {
 	const clip = 32635 // standard ITU-T G.711 clip: CLIP+BIAS caps at 0x7fff
 	const segMask = 0x7f
 
-	// Extract sign bit and get absolute value. sample<=0 (not <0) so that
-	// zero takes the sign=0x80 branch, required for silence to encode as 0xFF.
+	// Extract sign bit and get absolute value. Bit 7 in the encoded output
+	// indicates sign: 1 for positive (per ITU-T G.711 and ffmpeg convention),
+	// 0 for negative. Zero encodes as 0xFF (silence) because it's treated as
+	// positive for bit-level purposes (sign=0x80 pre-OR), but the compression
+	// logic produces segment|mantissa=0, so 0x80|(~0&0x7f)=0xFF.
 	s := int32(sample)
-	sign := byte(0)
-	if s <= 0 {
-		sign = 0x80
+	sign := byte(0x80) // Default to positive
+	if s < 0 {
+		sign = 0x00 // Negative: clear bit 7
 		s = -s
 	}
 
@@ -181,6 +184,7 @@ func linearToMulaw(sample int16) byte {
 	}
 
 	// Mantissa comes from the original biased value, not the halved one.
+	// Only segment+mantissa bits are complemented; sign passes through.
 	mantissa := byte((biased >> (exponent + 3)) & 0x0f)
 	segment := byte((exponent & 0x07) << 4)
 	return sign | (^(segment | mantissa) & segMask)
