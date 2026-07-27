@@ -582,3 +582,63 @@ func TestStreamMic_MicWarmSignalFiresOnceAtFirstRealFrame(t *testing.T) {
 		t.Errorf("warmup signal received %d times, want 1", signalCount)
 	}
 }
+
+// TestStreamMic_SilenceAfterRealFrameNotDiscarded: regression test for the bug
+// where silence frames emitted AFTER the first real frame were still being
+// discarded. Sequence: 5 silence + 1 real + 3 silence + 1 real. All 5 frames
+// from the first real onward must be emitted (the real frame, 3 mid-call silence,
+// and the final real frame). None of the post-warmup silence should be discarded.
+func TestStreamMic_SilenceAfterRealFrameNotDiscarded(t *testing.T) {
+	// 5 leading silence frames
+	leadingSilence := bytes.Repeat([]byte{0xFF}, 5*muLawFrame20ms)
+
+	// 1 real frame (pattern: 0x00, 0x01, ..., 0x9F)
+	realFrame1 := make([]byte, muLawFrame20ms)
+	for i := range realFrame1 {
+		realFrame1[i] = byte(i % 256)
+	}
+
+	// 3 mid-call silence frames (these must NOT be discarded after warmupFired)
+	midSilence := bytes.Repeat([]byte{0xFF}, 3*muLawFrame20ms)
+
+	// 1 final real frame (pattern: 0x80, 0x81, ..., 0x1F)
+	realFrame2 := make([]byte, muLawFrame20ms)
+	for i := range realFrame2 {
+		realFrame2[i] = byte((i + 0x80) % 256)
+	}
+
+	data := append(append(append(leadingSilence, realFrame1...), midSilence...), realFrame2...)
+
+	var emitted [][]byte
+	var warmupFired int
+	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func() {
+		warmupFired++
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard: %v", err)
+	}
+
+	// Should emit exactly 5 frames after the leading silence:
+	// 1 (first real) + 3 (mid-call silence) + 1 (final real) = 5 total
+	if len(emitted) != 5 {
+		t.Errorf("got %d emitted frames, want 5 (all frames from first real onward)", len(emitted))
+	}
+
+	// Verify frame contents
+	if len(emitted) > 0 && !bytes.Equal(emitted[0], realFrame1) {
+		t.Errorf("first emitted frame (should be realFrame1) mismatch")
+	}
+	if len(emitted) > 4 && !bytes.Equal(emitted[4], realFrame2) {
+		t.Errorf("fifth emitted frame (should be realFrame2) mismatch")
+	}
+
+	if warmupFired != 1 {
+		t.Errorf("warmup signal fired %d times, want 1", warmupFired)
+	}
+	if capHit {
+		t.Errorf("capHit should be false (discard ended before cap)")
+	}
+}
