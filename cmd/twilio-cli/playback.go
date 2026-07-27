@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 )
@@ -115,4 +116,62 @@ func (l *lazyPlayer) close() {
 	if l.player != nil {
 		_ = l.player.close()
 	}
+}
+
+// generateEarcon returns a 160-byte μ-law encoded earcon tone (400Hz sine wave at 8kHz).
+func generateEarcon() []byte {
+	const (
+		sampleRate = 8000.0
+		frequency  = 400.0
+		samples    = muLawFrame20ms
+	)
+
+	earcon := make([]byte, samples)
+	for i := 0; i < samples; i++ {
+		// Generate a 400Hz sine wave in the range [-32767, 32767].
+		t := float64(i) / sampleRate
+		amplitude := 32767.0 * math.Sin(2*math.Pi*frequency*t)
+		// Convert to μ-law.
+		earcon[i] = linearToMulaw(int16(amplitude))
+	}
+	return earcon
+}
+
+// linearToMulaw converts a 16-bit signed PCM sample to 8-bit μ-law.
+// μ-law encoding is the standard used by Twilio and telephony systems.
+func linearToMulaw(sample int16) byte {
+	const bias = 0x84
+	const clip = 0x7fff
+
+	// Extract sign bit and get absolute value.
+	sign := byte(0)
+	if sample < 0 {
+		sign = 0x80
+		sample = -sample
+	}
+
+	// Clip to valid range.
+	if sample > clip {
+		sample = clip
+	}
+
+	// Add bias for compression.
+	sample = sample + bias
+
+	// Find exponent and mantissa.
+	var exponent uint
+	for sample > 0xff {
+		exponent++
+		sample = sample >> 1
+	}
+
+	// Combine sign, exponent, and mantissa.
+	mantissa := byte((sample >> 4) & 0x0f)
+	return sign | byte((exponent&0x07)<<4) | mantissa
+}
+
+// playEarcon plays one earcon tone to the given lazy player.
+func playEarcon(l *lazyPlayer) {
+	tone := generateEarcon()
+	l.play(tone)
 }

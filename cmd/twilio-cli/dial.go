@@ -161,6 +161,8 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 			} else {
 				log.Printf("twilio-cli: mic warm (capture live)")
 			}
+			// Play an earcon tone to signal the caller to speak after the cue.
+			playEarcon(player)
 		}
 		err := streamMic(micCtx, conn, streamSID, &seqNum, onMicWarm)
 		// naturalEnd: streamMic returned on its OWN (mic EOF = caller hangup), not
