@@ -226,7 +226,6 @@ func TestMulawEncoding_RoundTripsThroughRealFfmpeg(t *testing.T) {
 
 			// Check: decoded value is close to original (within μ-law quantization tolerance)
 			// and has the correct sign.
-			const tolerance = 400 // Typical μ-law quantization step
 
 			// Determine expected sign.
 			expectedSign := tt.sample >= 0
@@ -239,22 +238,20 @@ func TestMulawEncoding_RoundTripsThroughRealFfmpeg(t *testing.T) {
 
 			// For non-zero samples, check that the magnitude is in the ballpark.
 			// μ-law quantization step grows with signal magnitude, so scale tolerance
-			// accordingly; use a fixed floor for small samples.
+			// accordingly; tight enough to reject a wrong-mantissa-shift regression.
 			if tt.sample != 0 && decoded != 0 {
 				diff := tt.sample - decoded
 				if diff < 0 {
 					diff = -diff
 				}
-				// Tolerance: magnitude/8 with a floor of 150 to account for
-				// logarithmic quantization across all segments.
 				magnitude := int32(tt.sample)
 				if magnitude < 0 {
 					magnitude = -magnitude
 				}
-				scaledTolerance := int16(magnitude / 8)
-				if scaledTolerance < 150 {
-					scaledTolerance = 150
-				}
+				// Tolerance: magnitude/50 + 10. Passes correct encoder's diffs
+				// (0→0, ±100→4, ±1000→12, 32767→643) but rejects the wrong-mantissa-shift
+				// mutant (±100→20, ±1000→116).
+				scaledTolerance := int16(magnitude/50 + 10)
 				if diff > scaledTolerance {
 					t.Errorf("magnitude error: encoded %d → decoded %d (diff %d, tolerance %d)",
 						tt.sample, decoded, diff, scaledTolerance)
