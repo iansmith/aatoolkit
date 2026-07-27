@@ -467,3 +467,209 @@ func TestDrainFrames_FrameSizeZero_ReturnsError(t *testing.T) {
 		t.Error("drainFrames with frameSize=0 must return an error")
 	}
 }
+
+// --- mic warm-up discard tests ---
+
+// TestStreamMic_DiscardsLeadingMuLawSilence: 5 frames of 0xFF (silence) followed by
+// one "tone" frame (non-0xFF). Assert exactly 5 leading frames are dropped and the
+// first emitted frame equals the tone frame byte-for-byte.
+func TestStreamMic_DiscardsLeadingMuLawSilence(t *testing.T) {
+	silenceFrames := bytes.Repeat([]byte{0xFF}, 5*muLawFrame20ms)
+	toneFrame := make([]byte, muLawFrame20ms)
+	for i := range toneFrame {
+		toneFrame[i] = byte(i % 256)
+	}
+	data := append(silenceFrames, toneFrame...)
+
+	var emitted [][]byte
+	var warmupFired int
+	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func(bool) {
+		warmupFired++
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard: %v", err)
+	}
+
+	// We should receive only 1 frame (the tone frame, after 5 silence frames discarded)
+	if len(emitted) != 1 {
+		t.Errorf("got %d emitted frames, want 1 (5 silence frames should be discarded)", len(emitted))
+	}
+	if len(emitted) > 0 && !bytes.Equal(emitted[0], toneFrame) {
+		t.Errorf("first emitted frame mismatch: got %d bytes, want %d", len(emitted[0]), len(toneFrame))
+	}
+	if warmupFired != 1 {
+		t.Errorf("warmup signal fired %d times, want 1", warmupFired)
+	}
+	if capHit {
+		t.Errorf("capHit should be false when discard ends before cap")
+	}
+}
+
+// TestStreamMic_DiscardBoundedAtCap: 80 frames of 0xFF (silence). Assert nothing is
+// emitted for the first 75 frames, then frames 76–80 stream normally, and the
+// cap-hit flag is set.
+func TestStreamMic_DiscardBoundedAtCap(t *testing.T) {
+	data := bytes.Repeat([]byte{0xFF}, 80*muLawFrame20ms)
+
+	var emitted [][]byte
+	var warmupFired int
+	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func(bool) {
+		warmupFired++
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard with cap: %v", err)
+	}
+
+	// Should emit exactly 5 frames (76–80), with first 75 discarded
+	if len(emitted) != 5 {
+		t.Errorf("got %d emitted frames, want 5 (first 75 discarded at cap)", len(emitted))
+	}
+	if !capHit {
+		t.Errorf("cap-hit flag not set; should be true when 75 silence frames reached")
+	}
+	if warmupFired != 1 {
+		t.Errorf("warmup signal fired %d times, want 1 (at cap)", warmupFired)
+	}
+}
+
+// TestStreamMic_MicWarmSignalFiresOnceAtFirstRealFrame: assert the mic-warm signal
+// fires exactly once at the moment the first real (non-discarded) frame is emitted,
+// or at the 75-frame cap if all input is silence.
+func TestStreamMic_MicWarmSignalFiresOnceAtFirstRealFrame(t *testing.T) {
+	// Mix: 3 silence frames, 1 tone frame, 2 more frames
+	silenceFrames := bytes.Repeat([]byte{0xFF}, 3*muLawFrame20ms)
+	toneFrame := make([]byte, muLawFrame20ms)
+	for i := range toneFrame {
+		toneFrame[i] = 0x80
+	}
+	moreFrames := bytes.Repeat([]byte{0x7F}, 2*muLawFrame20ms)
+	data := append(append(silenceFrames, toneFrame...), moreFrames...)
+
+	var emitted [][]byte
+	warmupSignal := make(chan struct{}, 1) // Buffered to avoid blocking
+	_, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func(bool) {
+		select {
+		case warmupSignal <- struct{}{}:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard: %v", err)
+	}
+
+	// Should emit 3 frames (tone + 2 more), with 3 silence frames discarded
+	if len(emitted) != 3 {
+		t.Errorf("got %d emitted frames, want 3", len(emitted))
+	}
+
+	// Check signal fired exactly once
+	signalCount := 0
+	select {
+	case <-warmupSignal:
+		signalCount++
+	default:
+	}
+	if signalCount != 1 {
+		t.Errorf("warmup signal received %d times, want 1", signalCount)
+	}
+}
+
+// TestStreamMic_SilenceAfterRealFrameNotDiscarded: regression test for the bug
+// where silence frames emitted AFTER the first real frame were still being
+// discarded. Sequence: 5 silence + 1 real + 3 silence + 1 real. All 5 frames
+// from the first real onward must be emitted (the real frame, 3 mid-call silence,
+// and the final real frame). None of the post-warmup silence should be discarded.
+func TestStreamMic_SilenceAfterRealFrameNotDiscarded(t *testing.T) {
+	// 5 leading silence frames
+	leadingSilence := bytes.Repeat([]byte{0xFF}, 5*muLawFrame20ms)
+
+	// 1 real frame (pattern: 0x00, 0x01, ..., 0x9F)
+	realFrame1 := make([]byte, muLawFrame20ms)
+	for i := range realFrame1 {
+		realFrame1[i] = byte(i % 256)
+	}
+
+	// 3 mid-call silence frames (these must NOT be discarded after warmupFired)
+	midSilence := bytes.Repeat([]byte{0xFF}, 3*muLawFrame20ms)
+
+	// 1 final real frame (pattern: 0x80, 0x81, ..., 0x1F)
+	realFrame2 := make([]byte, muLawFrame20ms)
+	for i := range realFrame2 {
+		realFrame2[i] = byte((i + 0x80) % 256)
+	}
+
+	data := append(append(append(leadingSilence, realFrame1...), midSilence...), realFrame2...)
+
+	var emitted [][]byte
+	var warmupFired int
+	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func(bool) {
+		warmupFired++
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard: %v", err)
+	}
+
+	// Should emit exactly 5 frames after the leading silence:
+	// 1 (first real) + 3 (mid-call silence) + 1 (final real) = 5 total
+	if len(emitted) != 5 {
+		t.Errorf("got %d emitted frames, want 5 (all frames from first real onward)", len(emitted))
+	}
+
+	// Verify frame contents
+	if len(emitted) > 0 && !bytes.Equal(emitted[0], realFrame1) {
+		t.Errorf("first emitted frame (should be realFrame1) mismatch")
+	}
+	if len(emitted) > 4 && !bytes.Equal(emitted[4], realFrame2) {
+		t.Errorf("fifth emitted frame (should be realFrame2) mismatch")
+	}
+
+	if warmupFired != 1 {
+		t.Errorf("warmup signal fired %d times, want 1", warmupFired)
+	}
+	if capHit {
+		t.Errorf("capHit should be false (discard ended before cap)")
+	}
+}
+
+// TestStreamMic_MicWarmSignalFiresAtCapOnImmediateEOF: reader = exactly 75 silence
+// frames then EOF (the caller stayed muted for the entire warm-up window and the
+// call ended right at the cap, with no further frames). The mic-warm signal must
+// still fire once and report capHit=true, even though no frame is ever read past
+// the cap to trigger the check.
+func TestStreamMic_MicWarmSignalFiresAtCapOnImmediateEOF(t *testing.T) {
+	data := bytes.Repeat([]byte{0xFF}, 75*muLawFrame20ms)
+
+	var emitted [][]byte
+	var warmupFired int
+	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func(bool) {
+		warmupFired++
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard: %v", err)
+	}
+
+	if len(emitted) != 0 {
+		t.Errorf("got %d emitted frames, want 0 (all 75 were discarded, nothing follows)", len(emitted))
+	}
+	if !capHit {
+		t.Errorf("capHit should be true — the cap was reached even though the stream ended there")
+	}
+	if warmupFired != 1 {
+		t.Errorf("warmup signal fired %d times, want 1 (must fire at the cap even on immediate EOF)", warmupFired)
+	}
+}
