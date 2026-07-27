@@ -17,8 +17,8 @@ var muLawGolden = []struct {
 }{
 	{0x00, -32124, "full-scale negative"},
 	{0x80, 32124, "full-scale positive"},
-	{0xFF, 0, "negative zero decodes to 0"},
-	{0x7F, 0, "positive zero decodes to 0"},
+	{0xFF, 0, "positive zero decodes to 0"},
+	{0x7F, 0, "negative zero decodes to 0"},
 	{0x54, -748, "mid-range negative"},
 }
 

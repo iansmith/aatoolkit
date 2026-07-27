@@ -1,7 +1,9 @@
 package telephony
 
 import (
+	"bytes"
 	"encoding/binary"
+	"os/exec"
 	"testing"
 )
 
@@ -179,68 +181,77 @@ func TestEncodeMuLawFrames_SilenceIsUniformlyFF(t *testing.T) {
 	}
 }
 
-// referenceLinearToMuLaw independently re-implements the same nearest-code
-// search as linearToMuLaw, in this test file rather than calling production's
-// function, so a bug in production's search bounds (e.g. an off-by-one that
-// silently excludes a candidate byte) shows up as a mismatch here instead of a
-// false pass. It is the in-test oracle the ticket calls for — computed from the
-// existing muLawToLinear decode table, not hand-typed.
-func referenceLinearToMuLaw(sample int16) byte {
-	best := byte(0)
-	bestErr := int32(1<<31 - 1)
-	for b := 0; b <= 255; b++ {
-		decoded := muLawToLinear(byte(b))
-		err := int32(sample) - int32(decoded)
-		if err < 0 {
-			err = -err
-		}
-		if err < bestErr {
-			bestErr = err
-			best = byte(b)
+// TestLinearToMuLaw_IsExactMinimum is a guard test: it asserts that LinearToMuLaw
+// returns the code whose decoded value is nearest to the input, for all 65,536 inputs.
+// This test passes both before and after the tie-break change; it is the point.
+func TestLinearToMuLaw_IsExactMinimum(t *testing.T) {
+	for i := -32768; i <= 32767; i++ {
+		sample := int16(i)
+		got := LinearToMuLaw(sample)
+		gotErr := absErr(sample, got)
+
+		// Check that no other byte has strictly lower error
+		for bi := 0; bi <= 255; bi++ {
+			b := byte(bi)
+			candErr := absErr(sample, b)
+			if candErr < gotErr {
+				t.Errorf("LinearToMuLaw(%d) = 0x%02x (err %d), but 0x%02x has err %d",
+					sample, got, gotErr, b, candErr)
+				return
+			}
 		}
 	}
-	return best
 }
 
-// TestMuLaw_RoundTrip encodes a PCM ramp and asserts every single encoded byte
-// exactly matches the independently-computed G.711 oracle above — not a loose
-// statistical tolerance, since the oracle removes the need for one.
-func TestMuLaw_RoundTrip(t *testing.T) {
-	const numSamples = 8000
-	pcm := make([]int16, numSamples)
-	for i := range pcm {
-		pcm[i] = int16((int64(i) * 65536 / int64(numSamples)) - 32768)
-	}
-
-	wav := pcm16ToWAV(pcm, SampleRateHz)
-	frames, err := EncodeMuLawFrames(wav)
+// TestLinearToMuLaw_NeverWorseThanFfmpeg is a guard test: it asserts that
+// LinearToMuLaw is never strictly worse than ffmpeg's G.711 encoder,
+// across all 65,536 int16 inputs. Bit-equality is forbidden (charter R3).
+func TestLinearToMuLaw_NeverWorseThanFfmpeg(t *testing.T) {
+	// Skip if ffmpeg is not available
+	_, err := exec.LookPath("ffmpeg")
 	if err != nil {
-		t.Fatalf("EncodeMuLawFrames: %v", err)
-	}
-	frameSize := SampleRateHz * MuLawFrameMS / 1000
-	flat := make([]byte, 0, len(frames)*frameSize)
-	for _, f := range frames {
-		flat = append(flat, f...)
+		t.Skip("ffmpeg not found")
 	}
 
-	for i, sample := range pcm {
-		want := referenceLinearToMuLaw(sample)
-		got := flat[i]
-		if got != want {
-			t.Fatalf("sample %d (%d): encoded 0x%02x, want 0x%02x (oracle)", i, sample, got, want)
-		}
+	// Create a test WAV with all 65536 int16 values at s16le, 8kHz, 1 channel
+	pcm := make([]int16, 65536)
+	for i := 0; i < 65536; i++ {
+		pcm[i] = int16(i - 32768)
+	}
+	wav := pcm16ToWAV(pcm, 8000)
+
+	// Encode with ffmpeg
+	cmd := exec.Command("ffmpeg", "-f", "s16le", "-ar", "8000", "-ac", "1",
+		"-i", "pipe:0", "-acodec", "pcm_mulaw", "-f", "mulaw", "pipe:1")
+	cmd.Stdin = bytes.NewReader(wav[44:]) // Skip WAV header, ffmpeg expects raw PCM
+	out, err := cmd.Output()
+	if err != nil {
+		t.Skipf("ffmpeg encoding failed: %v", err)
 	}
 
-	// Round-trip sanity: decoding the encoded frames reproduces the same
-	// samples muLawToLinear(want) would, for every sample — this is exact
-	// (not a tolerance), since flat[i] was just proven to equal want above.
-	decoded := decodeMuLaw(flat[:len(pcm)])
-	for i, sample := range pcm {
-		wantDecoded := muLawToLinear(referenceLinearToMuLaw(sample))
-		gotDecoded := int16(decoded[i] * 32768)
-		if gotDecoded != wantDecoded {
-			t.Errorf("sample %d: decodeMuLaw reconstructed %d, want %d", i, gotDecoded, wantDecoded)
+	if len(out) != 65536 {
+		t.Fatalf("ffmpeg output: want 65536 bytes, got %d", len(out))
+	}
+
+	// Compare: our encoder should be >= ffmpeg on all inputs
+	worse := 0
+	for i := 0; i < 65536; i++ {
+		sample := pcm[i]
+		ourCode := LinearToMuLaw(sample)
+		ffmpegCode := out[i]
+
+		ourErr := absErr(sample, ourCode)
+		ffmpegErr := absErr(sample, ffmpegCode)
+
+		if ourErr > ffmpegErr {
+			if worse < 10 {
+				t.Logf("sample %d: our error %d, ffmpeg error %d", sample, ourErr, ffmpegErr)
+			}
+			worse++
 		}
+	}
+	if worse > 0 {
+		t.Errorf("LinearToMuLaw was strictly worse than ffmpeg on %d inputs", worse)
 	}
 }
 

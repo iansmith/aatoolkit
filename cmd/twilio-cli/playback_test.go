@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/coder/websocket"
+
+	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // recordingSink is an in-memory io.WriteCloser standing in for ffplay's stdin.
@@ -150,7 +152,7 @@ func TestPlayer_CloseWithNoFramesClosesSinkOnce(t *testing.T) {
 
 // --- μ-law encoding validation ---
 
-// TestMulawEncoding_RoundTripsThroughRealFfmpeg validates that linearToMulaw
+// TestMulawEncoding_RoundTripsThroughRealFfmpeg validates that LinearToMuLaw
 // produces correct ITU-T G.711 μ-law encoded bytes by round-tripping through
 // the actual ffmpeg binary (the oracle), not a hand-rolled decoder. Encoding a
 // sample and decoding it through ffmpeg recovers a value within quantization
@@ -173,7 +175,7 @@ func TestMulawEncoding_RoundTripsThroughRealFfmpeg(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Encode the sample.
-			encoded := linearToMulaw(tt.sample)
+			encoded := telephony.LinearToMuLaw(tt.sample)
 
 			// Write to a temp file and decode via ffmpeg.
 			tmpfile, err := os.CreateTemp("", "mulaw-*.raw")
@@ -261,13 +263,13 @@ func TestMulawEncoding_RoundTripsThroughRealFfmpeg(t *testing.T) {
 	}
 }
 
-// TestMulawEncoding validates that the linearToMulaw function produces
-// correct ITU-T G.711 μ-law encoded bytes by checking known reference values.
-// The encoding must include the final bitwise complement step. This test's
-// original sign-bit assertions (V1) were independently verified backwards by
-// reviewers and replaced with TestMulawEncoding_RoundTripsThroughRealFfmpeg,
-// which uses the ffmpeg oracle. This test is now minimal and non-critical;
-// the ffmpeg-based test is the source of truth.
+// TestMulawEncoding validates that LinearToMuLaw produces correct ITU-T G.711
+// μ-law encoded bytes by checking known reference values. The encoding must
+// include the final bitwise complement step. This test's original sign-bit
+// assertions (V1) were independently verified backwards by reviewers and
+// replaced with TestMulawEncoding_RoundTripsThroughRealFfmpeg, which uses the
+// ffmpeg oracle. This test is now minimal and non-critical; the ffmpeg-based
+// test is the source of truth.
 func TestMulawEncoding(t *testing.T) {
 	tests := []struct {
 		sample  int16
@@ -307,9 +309,9 @@ func TestMulawEncoding(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := linearToMulaw(tt.sample)
+			got := telephony.LinearToMuLaw(tt.sample)
 			if !tt.checkFn(got) {
-				t.Errorf("linearToMulaw(%d) = 0x%02x, failed validation", tt.sample, got)
+				t.Errorf("LinearToMuLaw(%d) = 0x%02x, failed validation", tt.sample, got)
 			}
 		})
 	}
