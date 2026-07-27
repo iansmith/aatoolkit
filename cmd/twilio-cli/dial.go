@@ -223,6 +223,18 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		}
 	}()
 
+	// tryPlayEarcon plays one already-pending earcon signal, if any, without
+	// blocking. Reports whether it did.
+	tryPlayEarcon := func() bool {
+		select {
+		case <-earconCh:
+			playEarcon(player)
+			return true
+		default:
+			return false
+		}
+	}
+
 	// finishCallEnded is the shared teardown for every "call ended" exit:
 	// unblock the mic goroutine, wait for it to fully finish, then drain any
 	// earcon signal it sent before returning its error to the caller.
@@ -239,11 +251,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		log.Printf("twilio-cli: call ended: %s", callEndReason(cause))
 		cancelMic() // unblock goroutine before we wait for its result
 		err := <-micErrCh
-		select {
-		case <-earconCh:
-			playEarcon(player)
-		default:
-		}
+		tryPlayEarcon()
 		return err // propagate hard mic failures to the caller
 	}
 
@@ -252,14 +260,10 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		// mic goroutine always sends on earconCh (if at all) strictly before
 		// its naturalEnd path cancels readCtx, but once both are ready at
 		// once the select below picks between them pseudo-randomly. Draining
-		// earconCh first, in its own non-blocking select, makes that
-		// ordering deterministic instead of a coin flip that can drop the
-		// tone.
-		select {
-		case <-earconCh:
-			playEarcon(player)
+		// earconCh first, in its own non-blocking check, makes that ordering
+		// deterministic instead of a coin flip that can drop the tone.
+		if tryPlayEarcon() {
 			continue
-		default:
 		}
 
 		select {
