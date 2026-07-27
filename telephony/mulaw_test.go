@@ -46,6 +46,139 @@ func TestEncodeMuLawFrames_PropagatesDecodeError(t *testing.T) {
 	}
 }
 
+// absErr returns the absolute error between a sample and the decoded value of a μ-law byte.
+func absErr(sample int16, b byte) int32 {
+	decoded := muLawToLinear(b)
+	err := int32(sample) - int32(decoded)
+	if err < 0 {
+		err = -err
+	}
+	return err
+}
+
+// mag returns the magnitude (absolute value) of the decoded μ-law byte.
+func mag(b byte) int32 {
+	decoded := muLawToLinear(b)
+	if decoded < 0 {
+		return int32(-decoded)
+	}
+	return int32(decoded)
+}
+
+// TestLinearToMuLaw_TieBreak asserts that among codes achieving the minimum error,
+// the chosen code's decoded magnitude is maximum; and when more than one code ties
+// on both error and magnitude (only possible when magnitude is 0), the chosen code is 0xFF.
+func TestLinearToMuLaw_TieBreak(t *testing.T) {
+	// These samples have multiple codes achieving the same minimum error.
+	// For all of them, the chosen code should have the maximum magnitude among
+	// the candidates. For sample 0 specifically, the ±0 tie (0xFF and 0x7F both
+	// decode to 0) breaks to 0xFF.
+	testCases := []struct {
+		sample int16
+		want   byte
+	}{
+		{0, 0xFF},  // ±0 tie, both decode to 0, choose 0xFF
+		{-1, 0xFF}, // ±0 tie, both decode to 0, choose 0xFF
+		{-2, 0xFF}, // ±0 tie, both decode to 0, choose 0xFF
+		{-3, 0xFF}, // ±0 tie, both decode to 0, choose 0xFF
+		{1, 0xFF},  // ±0 tie, both decode to 0, choose 0xFF
+		{2, 0xFF},  // ±0 tie, both decode to 0, choose 0xFF
+		{3, 0xFF},  // ±0 tie, both decode to 0, choose 0xFF
+		{4, 0xFE},  // three-way tie, step 1 (magnitude) fires: 0xFE > 0xFF = 0x7F
+	}
+
+	for _, tc := range testCases {
+		got := LinearToMuLaw(tc.sample)
+		if got != tc.want {
+			t.Errorf("LinearToMuLaw(%d) = 0x%02x, want 0x%02x", tc.sample, got, tc.want)
+		}
+	}
+
+	// General property, over all 65,536 int16 inputs: among the codes achieving
+	// the minimum error, the chosen code's decoded magnitude equals the maximum
+	// magnitude over the tied set; and when that maximum magnitude is 0, the
+	// chosen code is exactly 0xFF.
+	for i := -32768; i <= 32767; i++ {
+		sample := int16(i)
+		got := LinearToMuLaw(sample)
+		gotErr := absErr(sample, got)
+
+		minErr := gotErr
+		maxMag := int32(-1)
+		for bi := 0; bi <= 255; bi++ {
+			b := byte(bi)
+			candErr := absErr(sample, b)
+			if candErr < minErr {
+				minErr = candErr
+			}
+		}
+		for bi := 0; bi <= 255; bi++ {
+			b := byte(bi)
+			if absErr(sample, b) == minErr {
+				if m := mag(b); m > maxMag {
+					maxMag = m
+				}
+			}
+		}
+
+		if gotErr != minErr {
+			t.Fatalf("LinearToMuLaw(%d) = 0x%02x has err %d, but minimum achievable err is %d", sample, got, gotErr, minErr)
+		}
+		if mag(got) != maxMag {
+			t.Fatalf("LinearToMuLaw(%d) = 0x%02x has magnitude %d, want max tied magnitude %d", sample, got, mag(got), maxMag)
+		}
+		if maxMag == 0 && got != 0xFF {
+			t.Fatalf("LinearToMuLaw(%d) = 0x%02x in a zero-magnitude tie, want 0xFF", sample, got)
+		}
+	}
+}
+
+// TestLinearToMuLaw_NeverEmitsNegativeZero asserts that 0x7F is never returned
+// for any of the 65,536 int16 inputs. The old encoder returned 0x7F for 8 inputs
+// (−3 to +4); this test ensures those are now 0xFF (or 0xFE for sample 4).
+func TestLinearToMuLaw_NeverEmitsNegativeZero(t *testing.T) {
+	count := 0
+	for i := -32768; i <= 32767; i++ {
+		sample := int16(i)
+		got := LinearToMuLaw(sample)
+		if got == 0x7F {
+			t.Logf("LinearToMuLaw(%d) = 0x7F (should not occur)", sample)
+			count++
+		}
+	}
+	if count != 0 {
+		t.Errorf("LinearToMuLaw returned 0x7F for %d inputs; want 0", count)
+	}
+}
+
+// TestEncodeMuLawFrames_SilenceIsUniformlyFF asserts that an all-zero WAV
+// produces frames whose every byte is 0xFF, both real samples and padding.
+// This is the regression test for the original defect where samples encoded
+// to 0x7F and padding to 0xFF, putting two different "silence" bytes in one frame.
+func TestEncodeMuLawFrames_SilenceIsUniformlyFF(t *testing.T) {
+	frameSize := SampleRateHz * MuLawFrameMS / 1000
+	// frameSize + frameSize/2 samples = 240, yields 2 frames (160 bytes each)
+	totalSamples := frameSize + frameSize/2
+	wav := pcm16ToWAV(make([]int16, totalSamples), SampleRateHz)
+
+	frames, err := EncodeMuLawFrames(wav)
+	if err != nil {
+		t.Fatalf("EncodeMuLawFrames: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("want 2 frames, got %d", len(frames))
+	}
+
+	// Both frames should be uniformly 0xFF (real samples + padding)
+	for frameIdx, frame := range frames {
+		for byteIdx, b := range frame {
+			if b != 0xFF {
+				t.Errorf("frame %d byte %d: want 0xFF, got 0x%02x", frameIdx, byteIdx, b)
+			}
+		}
+	}
+}
+
 // referenceLinearToMuLaw independently re-implements the same nearest-code
 // search as linearToMuLaw, in this test file rather than calling production's
 // function, so a bug in production's search bounds (e.g. an off-by-one that
