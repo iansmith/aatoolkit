@@ -238,13 +238,26 @@ func TestMulawEncoding_RoundTripsThroughRealFfmpeg(t *testing.T) {
 			}
 
 			// For non-zero samples, check that the magnitude is in the ballpark.
+			// μ-law quantization step grows with signal magnitude, so scale tolerance
+			// accordingly; use a fixed floor for small samples.
 			if tt.sample != 0 && decoded != 0 {
 				diff := tt.sample - decoded
 				if diff < 0 {
 					diff = -diff
 				}
-				if diff > tolerance {
-					t.Logf("magnitude error: encoded %d → decoded %d (diff %d)", tt.sample, decoded, diff)
+				// Tolerance: magnitude/8 with a floor of 150 to account for
+				// logarithmic quantization across all segments.
+				magnitude := int32(tt.sample)
+				if magnitude < 0 {
+					magnitude = -magnitude
+				}
+				scaledTolerance := int16(magnitude / 8)
+				if scaledTolerance < 150 {
+					scaledTolerance = 150
+				}
+				if diff > scaledTolerance {
+					t.Errorf("magnitude error: encoded %d → decoded %d (diff %d, tolerance %d)",
+						tt.sample, decoded, diff, scaledTolerance)
 				}
 			}
 		})

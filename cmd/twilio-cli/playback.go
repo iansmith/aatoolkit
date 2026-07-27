@@ -147,9 +147,9 @@ func generateEarcon() []byte {
 // the mantissa is extracted from that ORIGINAL biased value shifted by
 // (exponent+3) — not from the already-halved value — since the halving loop
 // destroys the low bits the mantissa needs. Only the segment+mantissa bits are
-// complemented; the sign bit passes through as computed, with zero folded into
-// the negative branch (sample<=0), matching the standard's "negative zero"
-// convention where silence encodes to 0xFF.
+// complemented; the sign bit passes through as computed. Zero is treated as
+// positive (bit 7 set to 0x80) by default, producing 0xFF (silence) via the
+// standard's "negative zero" convention.
 func linearToMulaw(sample int16) byte {
 	const bias = 0x84
 	const clip = 32635 // standard ITU-T G.711 clip: CLIP+BIAS caps at 0x7fff
