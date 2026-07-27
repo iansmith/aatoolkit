@@ -23,7 +23,7 @@ func EncodeMuLawFrames(wav []byte) ([][]byte, error) {
 
 	mulaw := make([]byte, len(pcm))
 	for i, sample := range pcm {
-		mulaw[i] = linearToMuLaw(sample)
+		mulaw[i] = LinearToMuLaw(sample)
 	}
 
 	frameSize := SampleRateHz * MuLawFrameMS / 1000
@@ -129,9 +129,9 @@ func decodeWAVToPCM16(wav []byte) ([]int16, int, error) {
 	return pcm, sampleRate, nil
 }
 
-// linearToMuLaw encodes a 16-bit PCM sample to a G.711 μ-law byte.
+// LinearToMuLaw encodes a 16-bit PCM sample to a G.711 μ-law byte.
 // Finds the μ-law byte that best represents the input by searching all 256 values.
-func linearToMuLaw(sample int16) byte {
+func LinearToMuLaw(sample int16) byte {
 	minErr := int32(32768)
 	bestByte := byte(0xFF)
 
