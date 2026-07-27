@@ -8,6 +8,8 @@ import (
 	"math"
 	"os"
 	"os/exec"
+
+	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // audioPlayer streams μ-law audio frames to a single sink for the lifetime of a
@@ -135,59 +137,9 @@ func generateEarcon() []byte {
 		t := float64(i) / sampleRate
 		amplitude := 32767.0 * math.Sin(2*math.Pi*frequency*t)
 		// Convert to μ-law.
-		earcon[i] = linearToMulaw(int16(amplitude))
+		earcon[i] = telephony.LinearToMuLaw(int16(amplitude))
 	}
 	return earcon
-}
-
-// linearToMulaw converts a 16-bit signed PCM sample to 8-bit μ-law.
-// μ-law encoding is the standard used by Twilio and telephony systems.
-// Implements ITU-T G.711: sign bit, 3 segment (exponent) bits, and 4 mantissa
-// bits. The exponent is found by repeatedly halving the biased magnitude, but
-// the mantissa is extracted from that ORIGINAL biased value shifted by
-// (exponent+3) — not from the already-halved value — since the halving loop
-// destroys the low bits the mantissa needs. Only the segment+mantissa bits are
-// complemented; the sign bit passes through as computed. Zero is treated as
-// positive (bit 7 set to 0x80) by default, producing 0xFF (silence) via the
-// standard's "negative zero" convention.
-func linearToMulaw(sample int16) byte {
-	const bias = 0x84
-	const clip = 32635 // standard ITU-T G.711 clip: CLIP+BIAS caps at 0x7fff
-	const segMask = 0x7f
-
-	// Extract sign bit and get absolute value. Bit 7 in the encoded output
-	// indicates sign: 1 for positive (per ITU-T G.711 and ffmpeg convention),
-	// 0 for negative. Zero encodes as 0xFF (silence) because it's treated as
-	// positive for bit-level purposes (sign=0x80 pre-OR), but the compression
-	// logic produces segment|mantissa=0, so 0x80|(~0&0x7f)=0xFF.
-	s := int32(sample)
-	sign := byte(0x80) // Default to positive
-	if s < 0 {
-		sign = 0x00 // Negative: clear bit 7
-		s = -s
-	}
-
-	// Clip to valid range.
-	if s > clip {
-		s = clip
-	}
-
-	// Add bias for compression.
-	s += bias
-	biased := s
-
-	// Find the exponent (segment) by halving until the value fits in 8 bits.
-	var exponent uint
-	for s > 0xff {
-		exponent++
-		s >>= 1
-	}
-
-	// Mantissa comes from the original biased value, not the halved one.
-	// Only segment+mantissa bits are complemented; sign passes through.
-	mantissa := byte((biased >> (exponent + 3)) & 0x0f)
-	segment := byte((exponent & 0x07) << 4)
-	return sign | (^(segment | mantissa) & segMask)
 }
 
 // playEarcon plays one earcon tone to the given lazy player.
