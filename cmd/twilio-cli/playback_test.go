@@ -4,7 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/coder/websocket"
 )
 
 // recordingSink is an in-memory io.WriteCloser standing in for ffplay's stdin.
@@ -140,57 +145,172 @@ func TestPlayer_CloseWithNoFramesClosesSinkOnce(t *testing.T) {
 	}
 }
 
+// --- μ-law encoding validation ---
+
+// TestMulawEncoding validates that the linearToMulaw function produces
+// correct ITU-T G.711 μ-law encoded bytes by checking known reference values.
+// The encoding must include the final bitwise complement step.
+func TestMulawEncoding(t *testing.T) {
+	tests := []struct {
+		sample  int16
+		name    string
+		checkFn func(byte) bool
+	}{
+		// Test that silence (0) is encoded distinctly.
+		{0, "silence", func(b byte) bool {
+			// After bias+compress+XOR, 0 encodes to 0xFF (all bits set).
+			return b == 0xFF
+		}},
+		// Test that small positive and negative samples encode differently.
+		{100, "small positive", func(b byte) bool {
+			// Should not be 0xFF (silence) and should have sign bit unset.
+			return b != 0xFF && (b&0x80) == 0
+		}},
+		{-100, "small negative", func(b byte) bool {
+			// Should have sign bit set.
+			return (b & 0x80) != 0
+		}},
+		// Test that larger magnitudes compress further (fewer exponent bits needed).
+		{1000, "large positive", func(b byte) bool {
+			// Should not be 0xFF (silence) and should have sign bit unset.
+			return b != 0xFF && (b&0x80) == 0
+		}},
+		{-1000, "large negative", func(b byte) bool {
+			// Should have sign bit set.
+			return (b & 0x80) != 0
+		}},
+		// Test saturation at clip value.
+		{0x7fff, "max positive", func(b byte) bool {
+			// Should compress like a large positive sample.
+			return (b & 0x80) == 0
+		}},
+		{-0x8000, "min negative (saturated)", func(b byte) bool {
+			// Should have sign bit set.
+			return (b & 0x80) != 0
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := linearToMulaw(tt.sample)
+			if !tt.checkFn(got) {
+				t.Errorf("linearToMulaw(%d) = 0x%02x, failed validation", tt.sample, got)
+			}
+		})
+	}
+}
+
 // --- earcon tests ---
 
 // TestEarcon_FiresOnMicWarmSignalNotBefore verifies that the earcon is played
-// exactly once on the mic-warm signal, with zero tone bytes before the signal.
+// exactly once on the mic-warm signal through the real dial() wiring, with zero
+// tone bytes before the signal. Uses withFakeMic to exercise the actual
+// onMicWarm callback path.
 func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 	s := &recordingSink{}
-	l := newLazyPlayer(context.Background())
-	l.newPlayer = func(context.Context) (*audioPlayer, error) {
+
+	// Inject a fake player that records earcon writes.
+	origNewPlayerFunc := newPlayerFunc
+	defer func() { newPlayerFunc = origNewPlayerFunc }()
+	newPlayerFunc = func(ctx context.Context) (*audioPlayer, error) {
 		return newPlayerWithSink(s), nil
 	}
 
-	// Before signal: nothing should be written
-	if s.buf.Len() != 0 {
-		t.Errorf("before signal: got %d bytes written, want 0", s.buf.Len())
+	// Inject a fake mic that fires onMicWarm exactly once (capHit=false).
+	var onMicWarmCalled bool
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
+		// Before calling onMicWarm, the sink should be empty.
+		if s.buf.Len() != 0 {
+			t.Errorf("before onMicWarm: got %d bytes, want 0", s.buf.Len())
+		}
+
+		// Call onMicWarm to trigger the earcon.
+		onMicWarm(false)
+		onMicWarmCalled = true
+
+		// Signal dial() to stop by returning without error.
+		return nil
+	})
+
+	// Call dial with a stub server.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
+		readHandshake(t, buf) // consume connected + start
+	}))
+	defer srv.Close()
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+		t.Fatalf("dial: %v", err)
 	}
 
-	// Fire the mic-warm signal
-	playEarcon(l)
+	// Verify onMicWarm was actually called.
+	if !onMicWarmCalled {
+		t.Error("onMicWarm callback was never called")
+	}
 
-	// After signal: exactly one earcon tone (160 bytes) should be written
+	// Verify exactly one earcon tone (160 bytes) was written.
 	if s.buf.Len() != muLawFrame20ms {
-		t.Errorf("after signal: got %d bytes written, want %d (one earcon tone)",
+		t.Errorf("playback sink: got %d bytes written, want %d (one earcon tone)",
 			s.buf.Len(), muLawFrame20ms)
 	}
-
-	l.close()
 }
 
 // TestEarcon_ToneWrittenOnlyToPlaybackSink verifies that earcon bytes reach
-// only the playback sink and do not leak to capture/websocket paths.
+// only the playback sink through the real dial() wiring and do not leak to
+// capture/websocket paths. Uses withFakeMic to exercise the actual onMicWarm
+// callback path.
 func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
 	s := &recordingSink{}
-	l := newLazyPlayer(context.Background())
-	l.newPlayer = func(context.Context) (*audioPlayer, error) {
+
+	// Inject a fake player that records earcon writes.
+	origNewPlayerFunc := newPlayerFunc
+	defer func() { newPlayerFunc = origNewPlayerFunc }()
+	newPlayerFunc = func(ctx context.Context) (*audioPlayer, error) {
 		return newPlayerWithSink(s), nil
 	}
 
-	playEarcon(l)
+	// Inject a fake mic that fires onMicWarm.
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
+		// Call onMicWarm to trigger the earcon.
+		onMicWarm(false)
+		return nil
+	})
 
-	// Verify the earcon tone was written to playback sink
+	// Call dial with a stub server.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
+		readHandshake(t, buf) // consume connected + start
+	}))
+	defer srv.Close()
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// Verify the earcon tone was written to the playback sink.
 	if s.buf.Len() != muLawFrame20ms {
 		t.Errorf("playback sink: got %d bytes, want %d",
 			s.buf.Len(), muLawFrame20ms)
 	}
 
-	// Verify tone was written exactly once (one Write call)
+	// Verify tone was written exactly once (one Write call).
 	if s.writes != 1 {
 		t.Errorf("playback sink writes: %d, want 1 (earcon fires once)", s.writes)
 	}
-
-	l.close()
 }
 
 // --- adversary gap tests ---

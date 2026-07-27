@@ -56,6 +56,11 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	player := newLazyPlayer(ctx)
 	defer player.close()
 
+	// earconCh signals the main read loop to play an earcon tone.
+	// The mic goroutine sends on this channel; the read loop receives and plays
+	// from its own goroutine context to avoid concurrent access to lazyPlayer.
+	earconCh := make(chan struct{}, 1)
+
 	micCtx, cancelMic := context.WithCancel(ctx)
 	defer cancelMic() // fires before CloseNow (LIFO); signals goroutine to stop
 
@@ -161,8 +166,13 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 			} else {
 				log.Printf("twilio-cli: mic warm (capture live)")
 			}
-			// Play an earcon tone to signal the caller to speak after the cue.
-			playEarcon(player)
+			// Signal the read loop to play an earcon tone. Non-blocking send
+			// (buffered channel) so the mic goroutine doesn't wait.
+			select {
+			case earconCh <- struct{}{}:
+			default:
+				// Earcon signal already pending; skip this one.
+			}
 		}
 		err := streamMic(micCtx, conn, streamSID, &seqNum, onMicWarm)
 		// naturalEnd: streamMic returned on its OWN (mic EOF = caller hangup), not
@@ -190,6 +200,14 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	var bytesSinceMark int
 
 	for {
+		select {
+		case <-earconCh:
+			// Mic goroutine signaled an earcon tone. Play it from the read loop's
+			// goroutine context (the only context that owns lazyPlayer).
+			playEarcon(player)
+		default:
+		}
+
 		_, msg, err := conn.Read(readCtx)
 		if err != nil {
 			if isCallEnded(err) {

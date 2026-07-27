@@ -19,11 +19,14 @@ type audioPlayer struct {
 	wait func() error // reaps the ffplay process on close; nil when the sink is injected
 }
 
-// newPlayer starts one ffplay process that reads a raw 8 kHz μ-law stream from
+// newPlayerFunc is a seam for tests to inject a fake player. Default is the real newPlayerImpl.
+var newPlayerFunc func(context.Context) (*audioPlayer, error) = newPlayerImpl
+
+// newPlayerImpl starts one ffplay process that reads a raw 8 kHz μ-law stream from
 // stdin and plays it through the local speaker. Every frame passed to play is
 // written to that single stream, so audio plays continuously and at realtime.
 // ffplay is cross-platform, so this needs no per-OS build tags.
-func newPlayer(ctx context.Context) (*audioPlayer, error) {
+func newPlayerImpl(ctx context.Context) (*audioPlayer, error) {
 	cmd := exec.CommandContext(ctx, "ffplay",
 		"-hide_banner", "-loglevel", "error",
 		"-nodisp", "-autoexit",
@@ -80,7 +83,7 @@ type lazyPlayer struct {
 }
 
 func newLazyPlayer(ctx context.Context) *lazyPlayer {
-	return &lazyPlayer{newPlayer: newPlayer, ctx: ctx}
+	return &lazyPlayer{newPlayer: newPlayerFunc, ctx: ctx}
 }
 
 // play streams one μ-law frame, starting the player on first use. Errors are
@@ -139,9 +142,12 @@ func generateEarcon() []byte {
 
 // linearToMulaw converts a 16-bit signed PCM sample to 8-bit μ-law.
 // μ-law encoding is the standard used by Twilio and telephony systems.
+// Implements ITU-T G.711 with bias 0x84, sign bit, 3 segment bits, and 4 mantissa bits,
+// followed by bitwise complement of the entire encoded byte.
 func linearToMulaw(sample int16) byte {
 	const bias = 0x84
 	const clip = 0x7fff
+	const mask = 0xff
 
 	// Extract sign bit and get absolute value.
 	sign := byte(0)
@@ -167,7 +173,9 @@ func linearToMulaw(sample int16) byte {
 
 	// Combine sign, exponent, and mantissa.
 	mantissa := byte((sample >> 4) & 0x0f)
-	return sign | byte((exponent&0x07)<<4) | mantissa
+	encoded := sign | byte((exponent&0x07)<<4) | mantissa
+	// ITU-T G.711 final step: bitwise complement of the entire encoded byte.
+	return encoded ^ mask
 }
 
 // playEarcon plays one earcon tone to the given lazy player.
