@@ -13,12 +13,12 @@ archive_dir  = ".slopstop/ticket-archive"   # project-local; avoids the protecte
 [tiers.huge]
 provider = "anthropic"
 model    = "opus"
-version  = "4.8"     # :design + huge-tier checks
+version  = "5"       # :design + huge-tier checks
 
 [tiers.large]
 provider = "anthropic"
 model    = "opus"
-version  = "4.8"     # :tickets + failure-driven rewrites + drift checks
+version  = "5"       # :tickets + failure-driven rewrites + drift checks
 
 [tiers.medium]
 provider = "anthropic"
