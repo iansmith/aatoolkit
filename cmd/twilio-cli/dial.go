@@ -18,8 +18,9 @@ import (
 
 // streamMic is the mic-capture entry point dial() calls through. Overridable
 // in tests to simulate capture completion (EOF) deterministically, since real
-// mic capture has no natural EOF to trigger from a test.
-var streamMic = streamMicFrames
+// mic capture has no natural EOF to trigger from a test. Receives an onMicWarm
+// callback that fires when the first real frame is emitted or the discard cap is hit.
+var streamMic func(context.Context, *websocket.Conn, string, *int, func()) error = streamMicFrames
 
 // dialOptions configures optional dial() behavior.
 type dialOptions struct {
@@ -153,7 +154,10 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	micErrCh := make(chan error, 1)
 	go func() {
 		defer cancelMic() // goroutine exit cancels the read loop
-		err := streamMic(micCtx, conn, streamSID, &seqNum)
+		onMicWarm := func() {
+			log.Printf("twilio-cli: mic warm (capture live)")
+		}
+		err := streamMic(micCtx, conn, streamSID, &seqNum, onMicWarm)
 		// naturalEnd: streamMic returned on its OWN (mic EOF = caller hangup), not
 		// because something cancelled micCtx (Ctrl-C, or a server-initiated close via
 		// the read loop's cancelMic).

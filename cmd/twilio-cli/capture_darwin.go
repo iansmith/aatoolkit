@@ -52,9 +52,11 @@ func gracefulCancel(cmd *exec.Cmd) {
 }
 
 // streamMicFrames captures mic input via ffmpeg, slices it into 8 kHz μ-law
-// 20 ms frames (160 bytes each), and sends each frame to conn as a Twilio
-// media event. Returns when ctx is cancelled or the connection closes.
-func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int) error {
+// 20 ms frames (160 bytes each), discards leading all-0xFF silence frames
+// (bounded at 75 frames / 1500 ms), and sends each frame to conn as a Twilio
+// media event. onMicWarm fires exactly once when the first real frame is emitted
+// or the discard cap is hit. Returns when ctx is cancelled or the connection closes.
+func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, onMicWarm func()) error {
 	mic := os.Getenv("AATOOLKIT_STT_MIC")
 	if mic == "" {
 		mic = ":default"
@@ -77,7 +79,7 @@ func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string
 	// Termination is EOF-driven (ffmpeg's close), bounded by cmd.WaitDelay. Each frame
 	// is sent with a fresh short-lived write context so the now-dead ctx can't abort the
 	// trailing writes (matching sendStop/echoMark's teardown-write pattern in dial.go).
-	drainErr := drainFrames(context.Background(), stdout, muLawFrame20ms, func(frame []byte) error {
+	_, drainErr := drainFramesWithDiscard(context.Background(), stdout, muLawFrame20ms, func(frame []byte) error {
 		msg, encErr := enc.encode(frame)
 		if encErr != nil {
 			return encErr
@@ -85,7 +87,7 @@ func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string
 		writeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		return conn.Write(writeCtx, websocket.MessageText, msg)
-	})
+	}, onMicWarm)
 	// If drainFrames exited due to a send error (not context cancellation),
 	// ffmpeg may still be running and will fill the pipe buffer, blocking
 	// cmd.Wait indefinitely. Kill it now so Wait returns promptly.
