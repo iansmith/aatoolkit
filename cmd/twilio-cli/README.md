@@ -22,6 +22,12 @@ go run ./cmd/twilio-cli +15551234567
 Posts the voice webhook, then opens the media-stream WebSocket and plays microphone audio in,
 printing the server's marks and control frames as they arrive.
 
+**Speaking after the earcon cue:** When capture emits the mic-warm signal (indicating the
+initial silence-discard period is over), twilio-cli plays a 400Hz earcon tone to the local
+speaker to signal "capture is live — speak now." This allows the operator to know exactly
+when the call is ready to record speech without relying on blind timing. Speak promptly
+*after* the cue so the full opening word is captured.
+
 | Flag | Purpose |
 |---|---|
 | `-webhook` | Full webhook URL. Skips config resolution entirely. |
@@ -67,6 +73,24 @@ captured reply: To=+15551234567 Body="..."
 
 Do **not** set `TWILIO_API_BASE_URL` in `aa-server-status.toml`. Pointing the fleet at a local
 capture server by default would silently stop real SMS replies from being sent.
+
+## Acoustic bleed mitigation
+
+The earcon tone is played through the local speaker and can be heard in the background
+by the microphone, creating a small amount of acoustic "bleed" into the recording. This is
+not a software isolation issue (capture and playback are separate OS processes), but a
+physical acoustics effect.
+
+To eliminate acoustic bleed, use one of these mitigation strategies:
+
+- **Headphones:** Connect headphones to the speaker output. The microphone will not pick up
+  headphone audio.
+- **Separate output device:** Set `AATOOLKIT_STT_MIC` to point to an alternate audio input
+  (e.g. a USB headset microphone instead of the system mic), while the earcon plays through
+  built-in speakers.
+
+For most testing scenarios, the small acoustic bleed is acceptable — speech will still
+transcribe clearly.
 
 ## Troubleshooting
 

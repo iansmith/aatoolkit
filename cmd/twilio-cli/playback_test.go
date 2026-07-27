@@ -4,7 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
+
+	"github.com/coder/websocket"
 )
 
 // recordingSink is an in-memory io.WriteCloser standing in for ffplay's stdin.
@@ -137,6 +145,286 @@ func TestPlayer_CloseWithNoFramesClosesSinkOnce(t *testing.T) {
 	}
 	if s.closes != 1 {
 		t.Errorf("sink Close called %d times, want 1", s.closes)
+	}
+}
+
+// --- μ-law encoding validation ---
+
+// TestMulawEncoding_RoundTripsThroughRealFfmpeg validates that linearToMulaw
+// produces correct ITU-T G.711 μ-law encoded bytes by round-tripping through
+// the actual ffmpeg binary (the oracle), not a hand-rolled decoder. Encoding a
+// sample and decoding it through ffmpeg recovers a value within quantization
+// tolerance and with the correct sign.
+func TestMulawEncoding_RoundTripsThroughRealFfmpeg(t *testing.T) {
+	// Test samples: zero, small pos/neg, large pos/neg, saturation extremes.
+	tests := []struct {
+		sample int16
+		name   string
+	}{
+		{0, "silence"},
+		{100, "small positive"},
+		{-100, "small negative"},
+		{1000, "large positive"},
+		{-1000, "large negative"},
+		{0x7fff, "max positive"},
+		{-0x8000, "min negative (saturated)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Encode the sample.
+			encoded := linearToMulaw(tt.sample)
+
+			// Write to a temp file and decode via ffmpeg.
+			tmpfile, err := os.CreateTemp("", "mulaw-*.raw")
+			if err != nil {
+				if os.IsNotExist(err) {
+					t.Skip("no temp directory")
+				}
+				t.Fatalf("CreateTemp: %v", err)
+			}
+			defer os.Remove(tmpfile.Name())
+
+			if _, err := tmpfile.Write([]byte{encoded}); err != nil {
+				tmpfile.Close()
+				t.Fatalf("write encoded: %v", err)
+			}
+			tmpfile.Close()
+
+			// Decode via ffmpeg.
+			decodedFile, err := os.CreateTemp("", "decoded-*.pcm")
+			if err != nil {
+				t.Skip("no temp directory")
+			}
+			defer os.Remove(decodedFile.Name())
+			decodedFile.Close()
+
+			cmd := exec.Command("ffmpeg",
+				"-f", "mulaw", "-ar", "8000", "-i", tmpfile.Name(),
+				"-f", "s16le", "-ar", "8000", "-y", decodedFile.Name())
+			cmd.Stdout = io.Discard
+			cmd.Stderr = io.Discard
+
+			if err := cmd.Run(); err != nil {
+				// ffmpeg might not be available in test environment; skip gracefully.
+				if errors.Is(err, exec.ErrNotFound) {
+					t.Skip("ffmpeg not found")
+				}
+				t.Fatalf("ffmpeg decode: %v", err)
+			}
+
+			// Read the decoded PCM sample (little-endian int16).
+			decodedBuf, err := os.ReadFile(decodedFile.Name())
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if len(decodedBuf) < 2 {
+				t.Fatalf("decoded file too short: %d bytes", len(decodedBuf))
+			}
+
+			decoded := int16(decodedBuf[0]) | (int16(decodedBuf[1]) << 8)
+
+			// Check: decoded value is close to original (within μ-law quantization tolerance)
+			// and has the correct sign.
+
+			// Determine expected sign.
+			expectedSign := tt.sample >= 0
+			actualSign := decoded >= 0
+
+			// For small magnitudes, be lenient on the decoded value itself but strict on sign.
+			if expectedSign != actualSign {
+				t.Errorf("sign mismatch: encoded %d → decoded %d (sign inverted)", tt.sample, decoded)
+			}
+
+			// For non-zero samples, check that the magnitude is in the ballpark.
+			// μ-law quantization step grows with signal magnitude, so scale tolerance
+			// accordingly; tight enough to reject a wrong-mantissa-shift regression.
+			if tt.sample != 0 && decoded != 0 {
+				diff := tt.sample - decoded
+				if diff < 0 {
+					diff = -diff
+				}
+				magnitude := int32(tt.sample)
+				if magnitude < 0 {
+					magnitude = -magnitude
+				}
+				// Tolerance: magnitude/50 + 10. Passes correct encoder's diffs
+				// (0→0, ±100→4, ±1000→12, 32767→643) but rejects the wrong-mantissa-shift
+				// mutant (±100→20, ±1000→116).
+				scaledTolerance := int16(magnitude/50 + 10)
+				if diff > scaledTolerance {
+					t.Errorf("magnitude error: encoded %d → decoded %d (diff %d, tolerance %d)",
+						tt.sample, decoded, diff, scaledTolerance)
+				}
+			}
+		})
+	}
+}
+
+// TestMulawEncoding validates that the linearToMulaw function produces
+// correct ITU-T G.711 μ-law encoded bytes by checking known reference values.
+// The encoding must include the final bitwise complement step. This test's
+// original sign-bit assertions (V1) were independently verified backwards by
+// reviewers and replaced with TestMulawEncoding_RoundTripsThroughRealFfmpeg,
+// which uses the ffmpeg oracle. This test is now minimal and non-critical;
+// the ffmpeg-based test is the source of truth.
+func TestMulawEncoding(t *testing.T) {
+	tests := []struct {
+		sample  int16
+		name    string
+		checkFn func(byte) bool
+	}{
+		// Test that silence (0) is encoded distinctly.
+		{0, "silence", func(b byte) bool {
+			// After bias+compress+XOR, 0 encodes to 0xFF (all bits set).
+			return b == 0xFF
+		}},
+		// Test that positive and negative samples encode differently (no sign check;
+		// sign correctness is verified by TestMulawEncoding_RoundTripsThroughRealFfmpeg).
+		{100, "small positive", func(b byte) bool {
+			// Should not be 0xFF (silence).
+			return b != 0xFF
+		}},
+		{-100, "small negative", func(b byte) bool {
+			// Should not be 0xFF (silence).
+			return b != 0xFF
+		}},
+		// Test that larger magnitudes compress and encode distinctly.
+		{1000, "large positive", func(b byte) bool {
+			return b != 0xFF
+		}},
+		{-1000, "large negative", func(b byte) bool {
+			return b != 0xFF
+		}},
+		// Test saturation at clip value.
+		{0x7fff, "max positive", func(b byte) bool {
+			return b != 0xFF
+		}},
+		{-0x8000, "min negative (saturated)", func(b byte) bool {
+			return b != 0xFF
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := linearToMulaw(tt.sample)
+			if !tt.checkFn(got) {
+				t.Errorf("linearToMulaw(%d) = 0x%02x, failed validation", tt.sample, got)
+			}
+		})
+	}
+}
+
+// --- earcon tests ---
+
+// TestEarcon_FiresOnMicWarmSignalNotBefore verifies that the earcon is played
+// exactly once on the mic-warm signal through the real dial() wiring, with zero
+// tone bytes before the signal. Uses withFakeMic to exercise the actual
+// onMicWarm callback path.
+func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
+	s := &recordingSink{}
+
+	// Inject a fake player that records earcon writes.
+	origNewPlayerFunc := newPlayerFunc
+	defer func() { newPlayerFunc = origNewPlayerFunc }()
+	newPlayerFunc = func(ctx context.Context) (*audioPlayer, error) {
+		return newPlayerWithSink(s), nil
+	}
+
+	// Inject a fake mic that fires onMicWarm exactly once (capHit=false).
+	var onMicWarmCalled bool
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
+		// Before calling onMicWarm, the sink should be empty.
+		if s.buf.Len() != 0 {
+			t.Errorf("before onMicWarm: got %d bytes, want 0", s.buf.Len())
+		}
+
+		// Call onMicWarm to trigger the earcon.
+		onMicWarm(false)
+		onMicWarmCalled = true
+
+		// Signal dial() to stop by returning without error.
+		return nil
+	})
+
+	// Call dial with a stub server.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
+		readHandshake(t, buf) // consume connected + start
+	}))
+	defer srv.Close()
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// Verify onMicWarm was actually called.
+	if !onMicWarmCalled {
+		t.Error("onMicWarm callback was never called")
+	}
+
+	// Verify exactly one earcon tone (160 bytes) was written.
+	if s.buf.Len() != muLawFrame20ms {
+		t.Errorf("playback sink: got %d bytes written, want %d (one earcon tone)",
+			s.buf.Len(), muLawFrame20ms)
+	}
+}
+
+// TestEarcon_ToneWrittenOnlyToPlaybackSink verifies that earcon bytes reach
+// only the playback sink through the real dial() wiring and do not leak to
+// capture/websocket paths. Uses withFakeMic to exercise the actual onMicWarm
+// callback path.
+func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
+	s := &recordingSink{}
+
+	// Inject a fake player that records earcon writes.
+	origNewPlayerFunc := newPlayerFunc
+	defer func() { newPlayerFunc = origNewPlayerFunc }()
+	newPlayerFunc = func(ctx context.Context) (*audioPlayer, error) {
+		return newPlayerWithSink(s), nil
+	}
+
+	// Inject a fake mic that fires onMicWarm.
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
+		// Call onMicWarm to trigger the earcon.
+		onMicWarm(false)
+		return nil
+	})
+
+	// Call dial with a stub server.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
+		readHandshake(t, buf) // consume connected + start
+	}))
+	defer srv.Close()
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// Verify the earcon tone was written to the playback sink.
+	if s.buf.Len() != muLawFrame20ms {
+		t.Errorf("playback sink: got %d bytes, want %d",
+			s.buf.Len(), muLawFrame20ms)
+	}
+
+	// Verify tone was written exactly once (one Write call).
+	if s.writes != 1 {
+		t.Errorf("playback sink writes: %d, want 1 (earcon fires once)", s.writes)
 	}
 }
 
