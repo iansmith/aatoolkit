@@ -70,7 +70,7 @@ func drainFramesWithDiscard(ctx context.Context, r io.Reader, frameSize int, sen
 			}
 		}
 
-		if isSilence && discarded < discardCap {
+		if !warmupFired && isSilence && discarded < discardCap {
 			// Discard this silence frame
 			discarded++
 			continue
