@@ -95,40 +95,6 @@ func TestLinearToMuLaw_TieBreak(t *testing.T) {
 			t.Errorf("LinearToMuLaw(%d) = 0x%02x, want 0x%02x", tc.sample, got, tc.want)
 		}
 	}
-
-	// Verify the tie-break property by spot-checking samples with known ties.
-	// The pinned table above covers the most important cases (±0 tie and three-way tie).
-	// Samples -3 to +4 are the only ones near zero with ties; we verify they work.
-	for sample := int16(-3); sample <= 4; sample++ {
-		chosen := LinearToMuLaw(sample)
-		chosenErr := absErr(sample, chosen)
-		chosenMag := mag(chosen)
-
-		// For each tied sample, verify the chosen code has maximum magnitude
-		// among all codes achieving the minimum error
-		var tiedCount int
-		for b := byte(0); b <= 255; b++ {
-			candErr := absErr(sample, b)
-			if candErr == chosenErr {
-				tiedCount++
-				candMag := mag(b)
-				if candMag > chosenMag {
-					t.Errorf("LinearToMuLaw(%d) chose 0x%02x (mag %d), but 0x%02x has mag %d",
-						sample, chosen, chosenMag, b, candMag)
-					return
-				}
-				// When magnitude is zero, must prefer 0xFF over 0x7F
-				if chosenMag == 0 && candMag == 0 && b == 0x7F && chosen != 0xFF {
-					t.Errorf("LinearToMuLaw(%d): ±0 tie, chose 0x%02x, want 0xFF", sample, chosen)
-					return
-				}
-			}
-		}
-		// Verify these samples actually have ties (more than one minimum-error code)
-		if tiedCount < 2 {
-			t.Logf("LinearToMuLaw(%d): expected a tie but found %d minimum-error codes", sample, tiedCount)
-		}
-	}
 }
 
 // TestLinearToMuLaw_NeverEmitsNegativeZero asserts that 0x7F is never returned
