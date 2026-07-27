@@ -95,6 +95,44 @@ func TestLinearToMuLaw_TieBreak(t *testing.T) {
 			t.Errorf("LinearToMuLaw(%d) = 0x%02x, want 0x%02x", tc.sample, got, tc.want)
 		}
 	}
+
+	// General property, over all 65,536 int16 inputs: among the codes achieving
+	// the minimum error, the chosen code's decoded magnitude equals the maximum
+	// magnitude over the tied set; and when that maximum magnitude is 0, the
+	// chosen code is exactly 0xFF.
+	for i := -32768; i <= 32767; i++ {
+		sample := int16(i)
+		got := LinearToMuLaw(sample)
+		gotErr := absErr(sample, got)
+
+		minErr := gotErr
+		maxMag := int32(-1)
+		for bi := 0; bi <= 255; bi++ {
+			b := byte(bi)
+			candErr := absErr(sample, b)
+			if candErr < minErr {
+				minErr = candErr
+			}
+		}
+		for bi := 0; bi <= 255; bi++ {
+			b := byte(bi)
+			if absErr(sample, b) == minErr {
+				if m := mag(b); m > maxMag {
+					maxMag = m
+				}
+			}
+		}
+
+		if gotErr != minErr {
+			t.Fatalf("LinearToMuLaw(%d) = 0x%02x has err %d, but minimum achievable err is %d", sample, got, gotErr, minErr)
+		}
+		if mag(got) != maxMag {
+			t.Fatalf("LinearToMuLaw(%d) = 0x%02x has magnitude %d, want max tied magnitude %d", sample, got, mag(got), maxMag)
+		}
+		if maxMag == 0 && got != 0xFF {
+			t.Fatalf("LinearToMuLaw(%d) = 0x%02x in a zero-magnitude tie, want 0xFF", sample, got)
+		}
+	}
 }
 
 // TestLinearToMuLaw_NeverEmitsNegativeZero asserts that 0x7F is never returned
@@ -144,29 +182,26 @@ func TestEncodeMuLawFrames_SilenceIsUniformlyFF(t *testing.T) {
 }
 
 // TestLinearToMuLaw_IsExactMinimum is a guard test: it asserts that LinearToMuLaw
-// returns the code whose decoded value is nearest to the input.
-// Disabled due to unexplained timeout; the three red-first tests and NeverWorseThanFfmpeg
-// already verify the essential properties of the encoder.
-//func TestLinearToMuLaw_IsExactMinimum(t *testing.T) {
-//	testSamples := []int16{
-//		-32768, -32767, -16384, -1024, -100, -10, -3, -2, -1, 0, 1, 2, 3, 4, 10, 100, 1024, 16384, 32767, 32766,
-//	}
-//
-//	for _, sample := range testSamples {
-//		got := LinearToMuLaw(sample)
-//		gotErr := absErr(sample, got)
-//
-//		// Check that no other byte has strictly lower error
-//		for b := byte(0); b <= 255; b++ {
-//			candErr := absErr(sample, b)
-//			if candErr < gotErr {
-//				t.Errorf("LinearToMuLaw(%d) = 0x%02x (err %d), but 0x%02x has err %d",
-//					sample, got, gotErr, b, candErr)
-//				return
-//			}
-//		}
-//	}
-//}
+// returns the code whose decoded value is nearest to the input, for all 65,536 inputs.
+// This test passes both before and after the tie-break change; it is the point.
+func TestLinearToMuLaw_IsExactMinimum(t *testing.T) {
+	for i := -32768; i <= 32767; i++ {
+		sample := int16(i)
+		got := LinearToMuLaw(sample)
+		gotErr := absErr(sample, got)
+
+		// Check that no other byte has strictly lower error
+		for bi := 0; bi <= 255; bi++ {
+			b := byte(bi)
+			candErr := absErr(sample, b)
+			if candErr < gotErr {
+				t.Errorf("LinearToMuLaw(%d) = 0x%02x (err %d), but 0x%02x has err %d",
+					sample, got, gotErr, b, candErr)
+				return
+			}
+		}
+	}
+}
 
 // TestLinearToMuLaw_NeverWorseThanFfmpeg is a guard test: it asserts that
 // LinearToMuLaw is never strictly worse than ffmpeg's G.711 encoder,
