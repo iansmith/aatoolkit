@@ -55,8 +55,9 @@ func gracefulCancel(cmd *exec.Cmd) {
 // 20 ms frames (160 bytes each), discards leading all-0xFF silence frames
 // (bounded at 75 frames / 1500 ms), and sends each frame to conn as a Twilio
 // media event. onMicWarm fires exactly once when the first real frame is emitted
-// or the discard cap is hit. Returns when ctx is cancelled or the connection closes.
-func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, onMicWarm func()) error {
+// (capHit=false) or the discard cap is hit (capHit=true). Returns when ctx is cancelled
+// or the connection closes.
+func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, onMicWarm func(bool)) error {
 	mic := os.Getenv("AATOOLKIT_STT_MIC")
 	if mic == "" {
 		mic = ":default"

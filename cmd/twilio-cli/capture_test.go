@@ -486,7 +486,7 @@ func TestStreamMic_DiscardsLeadingMuLawSilence(t *testing.T) {
 	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
 		emitted = append(emitted, append([]byte(nil), f...))
 		return nil
-	}, func() {
+	}, func(bool) {
 		warmupFired++
 	})
 	if err != nil {
@@ -519,7 +519,7 @@ func TestStreamMic_DiscardBoundedAtCap(t *testing.T) {
 	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
 		emitted = append(emitted, append([]byte(nil), f...))
 		return nil
-	}, func() {
+	}, func(bool) {
 		warmupFired++
 	})
 	if err != nil {
@@ -556,7 +556,7 @@ func TestStreamMic_MicWarmSignalFiresOnceAtFirstRealFrame(t *testing.T) {
 	_, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
 		emitted = append(emitted, append([]byte(nil), f...))
 		return nil
-	}, func() {
+	}, func(bool) {
 		select {
 		case warmupSignal <- struct{}{}:
 		default:
@@ -614,7 +614,7 @@ func TestStreamMic_SilenceAfterRealFrameNotDiscarded(t *testing.T) {
 	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
 		emitted = append(emitted, append([]byte(nil), f...))
 		return nil
-	}, func() {
+	}, func(bool) {
 		warmupFired++
 	})
 	if err != nil {

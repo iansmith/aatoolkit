@@ -36,9 +36,10 @@ func (e *mediaFrameEncoder) encode(payload []byte) ([]byte, error) {
 
 // drainFramesWithDiscard reads frames from r, discarding leading all-0xFF frames
 // (μ-law silence), bounded by a cap of 75 frames (1500 ms). Once the first real
-// (non-0xFF) frame is encountered or the cap is reached, onMicWarm fires exactly once.
+// (non-0xFF) frame is encountered or the cap is reached, onMicWarm fires exactly once
+// with a bool indicating whether the cap was hit (true) or a real frame was found (false).
 // frameSize must be positive. Returns a flag indicating whether the cap was hit.
-func drainFramesWithDiscard(ctx context.Context, r io.Reader, frameSize int, send func([]byte) error, onMicWarm func()) (bool, error) {
+func drainFramesWithDiscard(ctx context.Context, r io.Reader, frameSize int, send func([]byte) error, onMicWarm func(bool)) (bool, error) {
 	if frameSize <= 0 {
 		return false, errors.New("drainFramesWithDiscard: frameSize must be positive")
 	}
@@ -82,7 +83,7 @@ func drainFramesWithDiscard(ctx context.Context, r io.Reader, frameSize int, sen
 			if discarded >= discardCap {
 				capHit = true
 			}
-			onMicWarm()
+			onMicWarm(capHit)
 		}
 
 		// Emit the frame (real frame or post-cap silence frame)
