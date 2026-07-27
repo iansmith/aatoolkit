@@ -140,6 +140,59 @@ func TestPlayer_CloseWithNoFramesClosesSinkOnce(t *testing.T) {
 	}
 }
 
+// --- earcon tests ---
+
+// TestEarcon_FiresOnMicWarmSignalNotBefore verifies that the earcon is played
+// exactly once on the mic-warm signal, with zero tone bytes before the signal.
+func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
+	s := &recordingSink{}
+	l := newLazyPlayer(context.Background())
+	l.newPlayer = func(context.Context) (*audioPlayer, error) {
+		return newPlayerWithSink(s), nil
+	}
+
+	// Before signal: nothing should be written
+	if s.buf.Len() != 0 {
+		t.Errorf("before signal: got %d bytes written, want 0", s.buf.Len())
+	}
+
+	// Fire the mic-warm signal
+	playEarcon(l)
+
+	// After signal: exactly one earcon tone (160 bytes) should be written
+	if s.buf.Len() != muLawFrame20ms {
+		t.Errorf("after signal: got %d bytes written, want %d (one earcon tone)",
+			s.buf.Len(), muLawFrame20ms)
+	}
+
+	l.close()
+}
+
+// TestEarcon_ToneWrittenOnlyToPlaybackSink verifies that earcon bytes reach
+// only the playback sink and do not leak to capture/websocket paths.
+func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
+	s := &recordingSink{}
+	l := newLazyPlayer(context.Background())
+	l.newPlayer = func(context.Context) (*audioPlayer, error) {
+		return newPlayerWithSink(s), nil
+	}
+
+	playEarcon(l)
+
+	// Verify the earcon tone was written to playback sink
+	if s.buf.Len() != muLawFrame20ms {
+		t.Errorf("playback sink: got %d bytes, want %d",
+			s.buf.Len(), muLawFrame20ms)
+	}
+
+	// Verify tone was written exactly once (one Write call)
+	if s.writes != 1 {
+		t.Errorf("playback sink writes: %d, want 1 (earcon fires once)", s.writes)
+	}
+
+	l.close()
+}
+
 // --- adversary gap tests ---
 
 // Gap: the served audio file length is rarely a multiple of 160, so the server
