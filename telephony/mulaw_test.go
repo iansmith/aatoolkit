@@ -95,6 +95,43 @@ func TestLinearToMuLaw_TieBreak(t *testing.T) {
 			t.Errorf("LinearToMuLaw(%d) = 0x%02x, want 0x%02x", tc.sample, got, tc.want)
 		}
 	}
+
+	// Verify the tie-break property for all 65,536 int16 inputs:
+	// among codes achieving minimum error, the chosen code has maximum magnitude.
+	// When magnitude ties at zero, prefer 0xFF.
+	for i := -32768; i <= 32767; i++ {
+		sample := int16(i)
+		chosen := LinearToMuLaw(sample)
+		chosenErr := absErr(sample, chosen)
+		chosenMag := mag(chosen)
+
+		// Find all codes with the same minimum error
+		var tiedCodes []byte
+		for b := byte(0); b <= 255; b++ {
+			if absErr(sample, b) == chosenErr {
+				tiedCodes = append(tiedCodes, b)
+			}
+		}
+
+		// Verify the chosen code has maximum magnitude among tied codes
+		for _, b := range tiedCodes {
+			bMag := mag(b)
+			if bMag > chosenMag {
+				t.Errorf("LinearToMuLaw(%d) chose 0x%02x (mag %d), but 0x%02x has mag %d",
+					sample, chosen, chosenMag, b, bMag)
+				return
+			}
+		}
+
+		// When magnitude is zero (±0 tie), verify we chose 0xFF
+		if chosenMag == 0 {
+			if chosen != 0xFF {
+				t.Errorf("LinearToMuLaw(%d): when mag=0, chose 0x%02x, want 0xFF",
+					sample, chosen)
+				return
+			}
+		}
+	}
 }
 
 // TestLinearToMuLaw_NeverEmitsNegativeZero asserts that 0x7F is never returned
@@ -102,7 +139,8 @@ func TestLinearToMuLaw_TieBreak(t *testing.T) {
 // (−3 to +4); this test ensures those are now 0xFF (or 0xFE for sample 4).
 func TestLinearToMuLaw_NeverEmitsNegativeZero(t *testing.T) {
 	count := 0
-	for sample := int16(-32768); sample <= 32767; sample++ {
+	for i := -32768; i <= 32767; i++ {
+		sample := int16(i)
 		got := LinearToMuLaw(sample)
 		if got == 0x7F {
 			t.Logf("LinearToMuLaw(%d) = 0x7F (should not occur)", sample)
@@ -146,7 +184,8 @@ func TestEncodeMuLawFrames_SilenceIsUniformlyFF(t *testing.T) {
 // returns the code whose decoded value is nearest to the input, for all 65,536 inputs.
 // This test passes both before and after the tie-break change; it is the point.
 func TestLinearToMuLaw_IsExactMinimum(t *testing.T) {
-	for sample := int16(-32768); sample <= 32767; sample++ {
+	for i := -32768; i <= 32767; i++ {
+		sample := int16(i)
 		got := LinearToMuLaw(sample)
 		gotErr := absErr(sample, got)
 

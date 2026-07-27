@@ -138,15 +138,12 @@ func decodeWAVToPCM16(wav []byte) ([]int16, int, error) {
 // (2) the residual ±0 tie resolves to 0xFF.
 func LinearToMuLaw(sample int16) byte {
 	minErr := int32(32768)
-	bestByte := byte(0xFF)
+	bestByte := MuLawSilence
 	bestMag := int32(0)
 
 	for b := 0; b <= 255; b++ {
 		decoded := muLawToLinear(byte(b))
-		err := int32(sample) - int32(decoded)
-		if err < 0 {
-			err = -err
-		}
+		err := absInt32(int32(sample) - int32(decoded))
 		mag := absInt32(int32(decoded))
 
 		// Update best if: (1) this code has strictly lower error, OR
