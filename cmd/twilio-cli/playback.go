@@ -142,40 +142,48 @@ func generateEarcon() []byte {
 
 // linearToMulaw converts a 16-bit signed PCM sample to 8-bit μ-law.
 // μ-law encoding is the standard used by Twilio and telephony systems.
-// Implements ITU-T G.711 with bias 0x84, sign bit, 3 segment bits, and 4 mantissa bits,
-// followed by bitwise complement of the entire encoded byte.
+// Implements ITU-T G.711: sign bit, 3 segment (exponent) bits, and 4 mantissa
+// bits. The exponent is found by repeatedly halving the biased magnitude, but
+// the mantissa is extracted from that ORIGINAL biased value shifted by
+// (exponent+3) — not from the already-halved value — since the halving loop
+// destroys the low bits the mantissa needs. Only the segment+mantissa bits are
+// complemented; the sign bit passes through as computed, with zero folded into
+// the negative branch (sample<=0), matching the standard's "negative zero"
+// convention where silence encodes to 0xFF.
 func linearToMulaw(sample int16) byte {
 	const bias = 0x84
-	const clip = 0x7fff
-	const mask = 0xff
+	const clip = 32635 // standard ITU-T G.711 clip: CLIP+BIAS caps at 0x7fff
+	const segMask = 0x7f
 
-	// Extract sign bit and get absolute value.
+	// Extract sign bit and get absolute value. sample<=0 (not <0) so that
+	// zero takes the sign=0x80 branch, required for silence to encode as 0xFF.
+	s := int32(sample)
 	sign := byte(0)
-	if sample < 0 {
+	if s <= 0 {
 		sign = 0x80
-		sample = -sample
+		s = -s
 	}
 
 	// Clip to valid range.
-	if sample > clip {
-		sample = clip
+	if s > clip {
+		s = clip
 	}
 
 	// Add bias for compression.
-	sample = sample + bias
+	s += bias
+	biased := s
 
-	// Find exponent and mantissa.
+	// Find the exponent (segment) by halving until the value fits in 8 bits.
 	var exponent uint
-	for sample > 0xff {
+	for s > 0xff {
 		exponent++
-		sample = sample >> 1
+		s >>= 1
 	}
 
-	// Combine sign, exponent, and mantissa.
-	mantissa := byte((sample >> 4) & 0x0f)
-	encoded := sign | byte((exponent&0x07)<<4) | mantissa
-	// ITU-T G.711 final step: bitwise complement of the entire encoded byte.
-	return encoded ^ mask
+	// Mantissa comes from the original biased value, not the halved one.
+	mantissa := byte((biased >> (exponent + 3)) & 0x0f)
+	segment := byte((exponent & 0x07) << 4)
+	return sign | (^(segment | mantissa) & segMask)
 }
 
 // playEarcon plays one earcon tone to the given lazy player.
