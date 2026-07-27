@@ -467,3 +467,118 @@ func TestDrainFrames_FrameSizeZero_ReturnsError(t *testing.T) {
 		t.Error("drainFrames with frameSize=0 must return an error")
 	}
 }
+
+// --- mic warm-up discard tests ---
+
+// TestStreamMic_DiscardsLeadingMuLawSilence: 5 frames of 0xFF (silence) followed by
+// one "tone" frame (non-0xFF). Assert exactly 5 leading frames are dropped and the
+// first emitted frame equals the tone frame byte-for-byte.
+func TestStreamMic_DiscardsLeadingMuLawSilence(t *testing.T) {
+	silenceFrames := bytes.Repeat([]byte{0xFF}, 5*muLawFrame20ms)
+	toneFrame := make([]byte, muLawFrame20ms)
+	for i := range toneFrame {
+		toneFrame[i] = byte(i % 256)
+	}
+	data := append(silenceFrames, toneFrame...)
+
+	var emitted [][]byte
+	var warmupFired int
+	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func() {
+		warmupFired++
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard: %v", err)
+	}
+
+	// We should receive only 1 frame (the tone frame, after 5 silence frames discarded)
+	if len(emitted) != 1 {
+		t.Errorf("got %d emitted frames, want 1 (5 silence frames should be discarded)", len(emitted))
+	}
+	if len(emitted) > 0 && !bytes.Equal(emitted[0], toneFrame) {
+		t.Errorf("first emitted frame mismatch: got %d bytes, want %d", len(emitted[0]), len(toneFrame))
+	}
+	if warmupFired != 1 {
+		t.Errorf("warmup signal fired %d times, want 1", warmupFired)
+	}
+	if capHit {
+		t.Errorf("capHit should be false when discard ends before cap")
+	}
+}
+
+// TestStreamMic_DiscardBoundedAtCap: 80 frames of 0xFF (silence). Assert nothing is
+// emitted for the first 75 frames, then frames 76–80 stream normally, and the
+// cap-hit flag is set.
+func TestStreamMic_DiscardBoundedAtCap(t *testing.T) {
+	data := bytes.Repeat([]byte{0xFF}, 80*muLawFrame20ms)
+
+	var emitted [][]byte
+	var warmupFired int
+	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func() {
+		warmupFired++
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard with cap: %v", err)
+	}
+
+	// Should emit exactly 5 frames (76–80), with first 75 discarded
+	if len(emitted) != 5 {
+		t.Errorf("got %d emitted frames, want 5 (first 75 discarded at cap)", len(emitted))
+	}
+	if !capHit {
+		t.Errorf("cap-hit flag not set; should be true when 75 silence frames reached")
+	}
+	if warmupFired != 1 {
+		t.Errorf("warmup signal fired %d times, want 1 (at cap)", warmupFired)
+	}
+}
+
+// TestStreamMic_MicWarmSignalFiresOnceAtFirstRealFrame: assert the mic-warm signal
+// fires exactly once at the moment the first real (non-discarded) frame is emitted,
+// or at the 75-frame cap if all input is silence.
+func TestStreamMic_MicWarmSignalFiresOnceAtFirstRealFrame(t *testing.T) {
+	// Mix: 3 silence frames, 1 tone frame, 2 more frames
+	silenceFrames := bytes.Repeat([]byte{0xFF}, 3*muLawFrame20ms)
+	toneFrame := make([]byte, muLawFrame20ms)
+	for i := range toneFrame {
+		toneFrame[i] = 0x80
+	}
+	moreFrames := bytes.Repeat([]byte{0x7F}, 2*muLawFrame20ms)
+	data := append(append(silenceFrames, toneFrame...), moreFrames...)
+
+	var emitted [][]byte
+	warmupSignal := make(chan struct{}, 1) // Buffered to avoid blocking
+	_, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func() {
+		select {
+		case warmupSignal <- struct{}{}:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard: %v", err)
+	}
+
+	// Should emit 3 frames (tone + 2 more), with 3 silence frames discarded
+	if len(emitted) != 3 {
+		t.Errorf("got %d emitted frames, want 3", len(emitted))
+	}
+
+	// Check signal fired exactly once
+	signalCount := 0
+	select {
+	case <-warmupSignal:
+		signalCount++
+	default:
+	}
+	if signalCount != 1 {
+		t.Errorf("warmup signal received %d times, want 1", signalCount)
+	}
+}

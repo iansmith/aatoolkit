@@ -34,6 +34,64 @@ func (e *mediaFrameEncoder) encode(payload []byte) ([]byte, error) {
 	return twilio.EncodeMediaWithMetadata(e.streamSID, payload, e.chunk, *e.seqNum)
 }
 
+// drainFramesWithDiscard reads frames from r, discarding leading all-0xFF frames
+// (μ-law silence), bounded by a cap of 75 frames (1500 ms). Once the first real
+// (non-0xFF) frame is encountered or the cap is reached, onMicWarm fires exactly once.
+// frameSize must be positive. Returns a flag indicating whether the cap was hit.
+func drainFramesWithDiscard(ctx context.Context, r io.Reader, frameSize int, send func([]byte) error, onMicWarm func()) (bool, error) {
+	if frameSize <= 0 {
+		return false, errors.New("drainFramesWithDiscard: frameSize must be positive")
+	}
+
+	const discardCap = 75 // frames, 1500 ms at 20 ms/frame
+	buf := make([]byte, frameSize)
+	discarded := 0
+	warmupFired := false
+	capHit := false
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return capHit, err
+		}
+		_, err := io.ReadFull(r, buf)
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return capHit, nil
+		}
+		if err != nil {
+			return capHit, err
+		}
+
+		// Check if this frame is pure silence (all 0xFF)
+		isSilence := true
+		for _, b := range buf {
+			if b != 0xFF {
+				isSilence = false
+				break
+			}
+		}
+
+		if isSilence && discarded < discardCap {
+			// Discard this silence frame
+			discarded++
+			continue
+		}
+
+		// Either this is a real frame or we've hit the cap
+		if !warmupFired {
+			warmupFired = true
+			if discarded >= discardCap {
+				capHit = true
+			}
+			onMicWarm()
+		}
+
+		// Emit the frame (real frame or post-cap silence frame)
+		if err := send(buf); err != nil {
+			return capHit, err
+		}
+	}
+}
+
 // drainFrames reads fixed-size frames from r and calls send for each complete
 // frame. A partial trailing frame is dropped. Stops on EOF, send error, or
 // context cancellation. frameSize must be positive.
