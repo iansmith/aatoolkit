@@ -642,3 +642,34 @@ func TestStreamMic_SilenceAfterRealFrameNotDiscarded(t *testing.T) {
 		t.Errorf("capHit should be false (discard ended before cap)")
 	}
 }
+
+// TestStreamMic_MicWarmSignalFiresAtCapOnImmediateEOF: reader = exactly 75 silence
+// frames then EOF (the caller stayed muted for the entire warm-up window and the
+// call ended right at the cap, with no further frames). The mic-warm signal must
+// still fire once and report capHit=true, even though no frame is ever read past
+// the cap to trigger the check.
+func TestStreamMic_MicWarmSignalFiresAtCapOnImmediateEOF(t *testing.T) {
+	data := bytes.Repeat([]byte{0xFF}, 75*muLawFrame20ms)
+
+	var emitted [][]byte
+	var warmupFired int
+	capHit, err := drainFramesWithDiscard(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
+		emitted = append(emitted, append([]byte(nil), f...))
+		return nil
+	}, func(bool) {
+		warmupFired++
+	})
+	if err != nil {
+		t.Fatalf("drainFramesWithDiscard: %v", err)
+	}
+
+	if len(emitted) != 0 {
+		t.Errorf("got %d emitted frames, want 0 (all 75 were discarded, nothing follows)", len(emitted))
+	}
+	if !capHit {
+		t.Errorf("capHit should be true — the cap was reached even though the stream ended there")
+	}
+	if warmupFired != 1 {
+		t.Errorf("warmup signal fired %d times, want 1 (must fire at the cap even on immediate EOF)", warmupFired)
+	}
+}
