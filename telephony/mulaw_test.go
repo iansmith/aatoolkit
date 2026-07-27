@@ -105,30 +105,28 @@ func TestLinearToMuLaw_TieBreak(t *testing.T) {
 		chosenErr := absErr(sample, chosen)
 		chosenMag := mag(chosen)
 
-		// Find all codes with the same minimum error
-		var tiedCodes []byte
+		// Find minimum error among all codes and verify the property in one pass
+		minErr := chosenErr
 		for b := byte(0); b <= 255; b++ {
-			if absErr(sample, b) == chosenErr {
-				tiedCodes = append(tiedCodes, b)
-			}
-		}
-
-		// Verify the chosen code has maximum magnitude among tied codes
-		for _, b := range tiedCodes {
-			bMag := mag(b)
-			if bMag > chosenMag {
-				t.Errorf("LinearToMuLaw(%d) chose 0x%02x (mag %d), but 0x%02x has mag %d",
-					sample, chosen, chosenMag, b, bMag)
+			candErr := absErr(sample, b)
+			if candErr < minErr {
+				t.Errorf("LinearToMuLaw(%d) chose 0x%02x (err %d), but 0x%02x has err %d",
+					sample, chosen, chosenErr, b, candErr)
 				return
 			}
-		}
-
-		// When magnitude is zero (±0 tie), verify we chose 0xFF
-		if chosenMag == 0 {
-			if chosen != 0xFF {
-				t.Errorf("LinearToMuLaw(%d): when mag=0, chose 0x%02x, want 0xFF",
-					sample, chosen)
-				return
+			if candErr == minErr && b != chosen {
+				candMag := mag(b)
+				if candMag > chosenMag {
+					t.Errorf("LinearToMuLaw(%d) chose 0x%02x (mag %d), but 0x%02x has mag %d",
+						sample, chosen, chosenMag, b, candMag)
+					return
+				}
+				// When magnitude is zero, must prefer 0xFF
+				if chosenMag == 0 && candMag == 0 && b > chosen {
+					t.Errorf("LinearToMuLaw(%d): mag=0 tie between 0x%02x and 0x%02x, chose 0x%02x, want 0xFF",
+						sample, chosen, b, chosen)
+					return
+				}
 			}
 		}
 	}
