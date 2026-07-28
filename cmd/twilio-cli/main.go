@@ -165,7 +165,7 @@ func runSMSMode(args []string) {
 		log.Fatalf("twilio-cli: sms: %v", err)
 	}
 
-	fmt.Printf("captured reply: To=%s Body=%q\n", msg.To, msg.Body)
+	fmt.Printf("captured reply — From=%s To=%s\n\n%s\n", msg.From, msg.To, msg.Body)
 }
 
 func main() {
