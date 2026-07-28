@@ -5,6 +5,9 @@ import (
 	"fmt"
 )
 
+// MuLawSilence is the μ-law code for the silence byte (zero PCM value).
+const MuLawSilence = byte(0xFF)
+
 // EncodeMuLawFrames encodes a WAV file to G.711 μ-law frames suitable for Twilio.
 // It decodes the WAV header, extracts PCM samples, encodes them to μ-law, and
 // packs them into 20 ms frames (160 bytes each at 8 kHz), returned as a slice of
@@ -23,7 +26,7 @@ func EncodeMuLawFrames(wav []byte) ([][]byte, error) {
 
 	mulaw := make([]byte, len(pcm))
 	for i, sample := range pcm {
-		mulaw[i] = linearToMuLaw(sample)
+		mulaw[i] = LinearToMuLaw(sample)
 	}
 
 	frameSize := SampleRateHz * MuLawFrameMS / 1000
@@ -35,7 +38,7 @@ func EncodeMuLawFrames(wav []byte) ([][]byte, error) {
 	padded := make([]byte, numFrames*frameSize)
 	copy(padded, mulaw)
 	for i := len(mulaw); i < len(padded); i++ {
-		padded[i] = 0xFF
+		padded[i] = MuLawSilence
 	}
 
 	frames := make([][]byte, numFrames)
@@ -129,25 +132,47 @@ func decodeWAVToPCM16(wav []byte) ([]int16, int, error) {
 	return pcm, sampleRate, nil
 }
 
-// linearToMuLaw encodes a 16-bit PCM sample to a G.711 μ-law byte.
+// LinearToMuLaw encodes a 16-bit PCM sample to a G.711 μ-law byte.
 // Finds the μ-law byte that best represents the input by searching all 256 values.
-func linearToMuLaw(sample int16) byte {
+// Ties resolve in two ordered steps: (1) prefer the larger decoded magnitude;
+// (2) the residual ±0 tie resolves to 0xFF.
+func LinearToMuLaw(sample int16) byte {
 	minErr := int32(32768)
-	bestByte := byte(0xFF)
+	bestByte := MuLawSilence
+	bestMag := int32(0)
 
 	for b := 0; b <= 255; b++ {
 		decoded := muLawToLinear(byte(b))
-		err := int32(sample) - int32(decoded)
-		if err < 0 {
-			err = -err
-		}
+		err := absInt32(int32(sample) - int32(decoded))
+		mag := absInt32(int32(decoded))
+
+		// Update best if: (1) this code has strictly lower error, OR
+		// (2) same error but larger magnitude, OR
+		// (3) same error and same magnitude (zero), prefer 0xFF (larger byte value)
+		isBetter := false
 		if err < minErr {
+			isBetter = true
+		} else if err == minErr && mag > bestMag {
+			isBetter = true
+		} else if err == minErr && mag == bestMag && mag == 0 && byte(b) > bestByte {
+			isBetter = true
+		}
+
+		if isBetter {
 			minErr = err
+			bestMag = mag
 			bestByte = byte(b)
 		}
 	}
 
 	return bestByte
+}
+
+func absInt32(v int32) int32 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // resampleToMono8kHz resamples to mono 8 kHz using linear interpolation.

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
@@ -120,7 +121,7 @@ func TestDrainFrames_FrameSizeOne_EachByteIsSent(t *testing.T) {
 
 // Boundary: verify sends receive exactly frameSize bytes, not a shared buffer slice.
 func TestDrainFrames_EachSendReceivesFrameSizeBytes(t *testing.T) {
-	data := bytes.Repeat([]byte{0xff}, 2*muLawFrame20ms)
+	data := bytes.Repeat([]byte{telephony.MuLawSilence}, 2*muLawFrame20ms)
 	var sizes []int
 	err := drainFrames(context.Background(), bytes.NewReader(data), muLawFrame20ms, func(f []byte) error {
 		sizes = append(sizes, len(f))
@@ -474,7 +475,7 @@ func TestDrainFrames_FrameSizeZero_ReturnsError(t *testing.T) {
 // one "tone" frame (non-0xFF). Assert exactly 5 leading frames are dropped and the
 // first emitted frame equals the tone frame byte-for-byte.
 func TestStreamMic_DiscardsLeadingMuLawSilence(t *testing.T) {
-	silenceFrames := bytes.Repeat([]byte{0xFF}, 5*muLawFrame20ms)
+	silenceFrames := bytes.Repeat([]byte{telephony.MuLawSilence}, 5*muLawFrame20ms)
 	toneFrame := make([]byte, muLawFrame20ms)
 	for i := range toneFrame {
 		toneFrame[i] = byte(i % 256)
@@ -512,7 +513,7 @@ func TestStreamMic_DiscardsLeadingMuLawSilence(t *testing.T) {
 // emitted for the first 75 frames, then frames 76–80 stream normally, and the
 // cap-hit flag is set.
 func TestStreamMic_DiscardBoundedAtCap(t *testing.T) {
-	data := bytes.Repeat([]byte{0xFF}, 80*muLawFrame20ms)
+	data := bytes.Repeat([]byte{telephony.MuLawSilence}, 80*muLawFrame20ms)
 
 	var emitted [][]byte
 	var warmupFired int
@@ -543,7 +544,7 @@ func TestStreamMic_DiscardBoundedAtCap(t *testing.T) {
 // or at the 75-frame cap if all input is silence.
 func TestStreamMic_MicWarmSignalFiresOnceAtFirstRealFrame(t *testing.T) {
 	// Mix: 3 silence frames, 1 tone frame, 2 more frames
-	silenceFrames := bytes.Repeat([]byte{0xFF}, 3*muLawFrame20ms)
+	silenceFrames := bytes.Repeat([]byte{telephony.MuLawSilence}, 3*muLawFrame20ms)
 	toneFrame := make([]byte, muLawFrame20ms)
 	for i := range toneFrame {
 		toneFrame[i] = 0x80
@@ -590,7 +591,7 @@ func TestStreamMic_MicWarmSignalFiresOnceAtFirstRealFrame(t *testing.T) {
 // and the final real frame). None of the post-warmup silence should be discarded.
 func TestStreamMic_SilenceAfterRealFrameNotDiscarded(t *testing.T) {
 	// 5 leading silence frames
-	leadingSilence := bytes.Repeat([]byte{0xFF}, 5*muLawFrame20ms)
+	leadingSilence := bytes.Repeat([]byte{telephony.MuLawSilence}, 5*muLawFrame20ms)
 
 	// 1 real frame (pattern: 0x00, 0x01, ..., 0x9F)
 	realFrame1 := make([]byte, muLawFrame20ms)
@@ -599,7 +600,7 @@ func TestStreamMic_SilenceAfterRealFrameNotDiscarded(t *testing.T) {
 	}
 
 	// 3 mid-call silence frames (these must NOT be discarded after warmupFired)
-	midSilence := bytes.Repeat([]byte{0xFF}, 3*muLawFrame20ms)
+	midSilence := bytes.Repeat([]byte{telephony.MuLawSilence}, 3*muLawFrame20ms)
 
 	// 1 final real frame (pattern: 0x80, 0x81, ..., 0x1F)
 	realFrame2 := make([]byte, muLawFrame20ms)
@@ -649,7 +650,7 @@ func TestStreamMic_SilenceAfterRealFrameNotDiscarded(t *testing.T) {
 // still fire once and report capHit=true, even though no frame is ever read past
 // the cap to trigger the check.
 func TestStreamMic_MicWarmSignalFiresAtCapOnImmediateEOF(t *testing.T) {
-	data := bytes.Repeat([]byte{0xFF}, 75*muLawFrame20ms)
+	data := bytes.Repeat([]byte{telephony.MuLawSilence}, 75*muLawFrame20ms)
 
 	var emitted [][]byte
 	var warmupFired int

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 
+	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
@@ -65,7 +66,7 @@ func drainFramesWithDiscard(ctx context.Context, r io.Reader, frameSize int, sen
 		// Check if this frame is pure silence (all 0xFF)
 		isSilence := true
 		for _, b := range buf {
-			if b != 0xFF {
+			if b != telephony.MuLawSilence {
 				isSilence = false
 				break
 			}
