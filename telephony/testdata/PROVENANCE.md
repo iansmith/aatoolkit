@@ -14,7 +14,7 @@
 Verify at any time:
 
 ```sh
-shasum -a 256 internal/telephony/testdata/meetings_today.ulaw
+shasum -a 256 telephony/testdata/meetings_today.ulaw
 # 556fe18f83e69ddd021a19d353a45f1352e4cec9a3ed78aa2e2aa7973c7cdc03
 ```
 
@@ -29,24 +29,21 @@ ffmpeg -i <source-recording> -ar 8000 -ac 1 -f mulaw meetings_today.ulaw
 
 ## Why this fixture
 
-`internal/telephony/testdata/silero_goldens.json` (SOP-80/95) is a 24-frame
-synthetic/short fixture built to compare gonnx against onnxruntime bit-for-bit on
+`telephony/testdata/silero_goldens.json` (SOP-80/95) is a 24-frame synthetic/short
+fixture built to compare the VAD model's output against onnxruntime bit-for-bit on
 individual frames. It doesn't exercise a real end-to-end call: real leading
 silence, a real utterance, real trailing silence, and the full
 decode → window → detect → hysteresis state machine chain that
-`internal/telephony/vad.go`'s `runVAD` actually runs in production.
+`telephony/vad.go`'s `runVAD` actually runs in production.
 
 This fixture — a real recording of the phrase the engine is meant to actually
 handle ("Can you show me my meetings today?") — is what
-`internal/telephony/silero_e2e_test.go`'s `TestSileroE2ETimelineGolden` uses to
-pin the emitted `VADEvent` timeline (speech onset → silence → end-of-utterance)
-against a committed golden, so a mis-wired detector, a windowing bug, or a
-state-machine regression in that chain gets caught.
+`telephony/vad_config_test.go`'s `TestSileroE2ETimelineGolden` uses to pin the
+emitted `VADEvent` timeline (speech onset → silence → end-of-utterance) against a
+committed golden, so a mis-wired detector, a windowing bug, or a state-machine
+regression in that chain gets caught.
 
-Do not confuse this with `third_party/gonnx/sample_models/silero_vad/test_10s.ulaw`
-(SOP-89's NaN-divergence regression fixture) or reuse it for anything outside this
-ticket's stated scope — see `third_party/gonnx/sample_models/silero_vad/PROVENANCE.md`
-for that fixture's own story.
+Do not reuse this fixture for anything outside this ticket's stated scope.
 
 ## Companion fixtures
 
@@ -57,8 +54,8 @@ for that fixture's own story.
   running the real, unmodified the engine pipeline (`decodeMuLaw` → `windower` →
   `sileroDetector.Detect` → `vadMachine.step`) once over this recording and
   snapshotting its output. `TestSileroE2ETimelineGolden` in
-  `internal/telephony/silero_e2e_test.go` asserts the pipeline reproduces this
-  timeline exactly, every run.
+  `telephony/vad_config_test.go` asserts the pipeline reproduces this timeline
+  exactly, every run.
 
   **This timeline is tied to `defaultVADConfig`'s thresholds, so a deliberate
   tuning change moves it — and the diff is the check.** Every event's

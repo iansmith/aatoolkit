@@ -102,6 +102,4 @@ aatoolkit is developed alongside its consumer(s) via a `go.work` workspace one d
 (so cross-module edits resolve from local disk); `go.work` is not committed. CI and the
 consumer's release builds use the pinned module version, so aatoolkit must always build and
 test **standalone** — verify with `GOWORK=off go build ./... && GOWORK=off go test ./...`
-before relying on a change. The vendored `third_party/gonnx` fork is wired via a local
-`replace`; a consumer that depends on aatoolkit must re-declare that replace (replace
-directives are not inherited).
+before relying on a change.
