@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+
+	"github.com/coder/websocket"
 )
 
 // This file is the file-backed frame source: an alternative to capture_darwin.go's
@@ -22,8 +24,12 @@ var errNotImplemented = errors.New("not implemented")
 // it is unit-testable without driving main(), which ends in log.Fatalf/os.Exit.
 //
 // A relative path resolves against the process working directory.
+// The Phase 0 stub returns ("", nil) rather than an error deliberately: a stub
+// that rejected everything would make every rejection-shaped test pass
+// vacuously. Returning success makes them genuinely red, so the baseline
+// actually constrains the implementation.
 func resolveAudioPath(path string) (string, error) {
-	return "", errNotImplemented
+	return "", nil
 }
 
 // streamFileFramesFrom reads muLawFrame20ms-sized frames from r and hands each to
@@ -38,4 +44,14 @@ func resolveAudioPath(path string) (string, error) {
 // TestDrainFrames_* suite tests at; streamFileFrames wraps it for the live path.
 func streamFileFramesFrom(ctx context.Context, r io.Reader, send func([]byte) error, onMicWarm func(bool)) error {
 	return errNotImplemented
+}
+
+// streamFileFrames returns the frame source dial() calls through when -audio is
+// set: it opens path, wraps each frame with the call's mediaFrameEncoder, and
+// writes it to conn. The returned func matches the streamMic seam's signature
+// (dial.go), mirroring capture_darwin.go's streamMicFrames shape.
+func streamFileFrames(path string) func(context.Context, *websocket.Conn, string, *int, func(bool)) error {
+	return func(context.Context, *websocket.Conn, string, *int, func(bool)) error {
+		return errNotImplemented
+	}
 }
