@@ -25,12 +25,6 @@ import os
 import sys
 from pathlib import Path
 
-# Allow model downloads - disable offline mode if model cache doesn't exist yet
-# Do this BEFORE importing facts_server (which sets HF_HUB_OFFLINE at module load)
-if not os.path.exists(os.path.expanduser("~/.cache/huggingface/hub/models--urchade--gliner_small-v2.1")):
-    os.environ["HF_HUB_OFFLINE"] = "0"
-    os.environ["TRANSFORMERS_OFFLINE"] = "0"
-
 from fastapi.testclient import TestClient
 
 import facts_server
@@ -110,7 +104,7 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default=None,
+        default=os.environ.get("AATOOLKIT_FACTS_MODEL", "urchade/gliner_small-v2.1"),
         help="Model identifier or path (default: env AATOOLKIT_FACTS_MODEL or urchade/gliner_small-v2.1)"
     )
 
@@ -123,63 +117,48 @@ def main():
     with open(cases_path) as f:
         cases = json.load(f)
 
-    # Resolve model (use facts_server's logic)
-    if args.model is None:
-        import os
-        args.model = os.environ.get("AATOOLKIT_FACTS_MODEL", "urchade/gliner_small-v2.1")
-
     model = facts_server.resolve_model(args.model)
-
-    # Disable offline mode temporarily for model loading (facts_server sets it, but we need to download)
-    os.environ.pop("HF_HUB_OFFLINE", None)
-    os.environ.pop("TRANSFORMERS_OFFLINE", None)
-
-    # Load model
-    extractor = facts_server.load_model(model)
-
-    # Create app with pre-loaded extractor
-    app = facts_server.create_app(extractor=extractor, warmup=False)
-    client = TestClient(app)
 
     # Run cases
     results = []
     all_passed = True
 
-    for case in cases:
-        case_id = case.get("id", "unknown")
-        category = case.get("category", "unknown")
+    with TestClient(facts_server.create_app(model=model)) as client:
+        for case in cases:
+            case_id = case.get("id", "unknown")
+            category = case.get("category", "unknown")
 
-        # Get steered row
-        resp = client.post("/extract", json={
-            "text": case["text"],
-            "labels": case["steered_labels"],
-            "threshold": case["threshold"]
-        })
-        steered_spans = resp.json()["spans"] if resp.status_code == 200 else []
+            # Get steered row
+            resp = client.post("/extract", json={
+                "text": case["text"],
+                "labels": case["steered_labels"],
+                "threshold": case["threshold"]
+            })
+            steered_spans = resp.json()["spans"] if resp.status_code == 200 else []
 
-        # Get control row
-        resp = client.post("/extract", json={
-            "text": case["text"],
-            "labels": case["control_labels"],
-            "threshold": case["threshold"]
-        })
-        control_spans = resp.json()["spans"] if resp.status_code == 200 else []
+            # Get control row
+            resp = client.post("/extract", json={
+                "text": case["text"],
+                "labels": case["control_labels"],
+                "threshold": case["threshold"]
+            })
+            control_spans = resp.json()["spans"] if resp.status_code == 200 else []
 
-        # Judge
-        passed, failures = judge_case(case, steered_spans, control_spans)
-        status = "PASS" if passed else "FAIL"
+            # Judge
+            passed, failures = judge_case(case, steered_spans, control_spans)
+            status = "PASS" if passed else "FAIL"
 
-        if not passed:
-            all_passed = False
+            if not passed:
+                all_passed = False
 
-        results.append({
-            "id": case_id,
-            "category": category,
-            "status": status,
-            "steered_spans": steered_spans,
-            "control_spans": control_spans,
-            "failures": failures
-        })
+            results.append({
+                "id": case_id,
+                "category": category,
+                "status": status,
+                "steered_spans": steered_spans,
+                "control_spans": control_spans,
+                "failures": failures
+            })
 
     # Print results table
     print("\n" + "="*120)
