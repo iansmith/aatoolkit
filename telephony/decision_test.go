@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -41,6 +42,73 @@ func (m *mockRecorder) all() []telephony.DecisionEvent {
 	return append([]telephony.DecisionEvent(nil), m.events...)
 }
 
+// startSession builds a Session with the given options, starts it, and fails
+// the test on a start error -- the setup repeated at the top of every
+// decision-recorder test in this file.
+func startSession(t *testing.T, sessionID string, opts ...telephony.SessionOption) *telephony.Session {
+	t.Helper()
+	s := telephony.NewSession(context.Background(), sessionID, opts...)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return s
+}
+
+// pumpSilenceFrames sends n windowFrame(0x80) frames spaced 2ms apart -- the
+// speech-then-silence drive repeated (with varying counts and timeouts)
+// across the decision-recorder tests.
+func pumpSilenceFrames(t *testing.T, dataIn telephony.TwilioDataPlaneInput, n int, timeout time.Duration) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		sendData(t, dataIn, windowFrame(0x80), timeout)
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// filterByKind returns the events of the given Kind, preserving order.
+func filterByKind(evs []telephony.DecisionEvent, kind string) []telephony.DecisionEvent {
+	var out []telephony.DecisionEvent
+	for _, ev := range evs {
+		if ev.Kind == kind {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// waitTurnComplete blocks until the sink has recorded at least one turn, with
+// a deadlock backstop a passing test never reaches.
+func waitTurnComplete(t *testing.T, sink *spySink) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(sink.turnTexts()) == 0 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if len(sink.turnTexts()) == 0 {
+		t.Fatal("turn did not complete within the backstop")
+	}
+}
+
+// fieldCheck pairs a precomputed assertion outcome with its failure message,
+// letting a run of independent field checks be table-driven instead of a
+// chain of if statements.
+type fieldCheck struct {
+	ok  bool
+	msg string
+}
+
+// checkFields reports every failing check via t.Error, preserving the
+// "check everything, report every failure" behavior of a chain of t.Errorf
+// calls.
+func checkFields(t *testing.T, checks []fieldCheck) {
+	t.Helper()
+	for _, c := range checks {
+		if !c.ok {
+			t.Error(c.msg)
+		}
+	}
+}
+
 // TestDecisionRecorder_EndOfUtterance drives one utterance through a live
 // session and asserts exactly one end-of-utterance DecisionEvent is recorded,
 // naming EndSilenceMS, its resolved value, an audio-position time, and the STT
@@ -52,7 +120,7 @@ func TestDecisionRecorder_EndOfUtterance(t *testing.T) {
 	sttOut := telephony.NewBufferedChan[telephony.STTResult](100)
 
 	probs := speechThenSilenceProbs(1, telephony.EndSilenceWindows())
-	s := telephony.NewSession(context.Background(), "test-decrec",
+	s := startSession(t, "test-decrec",
 		telephony.WithVADFactory(func() (telephony.VADDetector, error) {
 			return &fakeDetector{probs: probs}, nil
 		}),
@@ -61,15 +129,9 @@ func TestDecisionRecorder_EndOfUtterance(t *testing.T) {
 		telephony.WithSTTOutput(sttOut),
 		telephony.WithDecisionRecorder(rec),
 	)
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
 	defer s.Close()
 
-	for i := 0; i < telephony.EndSilenceWindows()+2; i++ {
-		sendData(t, dataIn, windowFrame(0x80), 5*time.Second)
-		time.Sleep(2 * time.Millisecond)
-	}
+	pumpSilenceFrames(t, dataIn, telephony.EndSilenceWindows()+2, 5*time.Second)
 
 	// The STT dispatch confirms VADEndOfUtterance fired; recordEndOfUtterance
 	// runs right after it on the same sequencer goroutine.
@@ -85,37 +147,21 @@ func TestDecisionRecorder_EndOfUtterance(t *testing.T) {
 	// (M2 added speech-start + silence), so pick out the EOU event rather than
 	// asserting a total count.
 	evs := rec.all()
-	var eou []telephony.DecisionEvent
-	for _, ev := range evs {
-		if ev.Kind == telephony.DecisionKindEndOfUtter {
-			eou = append(eou, ev)
-		}
-	}
+	eou := filterByKind(evs, telephony.DecisionKindEndOfUtter)
 	if len(eou) != 1 {
 		t.Fatalf("end-of-utterance events: got %d, want 1 (all: %+v)", len(eou), evs)
 	}
 	e := eou[0]
-	if e.Type != telephony.DecisionTypeVAD {
-		t.Errorf("Type: got %q, want %q", e.Type, telephony.DecisionTypeVAD)
-	}
-	if e.Kind != telephony.DecisionKindEndOfUtter {
-		t.Errorf("Kind: got %q, want %q", e.Kind, telephony.DecisionKindEndOfUtter)
-	}
-	if e.Param != telephony.DecisionParamEndSilence {
-		t.Errorf("Param: got %q, want %q", e.Param, telephony.DecisionParamEndSilence)
-	}
-	if want := telephony.DefaultVADConfig().EndSilenceMS; e.ParamValue != want {
-		t.Errorf("ParamValue: got %v, want %d", e.ParamValue, want)
-	}
-	if e.RequestID != req.RequestID {
-		t.Errorf("RequestID: got %d, want %d", e.RequestID, req.RequestID)
-	}
-	if e.AudioMS <= 0 || e.AudioMS%32 != 0 {
-		t.Errorf("AudioMS: got %d, want a positive multiple of 32 (window-clock ms)", e.AudioMS)
-	}
-	if !strings.Contains(e.Effect, "STT request") {
-		t.Errorf("Effect: got %q, want a mention of the dispatched STT request", e.Effect)
-	}
+	want := telephony.DefaultVADConfig().EndSilenceMS
+	checkFields(t, []fieldCheck{
+		{e.Type == telephony.DecisionTypeVAD, fmt.Sprintf("Type: got %q, want %q", e.Type, telephony.DecisionTypeVAD)},
+		{e.Kind == telephony.DecisionKindEndOfUtter, fmt.Sprintf("Kind: got %q, want %q", e.Kind, telephony.DecisionKindEndOfUtter)},
+		{e.Param == telephony.DecisionParamEndSilence, fmt.Sprintf("Param: got %q, want %q", e.Param, telephony.DecisionParamEndSilence)},
+		{e.ParamValue == want, fmt.Sprintf("ParamValue: got %v, want %d", e.ParamValue, want)},
+		{e.RequestID == req.RequestID, fmt.Sprintf("RequestID: got %d, want %d", e.RequestID, req.RequestID)},
+		{e.AudioMS > 0 && e.AudioMS%32 == 0, fmt.Sprintf("AudioMS: got %d, want a positive multiple of 32 (window-clock ms)", e.AudioMS)},
+		{strings.Contains(e.Effect, "STT request"), fmt.Sprintf("Effect: got %q, want a mention of the dispatched STT request", e.Effect)},
+	})
 }
 
 // waitCapEvent blocks until exactly one type="cap" DecisionEvent of the given
@@ -335,7 +381,7 @@ func TestDecisionRecorder_STTDispatchAndResult(t *testing.T) {
 	sttOut := telephony.NewBufferedChan[telephony.STTResult](100)
 
 	probs := speechThenSilenceProbs(1, telephony.EndSilenceWindows())
-	s := telephony.NewSession(context.Background(), sessionID,
+	s := startSession(t, sessionID,
 		telephony.WithVADFactory(func() (telephony.VADDetector, error) {
 			return &fakeDetector{probs: probs}, nil
 		}),
@@ -345,15 +391,9 @@ func TestDecisionRecorder_STTDispatchAndResult(t *testing.T) {
 		telephony.WithDecisionRecorder(rec),
 		telephony.WithDecisionClock(fnow.now),
 	)
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
 	defer s.Close()
 
-	for i := 0; i < telephony.EndSilenceWindows()+2; i++ {
-		sendData(t, dataIn, windowFrame(0x80), 5*time.Second)
-		time.Sleep(2 * time.Millisecond)
-	}
+	pumpSilenceFrames(t, dataIn, telephony.EndSilenceWindows()+2, 5*time.Second)
 
 	// The dispatch appears on sttIn; receiving it proves dispatchSTT (and its
 	// stt_dispatch record + stored dispatch instant) have already run.
@@ -365,12 +405,10 @@ func TestDecisionRecorder_STTDispatchAndResult(t *testing.T) {
 	}
 
 	dispatch := waitEventType(t, rec, "stt_dispatch")
-	if dispatch.RequestID != req.RequestID {
-		t.Errorf("stt_dispatch RequestID: got %d, want %d", dispatch.RequestID, req.RequestID)
-	}
-	if dispatch.AudioBytes <= 0 {
-		t.Errorf("stt_dispatch AudioBytes: got %d, want > 0", dispatch.AudioBytes)
-	}
+	checkFields(t, []fieldCheck{
+		{dispatch.RequestID == req.RequestID, fmt.Sprintf("stt_dispatch RequestID: got %d, want %d", dispatch.RequestID, req.RequestID)},
+		{dispatch.AudioBytes > 0, fmt.Sprintf("stt_dispatch AudioBytes: got %d, want > 0", dispatch.AudioBytes)},
+	})
 
 	// Advance the clock, then deliver the result: latency must be exactly the delta.
 	fnow.advance(800 * time.Millisecond)
@@ -388,18 +426,12 @@ func TestDecisionRecorder_STTDispatchAndResult(t *testing.T) {
 	}
 
 	result := waitEventType(t, rec, "stt_result")
-	if result.RequestID != req.RequestID {
-		t.Errorf("stt_result RequestID: got %d, want %d", result.RequestID, req.RequestID)
-	}
-	if result.LatencyMS != 800 {
-		t.Errorf("stt_result LatencyMS: got %d, want 800", result.LatencyMS)
-	}
-	if result.Text != "hello world" {
-		t.Errorf("stt_result Text: got %q, want %q", result.Text, "hello world")
-	}
-	if result.STTDurSec != 1.5 {
-		t.Errorf("stt_result STTDurSec: got %v, want 1.5", result.STTDurSec)
-	}
+	checkFields(t, []fieldCheck{
+		{result.RequestID == req.RequestID, fmt.Sprintf("stt_result RequestID: got %d, want %d", result.RequestID, req.RequestID)},
+		{result.LatencyMS == 800, fmt.Sprintf("stt_result LatencyMS: got %d, want 800", result.LatencyMS)},
+		{result.Text == "hello world", fmt.Sprintf("stt_result Text: got %q, want %q", result.Text, "hello world")},
+		{result.STTDurSec == 1.5, fmt.Sprintf("stt_result STTDurSec: got %v, want 1.5", result.STTDurSec)},
+	})
 }
 
 // TestTranscriptSummary_WrittenAtClose drives one full user turn (utterance ->
@@ -416,7 +448,7 @@ func TestTranscriptSummary_WrittenAtClose(t *testing.T) {
 	sttIn := telephony.NewBufferedChan[telephony.STTRequest](100)
 	sttOut := telephony.NewBufferedChan[telephony.STTResult](100)
 	sink := &spySink{}
-	s := telephony.NewSession(context.Background(), sid,
+	s := startSession(t, sid,
 		telephony.WithVADFactory(func() (telephony.VADDetector, error) { return &fakeDetector{probs: probs}, nil }),
 		telephony.WithTurnSink(sink),
 		telephony.WithTwilioDataInput(dataIn),
@@ -424,15 +456,9 @@ func TestTranscriptSummary_WrittenAtClose(t *testing.T) {
 		telephony.WithSTTOutput(sttOut),
 		telephony.WithTranscriptOutput(dir, sid, &live),
 	)
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
 
 	// One utterance -> end-of-utterance -> STT dispatch.
-	for i := 0; i < telephony.EndSilenceWindows()+2; i++ {
-		sendData(t, dataIn, windowFrame(0x80), recvTimeout)
-		time.Sleep(2 * time.Millisecond)
-	}
+	pumpSilenceFrames(t, dataIn, telephony.EndSilenceWindows()+2, recvTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), recvTimeout)
 	req, err := sttIn.Recv(ctx)
 	cancel()
@@ -448,17 +474,8 @@ func TestTranscriptSummary_WrittenAtClose(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Continued silence -> turn-end -> completeTurn captures the turn.
-	for i := 0; i <= telephony.TurnEndSilenceWindows()+10; i++ {
-		sendData(t, dataIn, windowFrame(0x80), recvTimeout)
-		time.Sleep(2 * time.Millisecond)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(sink.turnTexts()) == 0 {
-		time.Sleep(2 * time.Millisecond)
-	}
-	if len(sink.turnTexts()) == 0 {
-		t.Fatal("turn did not complete within the backstop")
-	}
+	pumpSilenceFrames(t, dataIn, telephony.TurnEndSilenceWindows()+11, recvTimeout)
+	waitTurnComplete(t, sink)
 
 	s.Close()
 
@@ -519,7 +536,10 @@ func TestWithFileDecisionRecorderFromEnv_Gating(t *testing.T) {
 
 // TestFileRecorder_FlushAndLiveFeed checks the concrete recorder both live-feeds
 // each event to its writer as it arrives and, on Close, flushes a homogeneous
-// JSONL plus a separate header file.
+// JSONL plus a separate header file. Split into one subtest per property --
+// the properties are independent (live-feed, jsonl flush, header contents,
+// close-idempotency) but share the same recorded fixture, so the subtests
+// run in sequence against shared state rather than each rebuilding it.
 func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
 	dir := t.TempDir()
 	var live bytes.Buffer
@@ -540,51 +560,59 @@ func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
 		r.Record(e)
 	}
 
-	if got := strings.Count(live.String(), "\n"); got != len(in) {
-		t.Errorf("live feed lines: got %d, want %d\n%s", got, len(in), live.String())
-	}
-
-	if err := r.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, "MZstream1.events.jsonl"))
-	if err != nil {
-		t.Fatalf("read jsonl: %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != len(in) {
-		t.Fatalf("jsonl lines: got %d, want %d", len(lines), len(in))
-	}
-	for i, ln := range lines {
-		var ev telephony.DecisionEvent
-		if err := json.Unmarshal([]byte(ln), &ev); err != nil {
-			t.Fatalf("line %d is not valid json: %v", i, err)
+	t.Run("live-feeds each event as it arrives", func(t *testing.T) {
+		if got := strings.Count(live.String(), "\n"); got != len(in) {
+			t.Errorf("live feed lines: got %d, want %d\n%s", got, len(in), live.String())
 		}
-		if ev.Seq != i+1 {
-			t.Errorf("line %d seq: got %d, want %d", i, ev.Seq, i+1)
+	})
+
+	t.Run("flushes a homogeneous jsonl on close", func(t *testing.T) {
+		if err := r.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
 		}
-	}
 
-	hdrData, err := os.ReadFile(filepath.Join(dir, "MZstream1.events.header.json"))
-	if err != nil {
-		t.Fatalf("read header: %v", err)
-	}
-	var hdr map[string]any
-	if err := json.Unmarshal(hdrData, &hdr); err != nil {
-		t.Fatalf("header is not valid json: %v", err)
-	}
-	if hdr["call_sid"] != "CAcall1" {
-		t.Errorf("header call_sid: got %v, want CAcall1", hdr["call_sid"])
-	}
-	if hdr["label"] != "sim" {
-		t.Errorf("header label: got %v, want sim", hdr["label"])
-	}
-	if _, ok := hdr["vad_config"]; !ok {
-		t.Errorf("header missing vad_config")
-	}
+		data, err := os.ReadFile(filepath.Join(dir, "MZstream1.events.jsonl"))
+		if err != nil {
+			t.Fatalf("read jsonl: %v", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		if len(lines) != len(in) {
+			t.Fatalf("jsonl lines: got %d, want %d", len(lines), len(in))
+		}
+		for i, ln := range lines {
+			var ev telephony.DecisionEvent
+			if err := json.Unmarshal([]byte(ln), &ev); err != nil {
+				t.Fatalf("line %d is not valid json: %v", i, err)
+			}
+			if ev.Seq != i+1 {
+				t.Errorf("line %d seq: got %d, want %d", i, ev.Seq, i+1)
+			}
+		}
+	})
 
-	if err := r.Close(); err != nil {
-		t.Fatalf("second Close (must be idempotent): %v", err)
-	}
+	t.Run("writes a header file on close", func(t *testing.T) {
+		hdrData, err := os.ReadFile(filepath.Join(dir, "MZstream1.events.header.json"))
+		if err != nil {
+			t.Fatalf("read header: %v", err)
+		}
+		var hdr map[string]any
+		if err := json.Unmarshal(hdrData, &hdr); err != nil {
+			t.Fatalf("header is not valid json: %v", err)
+		}
+		if hdr["call_sid"] != "CAcall1" {
+			t.Errorf("header call_sid: got %v, want CAcall1", hdr["call_sid"])
+		}
+		if hdr["label"] != "sim" {
+			t.Errorf("header label: got %v, want sim", hdr["label"])
+		}
+		if _, ok := hdr["vad_config"]; !ok {
+			t.Errorf("header missing vad_config")
+		}
+	})
+
+	t.Run("close is idempotent", func(t *testing.T) {
+		if err := r.Close(); err != nil {
+			t.Fatalf("second Close (must be idempotent): %v", err)
+		}
+	})
 }
