@@ -76,16 +76,21 @@ func TestSegmentAccumulator_ResetsAfterFlush(t *testing.T) {
 }
 
 // Every rule-listed delimiter triggers a flush once past the threshold, not
-// just '.'.
+// just '.'. A non-whitespace prefix keeps the buffer above the whitespace-only
+// floor so the delimiter's own flush-trigger effect is what's under test —
+// '\n' is itself whitespace, so a lone '\n' is correctly withheld by the
+// separate whitespace-only rule (see FlushSkipsWhitespaceOnly).
 func TestSegmentAccumulator_AllDelimitersTrigger(t *testing.T) {
 	for _, d := range []byte{'.', '?', '!', ',', '\n'} {
 		acc := newSegmentAccumulator(1)
+		acc.write('x')
 		seg, ok := acc.write(d)
 		if !ok {
 			t.Fatalf("delimiter %q: expected flush, got none", d)
 		}
-		if len(seg) != 1 || seg[0] != d {
-			t.Fatalf("delimiter %q: segment = %q, want the delimiter itself", d, seg)
+		want := "x" + string(d)
+		if seg != want {
+			t.Fatalf("delimiter %q: segment = %q, want %q", d, seg, want)
 		}
 	}
 }
