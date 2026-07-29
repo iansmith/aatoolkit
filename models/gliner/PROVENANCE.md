@@ -7,6 +7,7 @@
 | License | apache-2.0 — https://huggingface.co/urchade/gliner_small-v2.1 |
 | Base encoder | microsoft/deberta-v3-small at a36c739020e01763fe789b4b85e2df55d6180012 |
 | Sha256 (pytorch_model.bin) | 1d4e83e4e4ae4ae0a4fbc81a32ee6de480fb341650d73e808088bb2800312de4 |
+| Total download size | 610.66 MB (urchade/gliner_small-v2.1: gliner_config.json + pytorch_model.bin + README.md + .gitattributes = 477 B + 610,652,234 B + 4,756 B + 1,519 B = 610,658,986 B) |
 
 ## Fetch the model
 
