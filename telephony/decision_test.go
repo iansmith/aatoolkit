@@ -534,24 +534,30 @@ func TestWithFileDecisionRecorderFromEnv_Gating(t *testing.T) {
 	})
 }
 
-// TestFileRecorder_FlushAndLiveFeed checks the concrete recorder both live-feeds
-// each event to its writer as it arrives and, on Close, flushes a homogeneous
-// JSONL plus a separate header file. Split into one subtest per property --
-// the properties are independent (live-feed, jsonl flush, header contents,
-// close-idempotency) but share the same recorded fixture, so the subtests
-// run in sequence against shared state rather than each rebuilding it.
-func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
+// flushFixture is a fresh FileDecisionRecorder (its own temp dir and live
+// buffer) with the same two-event fixture already recorded. Each
+// TestFileRecorder_FlushAndLiveFeed subtest builds its own so it is runnable
+// and correct in isolation.
+type flushFixture struct {
+	dir  string
+	live *bytes.Buffer
+	r    *telephony.FileDecisionRecorder
+	in   []telephony.DecisionEvent
+}
+
+// newFlushFixture builds a flushFixture: a new recorder over a new temp dir,
+// with the fixture's two events already recorded. ParamValue/AudioMS in the
+// fixture are arbitrary inputs the recorder serializes verbatim — NOT the VAD
+// default (which is DefaultVADConfig().EndSilenceMS) -- any values work here,
+// so they are deliberately literals, decoupled from the tuned default.
+func newFlushFixture(t *testing.T) flushFixture {
+	t.Helper()
 	dir := t.TempDir()
 	var live bytes.Buffer
 	r := telephony.NewFileDecisionRecorder(dir, "MZstream1", "CAcall1", "sim", telephony.DefaultVADConfig(), &live)
 	if r == nil {
 		t.Fatal("NewFileDecisionRecorder returned nil for a non-empty dir")
 	}
-
-	// ParamValue/AudioMS here are arbitrary fixture inputs the recorder serializes
-	// verbatim — NOT the VAD default (which is DefaultVADConfig().EndSilenceMS). This
-	// test exercises the recorder's flush/live-feed, so any values work; they are
-	// deliberately literals, decoupled from the tuned default.
 	in := []telephony.DecisionEvent{
 		{Type: "vad", Kind: "end-of-utterance", Param: "EndSilenceMS", ParamValue: 700, AudioMS: 640, RequestID: 1, Effect: "utterance closed; dispatched STT request 1"},
 		{Type: "vad", Kind: "end-of-utterance", Param: "EndSilenceMS", ParamValue: 700, AudioMS: 1280, RequestID: 2, Effect: "utterance closed; dispatched STT request 2"},
@@ -559,25 +565,36 @@ func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
 	for _, e := range in {
 		r.Record(e)
 	}
+	return flushFixture{dir: dir, live: &live, r: r, in: in}
+}
 
+// TestFileRecorder_FlushAndLiveFeed checks the concrete recorder both live-feeds
+// each event to its writer as it arrives and, on Close, flushes a homogeneous
+// JSONL plus a separate header file. Split into one subtest per property --
+// the properties are independent (live-feed, jsonl flush, header contents,
+// close-idempotency) -- each subtest builds its own fixture and drives it to
+// whatever state (Close or not) it needs, so each runs correctly in isolation.
+func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
 	t.Run("live-feeds each event as it arrives", func(t *testing.T) {
-		if got := strings.Count(live.String(), "\n"); got != len(in) {
-			t.Errorf("live feed lines: got %d, want %d\n%s", got, len(in), live.String())
+		f := newFlushFixture(t)
+		if got := strings.Count(f.live.String(), "\n"); got != len(f.in) {
+			t.Errorf("live feed lines: got %d, want %d\n%s", got, len(f.in), f.live.String())
 		}
 	})
 
 	t.Run("flushes a homogeneous jsonl on close", func(t *testing.T) {
-		if err := r.Close(); err != nil {
+		f := newFlushFixture(t)
+		if err := f.r.Close(); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 
-		data, err := os.ReadFile(filepath.Join(dir, "MZstream1.events.jsonl"))
+		data, err := os.ReadFile(filepath.Join(f.dir, "MZstream1.events.jsonl"))
 		if err != nil {
 			t.Fatalf("read jsonl: %v", err)
 		}
 		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-		if len(lines) != len(in) {
-			t.Fatalf("jsonl lines: got %d, want %d", len(lines), len(in))
+		if len(lines) != len(f.in) {
+			t.Fatalf("jsonl lines: got %d, want %d", len(lines), len(f.in))
 		}
 		for i, ln := range lines {
 			var ev telephony.DecisionEvent
@@ -591,7 +608,12 @@ func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
 	})
 
 	t.Run("writes a header file on close", func(t *testing.T) {
-		hdrData, err := os.ReadFile(filepath.Join(dir, "MZstream1.events.header.json"))
+		f := newFlushFixture(t)
+		if err := f.r.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		hdrData, err := os.ReadFile(filepath.Join(f.dir, "MZstream1.events.header.json"))
 		if err != nil {
 			t.Fatalf("read header: %v", err)
 		}
@@ -611,7 +633,11 @@ func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
 	})
 
 	t.Run("close is idempotent", func(t *testing.T) {
-		if err := r.Close(); err != nil {
+		f := newFlushFixture(t)
+		if err := f.r.Close(); err != nil {
+			t.Fatalf("first Close: %v", err)
+		}
+		if err := f.r.Close(); err != nil {
 			t.Fatalf("second Close (must be idempotent): %v", err)
 		}
 	})
