@@ -210,6 +210,30 @@ func (t *Tap) WriteOut(payload []byte) {
 	t.outCount++
 }
 
+// nextOutFrame dequeues the oldest queued outbound frame, or -- when the
+// queue is empty -- synthesizes one frame of silence paced to the last
+// inbound frame's length (falling back to defaultFrameBytes before any
+// inbound frame has set the pace). Caller holds t.mu.
+func (t *Tap) nextOutFrame() []byte {
+	if t.outCount > 0 {
+		frame := t.outQueue[t.outHead]
+		t.outQueue[t.outHead] = nil // don't retain a reference past dequeue
+		t.outHead = (t.outHead + 1) % maxOutQueueFrames
+		t.outCount--
+		return frame
+	}
+
+	silenceLen := t.lastInFrameN
+	if silenceLen == 0 {
+		silenceLen = defaultFrameBytes
+	}
+	frame := make([]byte, silenceLen)
+	for i := range frame {
+		frame[i] = 0xFF
+	}
+	return frame
+}
+
 func (t *Tap) DrainOut() {
 	if t == nil {
 		return
@@ -231,24 +255,7 @@ func (t *Tap) DrainOut() {
 		t.wOut = f
 	}
 
-	var frame []byte
-	if t.outCount > 0 {
-		frame = t.outQueue[t.outHead]
-		t.outQueue[t.outHead] = nil // don't retain a reference past dequeue
-		t.outHead = (t.outHead + 1) % maxOutQueueFrames
-		t.outCount--
-	} else {
-		silenceLen := t.lastInFrameN
-		if silenceLen == 0 {
-			silenceLen = defaultFrameBytes
-		}
-		frame = make([]byte, silenceLen)
-		for i := range frame {
-			frame[i] = 0xFF
-		}
-	}
-
-	n, err := t.wOut.Write(frame)
+	n, err := t.wOut.Write(t.nextOutFrame())
 	if err != nil {
 		t.logOnce(err)
 	}
@@ -258,44 +265,41 @@ func (t *Tap) DrainOut() {
 	}
 }
 
-func (t *Tap) Close() {
-	if t == nil {
-		return
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.closed {
-		return
-	}
-	t.closed = true
-
+// closeWriters closes whichever of w/wOut were opened, logging (not
+// aggregating) any error via logOnce -- one line about the tap's first
+// failure is the whole guarantee, not a report of every failing writer.
+// Caller holds t.mu.
+func (t *Tap) closeWriters() {
 	if t.w != nil {
 		if err := t.w.Close(); err != nil {
 			t.logOnce(err)
 		}
 	}
-
 	if t.wOut != nil {
 		if err := t.wOut.Close(); err != nil {
 			t.logOnce(err)
 		}
 	}
+}
 
-	if t.frames == 0 {
-		if t.w != nil {
-			if err := os.Remove(t.inulawPath()); err != nil && !os.IsNotExist(err) {
-				t.logOnce(err)
-			}
+// removeEmptyRecordings deletes whichever ulaw files were opened when no
+// inbound frame ever arrived -- an empty recording is capture noise, not
+// data. Caller holds t.mu.
+func (t *Tap) removeEmptyRecordings() {
+	if t.w != nil {
+		if err := os.Remove(t.inulawPath()); err != nil && !os.IsNotExist(err) {
+			t.logOnce(err)
 		}
-		if t.wOut != nil {
-			if err := os.Remove(t.outulawPath()); err != nil && !os.IsNotExist(err) {
-				t.logOnce(err)
-			}
-		}
-		return
 	}
+	if t.wOut != nil {
+		if err := os.Remove(t.outulawPath()); err != nil && !os.IsNotExist(err) {
+			t.logOnce(err)
+		}
+	}
+}
 
+// writeSidecar marshals and writes the tap's JSON sidecar. Caller holds t.mu.
+func (t *Tap) writeSidecar() {
 	raw, err := json.Marshal(tapSidecar{
 		StreamSID:        t.streamSID,
 		CallSID:          t.callSID,
@@ -316,4 +320,26 @@ func (t *Tap) Close() {
 	if err := os.WriteFile(t.sidecarPath(), raw, 0o644); err != nil {
 		t.logOnce(err)
 	}
+}
+
+func (t *Tap) Close() {
+	if t == nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return
+	}
+	t.closed = true
+
+	t.closeWriters()
+
+	if t.frames == 0 {
+		t.removeEmptyRecordings()
+		return
+	}
+
+	t.writeSidecar()
 }
