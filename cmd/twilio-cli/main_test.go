@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -160,5 +161,120 @@ health = { path = "/healthz", port = 9730 }
 	_, err := webhookTarget("", basePath)
 	if err == nil {
 		t.Fatal("expected an error when the server server declares no webhook port")
+	}
+}
+
+// TestTwilioCLIRelativeAudioPathFromOtherCwd exercises the entrypoint as a
+// subprocess, from a working directory that is not the project root, passing a
+// relative path argument (AATK-56).
+//
+// It runs a PAIR of subprocesses with the identical relative argument
+// `-audio ./how_are_you.ulaw`. The paired control is the point: the "no file-open
+// error" assertion alone is vacuously satisfied by a build that never opens the
+// file at all, so only the red control proves the relative path is genuinely
+// resolved against the process working directory rather than the repo root.
+func TestTwilioCLIRelativeAudioPathFromOtherCwd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := filepath.Join(cwd, "..", "..")
+
+	// Build the entrypoint.
+	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk56")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
+	build.Dir = repoRoot
+	build.Env = append(os.Environ(), "GOWORK=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build entrypoint: %v\n%s", err, out)
+	}
+
+	// Stage the fixture in a directory that is NOT the repo root.
+	fixture := filepath.Join(repoRoot, "telephony", "testdata", "how_are_you.ulaw")
+	data, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	audioDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(audioDir, "how_are_you.ulaw"), data, 0o644); err != nil {
+		t.Fatalf("stage fixture: %v", err)
+	}
+
+	// Both runs pass the SAME relative argument; only the cwd differs.
+	run := func(dir string) string {
+		cmd := exec.Command(bin,
+			"-audio", "./how_are_you.ulaw",
+			"-webhook", "http://127.0.0.1:1/voice",
+			"+15551234567",
+		)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk56-test-token")
+		out, _ := cmd.CombinedOutput() // a non-zero exit is expected in both runs
+		return string(out)
+	}
+
+	const missingMarker = "no such file"
+
+	t.Run("fixture present in cwd: resolves, fails later at the webhook", func(t *testing.T) {
+		out := run(audioDir)
+		if strings.Contains(out, missingMarker) {
+			t.Errorf("relative -audio path was not resolved against the process working directory.\ncwd: %s\noutput:\n%s", audioDir, out)
+		}
+	})
+
+	t.Run("control: fixture absent from repo root, must fail at file open", func(t *testing.T) {
+		out := run(repoRoot)
+		if !strings.Contains(out, missingMarker) {
+			t.Errorf("control run did not fail at file open — the relative path is not being resolved against the process working directory (or validation never ran).\ncwd: %s\noutput:\n%s", repoRoot, out)
+		}
+		if !strings.Contains(out, "how_are_you.ulaw") {
+			t.Errorf("control run's error does not name the path as given.\noutput:\n%s", out)
+		}
+	})
+}
+
+// TestTwilioCLIWithoutAudioFlagKeepsMicDefault guards the ticket's behavior 4:
+// with no -audio, the mic path stays selected. The whole feature is a
+// reassignment of the streamMic package var (dial.go), so a wiring bug that
+// installed the file source unconditionally — with an empty path — would break
+// every existing mic invocation. dial_test.go's withFakeMic overrides that var,
+// so no in-process test can catch a wrong default; only a subprocess can.
+func TestTwilioCLIWithoutAudioFlagKeepsMicDefault(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := filepath.Join(cwd, "..", "..")
+
+	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk56-default")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
+	build.Dir = repoRoot
+	build.Env = append(os.Environ(), "GOWORK=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build entrypoint: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin,
+		"-webhook", "http://127.0.0.1:1/voice",
+		"+15551234567",
+	)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk56-test-token")
+	out, _ := cmd.CombinedOutput() // non-zero exit expected: the webhook is unreachable
+	got := string(out)
+
+	if strings.Contains(got, "no such file") {
+		t.Errorf("a run with no -audio attempted audio validation — the mic path must stay the default.\noutput:\n%s", got)
+	}
+	if strings.Contains(got, "panic:") {
+		t.Errorf("a run with no -audio panicked.\noutput:\n%s", got)
 	}
 }
