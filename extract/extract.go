@@ -25,3 +25,5 @@ type Span struct {
 type Extractor interface {
 	Extract(ctx context.Context, req Request) ([]Span, error)
 }
+
+var _ Extractor = (*Client)(nil)
