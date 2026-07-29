@@ -16,12 +16,21 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
-// streamMic is the mic-capture entry point dial() calls through. Overridable
-// in tests to simulate capture completion (EOF) deterministically, since real
-// mic capture has no natural EOF to trigger from a test. Receives an onMicWarm
-// callback that fires when the first real frame is emitted or the discard cap is hit,
-// with a bool indicating whether the cap was hit.
+// streamMic is the frame-source entry point dial() calls through. It defaults to
+// mic capture; main() reassigns it to a file-backed source when -audio is passed
+// (capture_file.go). It is also the seam tests override to simulate capture
+// completion (EOF) deterministically, since real mic capture has no natural EOF
+// to trigger from a test. Receives an onMicWarm callback that fires when the
+// first real frame is emitted or the discard cap is hit, with a bool indicating
+// whether the cap was hit.
+//
+// This is the ONE frame-source seam — a second one (a dialOption, say) would
+// leave two mechanisms selecting the same thing.
 var streamMic func(context.Context, *websocket.Conn, string, *int, func(bool)) error = streamMicFrames
+
+// frameSourceLabel names whatever streamMic currently is, for the connected log
+// line. Set alongside streamMic, never independently.
+var frameSourceLabel = "mic"
 
 // dialOptions configures optional dial() behavior.
 type dialOptions struct {
@@ -155,7 +164,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	if err := writeHandshake(ctx, conn, startMsg); err != nil {
 		return ignoreHandshakeHangup(err)
 	}
-	log.Printf("twilio-cli: connected to %s, streaming mic (Ctrl-C to stop)", addr)
+	log.Printf("twilio-cli: connected to %s, streaming %s (Ctrl-C to stop)", addr, frameSourceLabel)
 
 	micErrCh := make(chan error, 1)
 	go func() {

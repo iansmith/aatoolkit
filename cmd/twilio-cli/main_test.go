@@ -236,3 +236,45 @@ func TestTwilioCLIRelativeAudioPathFromOtherCwd(t *testing.T) {
 		}
 	})
 }
+
+// TestTwilioCLIWithoutAudioFlagKeepsMicDefault guards the ticket's behavior 4:
+// with no -audio, the mic path stays selected. The whole feature is a
+// reassignment of the streamMic package var (dial.go), so a wiring bug that
+// installed the file source unconditionally — with an empty path — would break
+// every existing mic invocation. dial_test.go's withFakeMic overrides that var,
+// so no in-process test can catch a wrong default; only a subprocess can.
+func TestTwilioCLIWithoutAudioFlagKeepsMicDefault(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := filepath.Join(cwd, "..", "..")
+
+	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk56-default")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
+	build.Dir = repoRoot
+	build.Env = append(os.Environ(), "GOWORK=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build entrypoint: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin,
+		"-webhook", "http://127.0.0.1:1/voice",
+		"+15551234567",
+	)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk56-test-token")
+	out, _ := cmd.CombinedOutput() // non-zero exit expected: the webhook is unreachable
+	got := string(out)
+
+	if strings.Contains(got, "no such file") {
+		t.Errorf("a run with no -audio attempted audio validation — the mic path must stay the default.\noutput:\n%s", got)
+	}
+	if strings.Contains(got, "panic:") {
+		t.Errorf("a run with no -audio panicked.\noutput:\n%s", got)
+	}
+}

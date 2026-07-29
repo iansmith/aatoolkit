@@ -177,6 +177,7 @@ func main() {
 	webhookURL := flag.String("webhook", "", "the server server webhook URL (default: resolved from aa-server-status.toml)")
 	noEchoMarks := flag.Bool("no-echo-marks", false, "suppress mark-echo (for testing the server's AwaitingMarkEcho timeout)")
 	toNumber := flag.String("to", defaultTo, "dialed (listening) number, E.164")
+	audioPath := flag.String("audio", "", "stream this raw μ-law file instead of capturing the mic (any platform)")
 	flag.Parse()
 
 	// The caller's E.164 number is a required positional arg, validated locally
@@ -193,6 +194,19 @@ func main() {
 	}
 	if err := validateE164(*toNumber); err != nil {
 		log.Fatalf("twilio-cli: -to: %v", err)
+	}
+
+	// -audio is validated here — after the local E.164 checks, before webhook
+	// resolution and any network call — so a bad path fails fast and on its own
+	// terms, rather than behind a config-resolution or connection error that
+	// says nothing about the file.
+	if *audioPath != "" {
+		resolved, err := resolveAudioPath(*audioPath)
+		if err != nil {
+			log.Fatalf("twilio-cli: %v", err)
+		}
+		streamMic = streamFileFrames(resolved)
+		frameSourceLabel = fmt.Sprintf("audio file %s", resolved)
 	}
 
 	target, err := webhookTarget(*webhookURL, defaultBasePath)
