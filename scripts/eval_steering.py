@@ -72,6 +72,61 @@ def judge_case(case: dict, steered_spans: list, control_spans: list) -> tuple[bo
     return (len(failures) == 0, failures)
 
 
+def run_case(client, case: dict) -> dict:
+    """Run one steering case's steered and control rows and judge the result."""
+    resp = client.post("/extract", json={
+        "text": case["text"],
+        "labels": case["steered_labels"],
+        "threshold": case["threshold"]
+    })
+    steered_spans = resp.json()["spans"] if resp.status_code == 200 else []
+
+    resp = client.post("/extract", json={
+        "text": case["text"],
+        "labels": case["control_labels"],
+        "threshold": case["threshold"]
+    })
+    control_spans = resp.json()["spans"] if resp.status_code == 200 else []
+
+    passed, failures = judge_case(case, steered_spans, control_spans)
+
+    return {
+        "id": case.get("id", "unknown"),
+        "category": case.get("category", "unknown"),
+        "status": "PASS" if passed else "FAIL",
+        "steered_spans": steered_spans,
+        "control_spans": control_spans,
+        "failures": failures
+    }
+
+
+def print_report(results: list[dict]) -> None:
+    """Print the per-case table and the summary footer."""
+    print("\n" + "="*120)
+    print(f"{'Case ID':<25} {'Category':<15} {'Status':<8} {'Steered':<20} {'Control':<20} {'Details':<20}")
+    print("="*120)
+
+    for result in results:
+        steered_count = len(result["steered_spans"])
+        control_count = len(result["control_spans"])
+        failures_text = result["failures"][0][:15] if result["failures"] else ""
+
+        print(f"{result['id']:<25} {result['category']:<15} {result['status']:<8} "
+              f"{steered_count:<20} {control_count:<20} {failures_text:<20}")
+
+        for failure in result["failures"]:
+            print(f"  └─ {failure}")
+
+    print("="*120)
+
+    passed_count = sum(1 for r in results if r["status"] == "PASS")
+    print(f"\nSummary: {passed_count}/{len(results)} cases passed")
+    print(f"This evaluation is ~{len(results)} hand-written examples testing one claim.")
+    print(f"It is NOT a precision/recall figure, NOT a characterization of accuracy, "
+          f"and NOT an implementation-equivalence oracle.")
+    print()
+
+
 def resolve_cases_path(cases_arg: str) -> Path:
     """
     Resolve a cases file path against the repository root.
@@ -119,77 +174,12 @@ def main():
 
     model = facts_server.resolve_model(args.model)
 
-    # Run cases
-    results = []
-    all_passed = True
-
     with TestClient(facts_server.create_app(model=model)) as client:
-        for case in cases:
-            case_id = case.get("id", "unknown")
-            category = case.get("category", "unknown")
+        results = [run_case(client, case) for case in cases]
 
-            # Get steered row
-            resp = client.post("/extract", json={
-                "text": case["text"],
-                "labels": case["steered_labels"],
-                "threshold": case["threshold"]
-            })
-            steered_spans = resp.json()["spans"] if resp.status_code == 200 else []
+    print_report(results)
 
-            # Get control row
-            resp = client.post("/extract", json={
-                "text": case["text"],
-                "labels": case["control_labels"],
-                "threshold": case["threshold"]
-            })
-            control_spans = resp.json()["spans"] if resp.status_code == 200 else []
-
-            # Judge
-            passed, failures = judge_case(case, steered_spans, control_spans)
-            status = "PASS" if passed else "FAIL"
-
-            if not passed:
-                all_passed = False
-
-            results.append({
-                "id": case_id,
-                "category": category,
-                "status": status,
-                "steered_spans": steered_spans,
-                "control_spans": control_spans,
-                "failures": failures
-            })
-
-    # Print results table
-    print("\n" + "="*120)
-    print(f"{'Case ID':<25} {'Category':<15} {'Status':<8} {'Steered':<20} {'Control':<20} {'Details':<20}")
-    print("="*120)
-
-    for result in results:
-        steered_count = len(result["steered_spans"])
-        control_count = len(result["control_spans"])
-        failures_text = result["failures"][0][:15] if result["failures"] else ""
-
-        print(f"{result['id']:<25} {result['category']:<15} {result['status']:<8} "
-              f"{steered_count:<20} {control_count:<20} {failures_text:<20}")
-
-        if result["failures"]:
-            for failure in result["failures"]:
-                print(f"  └─ {failure}")
-
-    print("="*120)
-
-    # Summary
-    passed_count = sum(1 for r in results if r["status"] == "PASS")
-    failed_count = len(results) - passed_count
-
-    print(f"\nSummary: {passed_count}/{len(results)} cases passed")
-    print(f"This evaluation is ~{len(results)} hand-written examples testing one claim.")
-    print(f"It is NOT a precision/recall figure, NOT a characterization of accuracy, "
-          f"and NOT an implementation-equivalence oracle.")
-    print()
-
-    # Exit code
+    all_passed = all(r["status"] == "PASS" for r in results)
     sys.exit(0 if all_passed else 1)
 
 
