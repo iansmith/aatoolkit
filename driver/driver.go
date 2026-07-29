@@ -113,17 +113,10 @@ func (h *Host) Send(contextWindow []byte, tier string) ([]byte, []byte, error) {
 // its file only when the file changes.
 func (h *Host) SystemPrompt() string { return h.prompt() }
 
-// SendStream is like Send but streams the response, calling onSegment each
-// time a punctuation boundary is reached with enough accumulated text. The
-// returned slices are the fully assembled (content, reasoning). Segments are
-// flushed when the buffer crosses ~30 chars and a delimiter (. ? ! , \n) is
-// seen; the delimiter is kept at the end of the segment so the TTS has the
-// punctuation it needs for natural cadence.
-func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
-	ep, ok := h.tiers[tier]
-	if !ok {
-		return nil, nil, fmt.Errorf("unknown tier %q (have: fast, deep)", tier)
-	}
+// buildStreamPayload assembles the chat-completions request body for tier ep:
+// the fixed sampling params plus the caller's already-serialized messages
+// array, with thinking disabled for non-reasoning tiers.
+func buildStreamPayload(ep Tier, contextWindow []byte) map[string]any {
 	payload := map[string]any{
 		"model":             ep.Model,
 		"messages":          json.RawMessage(contextWindow),
@@ -136,113 +129,199 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 	if !ep.Reasoning {
 		payload["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
 	}
-	body, err := json.Marshal(payload)
+	return payload
+}
+
+// postStreamRequest POSTs body to ep.URL and returns the still-open streaming
+// response on success. On a non-200 status it reads up to 300 bytes of the
+// error body into the returned error and closes the response itself.
+func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", ep.URL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling %s: %w", ep.URL, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 301))
+		return nil, fmt.Errorf("llm %s: status %d (%.300s)", ep.URL, resp.StatusCode, errBody)
+	}
+	return resp, nil
+}
+
+// sseChunk is one decoded `data: {...}` line from the chat-completions SSE
+// stream.
+type sseChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			Reasoning        string `json:"reasoning"`
+		} `json:"delta"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// decodeSSELine parses one line of the SSE stream. ok is false for lines
+// that carry no chunk to process — blank lines, lines without the "data: "
+// prefix, and the "[DONE]" terminator.
+func decodeSSELine(line string) (chunk sseChunk, ok bool, err error) {
+	if line == "" || !strings.HasPrefix(line, "data: ") {
+		return sseChunk{}, false, nil
+	}
+	sseData := line[len("data: "):]
+	if sseData == "[DONE]" {
+		return sseChunk{}, false, nil
+	}
+	if err := json.Unmarshal([]byte(sseData), &chunk); err != nil {
+		return sseChunk{}, false, fmt.Errorf("decoding SSE chunk: %w", err)
+	}
+	return chunk, true, nil
+}
+
+// isSegmentDelimiter reports whether b is one of the punctuation boundaries
+// that can trigger a TTS segment flush.
+func isSegmentDelimiter(b byte) bool {
+	switch b {
+	case '.', '?', '!', ',', '\n':
+		return true
+	}
+	return false
+}
+
+// segmentAccumulator buffers streamed text and reports when it should be
+// flushed to TTS: at a delimiter (. ? ! , \n) once the buffer has crossed
+// min chars, keeping the delimiter, or unconditionally when force-flushed at
+// end-of-stream. A pure-whitespace buffer is never flushed.
+type segmentAccumulator struct {
+	buf strings.Builder
+	min int
+}
+
+func newSegmentAccumulator(min int) *segmentAccumulator {
+	return &segmentAccumulator{min: min}
+}
+
+// write appends b to the buffer and, if b is a delimiter and the buffer has
+// crossed the minimum length, flushes and returns the segment.
+func (s *segmentAccumulator) write(b byte) (string, bool) {
+	s.buf.WriteByte(b)
+	if !isSegmentDelimiter(b) || s.buf.Len() < s.min {
+		return "", false
+	}
+	return s.take()
+}
+
+// flush unconditionally drains the buffer — used at end-of-stream so no
+// trailing text is dropped, regardless of length.
+func (s *segmentAccumulator) flush() (string, bool) {
+	return s.take()
+}
+
+// take drains the buffer and reports whether it held anything worth sending;
+// pure whitespace is discarded rather than sent to TTS.
+func (s *segmentAccumulator) take() (string, bool) {
+	text := s.buf.String()
+	s.buf.Reset()
+	if strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	return text, true
+}
+
+// streamState carries the accumulation state threaded through a run of
+// processSSELine calls: the assembled content and reasoning, the segment
+// accumulator, and whether any content chunk has been seen yet.
+type streamState struct {
+	contentBuf, reasoningBuf strings.Builder
+	acc                      *segmentAccumulator
+	hasContent               bool
+}
+
+// processSSELine decodes one SSE line, folds it into st, and calls onSegment
+// for any TTS segment boundary the new content crosses. It returns an error
+// for a malformed chunk or an upstream error payload; lines needing no work
+// (blank, non-data, [DONE], choice-less) are a no-op.
+func processSSELine(line string, st *streamState, onSegment func(string)) error {
+	chunk, ok, err := decodeSSELine(line)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if chunk.Error != nil {
+		return fmt.Errorf("llm error: %s", chunk.Error.Message)
+	}
+	if len(chunk.Choices) == 0 {
+		return nil
+	}
+	d := chunk.Choices[0].Delta
+	st.contentBuf.WriteString(d.Content)
+	reasoning := d.ReasoningContent
+	if reasoning == "" {
+		reasoning = d.Reasoning
+	}
+	st.reasoningBuf.WriteString(reasoning)
+	if d.Content != "" {
+		st.hasContent = true
+	}
+	for _, b := range []byte(d.Content) {
+		if seg, ok := st.acc.write(b); ok {
+			onSegment(seg)
+		}
+	}
+	return nil
+}
+
+// SendStream is like Send but streams the response, calling onSegment each
+// time a punctuation boundary is reached with enough accumulated text. The
+// returned slices are the fully assembled (content, reasoning). Segments are
+// flushed when the buffer crosses ~30 chars and a delimiter (. ? ! , \n) is
+// seen; the delimiter is kept at the end of the segment so the TTS has the
+// punctuation it needs for natural cadence.
+func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
+	ep, ok := h.tiers[tier]
+	if !ok {
+		return nil, nil, fmt.Errorf("unknown tier %q (have: fast, deep)", tier)
+	}
+	body, err := json.Marshal(buildStreamPayload(ep, contextWindow))
 	if err != nil {
 		return nil, nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "POST", ep.URL, bytes.NewReader(body))
+	resp, err := h.postStreamRequest(ctx, ep, body)
 	if err != nil {
 		return nil, nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := h.client.Do(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("calling %s: %w", ep.URL, err)
-	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 301))
-		return nil, nil, fmt.Errorf("llm %s: status %d (%.300s)", ep.URL, resp.StatusCode, body)
-	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 256*1024)
-	var contentBuf strings.Builder
-	var reasoningBuf strings.Builder
-	var segBuf strings.Builder
-	var hasContent bool
-
-	// flushSegment sends accumulated text to onSegment if it exceeds the
-	// minimum length (30 chars). Mid-stream flushes respect the threshold to
-	// avoid chatty TTS calls, but the end-of-stream flush (force) sends
-	// whatever's left to avoid dropping the final phrase.
-	flushSegment := func(force bool) {
-		s := segBuf.String()
-		segBuf.Reset()
-		if strings.TrimSpace(s) == "" {
-			return // don't send pure whitespace to TTS
-		}
-		if force || len(s) >= minSegmentChars {
-			onSegment(s)
-		}
-	}
+	st := &streamState{acc: newSegmentAccumulator(minSegmentChars)}
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		sseData := line[6:]
-		if sseData == "[DONE]" {
-			continue
-		}
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content          string `json:"content"`
-					ReasoningContent string `json:"reasoning_content"`
-					Reasoning        string `json:"reasoning"`
-				} `json:"delta"`
-			} `json:"choices"`
-			Error *struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if err := json.Unmarshal([]byte(sseData), &chunk); err != nil {
-			return nil, nil, fmt.Errorf("decoding SSE chunk: %w", err)
-		}
-		if chunk.Error != nil {
-			return nil, nil, fmt.Errorf("llm error: %s", chunk.Error.Message)
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		d := chunk.Choices[0].Delta
-		contentBuf.WriteString(d.Content)
-		reasoning := d.ReasoningContent
-		if reasoning == "" {
-			reasoning = d.Reasoning
-		}
-		reasoningBuf.WriteString(reasoning)
-		if d.Content != "" {
-			hasContent = true
-		}
-
-		// Walk delta content, flushing at punctuation boundaries once the
-		// buffer clears the minSegmentChars threshold.
-		for _, b := range []byte(d.Content) {
-			segBuf.WriteByte(b)
-			switch b {
-			case '.', '?', '!', ',', '\n':
-				if segBuf.Len() >= minSegmentChars {
-					flushSegment(false)
-				}
-			}
+		if err := processSSELine(scanner.Text(), st, onSegment); err != nil {
+			return nil, nil, err
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, nil, fmt.Errorf("reading SSE stream: %w", err)
 	}
-	if !hasContent {
+	if !st.hasContent {
 		return nil, nil, fmt.Errorf("no content in SSE stream")
 	}
 	// Flush any trailing text that didn't hit a boundary.
-	flushSegment(true)
-	return []byte(contentBuf.String()), []byte(reasoningBuf.String()), nil
+	if seg, ok := st.acc.flush(); ok {
+		onSegment(seg)
+	}
+	return []byte(st.contentBuf.String()), []byte(st.reasoningBuf.String()), nil
 }
 
 // ---------------------------------------------------------------------------
