@@ -1,0 +1,77 @@
+package extract
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+)
+
+const defaultExtractTimeout = 30 * time.Second
+
+// Client is an HTTP client for the extraction sidecar.
+type Client struct {
+	baseURL    string
+	httpClient *http.Client
+}
+
+// NewClient creates a new extraction client.
+func NewClient(baseURL string) *Client {
+	return &Client{
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Timeout: defaultExtractTimeout,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100,
+			},
+		},
+	}
+}
+
+// Extract calls the extraction sidecar.
+func (c *Client) Extract(ctx context.Context, req Request) ([]Span, error) {
+	if req.Text == "" {
+		return nil, nil
+	}
+
+	if len(req.Labels) == 0 {
+		return nil, fmt.Errorf("extract: labels required")
+	}
+
+	if req.Threshold < 0 || req.Threshold > 1 {
+		return nil, fmt.Errorf("extract: threshold must be between 0 and 1")
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("extract: marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+Path, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("extract: create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("extract: calling extract sidecar at %s: %w", c.baseURL+Path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("extract sidecar returned %d", resp.StatusCode)
+	}
+
+	var respBody struct {
+		Spans []Span `json:"spans"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+		return nil, fmt.Errorf("extract: decode response: %w", err)
+	}
+
+	return respBody.Spans, nil
+}
