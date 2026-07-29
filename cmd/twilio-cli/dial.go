@@ -216,10 +216,6 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	// between earconCh and the next inbound message — otherwise a signal sent
 	// on earconCh while the loop is already parked in a blocking conn.Read
 	// would sit unseen until the next iteration, which may never come.
-	type readResult struct {
-		msg []byte
-		err error
-	}
 	readCh := make(chan readResult)
 	go func() {
 		for {
@@ -235,38 +231,53 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		}
 	}()
 
-	// tryPlayEarcon plays one already-pending earcon signal, if any, without
-	// blocking. Reports whether it did.
-	tryPlayEarcon := func() bool {
-		select {
-		case <-earconCh:
-			playEarcon(player)
-			return true
-		default:
-			return false
-		}
-	}
+	return dialReadLoop(readCtx, earconCh, readCh, player, conn, streamSID, &bytesSinceMark, cfg.noEchoMarks, cancelMic, micErrCh)
+}
 
-	// finishCallEnded is the shared teardown for every "call ended" exit:
-	// unblock the mic goroutine, wait for it to fully finish, then drain any
-	// earcon signal it sent before returning its error to the caller.
-	//
-	// The drain must happen strictly after <-micErrCh, not before: the mic
-	// goroutine sends on earconCh (if at all) before it ever reaches its
-	// final micErrCh send, so once micErrCh has unblocked, the mic
-	// goroutine's entire body — including any earconCh send — has already
-	// run. Draining earlier would race, because the real per-call socket (as
-	// opposed to our own readCtx cancellation) can close independently of
-	// mic-warmup timing, so a pending signal can otherwise still be sitting
-	// unsent at the moment call-ended is first detected.
-	finishCallEnded := func(cause error) error {
-		log.Printf("twilio-cli: call ended: %s", callEndReason(cause))
-		cancelMic() // unblock goroutine before we wait for its result
-		err := <-micErrCh
-		tryPlayEarcon()
-		return err // propagate hard mic failures to the caller
-	}
+// readResult is one conn.Read outcome, pumped through readCh by dial's reader
+// goroutine so dialReadLoop can select between it and earconCh.
+type readResult struct {
+	msg []byte
+	err error
+}
 
+// tryPlayEarcon plays one already-pending earcon signal, if any, without
+// blocking. Reports whether it did.
+func tryPlayEarcon(earconCh chan struct{}, player *lazyPlayer) bool {
+	select {
+	case <-earconCh:
+		playEarcon(player)
+		return true
+	default:
+		return false
+	}
+}
+
+// finishCallEnded is the shared teardown for every "call ended" exit:
+// unblock the mic goroutine, wait for it to fully finish, then drain any
+// earcon signal it sent before returning its error to the caller.
+//
+// The drain must happen strictly after <-micErrCh, not before: the mic
+// goroutine sends on earconCh (if at all) before it ever reaches its
+// final micErrCh send, so once micErrCh has unblocked, the mic
+// goroutine's entire body — including any earconCh send — has already
+// run. Draining earlier would race, because the real per-call socket (as
+// opposed to our own readCtx cancellation) can close independently of
+// mic-warmup timing, so a pending signal can otherwise still be sitting
+// unsent at the moment call-ended is first detected.
+func finishCallEnded(cause error, cancelMic context.CancelFunc, micErrCh <-chan error, earconCh chan struct{}, player *lazyPlayer) error {
+	log.Printf("twilio-cli: call ended: %s", callEndReason(cause))
+	cancelMic() // unblock goroutine before we wait for its result
+	err := <-micErrCh
+	tryPlayEarcon(earconCh, player)
+	return err // propagate hard mic failures to the caller
+}
+
+// dialReadLoop is dial's inbound frame loop: it plays earcon tones signaled
+// by the mic goroutine and dispatches decoded frames until the call ends,
+// then runs finishCallEnded to unwind the mic goroutine and report its
+// result to the caller.
+func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan readResult, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error) error {
 	for {
 		// Give a pending earcon signal priority over call-ended detection: the
 		// mic goroutine always sends on earconCh (if at all) strictly before
@@ -274,7 +285,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		// once the select below picks between them pseudo-randomly. Draining
 		// earconCh first, in its own non-blocking check, makes that ordering
 		// deterministic instead of a coin flip that can drop the tone.
-		if tryPlayEarcon() {
+		if tryPlayEarcon(earconCh, player) {
 			continue
 		}
 
@@ -290,31 +301,43 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 			// the ctx.Done() teardown goroutine sent stop and cancelled readCtx
 			// itself) before it could deliver a final result on readCh. Treat
 			// this exactly like a call-ended read error.
-			return finishCallEnded(context.Canceled)
+			return finishCallEnded(context.Canceled, cancelMic, micErrCh, earconCh, player)
 
 		case r := <-readCh:
-			if r.err != nil {
-				if isCallEnded(r.err) {
-					return finishCallEnded(r.err)
-				}
-				return fmt.Errorf("read: %w", r.err)
+			if err, done := dialHandleReadResult(r, player, conn, streamSID, bytesSinceMark, noEchoMarks, cancelMic, micErrCh, earconCh); done {
+				return err
 			}
-			f, decErr := twilio.DecodeFrame(r.msg)
-			if decErr != nil {
-				// Log the bytes, not just the complaint. Every frame we *can*
-				// read gets its raw JSON logged below; the one we cannot is
-				// where seeing the wire matters most, and the error alone
-				// leaves you guessing what actually arrived.
-				log.Printf("twilio-cli: decode frame: %v", decErr)
-				logCtlFrame("<-", r.msg)
-				continue
-			}
-			if f.Event != twilio.EventMedia {
-				logCtlFrame("<-", r.msg)
-			}
-			handleFrame(f, player, conn, streamSID, &bytesSinceMark, cfg.noEchoMarks)
 		}
 	}
+}
+
+// dialHandleReadResult decodes and dispatches one inbound read result. done
+// reports whether the call has ended (a hard read failure or a clean
+// call-ended close, the latter already run through finishCallEnded) — in
+// which case err is dialReadLoop's return value; otherwise the loop
+// continues and err is always nil.
+func dialHandleReadResult(r readResult, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error, earconCh chan struct{}) (err error, done bool) {
+	if r.err != nil {
+		if isCallEnded(r.err) {
+			return finishCallEnded(r.err, cancelMic, micErrCh, earconCh, player), true
+		}
+		return fmt.Errorf("read: %w", r.err), true
+	}
+	f, decErr := twilio.DecodeFrame(r.msg)
+	if decErr != nil {
+		// Log the bytes, not just the complaint. Every frame we *can* read
+		// gets its raw JSON logged below; the one we cannot is where seeing
+		// the wire matters most, and the error alone leaves you guessing
+		// what actually arrived.
+		log.Printf("twilio-cli: decode frame: %v", decErr)
+		logCtlFrame("<-", r.msg)
+		return nil, false
+	}
+	if f.Event != twilio.EventMedia {
+		logCtlFrame("<-", r.msg)
+	}
+	handleFrame(f, player, conn, streamSID, bytesSinceMark, noEchoMarks)
+	return nil, false
 }
 
 // isCallEnded reports whether an error means the call is simply over — so
