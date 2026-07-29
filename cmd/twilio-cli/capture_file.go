@@ -15,12 +15,13 @@ import (
 // capture it is available on every platform — which is what lets the frame path
 // (VAD -> STT -> Turn) run headless, cross-platform, and deterministically.
 
-// frameInterval is the wall-clock spacing between consecutive frames: one
-// muLawFrame20ms-sized frame is 20 ms of audio at sampleRateHz, so streaming
-// them any faster would hand the server a whole utterance at once and break the
-// VAD's silence accounting. Derived from the frame size rather than written as a
-// bare 20ms, so a frame-size retune cannot silently desynchronize the two.
-const frameInterval = time.Duration(muLawFrame20ms) * time.Second / sampleRateHz
+// frameInterval is the wall-clock spacing between consecutive frames: exactly one
+// frame's playout duration, so streaming any faster would hand the server a whole
+// utterance at once and break the VAD's silence accounting. Derived from the frame
+// size rather than written as a bare 20ms, so a frame-size retune cannot silently
+// desynchronize the two — and taken from dial.go's mulawPlayoutDuration rather than
+// restating its arithmetic, so μ-law bytes→duration has one definition here.
+var frameInterval = mulawPlayoutDuration(muLawFrame20ms)
 
 // resolveAudioPath validates that path names a readable regular file and returns
 // the path to open. It is a pure validator in validateE164's shape (main.go) so
@@ -45,6 +46,10 @@ func resolveAudioPath(path string) (string, error) {
 		return "", fmt.Errorf("-audio %s: not a regular file (mode %s)", path, info.Mode())
 	}
 	// Stat says it exists and is regular; only an open proves it is readable.
+	// The two are not redundant, and the order is load-bearing: opening a FIFO
+	// blocks until a writer appears, so the IsRegular rejection above must run
+	// before any open — collapsing this into a single os.Open would hang the CLI
+	// on a named pipe instead of rejecting it.
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("-audio %s: %w", path, err)
@@ -72,24 +77,22 @@ func resolveAudioPath(path string) (string, error) {
 func streamFileFramesFrom(ctx context.Context, r io.Reader, send func([]byte) error, onMicWarm func(bool)) error {
 	start := time.Now()
 	frame := 0
-	warmed := false
 
 	return drainFrames(ctx, r, muLawFrame20ms, func(f []byte) error {
-		// Warm fires lazily at the first real frame, so an input with no
-		// complete frame never signals one (dial's earcon hangs off this).
-		if !warmed {
-			warmed = true
+		// One frame counter drives both halves, so warm cannot fire twice and
+		// frame 0 cannot wait.
+		if frame == 0 {
+			// Warm fires lazily at the first real frame, so an input with no
+			// complete frame never signals one (dial's earcon hangs off this).
 			if onMicWarm != nil {
 				onMicWarm(false)
 			}
-		}
-
-		// Absolute deadline schedule rather than a per-frame sleep: the target
-		// is start+n*frameInterval, so time spent in send() does not accumulate
-		// into drift over a long clip. Frame 0 goes out immediately and there is
-		// no wait after the final frame — a trailing sleep would just delay
-		// dial's stop frame.
-		if frame > 0 {
+		} else {
+			// Absolute deadline schedule rather than a per-frame sleep: the
+			// target is start+n*frameInterval, so time spent in send() does not
+			// accumulate into drift over a long clip. Frame 0 goes out
+			// immediately and there is no wait after the final frame — a
+			// trailing sleep would just delay dial's stop frame.
 			if err := waitUntil(ctx, start.Add(time.Duration(frame)*frameInterval)); err != nil {
 				return err
 			}
@@ -116,6 +119,26 @@ func waitUntil(ctx context.Context, deadline time.Time) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// installAudioFrameSource points the streamMic seam at a file-backed source when
+// -audio names one, and reports an unusable path as an error for main to fatal on
+// (webhookTarget's idiom — validation returns, the caller decides how to die).
+//
+// An empty audioPath is a no-op, so mic capture stays the default: this is the
+// one place that decides which frame source a run uses, and it sets streamMic and
+// frameSourceLabel together so the two can never disagree.
+func installAudioFrameSource(audioPath string) error {
+	if audioPath == "" {
+		return nil
+	}
+	resolved, err := resolveAudioPath(audioPath)
+	if err != nil {
+		return err
+	}
+	streamMic = streamFileFrames(resolved)
+	frameSourceLabel = fmt.Sprintf("audio file %s", resolved)
+	return nil
 }
 
 // streamFileFrames returns the frame source dial() calls through when -audio is

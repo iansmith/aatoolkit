@@ -196,17 +196,12 @@ func main() {
 		log.Fatalf("twilio-cli: -to: %v", err)
 	}
 
-	// -audio is validated here — after the local E.164 checks, before webhook
+	// -audio is resolved here — after the local E.164 checks, before webhook
 	// resolution and any network call — so a bad path fails fast and on its own
 	// terms, rather than behind a config-resolution or connection error that
 	// says nothing about the file.
-	if *audioPath != "" {
-		resolved, err := resolveAudioPath(*audioPath)
-		if err != nil {
-			log.Fatalf("twilio-cli: %v", err)
-		}
-		streamMic = streamFileFrames(resolved)
-		frameSourceLabel = fmt.Sprintf("audio file %s", resolved)
+	if err := installAudioFrameSource(*audioPath); err != nil {
+		log.Fatalf("twilio-cli: %v", err)
 	}
 
 	target, err := webhookTarget(*webhookURL, defaultBasePath)
