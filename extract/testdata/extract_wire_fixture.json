@@ -1,0 +1,21 @@
+{
+  "endpoint": "/extract",
+  "request_json": "{\"text\":\"Bill on the 5th of July\",\"labels\":[\"birthday_person\",\"birthday_date\"],\"threshold\":0.5}",
+  "request": {
+    "text": "Bill on the 5th of July",
+    "labels": ["birthday_person", "birthday_date"],
+    "threshold": 0.5
+  },
+  "response_json": "{\"spans\":[{\"text\":\"Bill\",\"label\":\"birthday_person\",\"start\":0,\"end\":4,\"score\":0.87},{\"text\":\"5th of July\",\"label\":\"birthday_date\",\"start\":12,\"end\":23,\"score\":0.81}]}",
+  "response": {
+    "spans": [
+      {"text": "Bill", "label": "birthday_person", "start": 0, "end": 4, "score": 0.87},
+      {"text": "5th of July", "label": "birthday_date", "start": 12, "end": 23, "score": 0.81}
+    ]
+  },
+  "byte_offset_cases": [
+    {"text": "Bill on the 5th of July", "span_text": "5th of July", "char_start": 12, "char_end": 23, "byte_start": 12, "byte_end": 23},
+    {"text": "Café Bill", "span_text": "Bill", "char_start": 5, "char_end": 9, "byte_start": 6, "byte_end": 10},
+    {"text": "🎂 Bill", "span_text": "Bill", "char_start": 2, "char_end": 6, "byte_start": 5, "byte_end": 9}
+  ]
+}
