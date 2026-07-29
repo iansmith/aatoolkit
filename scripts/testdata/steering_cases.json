@@ -1,0 +1,186 @@
+[
+  {
+    "id": "birthday-elliptical",
+    "category": "elliptical",
+    "text": "Bill on the 5th of July",
+    "steered_labels": ["birthday_person", "birthday_date"],
+    "control_labels": ["person", "date"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "birthday_person", "text": "Bill"},
+      {"label": "birthday_date", "text": "5th of July"}
+    ],
+    "expect_control": [
+      {"label": "person", "text": "Bill"},
+      {"label": "date", "text": "5th of July"}
+    ]
+  },
+  {
+    "id": "anniversary-elliptical",
+    "category": "elliptical",
+    "text": "They met on March 15th, 1985",
+    "steered_labels": ["anniversary_person", "anniversary_date"],
+    "control_labels": ["person", "date"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "anniversary_date", "text": "March 15th, 1985"}
+    ],
+    "expect_control": [
+      {"label": "date", "text": "March 15th, 1985"}
+    ]
+  },
+  {
+    "id": "medication-time-elliptical",
+    "category": "elliptical",
+    "text": "Take it at 9 AM, same as yesterday",
+    "steered_labels": ["medication_time", "medication_name"],
+    "control_labels": ["time", "substance"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "medication_time", "text": "9 AM"}
+    ],
+    "expect_control": [
+      {"label": "time", "text": "9 AM"}
+    ]
+  },
+  {
+    "id": "school-elliptical",
+    "category": "elliptical",
+    "text": "She starts next Monday at Roosevelt High",
+    "steered_labels": ["school_start_date", "school_name"],
+    "control_labels": ["date", "organization"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "school_start_date", "text": "next Monday"},
+      {"label": "school_name", "text": "Roosevelt High"}
+    ],
+    "expect_control": [
+      {"label": "date", "text": "next Monday"},
+      {"label": "organization", "text": "Roosevelt High"}
+    ]
+  },
+  {
+    "id": "birthday-direct",
+    "category": "direct",
+    "text": "Bill's birthday is July 5th",
+    "steered_labels": ["birthday_person", "birthday_date"],
+    "control_labels": ["person", "date"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "birthday_person", "text": "Bill"},
+      {"label": "birthday_date", "text": "July 5th"}
+    ],
+    "expect_control": [
+      {"label": "person", "text": "Bill"},
+      {"label": "date", "text": "July 5th"}
+    ]
+  },
+  {
+    "id": "appointment-direct",
+    "category": "direct",
+    "text": "Dr. Smith has office hours on Tuesdays at 3 PM",
+    "steered_labels": ["doctor_name", "appointment_time"],
+    "control_labels": ["person", "time"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "doctor_name", "text": "Dr. Smith"},
+      {"label": "appointment_time", "text": "3 PM"}
+    ],
+    "expect_control": [
+      {"label": "person", "text": "Dr. Smith"},
+      {"label": "time", "text": "3 PM"}
+    ]
+  },
+  {
+    "id": "casual-no-fact",
+    "category": "no_fact",
+    "text": "Yeah, that sounds fine, thanks",
+    "steered_labels": ["person", "date"],
+    "control_labels": ["person", "date"],
+    "threshold": 0.5,
+    "expect_steered": [],
+    "expect_control": []
+  },
+  {
+    "id": "acknowledgment-no-fact",
+    "category": "no_fact",
+    "text": "Got it, I'll take care of that",
+    "steered_labels": ["task_name", "deadline"],
+    "control_labels": ["entity", "date"],
+    "threshold": 0.5,
+    "expect_steered": [],
+    "expect_control": []
+  },
+  {
+    "id": "two-birthdays-multi",
+    "category": "multi_entity",
+    "text": "Alice's birthday is March 10 and Bob's is December 25",
+    "steered_labels": ["birthday_person", "birthday_date"],
+    "control_labels": ["person", "date"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "birthday_person", "text": "Alice"},
+      {"label": "birthday_date", "text": "March 10"},
+      {"label": "birthday_person", "text": "Bob"},
+      {"label": "birthday_date", "text": "December 25"}
+    ],
+    "expect_control": [
+      {"label": "person", "text": "Alice"},
+      {"label": "date", "text": "March 10"},
+      {"label": "person", "text": "Bob"},
+      {"label": "date", "text": "December 25"}
+    ]
+  },
+  {
+    "id": "two-meetings-multi",
+    "category": "multi_entity",
+    "text": "Conference with Sandra at 2 PM and with Tom at 4 PM",
+    "steered_labels": ["meeting_person", "meeting_time"],
+    "control_labels": ["person", "time"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "meeting_person", "text": "Sandra"},
+      {"label": "meeting_time", "text": "2 PM"},
+      {"label": "meeting_person", "text": "Tom"},
+      {"label": "meeting_time", "text": "4 PM"}
+    ],
+    "expect_control": [
+      {"label": "person", "text": "Sandra"},
+      {"label": "time", "text": "2 PM"},
+      {"label": "person", "text": "Tom"},
+      {"label": "time", "text": "4 PM"}
+    ]
+  },
+  {
+    "id": "vacation-elliptical",
+    "category": "elliptical",
+    "text": "We're going at the end of August for a week",
+    "steered_labels": ["vacation_start_date", "vacation_duration"],
+    "control_labels": ["date", "duration"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "vacation_start_date", "text": "August"},
+      {"label": "vacation_duration", "text": "a week"}
+    ],
+    "expect_control": [
+      {"label": "date", "text": "August"},
+      {"label": "duration", "text": "a week"}
+    ]
+  },
+  {
+    "id": "weather-elliptical",
+    "category": "elliptical",
+    "text": "It'll rain tomorrow morning around 8 o'clock",
+    "steered_labels": ["weather_event", "weather_time"],
+    "control_labels": ["event", "time"],
+    "threshold": 0.5,
+    "expect_steered": [
+      {"label": "weather_event", "text": "rain"},
+      {"label": "weather_time", "text": "tomorrow morning around 8 o'clock"}
+    ],
+    "expect_control": [
+      {"label": "event", "text": "rain"},
+      {"label": "time", "text": "tomorrow morning around 8 o'clock"}
+    ]
+  }
+]
