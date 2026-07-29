@@ -111,55 +111,75 @@ func dispatch(out io.Writer, engine Engine, cmd Command) {
 
 	switch cmd.Verb {
 	case VerbStatus:
-		if cmd.Target == "" {
-			printStatus(out, engine.Status())
-			return
-		}
-		printSingleStatus(out, engine.Status(), cmd.Target)
+		handleStatus(out, engine, cmd)
 	case VerbLogs:
-		lines, err := engine.Logs(cmd.Target)
-		if err != nil {
-			fmt.Fprintf(out, "error: logs %s: %v\n", cmd.Target, err)
-			return
-		}
-		for _, l := range lines {
-			fmt.Fprintln(out, l)
-		}
+		handleLogs(out, engine, cmd)
 	case VerbKill:
-		pid, err := strconv.Atoi(cmd.Target)
-		if err != nil || pid <= 0 {
-			fmt.Fprintf(out, "error: kill: invalid PID %q\n", cmd.Target)
-			return
-		}
-		if err := engine.Kill(pid); err != nil {
-			fmt.Fprintf(out, "error: kill %s: %v\n", cmd.Target, err)
-			return
-		}
-		fmt.Fprintf(out, "killed %s\n", cmd.Target)
+		handleKill(out, engine, cmd)
 	case VerbCommand:
-		command, args, err := engine.Command(cmd.Target)
-		if err != nil {
-			fmt.Fprintf(out, "error: command %s: %v\n", cmd.Target, err)
-			return
-		}
-		if len(args) > 0 {
-			fmt.Fprintf(out, "%s %s\n", command, strings.Join(args, " "))
-		} else {
-			fmt.Fprintln(out, command)
-		}
+		handleCommand(out, engine, cmd)
 	case VerbView:
-		lines, err := engine.View(cmd.Target, cmd.Modifier == "nowrap")
-		if err != nil {
-			fmt.Fprintf(out, "error: view %s: %v\n", cmd.Target, err)
-			return
-		}
-		for _, l := range lines {
-			fmt.Fprintln(out, l)
-		}
+		handleView(out, engine, cmd)
 	case VerbHelp:
 		printHelp(out)
 	default:
 		fmt.Fprintf(out, "error: unhandled command %+v\n", cmd)
+	}
+}
+
+func handleStatus(out io.Writer, engine Engine, cmd Command) {
+	if cmd.Target == "" {
+		printStatus(out, engine.Status())
+		return
+	}
+	printSingleStatus(out, engine.Status(), cmd.Target)
+}
+
+func handleLogs(out io.Writer, engine Engine, cmd Command) {
+	lines, err := engine.Logs(cmd.Target)
+	if err != nil {
+		fmt.Fprintf(out, "error: logs %s: %v\n", cmd.Target, err)
+		return
+	}
+	for _, l := range lines {
+		fmt.Fprintln(out, l)
+	}
+}
+
+func handleKill(out io.Writer, engine Engine, cmd Command) {
+	pid, err := strconv.Atoi(cmd.Target)
+	if err != nil || pid <= 0 {
+		fmt.Fprintf(out, "error: kill: invalid PID %q\n", cmd.Target)
+		return
+	}
+	if err := engine.Kill(pid); err != nil {
+		fmt.Fprintf(out, "error: kill %s: %v\n", cmd.Target, err)
+		return
+	}
+	fmt.Fprintf(out, "killed %s\n", cmd.Target)
+}
+
+func handleCommand(out io.Writer, engine Engine, cmd Command) {
+	command, args, err := engine.Command(cmd.Target)
+	if err != nil {
+		fmt.Fprintf(out, "error: command %s: %v\n", cmd.Target, err)
+		return
+	}
+	if len(args) > 0 {
+		fmt.Fprintf(out, "%s %s\n", command, strings.Join(args, " "))
+	} else {
+		fmt.Fprintln(out, command)
+	}
+}
+
+func handleView(out io.Writer, engine Engine, cmd Command) {
+	lines, err := engine.View(cmd.Target, cmd.Modifier == "nowrap")
+	if err != nil {
+		fmt.Fprintf(out, "error: view %s: %v\n", cmd.Target, err)
+		return
+	}
+	for _, l := range lines {
+		fmt.Fprintln(out, l)
 	}
 }
 
