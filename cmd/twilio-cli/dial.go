@@ -170,10 +170,13 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	go func() {
 		defer cancelMic() // goroutine exit cancels the read loop
 		onMicWarm := func(capHit bool) {
+			// Named by source: only the mic can reach the discard cap, but both
+			// sources reach "capture live", and calling a file replay "mic" there
+			// is just misleading. With no -audio the wording is unchanged.
 			if capHit {
-				log.Printf("twilio-cli: mic warm (discard cap reached)")
+				log.Printf("twilio-cli: %s warm (discard cap reached)", frameSourceLabel)
 			} else {
-				log.Printf("twilio-cli: mic warm (capture live)")
+				log.Printf("twilio-cli: %s warm (capture live)", frameSourceLabel)
 			}
 			// Signal the read loop to play an earcon tone. Non-blocking send
 			// (buffered channel) so the mic goroutine doesn't wait.

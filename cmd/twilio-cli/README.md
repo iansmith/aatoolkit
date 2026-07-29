@@ -49,9 +49,15 @@ The repo's own fixtures work as input (`telephony/testdata/*.ulaw`, `telephony/a
 Frames are paced in real time, not burst, so the server's VAD sees the clip exactly as it
 would a live call. Reaching the end of the file ends the call the same way hanging up does.
 
-Two deliberate differences from the mic path: leading silence is **not** discarded (a fixture
-streams verbatim, so replays stay reproducible), and no earcon is played — there is nobody to
-cue. A relative path resolves against your current directory, not the repository root.
+One deliberate difference from the mic path: leading silence is **not** discarded — a fixture
+streams verbatim, so replays stay reproducible. (The mic path discards up to 1500 ms of leading
+silence while the microphone warms up; a file has no warm-up.)
+
+The earcon **does** still sound, once, as the first frame goes out. It is the same mic-warm
+signal, and there is nobody to cue on a file replay, so mute your output if you are running
+unattended.
+
+A relative `-audio` path resolves against your current directory, not the repository root.
 
 The file must be **raw** μ-law with no container — a WAV will stream its 44-byte header as
 audio. Convert with:
