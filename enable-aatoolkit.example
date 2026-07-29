@@ -24,3 +24,8 @@ export TWILIO_AUTH_TOKEN=primary_auth_token
 #   export AATOOLKIT_STT_URL=http://127.0.0.1:7789
 #   export AATOOLKIT_FAST_URL=http://127.0.0.1:1235/v1/chat/completions
 #   export AATOOLKIT_MAX_TURN_MS=60000
+
+# --- extraction sidecar (facts_server.py) ---
+#   export AATOOLKIT_FACTS_HOST=127.0.0.1
+#   export AATOOLKIT_FACTS_PORT=7791
+#   export AATOOLKIT_FACTS_MODEL=urchade/gliner_small-v2.1
