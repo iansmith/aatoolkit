@@ -42,9 +42,9 @@ pulls in `torch` and `transformers`). A fleet `[[server]]` entry should list
 them in its `packages = [...]` array.
 """
 
-import argparse
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -53,6 +53,8 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+
+import sidecar
 
 
 def char_span_to_byte_span(text: str, char_start: int, char_end: int) -> tuple[int, int]:
@@ -137,46 +139,13 @@ def load_model(model_id: str):
     return gliner.GLiNER.from_pretrained(model_id)
 
 
-def build_arg_parser_facts():
-    """
-    Build the argument parser with host/port defaults for the facts sidecar.
-
-    Returns:
-        An argparse.ArgumentParser configured for the facts sidecar.
-    """
-    parser = argparse.ArgumentParser(
-        description="FastAPI + uvicorn extraction sidecar for GLiNER-based NER.",
-    )
-    parser.add_argument(
-        "--host",
-        default=os.environ.get("AATOOLKIT_FACTS_HOST", "127.0.0.1"),
-        help="bind address (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.environ.get("AATOOLKIT_FACTS_PORT", "7791")),
-        help="bind port (default: %(default)s)",
-    )
+def parse_args(argv=None):
+    parser = sidecar.build_arg_parser(__doc__, port=7791, env_prefix="FACTS")
     parser.add_argument(
         "--model",
         default=os.environ.get("AATOOLKIT_FACTS_MODEL", "urchade/gliner_small-v2.1"),
         help="Model identifier (Hugging Face repo id or local path). Default: urchade/gliner_small-v2.1",
     )
-    return parser
-
-
-def parse_args(argv=None):
-    """
-    Parse command-line arguments for the extraction sidecar.
-
-    Args:
-        argv: List of arguments (defaults to sys.argv[1:]).
-
-    Returns:
-        Parsed arguments namespace.
-    """
-    parser = build_arg_parser_facts()
     return parser.parse_args(argv)
 
 
@@ -197,22 +166,16 @@ def create_app(*, model=None, warmup=True, extractor=None):
     Returns:
         A FastAPI application.
     """
-    app = FastAPI(title="extraction-sidecar")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if warmup and extractor is None:
+            app.state.extractor = load_model(model)
+        yield
 
-    # Set extractor immediately if provided (for testing)
+    app = FastAPI(title="extraction-sidecar", lifespan=lifespan)
     if extractor is not None:
         app.state.extractor = extractor
-    elif warmup:
-        # Load model during startup if warmup is True
-        @app.on_event("startup")
-        def startup():
-            """Load model during app startup."""
-            app.state.extractor = load_model(model)
-
-    @app.get("/healthz")
-    async def healthz():
-        """Health check endpoint."""
-        return {"status": "ok"}
+    sidecar.add_healthz(app)
 
     @app.post("/extract")
     async def extract(request_body: dict):
