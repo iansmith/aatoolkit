@@ -30,6 +30,36 @@ from fastapi.testclient import TestClient
 import facts_server
 
 
+def _pairs(spans: list) -> set:
+    return {(s["label"], s["text"]) for s in spans}
+
+
+def _offsets(spans: list) -> set:
+    return {(s["start"], s["end"]) for s in spans}
+
+
+def _check_row_pairs(actual_spans: list, expected: list, row_name: str) -> list[str]:
+    actual_pairs = _pairs(actual_spans)
+    expected_pairs = _pairs(expected)
+    if actual_pairs != expected_pairs:
+        return [f"{row_name} row mismatch: expected {expected_pairs}, got {actual_pairs}"]
+    return []
+
+
+def _check_offsets(steered_spans: list, control_spans: list) -> list[str]:
+    steered_offsets = _offsets(steered_spans)
+    control_offsets = _offsets(control_spans)
+    if steered_offsets != control_offsets:
+        return [f"Span offset mismatch: steered {steered_offsets} != control {control_offsets}"]
+    return []
+
+
+def _check_no_fact(category: str, steered_spans: list, control_spans: list) -> list[str]:
+    if category == "no_fact" and (steered_spans or control_spans):
+        return [f"no_fact case must return zero spans in both rows, got steered={len(steered_spans)}, control={len(control_spans)}"]
+    return []
+
+
 def judge_case(case: dict, steered_spans: list, control_spans: list) -> tuple[bool, list[str]]:
     """
     Judge a steering case against expected outputs.
@@ -38,36 +68,10 @@ def judge_case(case: dict, steered_spans: list, control_spans: list) -> tuple[bo
     Implements the three main assertions plus the no_fact special case.
     """
     failures = []
-    category = case.get("category")
-
-    # Build sets of (label, text) pairs for comparison
-    steered_pairs = {(s["label"], s["text"]) for s in steered_spans}
-    control_pairs = {(s["label"], s["text"]) for s in control_spans}
-
-    # Build sets of (start, end) offsets
-    steered_offsets = {(s["start"], s["end"]) for s in steered_spans}
-    control_offsets = {(s["start"], s["end"]) for s in control_spans}
-
-    # Expected pairs
-    expect_steered_pairs = {(e["label"], e["text"]) for e in case.get("expect_steered", [])}
-    expect_control_pairs = {(e["label"], e["text"]) for e in case.get("expect_control", [])}
-
-    # Assertion 1: Steered row returns expected pairs
-    if steered_pairs != expect_steered_pairs:
-        failures.append(f"Steered row mismatch: expected {expect_steered_pairs}, got {steered_pairs}")
-
-    # Assertion 2: Control row returns expected pairs
-    if control_pairs != expect_control_pairs:
-        failures.append(f"Control row mismatch: expected {expect_control_pairs}, got {control_pairs}")
-
-    # Assertion 3: Span offsets must be identical
-    if steered_offsets != control_offsets:
-        failures.append(f"Span offset mismatch: steered {steered_offsets} != control {control_offsets}")
-
-    # Assertion 4: For no_fact, both rows must be empty
-    if category == "no_fact":
-        if steered_spans or control_spans:
-            failures.append(f"no_fact case must return zero spans in both rows, got steered={len(steered_spans)}, control={len(control_spans)}")
+    failures += _check_row_pairs(steered_spans, case.get("expect_steered", []), "Steered")
+    failures += _check_row_pairs(control_spans, case.get("expect_control", []), "Control")
+    failures += _check_offsets(steered_spans, control_spans)
+    failures += _check_no_fact(case.get("category"), steered_spans, control_spans)
 
     return (len(failures) == 0, failures)
 
