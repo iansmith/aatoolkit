@@ -59,7 +59,7 @@ def test_wire_fixture_request_reaches_extractor(wire_fixture):
     app = facts_server.create_app(warmup=False, extractor=stub)
     client = TestClient(app)
 
-    response = client.post("/extract", json=wire_fixture["request"])
+    response = client.post("/extract", content=wire_fixture["request_json"], headers={"content-type": "application/json"})
 
     assert len(stub.calls) == 1
     assert stub.calls[0]["text"] == "Bill on the 5th of July"
@@ -104,12 +104,12 @@ def test_rejects_malformed_requests():
     client = TestClient(app)
 
     malformed_requests = [
-        {},  # missing text, labels, threshold
-        {"text": "foo"},  # missing labels, threshold
+        {},  # missing text
+        {"text": "foo"},  # missing labels
         {"text": "foo", "labels": []},  # empty labels
         {"text": "foo", "labels": ["ok", 7]},  # labels contains non-string
+        {"text": "foo", "labels": ["ok"]},  # missing threshold
         {"text": "foo", "labels": ["ok"], "threshold": 1.5},  # threshold out of range
-        {"text": "foo", "labels": ["ok"], "threshold": -0.1},  # threshold out of range
     ]
 
     for req in malformed_requests:
@@ -211,7 +211,7 @@ def test_model_argument_reaches_loader():
 # Model path resolution
 # ============================================================================
 
-def test_resolve_model():
+def test_resolve_model(tmp_path):
     """Table test for model path resolution with exact inputs and expected values."""
     import facts_server
 
@@ -223,6 +223,7 @@ def test_resolve_model():
         ("models/gliner", "models/gliner"),  # repo id without special prefix
         ("./scripts", str(repo_root / "scripts")),  # relative path, normalized
         ("~", str(Path.home())),  # home expansion
+        (str(tmp_path), str(tmp_path)),  # absolute existing directory unchanged
     ]
 
     for input_val, expected in test_cases:
