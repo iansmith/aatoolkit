@@ -32,6 +32,35 @@ func TestMuLawDecodeMatchesG711(t *testing.T) {
 	}
 }
 
+// headerField describes one fixed-position field of the 44-byte WAV/RIFF
+// header: its byte range and expected value. want is a string for the four
+// four-character magic/ID fields, uint32 or uint16 for the rest — matching
+// each field's on-disk width.
+type headerField struct {
+	name   string
+	offset int
+	width  int
+	want   any
+}
+
+// ByteRate = SampleRate * NumChannels * BitsPerSample/8 = 8000 * 1 * 2.
+// BlockAlign = NumChannels * BitsPerSample/8 = 2.
+var wavHeaderFields = []headerField{
+	{"RIFF magic", 0, 4, "RIFF"},
+	{"ChunkSize", 4, 4, uint32(36 + 2000)},
+	{"WAVE magic", 8, 4, "WAVE"},
+	{"fmt ID", 12, 4, "fmt "},
+	{"Subchunk1Size", 16, 4, uint32(16)},
+	{"AudioFormat", 20, 2, uint16(1)},
+	{"NumChannels", 22, 2, uint16(1)},
+	{"SampleRate", 24, 4, uint32(8000)},
+	{"ByteRate", 28, 4, uint32(16000)},
+	{"BlockAlign", 32, 2, uint16(2)},
+	{"BitsPerSample", 34, 2, uint16(16)},
+	{"data ID", 36, 4, "data"},
+	{"Subchunk2Size", 40, 4, uint32(2000)},
+}
+
 func TestMulawToWAV_Header(t *testing.T) {
 	wav := mulawToWAV(make([]byte, 1000), 8000)
 
@@ -39,46 +68,22 @@ func TestMulawToWAV_Header(t *testing.T) {
 		t.Fatalf("WAV length = %d, want %d", len(wav), 44+2000)
 	}
 
-	if got := string(wav[0:4]); got != "RIFF" {
-		t.Errorf("RIFF magic = %q", got)
-	}
-	if got := binary.LittleEndian.Uint32(wav[4:8]); got != 36+2000 {
-		t.Errorf("ChunkSize = %d, want %d", got, 36+2000)
-	}
-	if got := string(wav[8:12]); got != "WAVE" {
-		t.Errorf("WAVE magic = %q", got)
-	}
-	if got := string(wav[12:16]); got != "fmt " {
-		t.Errorf("fmt ID = %q", got)
-	}
-	if got := binary.LittleEndian.Uint32(wav[16:20]); got != 16 {
-		t.Errorf("Subchunk1Size = %d, want 16", got)
-	}
-	if got := binary.LittleEndian.Uint16(wav[20:22]); got != 1 {
-		t.Errorf("AudioFormat = %d, want 1 (PCM)", got)
-	}
-	if got := binary.LittleEndian.Uint16(wav[22:24]); got != 1 {
-		t.Errorf("NumChannels = %d, want 1", got)
-	}
-	if got := binary.LittleEndian.Uint32(wav[24:28]); got != 8000 {
-		t.Errorf("SampleRate = %d, want 8000", got)
-	}
-	// ByteRate = SampleRate * NumChannels * BitsPerSample/8 = 8000 * 1 * 2.
-	if got := binary.LittleEndian.Uint32(wav[28:32]); got != 16000 {
-		t.Errorf("ByteRate = %d, want 16000", got)
-	}
-	// BlockAlign = NumChannels * BitsPerSample/8 = 2.
-	if got := binary.LittleEndian.Uint16(wav[32:34]); got != 2 {
-		t.Errorf("BlockAlign = %d, want 2", got)
-	}
-	if got := binary.LittleEndian.Uint16(wav[34:36]); got != 16 {
-		t.Errorf("BitsPerSample = %d, want 16", got)
-	}
-	if got := string(wav[36:40]); got != "data" {
-		t.Errorf("data ID = %q", got)
-	}
-	if got := binary.LittleEndian.Uint32(wav[40:44]); got != 2000 {
-		t.Errorf("Subchunk2Size = %d, want 2000", got)
+	for _, f := range wavHeaderFields {
+		raw := wav[f.offset : f.offset+f.width]
+		switch want := f.want.(type) {
+		case string:
+			if got := string(raw); got != want {
+				t.Errorf("%s = %q, want %q", f.name, got, want)
+			}
+		case uint32:
+			if got := binary.LittleEndian.Uint32(raw); got != want {
+				t.Errorf("%s = %d, want %d", f.name, got, want)
+			}
+		case uint16:
+			if got := binary.LittleEndian.Uint16(raw); got != want {
+				t.Errorf("%s = %d, want %d", f.name, got, want)
+			}
+		}
 	}
 }
 
