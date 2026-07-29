@@ -29,6 +29,15 @@ version  = "5"       # :run orchestrator + per-ticket reviewer/adversary subagen
 provider = "anthropic"
 model    = "haiku"   # fleet implementation agents (no version pin)
 
+# Override for THIS batch of CC-simplification leaves (AATK-62..67 under AATK-61):
+# each requires reading and reasoning about real control-flow tradeoffs across a
+# frozen test suite, not boilerplate transcription — haiku is undersized for that.
+# [tiers.small] above stays the documented default for ordinary fleet leaves; this
+# key overrides it for every fleet launch until removed.
+[fleet.agents]
+model = "claude-sonnet-5"
+allowed_tools = ["Bash(gh:*)", "Bash(git:*)", "Bash(go:*)", "Bash(gofmt:*)", "Bash(lizard:*)"]
+
 # Point this repo's runs at the local Phase-1 metering router (see ~/slopstop/router).
 # :design health-checks it at run start and :run points each fleet agent at it
 # (ANTHROPIC_BASE_URL + X-Slopstop-Run/X-Slopstop-Ticket headers), so fleet traffic is
