@@ -21,8 +21,15 @@ configuration errors (missing cases file, before model load).
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+
+# Allow model downloads - disable offline mode if model cache doesn't exist yet
+# Do this BEFORE importing facts_server (which sets HF_HUB_OFFLINE at module load)
+if not os.path.exists(os.path.expanduser("~/.cache/huggingface/hub/models--urchade--gliner_small-v2.1")):
+    os.environ["HF_HUB_OFFLINE"] = "0"
+    os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
 from fastapi.testclient import TestClient
 
@@ -123,8 +130,15 @@ def main():
 
     model = facts_server.resolve_model(args.model)
 
-    # Create app and client
-    app = facts_server.create_app(model=model)
+    # Disable offline mode temporarily for model loading (facts_server sets it, but we need to download)
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+
+    # Load model
+    extractor = facts_server.load_model(model)
+
+    # Create app with pre-loaded extractor
+    app = facts_server.create_app(extractor=extractor, warmup=False)
     client = TestClient(app)
 
     # Run cases
