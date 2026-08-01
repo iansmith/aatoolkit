@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -63,12 +60,7 @@ func realtimeDirect(url string) StreamHandler {
 // call with an error inside the dial timeout instead of holding the line open,
 // and the carrier socket is closed on the way out rather than left dangling.
 func TestHandleStreamRealtime_DialFailureEndsCallAndClosesCarrier(t *testing.T) {
-	// A well-formed address certain to be dead: bind a listener, then close it.
-	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	url := "ws" + strings.TrimPrefix(dead.URL, "http")
-	dead.Close()
-
-	h := newRealtimeHarnessWith(t, realtimeDirect(url))
+	h := newRealtimeHarnessWith(t, realtimeDirect(deadBackendURL(t)))
 
 	if err := h.waitDone(realtimeDialTimeout); err == nil {
 		t.Fatal("a backend that refuses connection must end the call with a non-nil error")

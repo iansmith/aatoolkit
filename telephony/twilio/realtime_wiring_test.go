@@ -112,6 +112,18 @@ func newFakeRealtimeBackend(t *testing.T) *fakeRealtimeBackend {
 	return b
 }
 
+// deadBackendURL is a well-formed backend address certain to refuse connection:
+// bind a listener so the port is real, then close it. Shared by every test that
+// exercises the dial-failure path, so they all point at the same kind of dead
+// address rather than each inventing one.
+func deadBackendURL(t *testing.T) string {
+	t.Helper()
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := "ws" + strings.TrimPrefix(dead.URL, "http")
+	dead.Close()
+	return url
+}
+
 func (b *fakeRealtimeBackend) url() string {
 	return "ws" + strings.TrimPrefix(b.srv.URL, "http")
 }
@@ -275,13 +287,7 @@ func TestRealtime_SwitchUnsetAttemptsNoDial(t *testing.T) {
 // --- behavior 5: failure paths end the call, never hang --------------------
 
 func TestRealtime_DialFailureEndsCallWithError(t *testing.T) {
-	// A backend that refuses connection: bind a listener, then close it, so the
-	// address is well-formed and certain to be dead.
-	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	url := "ws" + strings.TrimPrefix(dead.URL, "http")
-	dead.Close()
-
-	h := newRealtimeHarness(t, url)
+	h := newRealtimeHarness(t, deadBackendURL(t))
 
 	if err := h.waitDone(5 * time.Second); err == nil {
 		t.Fatal("a backend that refuses connection must end the call with a non-nil error")
