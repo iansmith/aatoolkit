@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/iansmith/aatoolkit/telephony"
+	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,21 @@ type Config struct {
 	TTS         TTSConfig
 	Prompt      func() string
 	UserContext func() string // optional user context block injected after system prompt
+
+	// RealtimeURL selects the voice transport. Empty — the default — runs the
+	// existing VAD/STT/TTS sidecar path and constructs no realtime client. Set
+	// to a backend websocket URL, calls run over that backend instead, which
+	// also hands it the turn-taking; see twilio.NewStreamHandler for what that
+	// bypasses. The engine supplies no default URL: like every other field
+	// here, it is the consumer's to inject.
+	RealtimeURL string
+}
+
+// StreamHandler returns the Media Streams handler for the configured
+// transport, for a consumer to install on twilio.Server.HandleStream. It is
+// the one place the transport switch is read.
+func (c Config) StreamHandler() twilio.StreamHandler {
+	return twilio.NewStreamHandler(c.RealtimeURL)
 }
 
 // New builds a driver Host from cfg, wiring the serial speech queue internally.
