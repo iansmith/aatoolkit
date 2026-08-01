@@ -683,21 +683,23 @@ func (s *Session) run() {
 		case v := <-s.modelRouteCh:
 			s.recordModelRoute(v)
 		case completion := <-s.timerFacility.Completions():
-			if !s.timerFacility.IsCurrent(completion) {
-				continue
-			}
-			s.dispatchTimerCompletion(completion.Name)
+			s.dispatchTimerCompletion(completion)
 		}
 	}
 }
 
-// dispatchTimerCompletion maps a fired TimerFacility timer's name to its
-// InputSource and dispatches it. Split out of run()'s select loop (which
-// must stay a flat, low-complexity dispatcher per Charter R8) as the number
-// of named timers has grown across tickets (SOP-125, SOP-156, SOP-161,
-// AATK-24, AATK-25).
-func (s *Session) dispatchTimerCompletion(name string) {
-	switch name {
+// dispatchTimerCompletion drops a superseded completion, then maps a fired
+// TimerFacility timer's name to its InputSource and dispatches it. Split out of
+// run()'s select loop (which must stay a flat, low-complexity dispatcher per
+// Charter R8) as the number of named timers has grown across tickets (SOP-125,
+// SOP-156, SOP-161, AATK-24, AATK-25). The staleness check moved in here with
+// it: it is part of "handle a fired timer", and leaving it inline cost run() a
+// branch that the split exists to keep out of it.
+func (s *Session) dispatchTimerCompletion(completion TimerCompletion) {
+	if !s.timerFacility.IsCurrent(completion) {
+		return
+	}
+	switch completion.Name {
 	case timerIdle:
 		s.dispatch(SourceIdleTimer, nil)
 	case timerMarkEcho:
