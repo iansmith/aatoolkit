@@ -24,11 +24,18 @@ type Frame struct {
 	Event     EventType
 	StreamSID string
 	Payload   []byte // decoded μ-law audio; non-nil only for EventMedia
-	Chunk     int    // monotonic frame sequence number; only set for EventMedia
-	Timestamp string // ms offset from stream start; only set for EventMedia
-	MarkName  string // non-empty only for EventMark
-	CallSID   string // non-empty only for EventStart
-	From      string // caller From threaded in by ServeStreams from the voice webhook; "" if unknown, only set for EventStart
+	// EncodedPayload is media.payload exactly as it arrived on the wire —
+	// base64 μ-law, never decoded. It is carried alongside Payload rather than
+	// derived from it because the realtime transport forwards base64 to the
+	// backend unchanged; re-encoding Payload would decode and re-encode every
+	// 20 ms frame to reproduce bytes the carrier already sent. Payload keeps
+	// its meaning exactly, so existing consumers are unaffected.
+	EncodedPayload string
+	Chunk          int    // monotonic frame sequence number; only set for EventMedia
+	Timestamp      string // ms offset from stream start; only set for EventMedia
+	MarkName       string // non-empty only for EventMark
+	CallSID        string // non-empty only for EventStart
+	From           string // caller From threaded in by ServeStreams from the voice webhook; "" if unknown, only set for EventStart
 }
 
 // inbound is the union of all Twilio Media Streams message shapes. Only the
@@ -84,6 +91,7 @@ func DecodeFrame(raw []byte) (Frame, error) {
 			return Frame{}, fmt.Errorf("twilio: decode media payload: %w", err)
 		}
 		f.Payload = payload
+		f.EncodedPayload = in.Media.Payload
 
 		if len(in.Media.Chunk) > 0 {
 			chunk, err := parseChunk(in.Media.Chunk)
@@ -116,6 +124,16 @@ type outboundBase struct {
 }
 
 func EncodeMedia(streamSID string, payload []byte) ([]byte, error) {
+	return EncodeMediaB64(streamSID, base64.StdEncoding.EncodeToString(payload))
+}
+
+// EncodeMediaB64 encodes an outgoing media frame from a payload that is
+// already base64 μ-law, placing it in the message unchanged. It exists for
+// sources whose audio arrives base64 in the first place — the realtime voice
+// backend's audio deltas — where routing through EncodeMedia would decode and
+// re-encode every 20 ms frame to reproduce the bytes it was handed.
+// EncodeMedia delegates here, so the media-frame JSON shape has one definition.
+func EncodeMediaB64(streamSID, payloadB64 string) ([]byte, error) {
 	msg := struct {
 		outboundBase
 		Media struct {
@@ -125,7 +143,7 @@ func EncodeMedia(streamSID string, payload []byte) ([]byte, error) {
 		outboundBase: outboundBase{Event: string(EventMedia), StreamSID: streamSID},
 		Media: struct {
 			Payload string `json:"payload"`
-		}{Payload: base64.StdEncoding.EncodeToString(payload)},
+		}{Payload: payloadB64},
 	}
 	return json.Marshal(msg)
 }
