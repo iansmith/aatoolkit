@@ -1,6 +1,7 @@
 package realtime
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -61,9 +62,33 @@ func TestEachFrameBecomesOneAppendInOrder(t *testing.T) {
 	}
 }
 
-// G2 (unreachable-backend Dial) was identified by the same pass but is NOT here:
-// against the unimplemented stub, Dial errors for every input, so "Dial returns an
-// error" asserts what the stub already does — vacuously green, the false-negative
-// shape attack vector 5 hunts for. It only becomes falsifiable once Dial can
-// succeed, so it is added during implementation rather than frozen as a Phase 0
-// baseline that proves nothing.
+// G2 — the DoD requires failures to surface "rather than blocking, panicking, or
+// silently reconnecting". Mid-session close is covered by the Phase 0 suite; a
+// backend that was never reachable is not, and a Dial that hands back a
+// usable-looking Client defers the error to the first frame of a live call.
+//
+// Added during implementation, not frozen at Phase 0: against the stub, Dial
+// errored for every input, so this assertion was vacuously green — the
+// false-negative shape attack vector 5 exists to catch. It is only falsifiable
+// once Dial can succeed, which is now.
+func TestDialAgainstUnreachableBackendReturnsError(t *testing.T) {
+	// A well-formed address with nothing listening: stand a backend up to claim
+	// a port, then close it before dialling.
+	be := newFakeBackend(t)
+	url := be.url()
+	be.srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	c, err := Dial(ctx, url)
+	if err == nil {
+		if c != nil {
+			_ = c.Close()
+		}
+		t.Fatal("Dial against an unreachable backend returned nil error")
+	}
+	if c != nil {
+		t.Errorf("Dial returned a non-nil Client alongside an error: %+v", c)
+	}
+}

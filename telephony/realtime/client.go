@@ -18,28 +18,65 @@ type Client struct {
 
 // Dial connects to url, sends the session.update handshake, and waits for the
 // backend's session.created before returning. A Client that comes back from
-// Dial has a negotiated session; one that errors has no connection to close.
+// Dial has a negotiated session; on any failure the connection is torn down and
+// the returned Client is nil, so a half-open Client can never escape and defer
+// its error to the first frame of a live call.
 func Dial(ctx context.Context, url string) (*Client, error) {
-	return nil, fmt.Errorf("realtime: Dial not implemented")
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("realtime: dial %s: %w", url, err)
+	}
+	c := &Client{conn: conn}
+
+	if err := c.send(ctx, newSessionUpdate()); err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("realtime: sending %s: %w", EventSessionUpdate, err)
+	}
+
+	// Read until the session is acknowledged. A backend is free to emit other
+	// events first; only session.created ends the handshake.
+	for {
+		ev, err := c.Read(ctx)
+		if err != nil {
+			conn.CloseNow()
+			return nil, fmt.Errorf("realtime: awaiting %s: %w", EventSessionCreated, err)
+		}
+		if ev.Type == EventSessionCreated {
+			return c, nil
+		}
+	}
 }
 
 // AppendAudio forwards one carrier frame's payload to the backend. payload is
 // base64 G.711 and is placed on the wire unchanged.
 func (c *Client) AppendAudio(ctx context.Context, payload string) error {
-	return fmt.Errorf("realtime: AppendAudio not implemented")
+	return c.send(ctx, audioAppend{Type: EventAudioAppend, Audio: payload})
 }
 
 // Read returns the next server event. Events whose type this package does not
-// model are returned with their Type set and the rest zero — Read never fails
-// on an unrecognised type. It returns an error when the connection ends.
+// model decode with their Type set and the rest zero — Read never fails on an
+// unrecognised type, because the protocol is larger than the subset used here
+// and a backend may legitimately emit more of it. It returns an error when the
+// connection ends.
 func (c *Client) Read(ctx context.Context) (ServerEvent, error) {
-	return ServerEvent{}, fmt.Errorf("realtime: Read not implemented")
+	_, data, err := c.conn.Read(ctx)
+	if err != nil {
+		return ServerEvent{}, err
+	}
+	var ev ServerEvent
+	if err := json.Unmarshal(data, &ev); err != nil {
+		return ServerEvent{}, fmt.Errorf("realtime: decoding server event: %w", err)
+	}
+	return ev, nil
 }
 
-// Close shuts the connection down. It is safe to call on an already-closed
-// client.
+// Close shuts the connection down. It is safe on a nil Client and on one whose
+// connection has already gone away.
 func (c *Client) Close() error {
-	return fmt.Errorf("realtime: Close not implemented")
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.Close(websocket.StatusNormalClosure, "")
 }
 
 // send marshals and writes one client event.

@@ -36,8 +36,9 @@ func NewBridge(c *Client, sink MediaSink) *Bridge {
 }
 
 // Forward sends one inbound carrier frame's base64 payload to the backend.
+// One frame in, one append out: no batching, no reordering, no rebuffering.
 func (b *Bridge) Forward(ctx context.Context, payload string) error {
-	return fmt.Errorf("realtime: Forward not implemented")
+	return b.client.AppendAudio(ctx, payload)
 }
 
 // Run reads server events until the connection ends or ctx is cancelled,
@@ -46,11 +47,50 @@ func (b *Bridge) Forward(ctx context.Context, payload string) error {
 // error describing why it stopped — a backend that goes away is a fact the
 // caller must see, never a silent return.
 func (b *Bridge) Run(ctx context.Context) error {
-	return fmt.Errorf("realtime: Run not implemented")
+	defer close(b.transcripts)
+
+	for {
+		ev, err := b.client.Read(ctx)
+		if err != nil {
+			return fmt.Errorf("realtime: read loop ended: %w", err)
+		}
+
+		switch ev.Type {
+		case EventAudioDelta:
+			// Verbatim: the delta is already base64 G.711, which is what the
+			// carrier wants. Decoding to re-encode would spend CPU per frame
+			// reproducing the input.
+			if err := b.sink.Media(ctx, ev.Delta); err != nil {
+				return fmt.Errorf("realtime: media sink: %w", err)
+			}
+		case EventSpeechStarted:
+			// One clear per event. Collapsing repeats would be a behavior
+			// change, not an optimisation.
+			if err := b.sink.Clear(ctx); err != nil {
+				return fmt.Errorf("realtime: clear sink: %w", err)
+			}
+		case EventTranscriptDelta:
+			b.publish(ctx, Transcript{Text: ev.Transcript})
+		case EventTranscriptDone:
+			b.publish(ctx, Transcript{Text: ev.Transcript, Final: true})
+		default:
+			// Unmodelled event type: ignored, and the loop continues. The
+			// protocol is larger than the subset this package reads.
+		}
+	}
 }
 
 // Transcripts yields transcription results in arrival order. The channel is
 // closed when Run returns.
 func (b *Bridge) Transcripts() <-chan Transcript {
 	return b.transcripts
+}
+
+// publish hands a transcript to the consumer, abandoning it if the context ends
+// first so a caller that stops reading cannot wedge the read loop.
+func (b *Bridge) publish(ctx context.Context, tr Transcript) {
+	select {
+	case b.transcripts <- tr:
+	case <-ctx.Done():
+	}
 }
