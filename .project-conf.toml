@@ -3,7 +3,7 @@
 system = "linear"
 key    = "AATK"                 # Linear team key (team "AiAssistantToolkit")
 prefix = "AATK"                 # ticket prefix, e.g. AATK-1
-tracking_dir = ".slopstop"
+tracking_dir = ".slopstop/ticket-active"
 archive_dir  = ".slopstop/ticket-archive"   # project-local; avoids the protected ~/.claude default
 
 # Tier→model map for the four-tier slopstop process.
@@ -27,7 +27,8 @@ version  = "5"       # :run orchestrator + per-ticket reviewer/adversary subagen
 
 [tiers.small]
 provider = "anthropic"
-model    = "haiku"   # fleet implementation agents (no version pin)
+model    = "sonnet"  # was 'haiku'; set 2026-08-01 (grand synchronization)
+version  = "5"  # set 2026-08-01 (grand synchronization)
 
 # Override for THIS batch of CC-simplification leaves (AATK-62..67 under AATK-61):
 # each requires reading and reasoning about real control-flow tradeoffs across a
@@ -64,7 +65,7 @@ filemap_violation = "kill"
 # skip_archive, unlike these, applies in BOTH modes — it's not [autonomous]-scoped.
 [autonomous]
 enabled = true
-branch_type = "feat"
+# branch_type intentionally unset 2026-08-01 — :start picks the prefix per ticket
 
 # Autonomous :merge behavior (applies when :merge is called with --autonomous).
 merge_strategy      = "merge"   # real merge commit; preserves per-commit history for git bisect

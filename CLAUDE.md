@@ -7,6 +7,17 @@ specific agent supplies its *meaning* (prompts, policy, ontology, identity) by i
 through `driver.Config` + `interp.Load` + the `host.Host` interface. Any number of agents can
 run on the same engine.
 
+## Universal Project Rules
+
+These live in `CLAUDE-universal.md` alongside this file — one mirrored copy per project,
+byte-identical everywhere. **Edit them in the slopstop repo (the reference copy) and
+propagate; never edit the copy in this repo.** Project-specific rules and deliberate
+overrides go below, in this file, where they take precedence.
+
+@CLAUDE-universal.md
+
+---
+
 ## The one hard rule — standalone
 
 **aatoolkit is a standalone module: it must not depend on anything outside its own
