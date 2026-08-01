@@ -43,12 +43,11 @@ type fakeBackend struct {
 
 	toSend    []any // pushed to the client after the handshake
 	closeHard bool  // close the socket right after session.created
-	ready     chan struct{}
 }
 
 func newFakeBackend(t *testing.T) *fakeBackend {
 	t.Helper()
-	b := &fakeBackend{ready: make(chan struct{})}
+	b := &fakeBackend{}
 	b.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -65,7 +64,6 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 		b.record(data)
 
 		_ = writeJSON(ctx, c, ServerEvent{Type: EventSessionCreated})
-		close(b.ready)
 
 		if b.closeHard {
 			_ = c.Close(websocket.StatusNormalClosure, "bye")
