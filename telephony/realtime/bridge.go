@@ -3,6 +3,7 @@ package realtime
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 )
 
 // MediaSink is the carrier-facing side of the bridge: where synthesized audio
@@ -24,10 +25,17 @@ type Transcript struct {
 
 // Bridge pumps between a carrier and a Client. It performs no audio
 // conversion in either direction — see the package comment.
+//
+// One goroutine may call Forward and another may call Run concurrently; that
+// is the intended shape, and it is safe because the underlying connection
+// permits one concurrent reader and one concurrent writer. Concurrent calls to
+// Forward are NOT safe — serialise them in the caller, which owns the carrier's
+// frame ordering anyway.
 type Bridge struct {
 	client      *Client
 	sink        MediaSink
 	transcripts chan Transcript
+	running     atomic.Bool
 }
 
 // NewBridge wires a client to a carrier media sink.
@@ -46,7 +54,13 @@ func (b *Bridge) Forward(ctx context.Context, payload string) error {
 // and transcripts are published on Transcripts. It always returns a non-nil
 // error describing why it stopped — a backend that goes away is a fact the
 // caller must see, never a silent return.
+// A second concurrent Run is refused rather than allowed to proceed: two
+// readers on one connection is undefined, and the loser would panic closing an
+// already-closed transcript channel on the way out.
 func (b *Bridge) Run(ctx context.Context) error {
+	if !b.running.CompareAndSwap(false, true) {
+		return fmt.Errorf("realtime: Run already in progress")
+	}
 	defer close(b.transcripts)
 
 	for {

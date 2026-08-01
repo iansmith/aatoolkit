@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	neturl "net/url"
 
 	"github.com/coder/websocket"
 )
@@ -22,9 +23,12 @@ type Client struct {
 // the returned Client is nil, so a half-open Client can never escape and defer
 // its error to the first frame of a live call.
 func Dial(ctx context.Context, url string) (*Client, error) {
+	// The handshake response never needs closing — coder/websocket owns it.
 	conn, _, err := websocket.Dial(ctx, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("realtime: dial %s: %w", url, err)
+		// redactUserinfo keeps credentials out of logs: a ws:// URL may carry
+		// user:password, and this error is the one thing guaranteed to be logged.
+		return nil, fmt.Errorf("realtime: dial %s: %w", redactUserinfo(url), err)
 	}
 	c := &Client{conn: conn}
 
@@ -61,7 +65,7 @@ func (c *Client) AppendAudio(ctx context.Context, payload string) error {
 func (c *Client) Read(ctx context.Context) (ServerEvent, error) {
 	_, data, err := c.conn.Read(ctx)
 	if err != nil {
-		return ServerEvent{}, err
+		return ServerEvent{}, fmt.Errorf("realtime: reading server event: %w", err)
 	}
 	var ev ServerEvent
 	if err := json.Unmarshal(data, &ev); err != nil {
@@ -77,6 +81,18 @@ func (c *Client) Close() error {
 		return nil
 	}
 	return c.conn.Close(websocket.StatusNormalClosure, "")
+}
+
+// redactUserinfo strips any credentials from a URL so it is safe to log. A URL
+// that will not parse is reported as-is: it cannot contain structured userinfo,
+// and hiding a malformed address makes the error harder to act on.
+func redactUserinfo(raw string) string {
+	u, err := neturl.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = neturl.User("redacted")
+	return u.String()
 }
 
 // send marshals and writes one client event.
