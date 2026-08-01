@@ -48,6 +48,7 @@ const (
 	DecisionTypeCap         = "cap"
 	DecisionTypeSTTDispatch = "stt_dispatch"
 	DecisionTypeSTTResult   = "stt_result"
+	DecisionTypeModelRoute  = "model_route"
 
 	DecisionKindSpeechStart  = "speech-start"
 	DecisionKindSilence      = "silence"
@@ -57,6 +58,7 @@ const (
 	DecisionKindTurnCap      = "turn-cap"
 	DecisionKindIdleTimeout  = "idle-timeout"
 	DecisionKindResponseCap  = "response-cap"
+	DecisionKindModelRoute   = "model-route"
 
 	DecisionParamSpeechThresh   = "SpeechThresh"
 	DecisionParamSilenceThresh  = "SilenceThresh"
@@ -66,7 +68,14 @@ const (
 	DecisionParamMaxTurn        = "MaxTurnMS"
 	DecisionParamMaxSilence     = "MaxSilenceMS"
 	DecisionParamMaxResponse    = "MaxResponseMS"
+	DecisionParamRouteTier      = "RouteTier"
 )
+
+// modelRouteShadowEffect is the Effect every model-route event carries. It is
+// constant on purpose: the whole point of the shadow record is that nothing
+// acted on the verdict, and a reader of the raw JSONL should not have to know
+// that from outside the file.
+const modelRouteShadowEffect = "shadow only; turn answered unchanged"
 
 // DecisionEvent is one recorded decision. The shape is deliberately flat and
 // JSON-friendly (one object per JSONL line); fields not relevant to a given
@@ -95,6 +104,13 @@ type DecisionEvent struct {
 	LatencyMS  int     `json:"latency_ms,omitempty"`
 	AudioBytes int     `json:"audio_bytes,omitempty"`
 	STTDurSec  float64 `json:"stt_audio_sec,omitempty"`
+
+	// RouteReason is the consumer's stated reason for the tier it reported on a
+	// model-route event (AATK-71); the tier itself rides in ParamValue under
+	// DecisionParamRouteTier, so the verdict stays inside the existing
+	// param/value vocabulary rather than starting a parallel one. omitempty, so
+	// every non-route event stays exactly as compact as it was.
+	RouteReason string `json:"route_reason,omitempty"`
 }
 
 // noopRecorder is the default when no recorder is wired: it drops every event
@@ -268,6 +284,9 @@ func formatDecisionLine(ev DecisionEvent) string {
 	case DecisionTypeSTTResult:
 		return fmt.Sprintf("[%8.3fs] %-16s req=%d latency=%dms audio=%.2fs  %q  -> %s\n",
 			float64(ev.AudioMS)/1000.0, ev.Type, ev.RequestID, ev.LatencyMS, ev.STTDurSec, ev.Text, ev.Effect)
+	case DecisionTypeModelRoute:
+		return fmt.Sprintf("[%8.3fs] %-16s %s=%v  %q  -> %s\n",
+			float64(ev.AudioMS)/1000.0, ev.Type, ev.Param, ev.ParamValue, ev.RouteReason, ev.Effect)
 	default:
 		return fmt.Sprintf("[%8.3fs] %-16s %s=%v  prob=%.2f silence=%dw  -> %s\n",
 			float64(ev.AudioMS)/1000.0, ev.Kind, ev.Param, ev.ParamValue, ev.Prob, ev.SilenceCount, ev.Effect)

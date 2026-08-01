@@ -171,6 +171,18 @@ type Session struct {
 	// turn completion). Source of truth for "a turn is in progress."
 	turnActive bool
 
+	// Shadow model-route state (AATK-71). routeReported marks that the current
+	// turn already has a reported routing verdict, so a consumer that reports
+	// twice for one turn has its second report dropped rather than
+	// double-counting that turn's label; completeTurn clears it as each new turn
+	// closes. turnEndAudioMS is the audio-clock position the turn closed at,
+	// snapshotted at completion so a verdict's event carries the turn's position
+	// and not whatever the live window happened to be when the report was picked
+	// up -- which is what keeps the record replay-stable. Both are read and
+	// written only on the sequencer goroutine (see modelRouteCh).
+	turnEndAudioMS int
+	routeReported  bool
+
 	// turnEndPending is set when VADTurnEnd fires while a full pass is still
 	// in flight (StateAwaitingFullResult): completing now would flush
 	// turnTranscripts before that pass's result arrives, so completion is
@@ -231,6 +243,14 @@ type Session struct {
 	sttIn         STTInput
 	sttDispatchCh chan STTRequest
 	sttReqID      int
+
+	// modelRouteCh carries shadow routing verdicts from ReportModelRoute --
+	// which a consumer may call from any goroutine -- to run(), so the event is
+	// recorded on the sequencer goroutine like every other decision and
+	// DecisionRecorder implementations keep the single-goroutine contract their
+	// interface documents. Buffered and sent to non-blockingly, so a consumer
+	// reporting a verdict never blocks on the sequencer.
+	modelRouteCh chan modelRouteVerdict
 
 	// sttDispatchTimes records the injected-clock instant each STT request was
 	// dispatched, keyed by request id, so handleSTTResult can report the round-
@@ -525,6 +545,7 @@ func NewSession(ctx context.Context, callSID string, opts ...SessionOption) *Ses
 		ctx:              ctx,
 		done:             make(chan struct{}),
 		sttDispatchTimes: make(map[int]time.Time),
+		modelRouteCh:     make(chan modelRouteVerdict, modelRouteDepth),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -654,6 +675,13 @@ func (s *Session) run() {
 				return
 			}
 			s.dispatch(SourceResponseReady, rev)
+		// Deliberately not routed through dispatch: a shadow routing verdict
+		// records and changes nothing, so it has no (state, source) cell to
+		// occupy -- putting it in the transition table would mean one identical
+		// handler per state, and inventing a state in which a verdict is
+		// silently discarded. It is recorded here instead (AATK-71).
+		case v := <-s.modelRouteCh:
+			s.recordModelRoute(v)
 		case completion := <-s.timerFacility.Completions():
 			if !s.timerFacility.IsCurrent(completion) {
 				continue
@@ -1064,6 +1092,98 @@ func (s *Session) recordStopwordTurnEnd() {
 	})
 }
 
+// modelRouteVerdict is one consumer-reported shadow routing verdict in flight
+// between ReportModelRoute and the sequencer: which tier would have handled the
+// turn, and why. The engine never constructs one of its own.
+type modelRouteVerdict struct {
+	tier   string
+	reason string
+}
+
+// modelRouteDepth is how many reported verdicts may be in flight before
+// ReportModelRoute starts dropping. A well-behaved consumer reports at most one
+// per turn, so anything above a couple is already pathological; the buffer
+// exists so a report issued while the sequencer is mid-transition does not have
+// to wait for it.
+const modelRouteDepth = 4
+
+// ReportModelRoute records a shadow model-routing verdict for the current turn:
+// tier is which tier would have handled it, reason is why. It is the seam a
+// consumer reports through, and the engine supplies no verdict of its own -- a
+// session nobody calls this on records nothing, which is every existing
+// consumer.
+//
+// This is the package's one consumer-facing mutator, where every other
+// injection point is a construction-time SessionOption the engine calls back
+// into. The divergence is deliberate: a routing verdict is not known at
+// construction, and a consumer whose policy decides after the turn closes has
+// nothing to hand a With* hook.
+//
+// Nothing acts on the verdict. The turn is answered exactly as it would have
+// been; the point is to accumulate a labelled corpus of what a router would
+// have done, gathered as a side effect of normal operation.
+//
+// Safe to call from any goroutine, including from inside TurnSink.
+// OnTurnComplete (which already runs on the sequencer): the verdict is handed to
+// the sequencer, which does the recording, so a DecisionRecorder still only ever
+// sees Record from one goroutine. The handoff is non-blocking -- a full buffer
+// drops the verdict with a warning rather than stalling the caller.
+//
+// The verdict attaches to the most recently completed turn and carries that
+// turn's audio position, so reporting late (after the consumer's own routing
+// policy has run) does not move the event. Reporting more than once for one turn
+// keeps the first verdict and drops the rest: the corpus exists to measure what
+// fraction of turns would escalate, and a duplicate would skew exactly that
+// number. Reporting so late that a further turn has already closed attributes
+// the verdict to that later turn -- inherent to an asynchronous seam, and the
+// reason a consumer should report as soon as its policy has decided.
+func (s *Session) ReportModelRoute(tier, reason string) {
+	select {
+	case s.modelRouteCh <- modelRouteVerdict{tier: tier, reason: reason}:
+	default:
+		log.Printf("telephony: session %s: WARN model-route buffer full, dropping verdict %q", s.CallSID, tier)
+	}
+}
+
+// recordModelRoute records one reported verdict against the current turn,
+// dropping a second report for a turn that already has one. Runs on the
+// sequencer goroutine (from run()'s select, or from Close's drain once the
+// sequencer has stopped), which is what makes the turn counters lock-free.
+func (s *Session) recordModelRoute(v modelRouteVerdict) {
+	if s.routeReported {
+		log.Printf("telephony: session %s: WARN model-route verdict %q dropped; this turn already reported one",
+			s.CallSID, v.tier)
+		return
+	}
+	s.routeReported = true
+	s.decisionRecorder.Record(DecisionEvent{
+		AudioMS:     s.turnEndAudioMS,
+		Type:        DecisionTypeModelRoute,
+		Kind:        DecisionKindModelRoute,
+		Param:       DecisionParamRouteTier,
+		ParamValue:  v.tier,
+		RouteReason: v.reason,
+		Effect:      modelRouteShadowEffect,
+	})
+}
+
+// drainModelRouteVerdicts records any verdicts still in flight. Called from
+// Close once the sequencer has stopped (or never ran), so it records on the
+// closing goroutine without racing run(). Without it a verdict reported for the
+// final turn of a call -- the common case, since the consumer's routing policy
+// runs after the turn closes -- would be lost every time, biasing the corpus
+// against whatever tier the last turn of a call tends to want.
+func (s *Session) drainModelRouteVerdicts() {
+	for {
+		select {
+		case v := <-s.modelRouteCh:
+			s.recordModelRoute(v)
+		default:
+			return
+		}
+	}
+}
+
 // drainSTTDispatch relays STTRequests from sttDispatchCh to sttIn in FIFO
 // order, isolated from run()'s select loop so a slow/backed-up STT sidecar
 // stalls only this goroutine (Charter R8) -- mirrors forwardToVAD's pattern.
@@ -1230,6 +1350,12 @@ func (s *Session) sendResponseMarkAndArmEcho(frames [][]byte) {
 // mirroring how Close() cancels every timer unconditionally rather than
 // per-path -- so no current or future completion path can leave it armed.
 func (s *Session) completeTurn(trigger TurnTrigger) {
+	// Open this turn to a routing verdict and snapshot the audio position first,
+	// so a verdict a consumer reports from inside OnTurnComplete (below, on this
+	// goroutine) and one it reports asynchronously later both attach to this
+	// turn, at this turn's position (AATK-71).
+	s.routeReported = false
+	s.turnEndAudioMS = s.lastStreamWindow * s.vadCfg.windowMS()
 	s.flushTurnTranscripts(trigger)
 	s.turnActive = false
 	s.turnEndPending = false
@@ -1278,6 +1404,10 @@ func (s *Session) Close() {
 		s.cancelTurnTimer()
 		s.vad.Close()
 	}
+	// Record any shadow routing verdict still in flight. The sequencer has
+	// stopped by here (or never started), so this records without racing it, and
+	// it must happen before the recorder is closed below (AATK-71).
+	s.drainModelRouteVerdicts()
 	// Flush the decision record after the sequencer has drained (so no further
 	// Record can arrive) and regardless of started, so a never-started session
 	// still writes a clean, empty record. Idempotent -- a second Close no-ops.
