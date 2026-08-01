@@ -89,6 +89,40 @@ func waitTurnComplete(t *testing.T, sink *spySink) {
 	}
 }
 
+// driveOneTurn drives one complete user turn through a started session's wired
+// channels: an utterance to its end, the STT result carrying text for the pass
+// that utterance dispatched, then held silence until the turn closes. Shared by
+// every test that needs a session with exactly one completed turn behind it.
+func driveOneTurn(
+	t *testing.T,
+	sid string,
+	dataIn *telephony.BufferedChan[[]byte],
+	sttIn *telephony.BufferedChan[telephony.STTRequest],
+	sttOut *telephony.BufferedChan[telephony.STTResult],
+	sink *spySink,
+	text string,
+) {
+	t.Helper()
+	pumpSilenceFrames(t, dataIn, telephony.EndSilenceWindows()+2, recvTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), recvTimeout)
+	req, err := sttIn.Recv(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("STT request not received: %v", err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), recvTimeout)
+	err = sttOut.Send(ctx, telephony.STTResult{
+		SessionID: sid, RequestID: req.RequestID, Kind: telephony.FullPass, Text: text,
+	})
+	cancel()
+	if err != nil {
+		t.Fatalf("send STT result: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond) // let the result settle before silence resumes
+	pumpSilenceFrames(t, dataIn, telephony.TurnEndSilenceWindows()+11, recvTimeout)
+	waitTurnComplete(t, sink)
+}
+
 // fieldCheck pairs a precomputed assertion outcome with its failure message,
 // letting a run of independent field checks be table-driven instead of a
 // chain of if statements.
@@ -457,25 +491,7 @@ func TestTranscriptSummary_WrittenAtClose(t *testing.T) {
 		telephony.WithTranscriptOutput(dir, sid, &live),
 	)
 
-	// One utterance -> end-of-utterance -> STT dispatch.
-	pumpSilenceFrames(t, dataIn, telephony.EndSilenceWindows()+2, recvTimeout)
-	ctx, cancel := context.WithTimeout(context.Background(), recvTimeout)
-	req, err := sttIn.Recv(ctx)
-	cancel()
-	if err != nil {
-		t.Fatalf("STT request not received: %v", err)
-	}
-	ctx, cancel = context.WithTimeout(context.Background(), recvTimeout)
-	err = sttOut.Send(ctx, telephony.STTResult{SessionID: sid, RequestID: req.RequestID, Kind: telephony.FullPass, Text: "hello world"})
-	cancel()
-	if err != nil {
-		t.Fatalf("send STT result: %v", err)
-	}
-	time.Sleep(50 * time.Millisecond)
-
-	// Continued silence -> turn-end -> completeTurn captures the turn.
-	pumpSilenceFrames(t, dataIn, telephony.TurnEndSilenceWindows()+11, recvTimeout)
-	waitTurnComplete(t, sink)
+	driveOneTurn(t, sid, dataIn, sttIn, sttOut, sink, "hello world")
 
 	s.Close()
 
@@ -641,4 +657,199 @@ func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
 			t.Fatalf("second Close (must be idempotent): %v", err)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Shadow model-route decisions (AATK-71).
+// ---------------------------------------------------------------------------
+
+// routeFixture is a live session wired with a capturing recorder and a spy
+// sink, plus the plumbing needed to drive one complete user turn through it
+// (utterance -> STT result -> silence turn-end). The four model-route tests
+// each need that same drive before a verdict has a turn to attach to, so it is
+// assembled once here rather than repeated per test.
+type routeFixture struct {
+	session *telephony.Session
+	rec     *mockRecorder
+	sink    *spySink
+	dataIn  *telephony.BufferedChan[[]byte]
+	sttIn   *telephony.BufferedChan[telephony.STTRequest]
+	sttOut  *telephony.BufferedChan[telephony.STTResult]
+}
+
+// newRouteFixture builds and starts the session. The caller drives it with
+// driveTurn and closes it (Close is the synchronisation point a verdict's
+// recording is observable after -- see ReportModelRoute).
+func newRouteFixture(t *testing.T, sid string) routeFixture {
+	t.Helper()
+	f := routeFixture{
+		rec:    &mockRecorder{},
+		sink:   &spySink{},
+		dataIn: telephony.NewBufferedChan[[]byte](256),
+		sttIn:  telephony.NewBufferedChan[telephony.STTRequest](100),
+		sttOut: telephony.NewBufferedChan[telephony.STTResult](100),
+	}
+	probs := speechThenSilenceProbs(1, telephony.TurnEndSilenceWindows()+10)
+	f.session = startSession(t, sid,
+		telephony.WithVADFactory(func() (telephony.VADDetector, error) { return &fakeDetector{probs: probs}, nil }),
+		telephony.WithTurnSink(f.sink),
+		telephony.WithTwilioDataInput(f.dataIn),
+		telephony.WithSTTInput(f.sttIn),
+		telephony.WithSTTOutput(f.sttOut),
+		telephony.WithDecisionRecorder(f.rec),
+	)
+	return f
+}
+
+// driveTurn runs one utterance to its STT result and then holds silence until
+// the turn closes, so the session has exactly one completed turn.
+func (f routeFixture) driveTurn(t *testing.T) {
+	t.Helper()
+	driveOneTurn(t, f.session.CallSID, f.dataIn, f.sttIn, f.sttOut, f.sink, "hello world")
+}
+
+// TestModelRoute_SilentByDefault drives a full turn through a session no
+// consumer reports a verdict on -- the behavior of every existing consumer --
+// and asserts the event stream carries nothing of the new kind: zero
+// model_route events, and no trace of either new wire key anywhere in the
+// serialized stream, which is what "byte-identical to the pre-change stream"
+// amounts to for a recording made from the same input.
+func TestModelRoute_SilentByDefault(t *testing.T) {
+	f := newRouteFixture(t, "route-silent")
+	f.driveTurn(t)
+	f.session.Close()
+
+	evs := f.rec.all()
+	if n := len(filterByKind(evs, telephony.DecisionKindModelRoute)); n != 0 {
+		t.Errorf("model_route events with no verdict reported: got %d, want 0", n)
+	}
+	if len(evs) == 0 {
+		t.Fatal("no decision events recorded at all -- the drive never produced a turn")
+	}
+	body, err := json.Marshal(evs)
+	if err != nil {
+		t.Fatalf("marshal events: %v", err)
+	}
+	for _, key := range []string{"model_route", "model-route", "route_reason", "RouteTier"} {
+		if bytes.Contains(body, []byte(key)) {
+			t.Errorf("unreported-verdict stream contains %q; it must be identical to the pre-change stream: %s", key, body)
+		}
+	}
+}
+
+// TestModelRoute_OneEventPerReportedVerdict reports a single verdict for a
+// completed turn and asserts exactly one event carrying the tier (in the
+// existing Param/ParamValue vocabulary), the reason, and an effect that says
+// on the record that nothing acted on it.
+func TestModelRoute_OneEventPerReportedVerdict(t *testing.T) {
+	f := newRouteFixture(t, "route-one")
+	f.driveTurn(t)
+	f.session.ReportModelRoute("large", "caller asked for a multi-step comparison")
+	f.session.Close()
+
+	got := filterByKind(f.rec.all(), telephony.DecisionKindModelRoute)
+	if len(got) != 1 {
+		t.Fatalf("model_route events: got %d, want 1 (all: %+v)", len(got), f.rec.all())
+	}
+	e := got[0]
+	checkFields(t, []fieldCheck{
+		{e.Type == "model_route", fmt.Sprintf("Type: got %q, want %q", e.Type, "model_route")},
+		{e.Kind == "model-route", fmt.Sprintf("Kind: got %q, want %q", e.Kind, "model-route")},
+		{e.Param == "RouteTier", fmt.Sprintf("Param: got %q, want %q", e.Param, "RouteTier")},
+		{e.ParamValue == "large", fmt.Sprintf("ParamValue: got %v, want %q", e.ParamValue, "large")},
+		{e.RouteReason == "caller asked for a multi-step comparison", fmt.Sprintf("RouteReason: got %q", e.RouteReason)},
+		{e.Effect != "", "Effect: got empty, want a statement that the verdict was shadow-only"},
+		{strings.Contains(e.Effect, "shadow"), fmt.Sprintf("Effect: got %q, want it to name shadow mode", e.Effect)},
+		{e.AudioMS > 0 && e.AudioMS%32 == 0, fmt.Sprintf("AudioMS: got %d, want a positive multiple of 32 (window-clock ms)", e.AudioMS)},
+	})
+}
+
+// TestModelRoute_SecondVerdictForSameTurnIgnored pins the chosen behavior for a
+// consumer that reports twice for one turn: the first verdict wins and the
+// second is dropped. A shadow corpus exists to measure what fraction of turns
+// would escalate, so a duplicate must not double-count that turn's label.
+func TestModelRoute_SecondVerdictForSameTurnIgnored(t *testing.T) {
+	f := newRouteFixture(t, "route-twice")
+	f.driveTurn(t)
+	f.session.ReportModelRoute("small", "first")
+	f.session.ReportModelRoute("large", "second")
+	f.session.Close()
+
+	got := filterByKind(f.rec.all(), telephony.DecisionKindModelRoute)
+	if len(got) != 1 {
+		t.Fatalf("model_route events after two reports for one turn: got %d, want 1 (all: %+v)", len(got), f.rec.all())
+	}
+	if got[0].ParamValue != "small" || got[0].RouteReason != "first" {
+		t.Errorf("kept verdict: got tier=%v reason=%q, want the first (small/first)", got[0].ParamValue, got[0].RouteReason)
+	}
+}
+
+// TestModelRoute_VocabularyPlacement asserts the new kind joins the existing
+// DecisionKind* family rather than starting a parallel one: it has the wire
+// value the recorded contract names, and it collides with none of the kinds
+// already in the vocabulary.
+func TestModelRoute_VocabularyPlacement(t *testing.T) {
+	checkFields(t, []fieldCheck{
+		{telephony.DecisionTypeModelRoute == "model_route", fmt.Sprintf("DecisionTypeModelRoute: got %q, want %q", telephony.DecisionTypeModelRoute, "model_route")},
+		{telephony.DecisionKindModelRoute == "model-route", fmt.Sprintf("DecisionKindModelRoute: got %q, want %q", telephony.DecisionKindModelRoute, "model-route")},
+		{telephony.DecisionParamRouteTier == "RouteTier", fmt.Sprintf("DecisionParamRouteTier: got %q, want %q", telephony.DecisionParamRouteTier, "RouteTier")},
+	})
+	assertNoCollision(t, "DecisionKindModelRoute", telephony.DecisionKindModelRoute, []string{
+		telephony.DecisionKindSpeechStart, telephony.DecisionKindSilence,
+		telephony.DecisionKindEndOfUtter, telephony.DecisionKindTurnEnd,
+		telephony.DecisionKindUtteranceCap, telephony.DecisionKindTurnCap,
+		telephony.DecisionKindIdleTimeout, telephony.DecisionKindResponseCap,
+	})
+	assertNoCollision(t, "DecisionParamRouteTier", telephony.DecisionParamRouteTier, []string{
+		telephony.DecisionParamSpeechThresh, telephony.DecisionParamSilenceThresh,
+		telephony.DecisionParamEndSilence, telephony.DecisionParamTurnEndSilence,
+		telephony.DecisionParamMaxUtterance, telephony.DecisionParamMaxTurn,
+		telephony.DecisionParamMaxSilence, telephony.DecisionParamMaxResponse,
+	})
+}
+
+// assertNoCollision fails if next repeats a value already in the vocabulary --
+// the check that a new constant joined the family rather than shadowing a
+// member of it.
+func assertNoCollision(t *testing.T, name, next string, existing []string) {
+	t.Helper()
+	for _, v := range existing {
+		if v == next {
+			t.Errorf("%s collides with an existing value %q", name, v)
+		}
+	}
+}
+
+// TestModelRoute_ReplayStability drives the same scripted input twice, reporting
+// the same verdict at the same point in each run, and asserts the route events
+// come out identical -- same order, same fields, same AudioMS. That is what
+// makes a shadow corpus usable as an evaluation set, and it holds because the
+// event is anchored on the turn's audio-clock position rather than on when the
+// consumer got around to reporting.
+func TestModelRoute_ReplayStability(t *testing.T) {
+	run := func(sid string) []telephony.DecisionEvent {
+		f := newRouteFixture(t, sid)
+		f.driveTurn(t)
+		f.session.ReportModelRoute("large", "same verdict both runs")
+		f.session.Close()
+		return filterByKind(f.rec.all(), telephony.DecisionKindModelRoute)
+	}
+
+	first := run("route-replay-1")
+	second := run("route-replay-2")
+
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("route events per run: got %d and %d, want 1 each", len(first), len(second))
+	}
+	b1, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal run 1: %v", err)
+	}
+	b2, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("marshal run 2: %v", err)
+	}
+	if !bytes.Equal(b1, b2) {
+		t.Errorf("route events differ across identical runs:\nrun1: %s\nrun2: %s", b1, b2)
+	}
 }
