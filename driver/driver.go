@@ -173,32 +173,52 @@ func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*ht
 // stream.
 type sseChunk struct {
 	Choices []struct {
-		Delta struct {
-			Content          string `json:"content"`
-			ReasoningContent string `json:"reasoning_content"`
-			Reasoning        string `json:"reasoning"`
-		} `json:"delta"`
+		Delta sseDelta `json:"delta"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 }
 
-// decodeSSELine parses one line of the SSE stream. ok is false for lines
-// that carry no chunk to process — blank lines, lines without the "data: "
-// prefix, and the "[DONE]" terminator.
-func decodeSSELine(line string) (chunk sseChunk, ok bool, err error) {
+// sseDelta is the incremental text one chunk carries.
+type sseDelta struct {
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content"`
+	Reasoning        string `json:"reasoning"`
+}
+
+// reasoningText returns the delta's reasoning, tolerating both spellings
+// providers emit for it: `reasoning_content` and bare `reasoning`.
+func (d sseDelta) reasoningText() string {
+	if d.ReasoningContent != "" {
+		return d.ReasoningContent
+	}
+	return d.Reasoning
+}
+
+// decodeSSELine parses one line of the SSE stream into the delta it carries.
+// ok is false for lines with nothing to apply — blank lines, lines without the
+// "data: " prefix, the "[DONE]" terminator, and chunks carrying no choices. An
+// upstream error payload comes back as an error, as does a malformed chunk.
+func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 	if line == "" || !strings.HasPrefix(line, "data: ") {
-		return sseChunk{}, false, nil
+		return sseDelta{}, false, nil
 	}
 	sseData := line[len("data: "):]
 	if sseData == "[DONE]" {
-		return sseChunk{}, false, nil
+		return sseDelta{}, false, nil
 	}
+	var chunk sseChunk
 	if err := json.Unmarshal([]byte(sseData), &chunk); err != nil {
-		return sseChunk{}, false, fmt.Errorf("decoding SSE chunk: %w", err)
+		return sseDelta{}, false, fmt.Errorf("decoding SSE chunk: %w", err)
 	}
-	return chunk, true, nil
+	if chunk.Error != nil {
+		return sseDelta{}, false, fmt.Errorf("llm error: %s", chunk.Error.Message)
+	}
+	if len(chunk.Choices) == 0 {
+		return sseDelta{}, false, nil
+	}
+	return chunk.Choices[0].Delta, true, nil
 }
 
 // isSegmentDelimiter reports whether b is one of the punctuation boundaries
@@ -265,26 +285,15 @@ type streamState struct {
 // for a malformed chunk or an upstream error payload; lines needing no work
 // (blank, non-data, [DONE], choice-less) are a no-op.
 func processSSELine(line string, st *streamState, onSegment func(string)) error {
-	chunk, ok, err := decodeSSELine(line)
+	d, ok, err := decodeSSELine(line)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return nil
 	}
-	if chunk.Error != nil {
-		return fmt.Errorf("llm error: %s", chunk.Error.Message)
-	}
-	if len(chunk.Choices) == 0 {
-		return nil
-	}
-	d := chunk.Choices[0].Delta
 	st.contentBuf.WriteString(d.Content)
-	reasoning := d.ReasoningContent
-	if reasoning == "" {
-		reasoning = d.Reasoning
-	}
-	st.reasoningBuf.WriteString(reasoning)
+	st.reasoningBuf.WriteString(d.reasoningText())
 	if d.Content != "" {
 		st.hasContent = true
 	}
