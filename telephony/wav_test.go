@@ -2,6 +2,7 @@ package telephony
 
 import (
 	"encoding/binary"
+	"strconv"
 	"testing"
 )
 
@@ -32,33 +33,60 @@ func TestMuLawDecodeMatchesG711(t *testing.T) {
 	}
 }
 
+// headerWant is one header field's expected value. Each implementation knows
+// its own on-disk encoding, so the field's width is implied by its type
+// instead of being restated as a number that could disagree with it.
+type headerWant interface {
+	// String renders the expectation.
+	String() string
+	// read decodes this field's bytes off the front of buf, rendering them
+	// exactly as String renders the expectation — so the assertion is one
+	// string comparison and the failure message reads naturally.
+	read(buf []byte) string
+}
+
+// magic is a fixed ASCII chunk/format ID, stored as its own characters.
+// It renders quoted so a trailing space (as in "fmt ") stays visible.
+type magic string
+
+func (m magic) String() string         { return strconv.Quote(string(m)) }
+func (m magic) read(buf []byte) string { return magic(buf[:len(m)]).String() }
+
+// le16 and le32 are little-endian unsigned integers of 2 and 4 bytes.
+type le16 uint16
+
+func (v le16) String() string         { return strconv.FormatUint(uint64(v), 10) }
+func (v le16) read(buf []byte) string { return le16(binary.LittleEndian.Uint16(buf)).String() }
+
+type le32 uint32
+
+func (v le32) String() string         { return strconv.FormatUint(uint64(v), 10) }
+func (v le32) read(buf []byte) string { return le32(binary.LittleEndian.Uint32(buf)).String() }
+
 // headerField describes one fixed-position field of the 44-byte WAV/RIFF
-// header: its byte range and expected value. want is a string for the four
-// four-character magic/ID fields, uint32 or uint16 for the rest — matching
-// each field's on-disk width.
+// header: where it starts and what it should hold.
 type headerField struct {
 	name   string
 	offset int
-	width  int
-	want   any
+	want   headerWant
 }
 
 // ByteRate = SampleRate * NumChannels * BitsPerSample/8 = 8000 * 1 * 2.
 // BlockAlign = NumChannels * BitsPerSample/8 = 2.
 var wavHeaderFields = []headerField{
-	{"RIFF magic", 0, 4, "RIFF"},
-	{"ChunkSize", 4, 4, uint32(36 + 2000)},
-	{"WAVE magic", 8, 4, "WAVE"},
-	{"fmt ID", 12, 4, "fmt "},
-	{"Subchunk1Size", 16, 4, uint32(16)},
-	{"AudioFormat", 20, 2, uint16(1)},
-	{"NumChannels", 22, 2, uint16(1)},
-	{"SampleRate", 24, 4, uint32(8000)},
-	{"ByteRate", 28, 4, uint32(16000)},
-	{"BlockAlign", 32, 2, uint16(2)},
-	{"BitsPerSample", 34, 2, uint16(16)},
-	{"data ID", 36, 4, "data"},
-	{"Subchunk2Size", 40, 4, uint32(2000)},
+	{"RIFF magic", 0, magic("RIFF")},
+	{"ChunkSize", 4, le32(36 + 2000)},
+	{"WAVE magic", 8, magic("WAVE")},
+	{"fmt ID", 12, magic("fmt ")},
+	{"Subchunk1Size", 16, le32(16)},
+	{"AudioFormat", 20, le16(1)},
+	{"NumChannels", 22, le16(1)},
+	{"SampleRate", 24, le32(8000)},
+	{"ByteRate", 28, le32(16000)},
+	{"BlockAlign", 32, le16(2)},
+	{"BitsPerSample", 34, le16(16)},
+	{"data ID", 36, magic("data")},
+	{"Subchunk2Size", 40, le32(2000)},
 }
 
 func TestMulawToWAV_Header(t *testing.T) {
@@ -69,20 +97,8 @@ func TestMulawToWAV_Header(t *testing.T) {
 	}
 
 	for _, f := range wavHeaderFields {
-		raw := wav[f.offset : f.offset+f.width]
-		switch want := f.want.(type) {
-		case string:
-			if got := string(raw); got != want {
-				t.Errorf("%s = %q, want %q", f.name, got, want)
-			}
-		case uint32:
-			if got := binary.LittleEndian.Uint32(raw); got != want {
-				t.Errorf("%s = %d, want %d", f.name, got, want)
-			}
-		case uint16:
-			if got := binary.LittleEndian.Uint16(raw); got != want {
-				t.Errorf("%s = %d, want %d", f.name, got, want)
-			}
+		if got := f.want.read(wav[f.offset:]); got != f.want.String() {
+			t.Errorf("%s = %s, want %s", f.name, got, f.want)
 		}
 	}
 }

@@ -83,48 +83,44 @@ func teardown(out io.Writer, engine Engine) {
 	fmt.Fprintf(out, "tearing down %d owned server(s): %v\n", len(names), names)
 }
 
-// actionVerbs are the verbs that map straight to a same-shaped
-// Engine method (name in, error out) — collapsed into one table so
-// dispatch doesn't need one near-identical case per verb.
-var actionVerbs = map[Verb]struct {
-	label       string
-	progressive string
-	call        func(Engine, string) error
-}{
-	VerbUp:     {"up", "starting", Engine.Up},
-	VerbDown:   {"down", "stopping", Engine.Down},
-	VerbDead:   {"dead", "reaping", Engine.Dead},
-	VerbBuild:  {"build", "building", Engine.Build},
-	VerbBounce: {"bounce", "bouncing", Engine.Bounce},
+// verbHandlers is the one routing table: every dispatchable verb to the
+// handler that runs it. The verbs that map straight to a same-shaped Engine
+// method (name in, error out) go through actionHandler rather than getting a
+// second dispatch mechanism of their own.
+var verbHandlers = map[Verb]func(io.Writer, Engine, Command){
+	VerbUp:      actionHandler("up", "starting", Engine.Up),
+	VerbDown:    actionHandler("down", "stopping", Engine.Down),
+	VerbDead:    actionHandler("dead", "reaping", Engine.Dead),
+	VerbBuild:   actionHandler("build", "building", Engine.Build),
+	VerbBounce:  actionHandler("bounce", "bouncing", Engine.Bounce),
+	VerbStatus:  handleStatus,
+	VerbLogs:    handleLogs,
+	VerbKill:    handleKill,
+	VerbCommand: handleCommand,
+	VerbView:    handleView,
+	VerbHelp:    func(out io.Writer, _ Engine, _ Command) { printHelp(out) },
+}
+
+// actionHandler builds the handler for a verb that is nothing but an Engine
+// method taking a server name: announce it, run it, report ok or the error.
+func actionHandler(label, progressive string, call func(Engine, string) error) func(io.Writer, Engine, Command) {
+	return func(out io.Writer, engine Engine, cmd Command) {
+		fmt.Fprintf(out, "%s %s...\n", progressive, cmd.Target)
+		if err := call(engine, cmd.Target); err != nil {
+			fmt.Fprintf(out, "error: %s %s: %v\n", label, cmd.Target, err)
+			return
+		}
+		fmt.Fprintf(out, "%s %s: ok\n", label, cmd.Target)
+	}
 }
 
 func dispatch(out io.Writer, engine Engine, cmd Command) {
-	if action, ok := actionVerbs[cmd.Verb]; ok {
-		fmt.Fprintf(out, "%s %s...\n", action.progressive, cmd.Target)
-		if err := action.call(engine, cmd.Target); err != nil {
-			fmt.Fprintf(out, "error: %s %s: %v\n", action.label, cmd.Target, err)
-			return
-		}
-		fmt.Fprintf(out, "%s %s: ok\n", action.label, cmd.Target)
+	handle, ok := verbHandlers[cmd.Verb]
+	if !ok {
+		fmt.Fprintf(out, "error: unhandled command %+v\n", cmd)
 		return
 	}
-
-	switch cmd.Verb {
-	case VerbStatus:
-		handleStatus(out, engine, cmd)
-	case VerbLogs:
-		handleLogs(out, engine, cmd)
-	case VerbKill:
-		handleKill(out, engine, cmd)
-	case VerbCommand:
-		handleCommand(out, engine, cmd)
-	case VerbView:
-		handleView(out, engine, cmd)
-	case VerbHelp:
-		printHelp(out)
-	default:
-		fmt.Fprintf(out, "error: unhandled command %+v\n", cmd)
-	}
+	handle(out, engine, cmd)
 }
 
 func handleStatus(out io.Writer, engine Engine, cmd Command) {
