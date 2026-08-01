@@ -164,13 +164,21 @@ type realtimeHarness struct {
 
 func newRealtimeHarness(t *testing.T, realtimeURL string) *realtimeHarness {
 	t.Helper()
+	return newRealtimeHarnessWith(t, NewStreamHandler(realtimeURL))
+}
+
+// newRealtimeHarnessWith is the same carrier-side rig driving an arbitrary
+// StreamHandler, so a test can enter by the exported realtime handler directly
+// (AATK-72) exactly as a consumer with its own session options would, rather
+// than only through NewStreamHandler's switch.
+func newRealtimeHarnessWith(t *testing.T, handle StreamHandler) *realtimeHarness {
+	t.Helper()
 	h := &realtimeHarness{
 		t:         t,
 		streamSID: "SS" + t.Name(),
 		done:      make(chan error, 1),
 	}
 
-	handle := NewStreamHandler(realtimeURL)
 	srv := &Server{
 		HandleStream: func(ctx context.Context, conn *websocket.Conn, start Frame) error {
 			err := handle(ctx, conn, start)
