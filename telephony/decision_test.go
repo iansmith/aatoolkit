@@ -669,12 +669,13 @@ func TestFileRecorder_FlushAndLiveFeed(t *testing.T) {
 // each need that same drive before a verdict has a turn to attach to, so it is
 // assembled once here rather than repeated per test.
 type routeFixture struct {
-	session *telephony.Session
-	rec     *mockRecorder
-	sink    *spySink
-	dataIn  *telephony.BufferedChan[[]byte]
-	sttIn   *telephony.BufferedChan[telephony.STTRequest]
-	sttOut  *telephony.BufferedChan[telephony.STTResult]
+	session   *telephony.Session
+	rec       *mockRecorder
+	sink      *spySink
+	dataIn    *telephony.BufferedChan[[]byte]
+	controlIn *telephony.BufferedChan[telephony.ControlEvent]
+	sttIn     *telephony.BufferedChan[telephony.STTRequest]
+	sttOut    *telephony.BufferedChan[telephony.STTResult]
 }
 
 // newRouteFixture builds and starts the session. The caller drives it with
@@ -683,22 +684,48 @@ type routeFixture struct {
 func newRouteFixture(t *testing.T, sid string) routeFixture {
 	t.Helper()
 	f := routeFixture{
-		rec:    &mockRecorder{},
-		sink:   &spySink{},
-		dataIn: telephony.NewBufferedChan[[]byte](256),
-		sttIn:  telephony.NewBufferedChan[telephony.STTRequest](100),
-		sttOut: telephony.NewBufferedChan[telephony.STTResult](100),
+		rec:       &mockRecorder{},
+		sink:      &spySink{},
+		dataIn:    telephony.NewBufferedChan[[]byte](256),
+		controlIn: telephony.NewBufferedChan[telephony.ControlEvent](8),
+		sttIn:     telephony.NewBufferedChan[telephony.STTRequest](100),
+		sttOut:    telephony.NewBufferedChan[telephony.STTResult](100),
 	}
 	probs := speechThenSilenceProbs(1, telephony.TurnEndSilenceWindows()+10)
 	f.session = startSession(t, sid,
 		telephony.WithVADFactory(func() (telephony.VADDetector, error) { return &fakeDetector{probs: probs}, nil }),
 		telephony.WithTurnSink(f.sink),
 		telephony.WithTwilioDataInput(f.dataIn),
+		telephony.WithTwilioControlInput(f.controlIn),
 		telephony.WithSTTInput(f.sttIn),
 		telephony.WithSTTOutput(f.sttOut),
 		telephony.WithDecisionRecorder(f.rec),
 	)
 	return f
+}
+
+// hangUp sends the carrier's "stop" control message, the signal a live call
+// ends on. Asserts on the literal wire value, as the package's other
+// control-plane tests do.
+func (f routeFixture) hangUp(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), recvTimeout)
+	defer cancel()
+	if err := f.controlIn.Send(ctx, telephony.ControlEvent{Kind: "stop", CallSID: f.session.CallSID}); err != nil {
+		t.Fatalf("send call-end: %v", err)
+	}
+	waitClosed(t, f.session)
+}
+
+// waitClosed blocks until the session reaches Closed, with a deadlock backstop
+// a passing test never reaches.
+func waitClosed(t *testing.T, s *telephony.Session) {
+	t.Helper()
+	select {
+	case <-s.Closed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not close within the backstop")
+	}
 }
 
 // driveTurn runs one utterance to its STT result and then holds silence until
@@ -784,6 +811,38 @@ func TestModelRoute_SecondVerdictForSameTurnIgnored(t *testing.T) {
 	}
 }
 
+// TestModelRoute_HangupIsNotATurnBoundary pins that a mid-call hangup does not
+// count as a turn for route attribution. The carrier's "stop" runs completeTurn
+// with TriggerCallEnd, but that is a hangup, not a turn -- recordTurnCompletion
+// already declines to record a decision for it. Route attribution follows the
+// same exclusion: treating it as a boundary would re-open the verdict slot (so a
+// duplicate arriving at call end is recorded rather than dropped) and re-anchor
+// the audio position onto the hangup, both of which corrupt the corpus at
+// exactly the point a consumer's late verdict tends to arrive.
+func TestModelRoute_HangupIsNotATurnBoundary(t *testing.T) {
+	f := newRouteFixture(t, "route-hangup")
+	f.driveTurn(t)
+	f.session.ReportModelRoute("small", "first")
+
+	// Let the first verdict land, then hang up and report again. The second
+	// report belongs to the same (only) turn and must still be dropped.
+	f.session.ReportModelRoute("large", "duplicate before hangup")
+	f.hangUp(t)
+	f.session.ReportModelRoute("large", "duplicate after hangup")
+	f.session.Close()
+
+	got := filterByKind(f.rec.all(), telephony.DecisionKindModelRoute)
+	if len(got) != 1 {
+		t.Fatalf("model_route events across a hangup: got %d, want 1 (all: %+v)", len(got), f.rec.all())
+	}
+	if got[0].ParamValue != "small" || got[0].RouteReason != "first" {
+		t.Errorf("kept verdict: got tier=%v reason=%q, want the first (small/first)", got[0].ParamValue, got[0].RouteReason)
+	}
+	if got[0].AudioMS <= 0 || got[0].AudioMS%32 != 0 {
+		t.Errorf("AudioMS: got %d, want the completed turn's position (a positive multiple of 32)", got[0].AudioMS)
+	}
+}
+
 // TestModelRoute_VocabularyPlacement asserts the new kind joins the existing
 // DecisionKind* family rather than starting a parallel one: it has the wire
 // value the recorded contract names, and it collides with none of the kinds
@@ -827,25 +886,46 @@ func assertNoCollision(t *testing.T, name, next string, existing []string) {
 // event is anchored on the turn's audio-clock position rather than on when the
 // consumer got around to reporting.
 func TestModelRoute_ReplayStability(t *testing.T) {
-	run := func(sid string) []telephony.DecisionEvent {
+	// Each run returns its route event and the turn-end event it should be
+	// anchored to. Comparing the two *within* a run is what proves the anchor;
+	// comparing an absolute window count between two separately-driven sessions
+	// would instead be asserting that both drives processed the identical number
+	// of frames, which is why every other AudioMS assertion in this package
+	// deliberately checks the shape of the position rather than its value.
+	run := func(sid string) (route, turnEnd telephony.DecisionEvent) {
 		f := newRouteFixture(t, sid)
 		f.driveTurn(t)
 		f.session.ReportModelRoute("large", "same verdict both runs")
 		f.session.Close()
-		return filterByKind(f.rec.all(), telephony.DecisionKindModelRoute)
+		evs := f.rec.all()
+		routes := filterByKind(evs, telephony.DecisionKindModelRoute)
+		ends := filterByKind(evs, telephony.DecisionKindTurnEnd)
+		if len(routes) != 1 || len(ends) != 1 {
+			t.Fatalf("%s: route events %d, turn-end events %d; want 1 each (all: %+v)", sid, len(routes), len(ends), evs)
+		}
+		return routes[0], ends[0]
 	}
 
-	first := run("route-replay-1")
-	second := run("route-replay-2")
+	firstRoute, firstEnd := run("route-replay-1")
+	secondRoute, secondEnd := run("route-replay-2")
 
-	if len(first) != 1 || len(second) != 1 {
-		t.Fatalf("route events per run: got %d and %d, want 1 each", len(first), len(second))
+	// The verdict lands on the turn's closing position, not on wherever the
+	// audio clock had reached when the report was picked up. This is the
+	// property that makes the corpus replayable.
+	if firstRoute.AudioMS != firstEnd.AudioMS {
+		t.Errorf("run 1: route AudioMS %d, want the turn-end position %d", firstRoute.AudioMS, firstEnd.AudioMS)
 	}
-	b1, err := json.Marshal(first)
+	if secondRoute.AudioMS != secondEnd.AudioMS {
+		t.Errorf("run 2: route AudioMS %d, want the turn-end position %d", secondRoute.AudioMS, secondEnd.AudioMS)
+	}
+
+	// Everything the consumer reported reproduces exactly across runs.
+	firstRoute.AudioMS, secondRoute.AudioMS = 0, 0
+	b1, err := json.Marshal(firstRoute)
 	if err != nil {
 		t.Fatalf("marshal run 1: %v", err)
 	}
-	b2, err := json.Marshal(second)
+	b2, err := json.Marshal(secondRoute)
 	if err != nil {
 		t.Fatalf("marshal run 2: %v", err)
 	}

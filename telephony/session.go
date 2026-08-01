@@ -1352,17 +1352,32 @@ func (s *Session) sendResponseMarkAndArmEcho(frames [][]byte) {
 // mirroring how Close() cancels every timer unconditionally rather than
 // per-path -- so no current or future completion path can leave it armed.
 func (s *Session) completeTurn(trigger TurnTrigger) {
-	// Open this turn to a routing verdict and snapshot the audio position first,
-	// so a verdict a consumer reports from inside OnTurnComplete (below, on this
-	// goroutine) and one it reports asynchronously later both attach to this
-	// turn, at this turn's position (AATK-71).
-	s.routeReported = false
-	s.turnEndAudioMS = s.lastStreamWindow * s.vadCfg.windowMS()
+	s.openTurnToRouteVerdict(trigger)
 	s.flushTurnTranscripts(trigger)
 	s.turnActive = false
 	s.turnEndPending = false
 	s.cancelTurnTimer()
 	s.recordTurnCompletion(trigger)
+}
+
+// openTurnToRouteVerdict marks the turn just completed as awaiting a shadow
+// routing verdict and snapshots the audio position it closed at, so a verdict a
+// consumer reports from inside OnTurnComplete (on the sequencer goroutine) and
+// one it reports asynchronously later both attach to this turn, at this turn's
+// position (AATK-71).
+//
+// TriggerCallEnd is excluded, for the same reason recordTurnCompletion declines
+// to record a decision for it: a mid-call hangup is not a turn. Treating it as
+// one would re-open the verdict slot right at the moment a consumer's late
+// verdict for the *previous* turn tends to arrive -- so a duplicate would be
+// recorded instead of dropped -- and would re-anchor that verdict onto the
+// hangup's audio position instead of the turn it actually labels.
+func (s *Session) openTurnToRouteVerdict(trigger TurnTrigger) {
+	if trigger == TriggerCallEnd {
+		return
+	}
+	s.routeReported = false
+	s.turnEndAudioMS = s.lastStreamWindow * s.vadCfg.windowMS()
 }
 
 // recordTurnCompletion records the decision for the turn-completion triggers
