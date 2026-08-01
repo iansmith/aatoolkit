@@ -630,62 +630,84 @@ func (s *Session) Start() error {
 	return nil
 }
 
-// run is the sequencer: a single select loop with one receive-case per
-// service input this session was wired with (Twilio data plane, Twilio
-// control plane, VAD events, STT results). Every input's payload is
-// dispatched through the total (state, source) transition table (state.go),
-// which returns the next state. the engine never performs a blocking send from
-// this loop (charter R8): the only outbound handoff, to VAD, goes through
-// forwardCh via a non-blocking select-send in handleDataFrame.
+// run is the sequencer: one select (see step) with a receive-case per service
+// input this session was wired with (Twilio data plane, Twilio control plane,
+// VAD events, STT results), driven until an input closes or the session's
+// context is cancelled. Every input's payload is dispatched through the total
+// (state, source) transition table (state.go), which returns the next state. the
+// engine never performs a blocking send from this loop (charter R8): the only
+// outbound handoff, to VAD, goes through forwardCh via a non-blocking
+// select-send in handleDataFrame.
 //
 // A nil, unwired input's Channel() is nil, and a nil channel in a select
 // case simply never fires — so an unwired source is inert rather than a
-// crash. run() stops when the session's context is cancelled.
+// crash.
 func (s *Session) run() {
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case frame, ok := <-dataChannel(s.dataIn):
-			if !ok {
-				return
-			}
-			s.dispatch(SourceTwilioData, frame)
-		case cev, ok := <-controlChannel(s.controlIn):
-			if !ok {
-				return
-			}
-			s.dispatch(SourceTwilioControl, cev)
-		case ev, ok := <-s.vad.Out.Channel():
-			if !ok {
-				return
-			}
-			// Track the latest audio position so a cap/timeout decision, which
-			// fires from a timer rather than a VADEvent, can still stamp one
-			// (SOP-166). This is the single point every VADEvent flows through.
-			s.lastStreamWindow = ev.StreamWindowIndex
-			s.dispatch(SourceVADEvent, ev)
-		case res, ok := <-sttChannel(s.sttOut):
-			if !ok {
-				return
-			}
-			s.dispatch(SourceSTTResult, res)
-		case rev, ok := <-responseChannel(s.responseIn):
-			if !ok {
-				return
-			}
-			s.dispatch(SourceResponseReady, rev)
-		// Deliberately not routed through dispatch: a shadow routing verdict
-		// records and changes nothing, so it has no (state, source) cell to
-		// occupy -- putting it in the transition table would mean one identical
-		// handler per state, and inventing a state in which a verdict is
-		// silently discarded. It is recorded here instead (AATK-71).
-		case v := <-s.modelRouteCh:
-			s.recordModelRoute(v)
-		case completion := <-s.timerFacility.Completions():
-			s.dispatchTimerCompletion(completion)
-		}
+	for s.step() {
 	}
+}
+
+// step waits for one input and handles it, reporting whether the sequencer
+// should keep going. Splitting it from run's loop is what keeps the select a
+// list of arrivals and nothing else: "this channel closed, so stop" is the same
+// decision for every input, so it lives once in dispatchIfOpen rather than as a
+// branch inside each case. What remains here is one line per thing that can
+// happen, which is the property the charter's flat-dispatcher rule is after.
+//
+// Every case returns rather than breaking, so a reader can tell which arrivals
+// can end the session (a closed input) from which cannot (a timer, a recorded
+// verdict) without tracing control flow back out to the loop.
+func (s *Session) step() bool {
+	select {
+	case <-s.ctx.Done():
+		return false
+	case frame, ok := <-dataChannel(s.dataIn):
+		return s.dispatchIfOpen(SourceTwilioData, frame, ok)
+	case cev, ok := <-controlChannel(s.controlIn):
+		return s.dispatchIfOpen(SourceTwilioControl, cev, ok)
+	case ev, ok := <-s.vad.Out.Channel():
+		return s.dispatchVADEvent(ev, ok)
+	case res, ok := <-sttChannel(s.sttOut):
+		return s.dispatchIfOpen(SourceSTTResult, res, ok)
+	case rev, ok := <-responseChannel(s.responseIn):
+		return s.dispatchIfOpen(SourceResponseReady, rev, ok)
+	// Deliberately not routed through dispatch: a shadow routing verdict
+	// records and changes nothing, so it has no (state, source) cell to
+	// occupy -- putting it in the transition table would mean one identical
+	// handler per state, and inventing a state in which a verdict is
+	// silently discarded. It is recorded here instead (AATK-71).
+	case v := <-s.modelRouteCh:
+		s.recordModelRoute(v)
+		return true
+	case completion := <-s.timerFacility.Completions():
+		s.dispatchTimerCompletion(completion)
+		return true
+	}
+}
+
+// dispatchIfOpen dispatches one received payload under source, unless ok says
+// the input's channel has closed -- in which case the sequencer stops. The
+// shared shape of every wired input.
+func (s *Session) dispatchIfOpen(source InputSource, payload any, ok bool) bool {
+	if !ok {
+		return false
+	}
+	s.dispatch(source, payload)
+	return true
+}
+
+// dispatchVADEvent is dispatchIfOpen for VAD events, which carry one extra
+// obligation: the session tracks the latest audio position so a cap/timeout
+// decision, which fires from a timer rather than a VADEvent, can still stamp one
+// (SOP-166). This is the single point every VADEvent flows through, and the
+// tracking must not run for the zero event a closed channel yields.
+func (s *Session) dispatchVADEvent(ev VADEvent, ok bool) bool {
+	if !ok {
+		return false
+	}
+	s.lastStreamWindow = ev.StreamWindowIndex
+	s.dispatch(SourceVADEvent, ev)
+	return true
 }
 
 // dispatchTimerCompletion drops a superseded completion, then maps a fired
