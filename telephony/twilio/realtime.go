@@ -22,33 +22,45 @@ const realtimeDialTimeout = 10 * time.Second
 // and no dial attempted. Non-empty routes the call to an external realtime
 // voice backend instead.
 //
-// TURN-TAKING CONSEQUENCE, and the reason this defaults off: on the realtime
-// path the *backend's* VAD and turn logic govern the conversation, so
-// telephony/decision.go — this engine's own turn-taking decision function — is
-// bypassed entirely for those turns, along with the VAD tuning that feeds it.
-// That is a real behavioral change, not a transport swap. The replay corpus was
-// captured against the current decision function, so its labels do NOT transfer
-// to calls run this way and cannot be used to judge them. Which turn-taking is
-// better is a question for measurement, in its own ticket; this switch exists so
-// both stacks can be run and compared without a redeploy.
+// The realtime path changes turn-taking, which is the reason this defaults off:
+// see HandleStreamRealtime for what is bypassed and why the replay corpus does
+// not transfer. Which turn-taking is better is a question for measurement, in
+// its own ticket; this switch exists so both stacks can be run and compared
+// without a redeploy.
 func NewStreamHandler(realtimeURL string) StreamHandler {
 	if realtimeURL == "" {
 		return DefaultHandleStream
 	}
 	return func(ctx context.Context, conn *websocket.Conn, start Frame) error {
-		return handleStreamRealtime(ctx, conn, start, realtimeURL)
+		return HandleStreamRealtime(ctx, conn, start, realtimeURL)
 	}
 }
 
-// handleStreamRealtime drives one call over the realtime voice backend. Carrier
-// audio crosses to the backend as the base64 string it arrived as, and the
-// backend's audio comes back the same way — no transcoding in either direction.
+// HandleStreamRealtime drives one call over the realtime voice backend. It is
+// the realtime peer of HandleStreamWithOpts: same entry shape, called with the
+// (ctx, conn, start) a StreamHandler receives, so a consumer that owns its own
+// handler body — because its per-call setup and teardown are bound to that
+// scope — can select this transport by branching on its own configuration
+// rather than going through NewStreamHandler.
+//
+// Carrier audio crosses to the backend as the base64 string it arrived as, and
+// the backend's audio comes back the same way — no transcoding in either
+// direction.
+//
+// TURN-TAKING CONSEQUENCE, stated here rather than at NewStreamHandler because
+// a consumer calling this directly never reads that doc: on this path the
+// *backend's* VAD and turn logic govern the conversation, so
+// telephony/decision.go — this engine's own turn-taking decision function — is
+// bypassed entirely for those turns, along with the VAD tuning that feeds it.
+// That is a real behavioral change, not a transport swap, and the replay corpus
+// was captured against the current decision function, so its labels do NOT
+// transfer to calls run this way and cannot be used to judge them.
 //
 // The call ends when either side does: the carrier hangs up (a stop frame or a
 // read error) or the backend goes away. A backend that fails to dial, or drops
 // mid-call, ends the call with a logged error rather than leaving the session
 // hung.
-func handleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame, url string) error {
+func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame, url string) error {
 	// CloseNow on every exit path, not Close: there is no local session to
 	// drain, and closing the carrier is also what unblocks the carrier pump
 	// below if it is still parked in Read, so no goroutine outlives this
