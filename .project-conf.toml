@@ -13,63 +13,26 @@ archive_dir  = ".slopstop/ticket-archive"   # project-local; avoids the protecte
 [tiers.huge]
 provider = "anthropic"
 model    = "opus"
+effort   = "high"  # set 2026-08-07 (fleet sync)
 version  = "5"       # :design + huge-tier checks
 
 [tiers.large]
 provider = "anthropic"
 model    = "opus"
+effort   = "high"  # set 2026-08-07 (fleet sync)
 version  = "5"       # :tickets + failure-driven rewrites + drift checks
 
 [tiers.medium]
 provider = "anthropic"
 model    = "sonnet"
+effort   = "high"  # set 2026-08-07 (fleet sync)
 version  = "5"       # :run orchestrator + per-ticket reviewer/adversary subagents
 
 [tiers.small]
 provider = "anthropic"
 model    = "sonnet"  # was 'haiku'; set 2026-08-01 (grand synchronization)
+effort   = "high"  # set 2026-08-07 (fleet sync)
 version  = "5"  # set 2026-08-01 (grand synchronization)
-
-# Override for THIS batch of CC-simplification leaves (AATK-62..67 under AATK-61):
-# each requires reading and reasoning about real control-flow tradeoffs across a
-# frozen test suite, not boilerplate transcription — haiku is undersized for that.
-# [tiers.small] above stays the documented default for ordinary fleet leaves; this
-# key overrides it for every fleet launch until removed.
-[fleet.agents]
-model = "claude-sonnet-5"
-allowed_tools = ["Bash(gh:*)", "Bash(git:*)", "Bash(go:*)", "Bash(gofmt:*)", "Bash(lizard:*)"]
-
-# Point this repo's runs at the local Phase-1 metering router (see ~/slopstop/router).
-# :design health-checks it at run start and :run points each fleet agent at it
-# (ANTHROPIC_BASE_URL + X-Slopstop-Run/X-Slopstop-Ticket headers), so fleet traffic is
-# metered by default. A dead router never blocks a run — agents fall back to direct API.
-[fleet.router]
-enabled = true
-host    = "127.0.0.1"
-port    = 8484
-
-# Fleet monitoring posture. "kill" (the default, set explicitly) terminates any fleet
-# agent that writes outside its ticket's file map — the graduated posture for real runs
-# (as opposed to "warn", the supervised-observation mode used during the meta-test).
-[fleet.monitoring]
-filemap_violation = "kill"
-
-# Run the slopstop flow hands-off: skip interactive prompts and auto-proceed
-# (implement in :plan, confirm in :merge) per the skills' autonomous behavior.
-#
-# NOTE: enabled=true drives :pr / :start / :archive / :plan autonomously. It does
-# NOT by itself make :merge autonomous — per the skill's merge-autonomous.md, full
-# autonomous :merge is activated by passing --autonomous on the :merge command line.
-# The merge_* keys below are read only on those --autonomous runs. Interactive
-# :merge still auto-confirms via [workflow] skip_confirm (below). [workflow]
-# skip_archive, unlike these, applies in BOTH modes — it's not [autonomous]-scoped.
-[autonomous]
-enabled = true
-# branch_type intentionally unset 2026-08-01 — :start picks the prefix per ticket
-
-# Autonomous :merge behavior (applies when :merge is called with --autonomous).
-merge_strategy      = "merge"   # real merge commit; preserves per-commit history for git bisect
-merge_target_state  = "auto"    # advance the ticket exactly one state, never force-jump to Done
 
 # PR code review backend for /slopstop-pr.
 # "claude" → in-house /code-review (Skill); "coderabbit" → CodeRabbit bot;
@@ -82,14 +45,11 @@ merge_target_state  = "auto"    # advance the ticket exactly one state, never fo
 # have one repo's worth of evidence before spending it on two.
 backend = "claude"
 effort = "high"
-fix    = true
 
-# Don't prompt for the branch type on /slopstop-start — use the heuristic
-# suggestion (from ticket labels/title) automatically. Only falls back to
-# asking when the heuristic produces no suggestion at all.
-# skip_archive=false: :merge always chains into :archive on terminal state
-# (slopstop v3.4.0+, both interactive and autonomous — replaces the old
-# [autonomous] archive_immediately key, which no longer exists).
+# skip_confirm: don't prompt for the branch type on /slopstop-start — use the
+# heuristic suggestion (from ticket labels/title) automatically. Only falls back
+# to asking when the heuristic produces no suggestion at all.
+# skip_archive=false: :merge always chains into :archive on terminal state.
 [workflow]
 skip_confirm = true
 skip_archive = false

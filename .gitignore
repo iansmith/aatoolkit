@@ -21,3 +21,33 @@ enable-aatoolkit
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+
+CLAUDE.local.md
+.project-conf-local.toml
+
+# Root-level markdown — personal notes, scratch work, ticket-local prompts.
+# Ticket-local files belong in the ticket's tracking dir; design docs belong in
+# design/ (tracked). CLAUDE.md and README.md are the tracked exceptions.
+/*.md
+!/CLAUDE.md
+!/README.md
+
+# Personal scratch / drafts — design docs go to design/ (tracked).
+/docs/
+
+*.bak
+
+# slopstop: exclude .claude CONTENTS, not the directory. git cannot re-include a path whose
+# parent directory is excluded, so `.claude/` would make the negations below inert and the
+# generated skills would never be committed — defeating the version freeze they exist for.
+#
+# agents/ is exempted ahead of BILL-486, which may ship per-tier subagent definitions there.
+# Cost if that ticket closes wontfix: nothing, the directory simply stays absent. Cost of
+# adding it late: definitions land on disk, never get committed, and effort silently inherits
+# while the config reads as configured — the same silent shape that left one repo with zero
+# tracked skills.
+.claude/*
+!.claude/rules
+!.claude/skills
+!.claude/agents
