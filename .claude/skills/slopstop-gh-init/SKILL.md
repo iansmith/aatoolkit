@@ -2,7 +2,7 @@
 description: Bootstrap a GitHub repo for the slopstop ticket workflow. Creates status labels, writes .project-conf.toml. Invoke as /slopstop-gh-init (or /slopstop-gh-init). Idempotent — safe to re-run.
 ---
 
-<!-- GENERATED from slopstop cd91635 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
      Edit skills/gh-init/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-gh-init
