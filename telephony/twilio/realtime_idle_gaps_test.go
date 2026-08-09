@@ -152,30 +152,57 @@ func TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnCarrierMediaOnly(t *testin
 	be := newFakeRealtimeBackend(t)
 	h := idleHarness(t, be.url(), idleGapTimeout)
 
+	emitCarrierEvery(t, h, idleGapTimeout/10, 0)
+
+	time.Sleep(idleGapTimeout * 5)
+
+	assertStillRunning(t, h, "carrier media frames faster than idleTimeout apart must keep the call alive")
+}
+
+// emitCarrierEvery sends a carrier media frame every interval, starting after
+// initialDelay, until the test ends.
+//
+// Written directly rather than through h.sendRaw: sendRaw fails the test on a
+// write error, and the carrier socket closing at the end of the run is expected
+// rather than a failure. It touches no *testing.T method, so it cannot panic by
+// logging after the test returns; t.Cleanup runs LIFO, so this stop fires
+// before the harness's own conn close, which was registered first.
+func emitCarrierEvery(t *testing.T, h *realtimeHarness, interval, initialDelay time.Duration) {
+	t.Helper()
+
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
+
+	send := func() bool {
+		err := h.conn.Write(context.Background(), websocket.MessageText,
+			mediaFrameRaw(h.streamSID, carrierPayloadB64()))
+		return err == nil
+	}
+
 	go func() {
-		ticker := time.NewTicker(idleGapTimeout / 10)
+		if initialDelay > 0 {
+			select {
+			case <-stop:
+				return
+			case <-time.After(initialDelay):
+			}
+			if !send() {
+				return
+			}
+		}
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-stop:
 				return
 			case <-ticker.C:
-				// Written directly rather than through h.sendRaw: sendRaw fails
-				// the test on a write error, and the carrier socket closing at
-				// the end of the run is expected, not a failure.
-				if err := h.conn.Write(context.Background(), websocket.MessageText,
-					mediaFrameRaw(h.streamSID, carrierPayloadB64())); err != nil {
+				if !send() {
 					return
 				}
 			}
 		}
 	}()
-
-	time.Sleep(idleGapTimeout * 5)
-
-	assertStillRunning(t, h, "carrier media frames faster than idleTimeout apart must keep the call alive")
 }
 
 // TestHandleStreamRealtime_IdleTimeoutClosesCarrierConnection pins the half of
@@ -216,6 +243,43 @@ func TestHandleStreamRealtime_ZeroIdleTimeoutNeverEndsSilentCall(t *testing.T) {
 	time.Sleep(idleGapTimeout * 5)
 
 	assertStillRunning(t, h, "idleTimeout 0 must arm no timer, leaving a silent call running exactly as it does today")
+}
+
+// TestHandleStreamRealtime_IdleTimeoutDoesNotFireWithConcurrentBackendAndCarrierActivity
+// covers the shape every other activity test misses: both sides talking at once.
+//
+// Round 2 raised it, and the reason is in the production code's structure. Backend
+// activity is observed inside bridge.Run's goroutine and carrier activity inside
+// pumpCarrierToBridge's — two goroutines that must both reset one shared timer.
+// Every other test drives one side while the other is silent, so the reset path is
+// never contended and an implementation racing on Reset/Stop passes all of them.
+// A caller talking while the backend answers is the ordinary case, not an edge one.
+//
+// The intervals are chosen so neither source alone would keep the call alive —
+// each fires slower than the timeout — while their interleaving always does. That
+// makes the test fail if either arm's reset is dropped under contention, not only
+// if both are.
+func TestHandleStreamRealtime_IdleTimeoutDoesNotFireWithConcurrentBackendAndCarrierActivity(t *testing.T) {
+	// Wider than idleGapTimeout: this test's discriminating power comes from the
+	// interleave, which caps the usable margin at 25%, so the absolute slack has
+	// to come from a longer timeout.
+	const timeout = 400 * time.Millisecond
+	const perSource = timeout * 3 / 2 // 600ms — each source alone is too slow
+	const offset = perSource / 2      // 300ms — interleaved, the union is fast enough
+
+	be := newFakeRealtimeBackend(t)
+	h := idleHarness(t, be.url(), timeout)
+	waitBackendReady(t, be, h)
+
+	be.emitEvery(t, perSource, map[string]string{
+		"type":  "response.output_audio.delta",
+		"delta": "AAAA",
+	})
+	emitCarrierEvery(t, h, perSource, offset)
+
+	time.Sleep(timeout * 5)
+
+	assertStillRunning(t, h, "interleaved backend and carrier activity must keep the call alive even though neither source alone would")
 }
 
 // TestHandleStreamRealtime_StopFrameEndsCallWhileIdleTimeoutArmed pins that an
