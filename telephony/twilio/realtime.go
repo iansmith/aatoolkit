@@ -2,6 +2,7 @@ package twilio
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -104,6 +105,20 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
 
+	// PHASE 0 STUB — not the implementation. A flat timer, armed once and never
+	// reset by anything, ending the call with a message that deliberately does
+	// not name the idle timeout. It is the simplest wrong thing: it establishes
+	// that a bound exists at all while implementing neither half of the
+	// contract, so every assertion the ticket actually cares about is red
+	// against it rather than trivially satisfied. Replaced wholesale by the
+	// implementation.
+	var idleC <-chan time.Time
+	if idleTimeout > 0 {
+		idleTimer := time.NewTimer(idleTimeout)
+		defer idleTimer.Stop()
+		idleC = idleTimer.C
+	}
+
 	// Whichever side ends first ends the call.
 	select {
 	case err := <-backendDone:
@@ -111,6 +126,10 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 		return err
 	case err := <-carrierDone:
 		return err
+	case <-idleC:
+		// A nil idleC blocks forever, so idleTimeout 0 arms nothing and this
+		// case cannot fire — which is what keeps every existing assertion green.
+		return fmt.Errorf("twilio: realtime: stub: idle policy not implemented")
 	}
 }
 
