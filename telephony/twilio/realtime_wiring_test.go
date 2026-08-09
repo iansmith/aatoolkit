@@ -66,8 +66,17 @@ type fakeRealtimeBackend struct {
 	mu       sync.Mutex
 	conns    int
 	received []json.RawMessage
+	conn     *websocket.Conn
 
 	closeAfterHandshake bool
+
+	// emitInterval, when positive, makes the backend emit an audio-delta
+	// event on this interval after the handshake completes — active traffic,
+	// for tests that must prove an idle timer does not fire while the
+	// backend keeps talking. Zero (the default) emits nothing after the
+	// handshake, which is the silent-backend case every other test in this
+	// file relies on.
+	emitInterval time.Duration
 }
 
 func newFakeRealtimeBackend(t *testing.T) *fakeRealtimeBackend {
@@ -83,6 +92,9 @@ func newFakeRealtimeBackend(t *testing.T) *fakeRealtimeBackend {
 			return
 		}
 		defer c.CloseNow()
+		b.mu.Lock()
+		b.conn = c
+		b.mu.Unlock()
 		ctx := r.Context()
 
 		// The session.update handshake the client opens with.
@@ -96,6 +108,12 @@ func newFakeRealtimeBackend(t *testing.T) *fakeRealtimeBackend {
 		if b.closeAfterHandshake {
 			_ = c.Close(websocket.StatusNormalClosure, "bye")
 			return
+		}
+
+		if b.emitInterval > 0 {
+			done := make(chan struct{})
+			defer close(done)
+			go b.emitAudioDeltas(ctx, c, done)
 		}
 
 		for {
@@ -112,6 +130,29 @@ func newFakeRealtimeBackend(t *testing.T) *fakeRealtimeBackend {
 	return b
 }
 
+// emitAudioDeltas writes a response.output_audio.delta event every
+// emitInterval until done is closed or a write fails. It stops on its own
+// when the connection ends, rather than leaking a goroutine past the request
+// handler's return — the handler's own read loop is what detects that end and
+// closes done via its defer.
+func (b *fakeRealtimeBackend) emitAudioDeltas(ctx context.Context, c *websocket.Conn, done <-chan struct{}) {
+	ticker := time.NewTicker(b.emitInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			if err := writeRealtimeJSON(ctx, c, map[string]string{
+				"type":  "response.output_audio.delta",
+				"delta": "AAAA",
+			}); err != nil {
+				return
+			}
+		}
+	}
+}
+
 // deadBackendURL is a well-formed backend address certain to refuse connection:
 // bind a listener so the port is real, then close it. Shared by every test that
 // exercises the dial-failure path, so they all point at the same kind of dead
@@ -122,6 +163,19 @@ func deadBackendURL(t *testing.T) string {
 	url := "ws" + strings.TrimPrefix(dead.URL, "http")
 	dead.Close()
 	return url
+}
+
+// closeNow ends the backend's current connection from the backend side,
+// immediately. It is how a test drives the "backend goes away" ending
+// deliberately, mid-run, rather than waiting for closeAfterHandshake's
+// automatic close right after the handshake.
+func (b *fakeRealtimeBackend) closeNow() {
+	b.mu.Lock()
+	c := b.conn
+	b.mu.Unlock()
+	if c != nil {
+		_ = c.Close(websocket.StatusNormalClosure, "bye")
+	}
 }
 
 func (b *fakeRealtimeBackend) url() string {

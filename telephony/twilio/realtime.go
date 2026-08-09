@@ -2,6 +2,7 @@ package twilio
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -32,7 +33,7 @@ func NewStreamHandler(realtimeURL string) StreamHandler {
 		return DefaultHandleStream
 	}
 	return func(ctx context.Context, conn *websocket.Conn, start Frame) error {
-		return HandleStreamRealtime(ctx, conn, start, realtimeURL)
+		return HandleStreamRealtime(ctx, conn, start, realtimeURL, 0)
 	}
 }
 
@@ -60,7 +61,22 @@ func NewStreamHandler(realtimeURL string) StreamHandler {
 // read error) or the backend goes away. A backend that fails to dial, or drops
 // mid-call, ends the call with a logged error rather than leaving the session
 // hung.
-func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame, url string) error {
+//
+// idleTimeout bounds how long the call may run with the backend producing no
+// event. 0 disables it, matching today's behavior exactly: unbounded, no
+// timer armed. A positive value is reset on every backend event bridge.Run
+// observes, of any type; carrier frames do NOT reset it, so a carrier that is
+// streaming continuously cannot mask a backend that has gone silent. If it
+// elapses with no backend activity, the call ends with an error naming "idle
+// timeout".
+//
+// A hung backend and a legitimately quiet one look identical on this path —
+// there is no local VAD or turn state to tell them apart (see
+// telephony.MaxSilenceMS for the order of magnitude the default transport
+// uses to make that call). Set idleTimeout longer than the longest
+// backend-quiet interval the deployment tolerates, or a normal pause in
+// conversation will end the call.
+func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame, url string, idleTimeout time.Duration) error {
 	// CloseNow on every exit path, not Close: there is no local session to
 	// drain, and closing the carrier is also what unblocks the carrier pump
 	// below if it is still parked in Read, so no goroutine outlives this
@@ -97,13 +113,75 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
 
-	// Whichever side ends first ends the call.
-	select {
-	case err := <-backendDone:
-		log.Printf("twilio: realtime: backend ended the call: %v", err)
-		return err
-	case err := <-carrierDone:
-		return err
+	idle := newIdleGuard(idleTimeout)
+	defer idle.stop()
+
+	// One goroutine, one select: bridge.Activity() resets the guard without any
+	// Reset call crossing a goroutine boundary, which is what keeps this
+	// race-free under -race. Only backendDone, carrierDone, or the guard firing
+	// ends the loop; an activity signal just re-arms and loops again.
+	for {
+		select {
+		case err := <-backendDone:
+			log.Printf("twilio: realtime: backend ended the call: %v", err)
+			return err
+		case err := <-carrierDone:
+			return err
+		case <-idle.fired():
+			return fmt.Errorf("twilio: realtime: idle timeout: no backend activity for %s", idleTimeout)
+		case <-bridge.Activity():
+			idle.reset()
+		}
+	}
+}
+
+// idleGuard is the idle timeout as a single object, so HandleStreamRealtime's
+// loop reads as four things that can end or extend a call rather than as timer
+// bookkeeping. A zero duration produces a guard that never fires: fired()
+// returns a nil channel, which blocks forever in a select, so the loop reduces
+// to the original two-case shape — unbounded, exactly today's behavior.
+//
+// Not safe for concurrent use, and deliberately so: every method is called from
+// the one goroutine that owns the select above.
+type idleGuard struct {
+	timer *time.Timer
+	after time.Duration
+}
+
+func newIdleGuard(after time.Duration) *idleGuard {
+	if after <= 0 {
+		return &idleGuard{}
+	}
+	return &idleGuard{timer: time.NewTimer(after), after: after}
+}
+
+// fired is the channel the guard signals on, or nil when it is disarmed.
+func (g *idleGuard) fired() <-chan time.Time {
+	if g.timer == nil {
+		return nil
+	}
+	return g.timer.C
+}
+
+// reset restarts the guard. Stop-then-drain before Reset is the required idiom:
+// a timer that already fired has a value parked in its channel, and resetting
+// without draining it would fire again immediately on stale time.
+func (g *idleGuard) reset() {
+	if g.timer == nil {
+		return
+	}
+	if !g.timer.Stop() {
+		select {
+		case <-g.timer.C:
+		default:
+		}
+	}
+	g.timer.Reset(g.after)
+}
+
+func (g *idleGuard) stop() {
+	if g.timer != nil {
+		g.timer.Stop()
 	}
 }
 

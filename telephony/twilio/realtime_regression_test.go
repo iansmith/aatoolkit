@@ -51,7 +51,7 @@ func TestDecodeFrame_PayloadStillDecodesForExistingConsumers(t *testing.T) {
 // over the backend URL the way a consumer branching on its own config would.
 func realtimeDirect(url string) StreamHandler {
 	return func(ctx context.Context, conn *websocket.Conn, start Frame) error {
-		return HandleStreamRealtime(ctx, conn, start, url)
+		return HandleStreamRealtime(ctx, conn, start, url, 0)
 	}
 }
 
