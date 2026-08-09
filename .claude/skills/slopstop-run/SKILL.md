@@ -3,7 +3,7 @@ description: The single lifecycle entry point — take one or more tickets and d
 disable-model-invocation: true
 ---
 
-<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop e37c68d by install-for-project.sh — do not edit.
      Edit skills/run/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-run
@@ -106,7 +106,7 @@ guessing.
 
 | value | source | default |
 |---|---|---|
-| `$PREFIX` | `prefix` | none — stop if absent or not `^[A-Za-z][A-Za-z0-9]*$` |
+| `$PREFIX` | `prefix` | none — stop if absent, malformed, or disagreeing with the tickets |
 | `$SYSTEM` | `system` | none — authoritative, never inferred from MCP availability |
 | `$OWNER`/`$REPO` | `pr-repo`, else split `key` on `/` | — |
 | `$PR_REMOTE` / `$ORIGIN_REMOTE` | `pr-remote` / `origin-remote` | `origin` |
@@ -124,6 +124,37 @@ guessing.
 pair, and resolving one while the other falls to a different tier is the bug that
 definition exists to prevent. **You are the only resolver**; no worker ever touches it.
 → Read `.claude/skills/slopstop-run/references/tracking-dir-resolution.md`
+
+### Prefix-agreement preflight — before any ticket runs
+
+**`$PREFIX` matching the regex is not the same as `$PREFIX` being right.** Once you have the
+ticket keys for this run, compare each one's prefix against `$PREFIX` **byte for byte**, and
+stop the whole run on a disagreement:
+
+```
+RUN BLOCKED: config prefix '<$PREFIX>' does not match ticket keys '<KEY>' — fix
+             .project-conf.toml's `prefix`, or the ticket keys, before re-running
+```
+
+**Case included. `Bill` is not `BILL`.** That is the whole defect: nothing else in the system
+compares these two, and every downstream consumer is case-sensitive. The router derives a
+spend record's prefix from the `X-Slopstop-Ticket` header — the real ticket key — while
+`/spend?prefix=…` filters on the config's `prefix`. A repo whose config says `Bill` against
+`BILL-*` tickets gets `/spend?prefix=Bill` → **HTTP 200 with zero totals**. Not an error, not
+an empty-result warning: a successful-looking response saying the run cost nothing.
+
+**The check has to live here.** Charter rule 2 bars the router from reading project config, so
+the router cannot notice the disagreement, and the config cannot notice the tickets. `:run` is
+the only thing that holds both.
+
+**Stop the run rather than warning.** A silent zero is unrecoverable after the fact — the spend
+was recorded under the other prefix and no later query reconstructs which run it belonged to —
+and the fix is a one-character config edit before anything is spent. This is the cheapest
+possible moment to catch it and the only one where nothing is lost.
+
+> **Do not "helpfully" normalise the case and continue.** Guessing which of the two is correct
+> is the proxy-for-identity mistake: the config might be wrong, or the tickets might be, and
+> they need opposite fixes from the human. Report both values and let them decide.
 
 ## The state machine
 
@@ -189,13 +220,35 @@ off another ticket's branch.
 Every leaf ticket carries `Blocked by:` in its header, per the ticket standard. **Parse it at
 intake, for every ticket in the list**, into a set of ticket keys.
 
-The accepted forms are exactly two: the literal `nothing`, or a comma-separated list of keys
-matching `^$PREFIX-\d+$`. Trailing prose after the keys is fine and is context for the
-reader — `Blocked by: PLTF-2563 — for merge-conflict avoidance only` parses to one key.
-Anything with no key in it — prose, a URL, a description of the work — is **unparseable**,
-and an unparseable value **holds the ticket** and is reported. Do not guess at prose. A
-scheduler that shrugs at `Blocked by: the auth work` and launches anyway has silently
-discarded a real dependency, which is the whole failure this section exists to stop.
+**Finding the declaration and parsing its value are two steps, and the recognisers differ.**
+
+*Step 1 — find it by phrase, not by punctuation.* A ticket declares blockers on any line
+containing the case-insensitive phrase `blocked by`, ignoring markdown emphasis (`*`, `_`)
+around it. **Do not search for the literal string `Blocked by:`** — the colon is the bug.
+SOP-262's header reads `**Blocked by three, all real:**`; a colon-anchored search finds
+nothing, the ticket falls through to the *absent* rule below, and a ticket that visibly
+declares three blockers launches with zero of them while the report calls it dependency-free.
+
+**Do not anchor to the start of a line either.** The ticket standard's own template puts the
+declaration mid-line — `Parent: none — freestanding leaf. Blocked by: nothing.` — so a
+line-initial rule finds nothing on every *correctly formed* ticket. Both wrong anchors fail
+the same way: silently, by finding nothing, which the absent rule then reads as "no blockers".
+
+*Step 2 — parse the value, strictly, and bound it.* The value runs from the phrase to the
+**first sentence terminator** (a `.` followed by whitespace or end of line) or the end of the
+line, whichever comes first. Bounding is not optional. SOP-261's declaration line reads
+`… Blocked by: nothing. This entry only launches the backend … Related: AATK-69`, and an
+unbounded read swallows that `Related:` key and invents a blocker the ticket never declared.
+
+Within that span, first strip any `<issue …>KEY</issue>` wrappers — **Linear stores
+cross-references as tags, so the stored text of a well-formed ticket is not the bare key** —
+then accept exactly two forms: the literal `nothing`, or keys matching `^$PREFIX-\d+$`.
+Trailing prose after the keys is context for the reader; `Blocked by: PLTF-2563 — for
+merge-conflict avoidance only` parses to one key. A recognised declaration yielding neither
+`nothing` nor a key — prose, a URL, or the SOP-262 shape above — is **unparseable**, and an
+unparseable value **holds the ticket** and is reported. Do not guess at prose. A scheduler
+that shrugs at `Blocked by: the auth work` and launches anyway has silently discarded a real
+dependency, which is the whole failure this section exists to stop.
 
 **A key from another project is a third case, not garbage.** A token matching
 `^[A-Za-z][A-Za-z0-9]*-\d+$` whose prefix is not `$PREFIX` — `Blocked by: BILL-471` in a
@@ -207,9 +260,15 @@ need opposite responses from the human — *fix the ticket* versus *go check the
 and re-run when it lands*. This is not hypothetical; it is how a cross-repo dependency
 actually gets written down.
 
-A missing `Blocked by:` line is a ticket-standard gap: report it, treat it as `nothing`, and
-say you did both. Absent and `nothing` mean different things — "nobody wrote it down" versus
-"checked, there are none" — and only one of them is a defect.
+**Absent means step 1 found nothing** — no line in the ticket begins `blocked by` at all. That
+is a ticket-standard gap: report it, treat it as `nothing`, and say you did both. Absent and
+`nothing` mean different things — "nobody wrote it down" versus "checked, there are none" —
+and only one of them is a defect.
+
+**A line step 1 recognised can never reach this rule.** It either parses or it holds; there is
+no path from a recognised line to "treat as `nothing`". Collapsing near-miss into absent is
+exactly what would have launched SOP-262 while SOP-261 was still In Progress, and the two
+demand opposite responses from the human — *fix the ticket* versus *nobody wrote it down*.
 
 **A blocker is satisfied when it is MERGED, not when it is done.** Two cases:
 
@@ -217,8 +276,68 @@ say you did both. Absent and `nothing` mean different things — "nobody wrote i
   completed and the PR reads `MERGED`. Not when its gates pass, not when its review is clean —
   a ticket whose code has not landed on the integration branch cannot be built on, and a
   dependent branch cut before that merge forks from a base that never contained the work.
-- **The blocker is not in this run's list.** Read its state from the ticket system once, at
-  intake. Terminal state → satisfied, proceed. Anything else → **hold**.
+- **The blocker is not in this run's list.** Ask the same question — did it land? — in this
+  order, once, at intake:
+  1. **Its commits are on the base branch** → **satisfied**, whatever its status says:
+     ```bash
+     git log "$ORIGIN_REMOTE/$BASE_BRANCH" --oneline --grep="^\[<KEY>\]"
+     ```
+  2. **Status category**, only when step 1 finds nothing → terminal means **satisfied**.
+  3. Neither → **hold**.
+
+**Merge evidence outranks status, and the reason is a live deadlock.** Reading status *first*
+was this section's rule until BILL-500, and it contradicted the heading three lines above it.
+`[workflow] post_merge_done = false` makes `:run` deliberately park a merged ticket **one state
+short of terminal**, so slopstop's own setting guaranteed that a merged out-of-run blocker read
+non-terminal and held forever. server-v2 sets it. PLTF-2563 sat at `In Review` — category
+`indeterminate` — with its PR merged and its commit on `master`, and PLTF-2565 would never have
+run. Any project with a 4-state workflow had the same deadlock.
+
+What a dependent needs is not a workflow state; it is the blocker's code on the branch it is
+about to fork from. Merge evidence answers that directly.
+
+**Ask git, not the PR list, and anchor the pattern.** The commit-subject prefix is mandated by
+the project's own conventions and `:run` writes it, so the commits carry the key. The grep is
+local, needs no API, and answers the real question in one step: a commit whose subject begins
+`[<KEY>]` sitting on the base branch *is* that ticket's work having landed there. No PR to
+locate, no sha to extract, no separate ancestry test.
+
+**Anchoring is the whole point, and an unanchored version is actively wrong.** `^\[<KEY>\]`
+matches a commit *belonging to* the ticket; a bare search for the key matches any commit or PR
+that merely *mentions* it. Proved while writing this rule: searching server-mycopy's PRs for
+`PLTF-2562` returns one **MERGED** PR — #108, which belongs to **PLTF-2563** and only discusses
+2562's cancellation in its body. An unanchored rule would have satisfied a cancelled blocker on
+a sibling ticket's merge. Match commit subjects on the base branch, not free text anywhere.
+
+This works because universal §3 forbids squash and rebase merges. A real merge commit keeps the
+branch's own commits, prefixes intact, reachable from the base branch. Squash them into one
+`Merge pull request #N` subject and this signal disappears — one more thing that rule buys.
+
+**Step 1 finding nothing is not evidence that nothing landed.** A ticket landed by hand without
+the subject prefix leaves no trace for the grep, so fall through to the status check. Treating
+absence as "not merged" recreates the deadlock with extra steps, which is the failure this rule
+exists to remove.
+
+**The status fallback is load-bearing — do not remove it.** A cancelled ticket never merges.
+PLTF-2562 was killed `DontFix` with no PR and no merge commit at all; only its category answers
+for it. Merge-evidence-only would hold every dependent on a cancelled blocker forever, which is
+the same deadlock wearing the opposite mask.
+
+**Terminal is a property of the status CATEGORY, never of its name.** One definition, here:
+
+| backend | terminal when |
+|---|---|
+| JIRA | `statusCategory.key == "done"` |
+| Linear | `state.type == "completed"` |
+| GitHub Issues | `state == "CLOSED"` |
+
+**Never test against a list of status names.** Every project renames its columns, and the
+names that matter are the ones nobody thinks to list: PLTF-2562 was killed as `DontFix`, which
+sits in category `done` while matching no plausible spelling of "done". A name list holds a
+dependent ticket forever on a blocker that is finished, and reports it as still open. It fails
+the other way too — a column *named* "Done" that a project has parked in an in-progress
+category would read as satisfied and release a dependent early. The category is the backend's
+own answer to this question; ask it rather than guessing from the label.
 
 **Re-check the blocked set after every merge**, not once at the start. The runnable set grows
 as the run proceeds; that is the entire point of accepting a chain in one invocation.
@@ -260,6 +379,10 @@ prose says blocked and the board does not, or the board says blocked and the pro
 and say which you acted on. **Never write the native relation**; a second writer is a second
 source of truth for a value the ticket body already holds (universal §5).
 
+**Report the same comparison again at close** (stages 13–15, step 3a), with the link ids.
+A blocker discharged *during* the run leaves a link that agreed at intake and disagrees by
+the end — and on JIRA nobody can delete it, so naming it is the only correction available.
+
 ## Invariant tickets — refactor and backfill
 
 **This is the one definition of all three modes.** Do not restate it in a worker skill or
@@ -286,76 +409,107 @@ There are **two** invariant modes, and they are exact mirrors of each other:
 The mirror is the design, not a coincidence. Each mode freezes exactly what the other one
 delivers, so neither can be used to smuggle in the other's work.
 
-### Detect the mode at intake — match rendered text, never markup
+### Resolve the mode at intake — from labels, and from nothing else
 
-A ticket cut by `/slopstop-tickets --refactor` or `--backfill` carries one of:
+Mode is carried by a **label**, one of exactly two, with fixed names:
 
-```
-**Mode:** refactor — invariant DoD (nothing broke)
-**Mode:** backfill — tests over existing behaviour
-```
-
-**The asterisks are presentation. Do not match them.** The marker's meaning is *"a line that
-says `Mode:` followed by a mode name"*, and that is what you match — because not every
-backend stores markdown. GitHub Issues returns raw markdown and the asterisks survive; JIRA
-stores ADF, where a body authored with bold renders as bold and the asterisks are simply
-**gone**. Both were measured 2026-08-07, and matching the markdown literal silently failed on
-two of the first two markers written through the normal path.
-
-**Normalize, then match, per line:**
-
-1. Strip surrounding whitespace.
-2. Strip markdown emphasis runs — `*`, `_`, backtick — from the line's start and end, and
-   from around the `Mode:` token.
-3. A **marker line** is one matching `^Mode:\s*(refactor|backfill)\b` after that.
-
-All of these resolve identically, which is the whole point:
-
-```
-**Mode:** refactor — invariant DoD (nothing broke)     Mode: refactor
-*Mode:* refactor          __Mode:__ refactor           **Mode: refactor**
-```
-
-**Anchor to the start of a line. Never substring-search the body.** Tickets carry prose
-*about* their own markers — a note explaining why a marker is written a certain way — and a
-substring search reads that as a second marker. Line-anchoring is the only thing separating
-a declaration from a discussion of one.
-
-> **Precondition: whatever converts the backend's body to text must emit a line break per
-> block.** Line-anchoring is meaningless otherwise. A rich-text document is a *tree of
-> blocks*, not a string — a flattener that concatenates text nodes without separators turns
-> `…(nothing broke)` + `Why` into `…(nothing broke)Why`, and every marker after the first
-> block loses its line start. Measured 2026-08-07 on a live ticket whose marker sits at block
-> 2: with block newlines it resolved `refactor`, without them it resolved **`normal`** —
-> silently, which is the failure shape this whole ticket exists to remove. When you flatten
-> ADF or any block document, append `\n` for every `paragraph`, `heading`, `listItem`,
-> `codeBlock`, `blockquote` and table row. If you cannot control the flattener, verify a
-> marker that is *not* the first block before trusting the result.
-
-Then **count**, rather than taking the first hit:
-
-| marker lines found | result |
+| label | mode |
 |---|---|
-| none | normal ticket |
+| `slopstop-refactor` | production code only; no test file may change |
+| `slopstop-backfill` | tests only; no production file may change |
+| *neither* | normal |
+
+**Read the labels through the backend's API. Do not parse the ticket body for a mode.**
+There is no `Mode:` marker, no emphasis to strip, no flattener to get right, and no
+fallback. A body that mentions a mode in prose is discussing one, not declaring one.
+
+| backend | read |
+|---|---|
+| `github` | `gh issue view $N --repo $OWNER/$REPO --json labels -q '[.labels[].name]'` |
+| `linear` | `get_issue` → the issue's `labels` |
+| `jira` | `getJiraIssue` → the `labels` field |
+
+Then **count what you found**:
+
+| labels present | result |
+|---|---|
+| neither | normal ticket — no warning, this is the common case |
 | exactly one | that mode |
-| two or more, **same** mode | that mode — and report the duplication |
-| two or more, **different** modes | **malformed: stop the ticket**, naming both |
+| both | **stop the ticket**, naming both labels |
 
-A ticket claiming both modes can change nothing at all: refactor freezes every test file,
+A ticket carrying both labels can change nothing at all: refactor freezes every test file,
 backfill freezes every production file, and together they freeze the repository. That is a
-ticket-authoring defect, not a mode to resolve.
+ticket-authoring defect, not a mode to resolve. Report it as
+`RUN BLOCKED: ticket carries both slopstop-refactor and slopstop-backfill`.
 
-Set `$REFACTOR` or `$BACKFILL` once, at intake, and record it as a `note` **with the marker
-line you matched, verbatim** — so a later reader can see what the mode was decided from
-rather than taking your word for it.
+**Never create a label on this path.** Resolving mode is a **read**, and a read creates
+nothing. A mode label absent from the project means no ticket there can carry it, which is
+already the correct and safe answer — creating one here changes nothing about the ticket in
+front of you and gives the read a write it has no business making.
 
-**Never infer a mode** from the title, the file map, or how the diff turns out. A mode
-inferred after the fact is a mode an implementer can talk you into.
+> **The rule is about reading, not about `:run`.** Create a label at the point you must
+> **apply** it; never at the point you merely **read** for one. `:run` does both: it reads
+> mode here and it applies the status labels at stages 13–15 step 3, where ensuring the label
+> exists is mandatory because GitHub rejects an edit naming an unknown label outright.
+>
+> Stated as a blanket *"`:run` never creates a label"* until 2026-08-09 (BILL-527), which
+> contradicted the status-label swap two stages later and stranded it: a project that skipped
+> `gh-init` merged its code and then could not advance its ticket. Do not re-broaden this back
+> to all of `:run` — the read/apply distinction is the whole content of the rule.
 
-> **Linear's storage format is not verified.** GitHub (markdown) and JIRA (ADF) were
-> measured; Linear was not. The normalization above is designed so the answer does not
-> matter — but if you are the first to run this against Linear, check and record it rather
-> than assuming this note is still current.
+`create-ticket` ensures a mode label exists at the point it applies one, and `gh-init` seeds
+both for a fresh GitHub project as a convenience.
+
+Set `$REFACTOR` or `$BACKFILL` once, at intake, and record it as a `note` **naming the label
+it came from** — so a later reader can see what the mode was decided from rather than taking
+your word for it, and so an archived run stays auditable without a second source:
+
+```json
+{"t":"…","kind":"note","text":"mode: refactor (from label slopstop-refactor)"}
+{"t":"…","kind":"note","text":"mode: normal (no slopstop-refactor or slopstop-backfill label)"}
+```
+
+The note is **derived, not authoritative**. The labels on the ticket are the source of truth;
+this record exists so the archive can be read without querying the tracker again.
+
+**Never infer a mode** from the title, the file map, the body, or how the diff turns out. A
+mode inferred after the fact is a mode an implementer can talk you into.
+
+> **Why a label and not a body marker.** Until 2026-08-09 the mode was a `**Mode:** refactor`
+> line in the body, and its failures were all silent and all in the losing-rigour direction:
+> refactor mode does not merely forbid test edits, it **skips Phase 0 entirely** — no
+> `red-tests`, no `mutation-check`, no `adversary` rounds. A marker mangled by an editor ran
+> the ticket as normal with its test-file guard never armed; the reverse skipped every gate.
+> Neither failed. Both reported clean. A body is prose in a field every ticket-system editor
+> is free to reflow, re-emphasise, or wrap — and the marker had already needed a rule for
+> ADF-versus-markdown emphasis and a precondition on block flattening, each a way to read
+> `normal` from a ticket that said `refactor`. A label is structured data behind an API: it
+> cannot be reflowed into something else, and all three backends support it natively.
+
+> **The names are namespaced, and fixed, on purpose.** A bare `refactor` label already exists
+> in real backlogs meaning "this is refactoring work", loosely; reading that as "engage
+> invariant mode" would silently re-interpret every pre-existing ticket carrying it, in the
+> direction that skips gates. And the names are **not** configurable — `[status_labels]` is,
+> which is exactly what makes it a required key a project can get wrong. One definition
+> (universal §5). There is deliberately **no `slopstop-normal` label**: absence of both is the
+> declaration, and a third label would recreate the absent-versus-declared-absent ambiguity
+> that moving to labels removes.
+
+> **The separator is a hyphen, and a colon was rejected on evidence.** `slopstop:refactor`
+> was the first design. **Linear reinterprets it**: `group/label` and `group:label` are
+> Linear's add-label syntax for creating a label group, so `slopstop:refactor` there does not
+> create that label — it creates a group `slopstop` containing a label named **`refactor`**,
+> which is precisely the bare-`refactor` collision the namespace exists to prevent, landing
+> in the gate-skipping direction. On JIRA a colon is at best degraded: labels containing `:`
+> are reported not to appear in autocomplete, so a human cannot find the label to apply it.
+> A hyphen has no special meaning on any of the three.
+>
+> **All three are now verified, and none of it is inference.** Linear: checked 2026-08-09
+> against its documented add-label syntax. GitHub: slopstop has shipped `status:in-progress`
+> for months, and hyphens are unremarkable there. JIRA: **tested live** on 2026-08-09 by
+> Ian, who applied `slopstop-foo` to PLTF-2567 and confirmed it holds — a hyphenated,
+> `slopstop`-prefixed label is accepted. That last one replaces what this note previously
+> recorded as public report rather than a probe; do not reintroduce the hedge.
 
 ### `$OWN` — what THIS branch changed, derived at check time
 
@@ -432,15 +586,13 @@ When `$REFACTOR` is set, five things change and nothing else does:
 no test file modified.** Not two of three. A suite that is green at both ends because a
 failing test was deleted in the middle is green and proves nothing.
 
-**"The same suite" means the same runnable node-id set, not the same count.** Equal counts
-with different members is a substitution, and it reads as clean to anything counting. Take
-both sides from the runner — a `func Test` / `def test` grep counts *declarations*, and the
-runnable units live inside them as subtests, parametrized cases and table rows. Measured: a
-Go file with one test containing three `t.Run` subtests has **5** node-ids and **2**
-`func Test` lines, so a table quietly losing rows passes a declaration count untouched.
-`implement`'s Step 1.3 baseline is one side of the comparison and its final run is the
-other; both already happen.
+**"The same suite" means the same runnable node-id set, not the same count** — compared as
+sets, in both directions. What a node-id is, why a declaration is not one, and how to take
+the set from the runner are defined once and not restated here (universal §5).
 → Read `.claude/skills/slopstop-run/references/node-ids.md`
+
+What is `:run`'s alone: **`implement`'s Step 1.3 baseline is one side of the comparison and
+its final run is the other**, so both sides already happen and neither needs a separate step.
 
 ### Backfill mode — `$BACKFILL`
 
@@ -505,15 +657,14 @@ set stops the ticket, and it is cleared by **both** of:
    clean on a contract that got smaller. **A dropped node-id stops the ticket on its own**,
    whatever the mutation verdict says.
 
-   **Enumerate both sides from the runner, never from the source.** A `func Test` / `def
-   test` grep counts declarations, and the runnable units — subtests, parametrized cases,
-   table rows — have no declaration line of their own. Measured: a Go file with one test
-   containing three `t.Run` subtests has **5** node-ids and **2** `func Test` lines. This is
-   not hypothetical here: PLTF-2562's entire enumeration contract lived inside one `t.Run`,
-   and a function-level comparison reported "no shrink" — as it would have if that subtest
-   had been deleted outright. The later side comes from `mutation-check`'s Step B1 report,
-   which enumerates as part of a run it already performs.
+   **Enumerate both sides from the runner, never from the source** — the rule and the recipe
+   are defined once and not restated here (universal §5).
    → Read `.claude/skills/slopstop-run/references/node-ids.md`
+
+   Why it bites *at this gate* specifically: PLTF-2562's entire enumeration contract lived
+   inside a single `t.Run`, so a function-level comparison reported "no shrink" — exactly as
+   it would have if that subtest had been deleted outright. The later side comes from
+   `mutation-check`'s Step B1 report, which enumerates as part of a run it already performs.
 
    A set you could not build is `could-not-enumerate`, and the stop **does not clear**.
 2. **`mutation-check --backfill` passes on the current files**, both probe shapes, per the
@@ -729,9 +880,57 @@ Serial across tickets, and all of it inline.
    back to stage 10b and re-verify on the new tip. Do not merge on a blessing taken before
    commits that are now in the diff. A blessing is a statement about a commit, not about a
    ticket.
+
+   **Record the re-check inside the `merge` span, not as a `pr` one.** It is a precondition of
+   merging, not a second run of the `pr` stage, so it belongs in `merge`'s `started` result:
+   *"blessing re-checked before merging: branch tip <sha> == blessed_sha"*. PLTF-2565 wrote it
+   that way and pairs clean. SOP-261 wrote it as a second `pr` `finished` with no `started`,
+   which is both the wrong stage and an orphan close, and that file's whole 3h00m05s of timing
+   is unreportable as a result.
+
+   **If the tip HAS advanced and you go back to 10b, that re-verification opens its own
+   spans** — a second `tamper`, a second `handoff`. A second run is a second span; never
+   reopen or re-close the first. See `run-jsonl.md`, invariant 1's close-time mirror.
 1. `gh pr merge --merge --delete-branch` against `$OWNER/$REPO`. **Never** `--squash`,
    `--rebase`, or `--admin`. Read the PR back and assert `state == "MERGED"` before believing
    it; capture `$MERGE_COMMIT`.
+
+   **Read `mergeStateStatus` first, and name the reason yourself when it is not mergeable.**
+   One call — `gh pr view $PR --json mergeStateStatus,statusCheckRollup,reviewDecision` — and
+   translate it before spending the merge attempt:
+
+   | `mergeStateStatus` | what it means | do |
+   |---|---|---|
+   | `CLEAN` | mergeable, checks green | merge |
+   | `UNSTABLE` | a non-required check is failing or **still queued** | merge — but say which check, in the report |
+   | `BLOCKED` | required reviews or required checks unsatisfied | **stop this ticket**, naming the unmet requirement |
+   | `BEHIND` | base has advanced | `git merge <base>` into the branch per the conflict rule, then re-verify from stage 10b — the blessing is void |
+   | `DIRTY` | conflicts | **stop this ticket**, naming the conflicting files |
+   | `UNKNOWN` | GitHub has not computed it yet | wait ~5s and ask **once** more; if still `UNKNOWN`, merge and let the read-back decide — never treat it as a stop |
+
+   **`UNKNOWN` is not a failure and must not become one.** GitHub computes this field
+   asynchronously, so it is the normal answer for a PR opened seconds ago — measured
+   2026-08-09, `gh pr view --json mergeStateStatus` returned `UNKNOWN` on a real PR of this
+   repo. Stopping a ticket on it would invent a blocker out of a value that means "ask again",
+   which is worse than the cryptic error this whole check exists to replace.
+
+   **Reading it does not replace the read-back assertion**; it is not a substitute for
+   checking what actually happened. GitHub computes `mergeStateStatus` asynchronously and it
+   can be stale or `UNKNOWN` at the moment you ask, so a merge can still be refused after a
+   `CLEAN`. Do both: predict, then verify.
+
+   **Why bother, when the read-back already catches a refused merge.** Because it catches it
+   as a `gh` exit code and an API error string, and the next thing a run does with that is
+   guess. Naming the state turns *"the merge failed"* into *"BLOCKED: required check `build`
+   has not reported"*, which is the difference between a human fixing it in a minute and a
+   run reporting a mystery. Measured on this repo 2026-08-09: a queued CodeRabbit check left
+   a PR `UNSTABLE`, the merge was refused — and the orchestrator posted the ticket's closing
+   comment anyway and had to reopen it. `UNSTABLE` is in the table above as *merge and say
+   so* precisely because of that run.
+
+   **`--admin` is still never the answer to any row of that table.** A required check that has
+   not reported is a check that has not reported; forcing past it converts a visible stop into
+   an invisible one.
 2. **Score the DoD** before advancing anything. `unverifiable` is not a polite `met` — any
    `not-met` or `unverifiable` blocks and goes to the human. The scoring rules are one
    definition and live in `references/`, not here:
@@ -746,6 +945,31 @@ Serial across tickets, and all of it inline.
      The motivating case is on-device mobile testing — an Expo/EAS build has to reach real
      hardware, possibly days later, and a human moves the ticket to done once it passes.
 
+   **Ensure a label exists before applying it.** On GitHub, applying a label that does not
+   exist fails the whole edit — measured 2026-08-09: `gh issue edit 461 --add-label
+   slopstop-blech` → `failed to update …: 'slopstop-blech' not found`, with the label not
+   created and the issue's existing labels untouched. So check, create if absent, then apply:
+
+   ```bash
+   $GH label list --repo "$OWNER/$REPO" --json name -q '.[].name'   # exact match
+   $GH label create "<label>" --repo "$OWNER/$REPO"                 # only if absent
+   $GH issue edit "$N" --repo "$OWNER/$REPO" --add-label "<label>"
+   ```
+
+   Idempotent: an existing label is used as-is, never recreated or recoloured. The one
+   definition of per-backend label creation — including why JIRA needs no step and Linear
+   does — lives in `create-ticket/SKILL.md` Step 3a.
+
+   **This is why `gh-init` can stay optional.** It seeds these labels for a fresh project as a
+   convenience, and nothing depends on it having run *because this step does not need it to*.
+   Before 2026-08-09 that claim was aspirational: a project that skipped `gh-init` merged its
+   code here and then failed to advance the ticket, having been told to apply a label it was
+   forbidden to create.
+
+   **Only slopstop's own labels.** This creates the configured status labels and slopstop's two
+   mode labels — nothing else. A label a human named in a ticket body is not slopstop's to
+   invent.
+
    Closure happens here, through the API. Never write `Closes #N` in a PR body — GitHub
    would auto-close, which both skips the label half of this step *and* overrides
    `post_merge_done = false` entirely, terminating a ticket that was meant to wait.
@@ -754,6 +978,37 @@ Serial across tickets, and all of it inline.
    awaiting <state>` — never folded in with the completed ones. A parked ticket looks
    identical to a forgotten one unless the report distinguishes them, and the whole point
    of the flag is that someone comes back to it later.
+3a. **Report issue links that contradict the ticket's `Blocked by:` header.** Read the
+   ticket's native relations once — you already compare them at intake — and compare each
+   against the header you parsed. **Name every disagreement, with the link id**, in the final
+   report:
+
+   ```
+   Stale links on PLTF-2565 (prose header says: Blocked by: nothing):
+     12517  PLTF-2563 blocks PLTF-2565   — PLTF-2563 merged as 1fe73f0
+     12518  PLTF-2565 blocks PLTF-2566   — discharged
+   ```
+
+   **This never stops or fails anything.** The prose header governs scheduling, so a stale
+   link is a board-display disagreement, not a run-blocking one — and slopstop cannot fix it
+   anyway on the backend where it happens. **On JIRA, an issue link cannot be removed by the
+   available tooling** — `editJiraIssue` reaches only the `fields` path and removal needs the
+   REST `update` path. Do not try it: the verbatim failure and its cause are recorded once,
+   beside the code that creates the links, in `create-ticket/SKILL.md` Step 3. It has been
+   re-derived by retrying twice already.
+
+   So the report *is* the deliverable here: a link nobody can delete and nobody has named is
+   a second source of truth that quietly disagrees with the first, and a human reading the
+   board draws the wrong conclusion from it. Say it out loud instead. Where slopstop *can*
+   write — a ticket comment, or the prose header — recording the discharge and the stale link
+   id is worth doing; it is the only correction available.
+
+   **Backend-scoped.** This applies as written to JIRA. Linear can remove a relation through
+   its API (`removeBlockedBy` / `removeBlocks` / `removeRelatedTo`), so there a contradiction
+   is fixable rather than permanent — still report it, and say that it is fixable. GitHub has
+   no native `Blocked by` relation at all: its blockers are body text, so there is nothing to
+   contradict and nothing to report.
+
 4. **Write the DoD-confirmation into `task_plan.md`** — per-item verdicts and their
    evidence — so it is a file in the tracking dir like everything else. Do not push it
    yourself; step 5's worker pushes the whole directory.
@@ -800,6 +1055,114 @@ A run resumes from disk, never from memory.
 At run end, validate again before reporting anything, then append the final
 `{"event":"note","stage":"run_closed",…}` line. Its absence is what tells a later reader the
 orchestrator died mid-run.
+
+## Re-scoring after a ticket-defect `not-met`
+
+**A ticket can stop at close because the *ticket* was wrong, not the work.** `dod-scoring.md`
+is right to say so — *"an item the implementation satisfies in spirit but not as written is
+`not-met`; the fix belongs in the ticket, not in a generous reading"* — and the remedy it
+prescribes is to amend the ticket. This is where the amendment lands.
+
+Without this path there is nowhere to land it. Re-running `:run` is **unsafe** on a merged
+ticket: stage 3 cuts a branch, and the branch already exists locally and on every remote
+while the PR has merged. PLTF-2565 hit exactly this, and its re-score, ticket transition and
+archive were all done by hand — the right outcome reached by the wrong route.
+
+### Recognise the state — three conditions, all from `run.jsonl`
+
+A ticket is **re-scorable** when all three hold:
+
+1. `merge` has a `finished` span. The work is landed.
+2. The **latest** `close` span is `failed`. The run stopped where scoring happens.
+3. `run_closed` is the last record. The run is over, not interrupted.
+
+**Condition 2 is the latest `close`, not any `close`.** A log that has already been through
+this path holds *both* a `failed` close and a later `finished` one — that is the point of
+appending rather than overwriting. Testing whether a `failed` close exists anywhere marks
+every successfully re-scored run as re-scorable again, forever. Found by running this rule
+against PLTF-2565's archive, which is exactly such a log.
+
+PLTF-2565's archived log is the reference case, and it reads:
+
+```
+span  merge       finished  13:14:44   PR 109 read back: state=MERGED, mergeCommit=1504f14…
+span  close       started   13:14:44
+span  close       failed    13:15:40   DoD 5 of 6 met, 1 not-met -> ticket STOPPED at close
+note  run_closed  …         13:16:07   1 merged (1504f14), 1 stopped at close (bullet 5 not-met)
+```
+
+All three conditions hold: `merge` finished, latest `close` failed, `run_closed` last.
+Re-scorable.
+
+The **archived** copy of that same file goes on past this point — it carries the re-score
+that was done by hand, so its latest `close` is `finished` and it correctly refuses a second
+one. Same file, two states, and the rule tells them apart.
+
+### Refuse it otherwise, and name which condition failed
+
+| what the log shows | verdict |
+|---|---|
+| no `merge` span, or `merge` `failed`, or `merge` `started` with no close | **refuse** — `RESCORE REFUSED: merge never finished; this is not a close-out path` |
+| `close` `finished` | **refuse** — `RESCORE REFUSED: close already succeeded; nothing was stopped` |
+| no `run_closed`, or a span still open | **refuse** — `RESCORE REFUSED: run was interrupted, not stopped — resume it instead` |
+| branch tip has moved since the merge commit | **refuse** — `RESCORE REFUSED: branch state has moved; the work changed` |
+
+**Name the condition, never just "refused".** These are four different situations with four
+different next steps, and a bare refusal sends the reader to re-derive which one they are in.
+
+**This is a close-out path, not a way to skip gates.** That is what every refusal above is
+protecting. If the *work* needs to change, this is the wrong door — go back through the
+normal stages.
+
+### What re-scoring does, and does not, re-run
+
+**Re-run:** DoD scoring, then stages 13–15 from step 2 onward — advance the ticket, write the
+DoD confirmation, launch `archive`, close the log, move the directory.
+
+**Do not re-run** investigate, implement, gates, review, handoff, PR, or merge. They
+completed, their evidence is in the record, and re-running them against a merged branch
+measures something other than what shipped.
+
+### Score the ticket as it is now
+
+Re-fetch the ticket body from the backend before scoring. **The whole point is that the DoD
+changed** — scoring a cached copy re-derives the original `not-met` and the path achieves
+nothing. Read the labels again too: the mode is a label, and a ticket amended at the same
+time may have had it changed.
+
+### The original `not-met` survives — this is a requirement, not a courtesy
+
+A re-score **appends**. It never overwrites, edits, or deletes the failed `close` span, and
+it never rewrites the DoD confirmation that recorded the original verdict.
+
+Write the second `close` span with the reason in its `result`, so one pass over the file
+still reconstructs the whole run:
+
+```
+span  close       started   13:27:42   re-open of close after the ticket-level fix; the
+                                       round-1 close failed on DoD bullet 5
+note  close       …         13:27:42   ticket changes made at the owner's request: DoD
+                                       bullet 5 rescoped to …
+span  close       finished  13:27:42   DoD re-scored 6 of 6 MET against the rescoped bullet 5.
+                                       The measurement did not change — the item did.
+```
+
+**A ticket that was fixed must not read as one that was always green.** The pre-amendment
+`not-met`, the amendment, and the re-score are three facts and the record keeps all three.
+Carry the same distinction into the DoD confirmation and the final report: say *"6 of 6 met
+after the ticket-level fix; the round-1 `not-met` on bullet 5 stands in the record as what
+actually happened"*, not *"6 of 6 met"*.
+
+> **Watch the span duration.** PLTF-2565's re-scored `close` span opened and closed on the
+> same second, which invariant 5 flags as suspect — a zero-second span is usually a stamp
+> written from memory. Here the scoring genuinely was near-instant, the human having already
+> made the decision during the preceding 12 minutes. Bracket the human's part as
+> `waiting_for_user` when you are the one waiting on it; that is where the time actually
+> went, and on PLTF-2565 it went unrecorded and inflated the orchestrator's inline figure
+> (`run-jsonl.md`, "Computing time").
+
+**Re-scoring never edits the ticket.** Authoring is `:tickets`' work. The amendment arrives
+already made; this path reads it, scores it, and closes out.
 
 ## Failure handling
 

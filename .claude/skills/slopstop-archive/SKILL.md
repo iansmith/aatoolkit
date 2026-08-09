@@ -2,7 +2,7 @@
 description: Push every file in a ticket's tracking directory to the ticket as one comment per file — task plan, findings, the run.jsonl timing log, adversary rounds — so the local record survives where the ticket lives. Reports what it pushed; moves nothing and deletes nothing.
 ---
 
-<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop e37c68d by install-for-project.sh — do not edit.
      Edit skills/archive/ in the slopstop repo and re-run. (universal §5) -->
 
 # Archive — push the tracking directory to the ticket
@@ -33,9 +33,13 @@ upstream never wrote one.
 ## Step 2 — Enumerate what you will push
 
 Every regular file in `--dir`, non-recursive, sorted. Do not filter to a known list —
-`task_plan.md`, `findings.md` and `run.jsonl` are the usual set, but a run may also have
-left `adversary-round-2.md` or similar, and a file you do not recognise is exactly the one
-worth preserving.
+`task_plan.md`, `findings.md`, `run.jsonl` and `run-derived.jsonl` are the usual set, but a
+run may also have left `adversary-round-2.md` or similar, and a file you do not recognise is
+exactly the one worth preserving.
+
+**`run-derived.jsonl` is why the no-filter rule earns its keep.** It was added by BILL-494 and
+required no change here — a known-list filter would have silently dropped it, and it is the
+only record that survives an orchestrator dying mid-run.
 
 Skip only: dotfiles, `*.bak`, `*.tmp`, and anything over **1 MB** (report it by name and
 size as skipped — do not silently drop it).

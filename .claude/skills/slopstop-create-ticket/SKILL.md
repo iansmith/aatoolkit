@@ -2,7 +2,7 @@
 description: Publish drafted tickets to whichever ticket system the project uses — create each issue, assign its key, link parents to children, and resolve cross-reference placeholders. The only place backend-specific creation lives; callers pass a draft and get back a letter-to-key map.
 ---
 
-<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop e37c68d by install-for-project.sh — do not edit.
      Edit skills/create-ticket/ in the slopstop repo and re-run. (universal §5) -->
 
 # Create tickets — the one place backends differ
@@ -83,6 +83,113 @@ Umbrella → leaf, after both exist.
 - **`linear`** — already done, via `parentId` at creation.
 - **`jira`** — an issue link of the project's configured subtask/relates type.
 
+> **On JIRA, creating an issue link is a one-way door: slopstop cannot remove one.** Nothing
+> in slopstop deletes an issue link, and on JIRA the tooling *cannot*. The Atlassian MCP
+> exposes `createIssueLink` and no delete; its `editJiraIssue` surfaces only the `fields`
+> path, while JIRA's REST API needs the `update` path — `update: {issuelinks: [{remove:
+> {id}}]}` — which the toolset does not reach. Recorded verbatim so nobody re-derives it by
+> retrying, which has now happened twice:
+>
+> ```
+> editJiraIssue(fields: {"issuelinks": []})
+>   -> {"errors":{"issuelinks":"Field does not support update 'issuelinks'"}}
+> ```
+>
+> **This is a JIRA statement, not a universal one.** Linear's API can remove a relation
+> (`save_issue` takes `removeBlockedBy` / `removeBlocks` / `removeRelatedTo`), and GitHub has
+> no native `Blocked by` relation to create or remove in the first place — its blockers are
+> body text, which is editable. Do not restate this limitation as slopstop's.
+>
+> **Say so where the link is made.** When you create a JIRA issue link, state in your report
+> that it cannot be removed later, so no caller plans on a step that does not exist. The
+> consequence is not hypothetical: a discharged blocker leaves the link standing while the
+> ticket's own `Blocked by:` header reads `nothing`, and the two disagree permanently. `:run`
+> reports that disagreement at close (stages 13–15), which is the mitigation — the prose
+> header is what governs scheduling, so a stale link is a board-display defect, not a stall.
+
+## Step 3a — Apply the mode label, where the draft asks for one
+
+A draft may declare a ticket's **mode** — `refactor` or `backfill`. Mode is carried by a
+label, never by body text (`:run`'s invariant-tickets section is the one definition). Exactly
+two names, fixed, not configurable:
+
+| mode | label |
+|---|---|
+| refactor | `slopstop-refactor` |
+| backfill | `slopstop-backfill` |
+| normal | *no label* — absence is the declaration; do not invent a third name |
+
+**Ensure, then apply. This is the one definition of per-backend label creation** — it governs
+any label slopstop must apply, not only the mode labels. `:run` points here for the status
+labels it swaps at close (stages 13–15 step 3); do not restate the matrix there (universal §5).
+
+**Create at the point you must APPLY a label; never at the point you merely READ for one.**
+A read that creates changes nothing about the ticket in front of it. An apply that does not
+create fails outright on two of the three backends — and fails at exactly the moment the
+ticket most needs the label, because an unlabelled ticket runs as normal and skips the gates
+its mode exists to impose.
+
+**Probed on all three, 2026-08-09. Do not re-derive this by trying it.**
+
+| backend | applying an unknown label | so |
+|---|---|---|
+| `jira` | **accepted** — labels are free-form | no creation step exists or is needed |
+| `github` | **rejected**: `failed to update …: 'slopstop-blech' not found` | ensure first |
+| `linear` | **rejected**: `Could not resolve label(s): "slopstop-blech"` | ensure first |
+
+**Both rejections are atomic, and that is the part that matters.** Neither backend created the
+label, and neither applied a partial set — the GitHub issue kept its existing labels, the
+Linear issue kept `["Bug"]` with `updatedAt` unmoved. So skipping the ensure step does not
+degrade to "applied without that one label". It degrades to **no write at all**, leaving a
+ticket that looks untouched and an intent that vanished silently.
+
+**Only labels slopstop itself needs.** The two mode labels and the project's configured status
+labels. A label a human named in a ticket body is not slopstop's to invent.
+
+- **`github`** — the label must exist first. Check `gh label list --repo "$OWNER/$REPO"
+  --json name -q '.[].name'` for an exact match; create it if absent
+  (`gh label create "<label>" --repo "$OWNER/$REPO" --description "<desc>"`); then
+  `gh issue edit "$N" --repo "$OWNER/$REPO" --add-label "<label>"`.
+- **`linear`** — the label must exist first, **probed not assumed**:
+  `list_issue_labels(name: "<label>")`, then `create_issue_label(name: "<label>")` if absent,
+  then attach it via `save_issue`. Attaching a name Linear does not know fails the whole call:
+
+  ```
+  save_issue(id: "MAZ-192", labels: ["Bug", "slopstop-blech"])
+    -> Error: Could not resolve label(s): "slopstop-blech". Provide labels as a JSON array
+       of strings (e.g. ["Bug", "Improvement"]) where each entry is an existing label name
+       or ID. Note: labels replaces the full label set, so unresolved entries are rejected
+       to avoid dropping existing labels.
+  ```
+
+  Measured 2026-08-09 against a live workspace where `slopstop-blech` did not exist. **The
+  rejection is atomic and deliberately so** — the issue kept its existing `["Bug"]` unchanged,
+  `updatedAt` did not move, and no label was auto-created. So skipping the ensure step does
+  not degrade to "attached without the label"; it degrades to **no label at all**, leaving a
+  ticket whose mode silently resolves to normal.
+
+  **This is a fact about existence, not about the name.** A hyphenated `slopstop-refactor` is
+  an ordinary label needing no configuration — the ensure step is one API round-trip inside
+  this skill, not something a project sets up. **Never write the label with a `:` or `/` in
+  it**, though: Linear reads `group:label` and `group/label` as label-*group* syntax, so a
+  colon-separated name silently becomes a group plus a differently-named child. The hyphen is
+  load-bearing, and it is load-bearing for a different reason than the ensure step.
+- **`jira`** — labels are free-form; no creation step exists or is needed. Set the `labels`
+  field on the issue.
+
+**Idempotent by construction.** An existing label is used as-is — never recreated, never
+recoloured, never edited. Re-running against a ticket that already carries the label is a
+no-op, not a duplicate.
+
+**Never apply both labels to one ticket.** A ticket carrying both freezes the whole
+repository — refactor freezes every test file, backfill every production file — and `:run`
+stops it. If a draft asks for both, that is a drafting defect: report
+`CREATE PARTIAL` naming the ticket, and apply neither.
+
+Descriptions, when creating:
+- `slopstop-refactor` → `"slopstop: production code only — no test file may change"`
+- `slopstop-backfill` → `"slopstop: tests only — no production file may change"`
+
 ## Step 4 — Resolve placeholders
 
 A draft cross-references tickets that did not exist when it was written, using `%%A%%`
@@ -105,11 +212,14 @@ Created: <n> tickets
 …
 
 Links:   <n> parent→child
+Labels:  <KEY> → <label>   (created | already existed)
+         …   or: none requested
 ```
 
 Verdict is exactly one of:
 
-- **`CREATE CLEAN: <n> tickets`** — all created, all linked, no `%%` remaining.
+- **`CREATE CLEAN: <n> tickets`** — all created, all linked, every requested mode label
+  applied, no `%%` remaining.
 - **`CREATE PARTIAL: <n> of <m>`** — name each failure and what exists already.
   **Never delete a created ticket to "clean up"** — a half-published tree is recoverable by
   hand, and deleting live tickets that other tickets already reference is not.

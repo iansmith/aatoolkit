@@ -67,6 +67,50 @@ what the validation rules below exist to catch.)*
 per-ticket). `stage` is the worker skill's name for worker spans, or a short verb for
 orchestrator-inline work.
 
+### The launch note — what a worker was actually given
+
+> **ADVISORY, as of BILL-496.** Write it; nothing depends on it. The authoritative record of
+> what a subagent was given is `.slopstop/metrics/hook-events.jsonl`, written by
+> `SubagentStart`/`SubagentStop` hooks in code, plus the model from the transcript — see
+> `tools/hooks/slopstop_hook.py`. Where this note and the hook record disagree, **the hook
+> record is right** and the disagreement is kept: it measures how reliably prose is followed,
+> which is the open question this file exists in the middle of. Do not "fix" a disagreement by
+> editing history.
+
+**Every worker launch writes one note carrying the resolved tuple**, in the same step that
+writes the `started` line and calls `Agent()`:
+
+```json
+{"ticket":"PLTF-2563","event":"note","stage":"implement","at":"…","launch":{
+  "worker":"implement","tier":"small","model":"sonnet","effort":"high",
+  "subagent_type":"slopstop-effort-high","subagent_type_used":"slopstop-effort-high"}}
+```
+
+| field | meaning |
+|---|---|
+| `worker` | the skill invoked — the roster name in `worker-launch.md` |
+| `tier` | the `[stage_tiers]` result, or the documented default when the key is absent |
+| `model` | what `tier` resolved to, as passed on the `Agent()` call |
+| `effort` | the resolved effort — the tier's, or **lower** where a stage requires it |
+| `subagent_type` | the carrier requested |
+| `subagent_type_used` | the carrier that actually resolved |
+
+**The last two are separate fields on purpose.** `worker-launch.md` permits falling back to
+`general-purpose` when a carrier does not resolve. Recorded as one field, a fallback is
+invisible: the run reads as configured while the effort has silently reverted to the
+session's. Two fields make the fallback a diff, not a footnote.
+
+**One note per launch, never per span.** A `gates` span covers `slop-check` and
+`complexity-check` — two launches under one span, and they need not share a tier. Fields on
+the span line cannot express that, and the first time two gate workers differ the span-level
+version would report one of them as both.
+
+**Why this is worth writing when the harness already knows it.** It is not novel data — the
+harness records model and effort per subagent, and that record is the ground truth this note
+is checked against. It is written because it is *small and durable*: PLTF-2563's session
+transcripts were deleted at archive time for being 25 MB, and this tuple is a few hundred
+bytes. An archived ticket has to stay auditable after the transcript is gone.
+
 ## Which stages are spans, and which are notes
 
 **A span measures a duration. A note records that something happened.** Choosing wrongly is
@@ -253,6 +297,9 @@ The adversary loop runs up to three rounds, and each round is a separate worker 
 **Bracket each launch**: `started` when that round is launched, `finished`/`failed` when
 its verdict comes back, carrying the round number and the verdict.
 
+`round` goes on **both** endpoints — see invariant 1b. It is a label, not part of the pairing
+key; invariant 1 states the key and this section does not restate it (universal §5).
+
 ```json
 {"ticket":"BILL-501","stage":"adversary","event":"span","state":"started","at":"…","round":2}
 {"ticket":"BILL-501","stage":"adversary","event":"span","state":"finished","at":"…","round":2,"result":"FAIL: 3"}
@@ -335,14 +382,106 @@ One pass over one file:
 | quantity | computation |
 |---|---|
 | wall clock | `last.at − first.at` |
-| human idle | `Σ` `waiting_for_user` spans |
-| **active time** | `wall − human_idle` |
-| agent-seconds | `Σ` worker spans — *exceeds* active under parallelism, like CPU-seconds vs elapsed |
-| unattributed | active minus the union of attributed spans |
+| **worker time** | elapsed union of worker spans — merge overlaps, so parallel workers count once |
+| **human wait** | `Σ` `waiting_for_user` **spans** — or `unknown`, see below |
+| **orchestrator inline** | `wall − worker_time − human_wait` |
+| agent-seconds | `Σ` worker spans *unmerged* — *exceeds* worker time under parallelism, like CPU-seconds vs elapsed |
+| active time | `wall − human_wait` |
 
 **"Active" is active *elapsed*, not inference time.** Tool execution, model inference and
 orchestrator overhead all sit inside it. Splitting those needs transcript-level data, which
 this design deliberately does not collect. Say "active", never "compute".
+
+### Report the three-way split, always, as its own line
+
+**Worker time, orchestrator inline time, human wait.** Name all three. A reader must not
+have to subtract anything to learn where the run went — and must not have to notice that
+the per-stage table does not sum to the wall clock.
+
+```
+wall clock              56m28s
+  worker time           38m08s   (68%)   — 12 spans, merged
+  orchestrator inline   18m20s   (32%)   — see attribution below
+  human wait                 0           — no waiting_for_user records of any kind
+```
+
+**Orchestrator inline time is the interval between one span closing and the next opening.**
+It is the orchestrator reading worker results, deciding, and writing files — real work,
+already computable from what is written. It needs no new instruction and gets none: an
+instruction to bracket every inline act is both unfollowable and the thing invariant 5 warns
+about, because a zero-second span is a stamp written from memory.
+
+**No stage owns this time, which is why it must have its own line.** On PLTF-2565 it was
+18m20s — *larger than `implement` and `investigate` combined*. Halve every worker on that run
+and a third of the clock still has no name on it.
+
+### All unbracketed time counts. The 120s threshold is a reporting boundary, not a visibility one
+
+Every second between spans belongs to the total, however small the slice. **The threshold
+decides which gaps get listed individually, not which gaps get counted.**
+
+| | |
+|---|---|
+| gaps **over** 120s | listed individually, with bounds and the preceding stage |
+| gaps **at or under** 120s | summed into one line — never dropped |
+| both | included in the orchestrator inline total |
+
+BILL-494 added gap accounting at a 120s threshold, and a threshold that governs *visibility*
+hides exactly the shape a busy run has: dozens of sub-minute slices, each individually
+unremarkable, adding to minutes. On SOP-261 that residue is 6m43s across 11 slices. Reporting
+zero for it, because no single slice cleared the bar, is an omission that reads as a
+measurement.
+
+**Attribute each interval to the stage boundary it follows**, so a reader can tell one long
+think from a slow drip:
+
+```
+  after close          12m02s   13:15:40 -> 13:27:42
+  after investigate     3m23s   12:39:23 -> 12:42:46
+  after handoff         1m39s   13:09:41 -> 13:11:20
+  under 120s            2m55s   (5 slices, not listed)
+```
+
+"12m after close" and "12m spread evenly" are different findings with different remedies.
+
+### Human wait: `unknown` is a distinct answer from `0`, and the difference is load-bearing
+
+Only a `waiting_for_user` **span** measures a human wait. A `waiting_for_user` **note** does
+not — it records that a wait happened without bounding it.
+
+| what the file contains | human wait |
+|---|---|
+| `waiting_for_user` spans | `Σ` of them |
+| **notes but no spans** | **`unknown`** — waits happened and none was measured |
+| neither, anywhere | `0` — and say *that is why*, not just the number |
+
+**Never report `0` for the middle row.** Notes without spans mean the run blocked on a human
+an unknown number of times for an unmeasured duration; calling that zero converts a missing
+measurement into a confident wrong answer, and it inflates the orchestrator figure by exactly
+the amount nobody measured. SOP-261 is the live case: **13 `waiting_for_user` notes and zero
+spans**, over a 3h00m05s run with 1h20m47s unbracketed. Its human wait is `unknown`. It is
+emphatically not `0`.
+
+**When human wait is `unknown`, orchestrator inline time is unknown too** — you cannot
+subtract a quantity you do not have. Report the pair, and refuse the split rather than
+guessing at it:
+
+```
+wall clock              3h00m05s
+  worker time           1h39m18s   (55%)   — 18 spans, merged
+  orchestrator + human  1h20m47s   (45%)   — SPLIT UNKNOWN
+                                             13 waiting_for_user notes, 0 spans
+```
+
+That report is less satisfying than three numbers and it is the only honest one. A tool that
+cannot establish which of two things it is looking at must say so rather than pick the nearer.
+
+**And the bottom row is weaker than it looks.** "No records of any kind → 0" rests on the
+absence of a record, which is not the same as the absence of a wait — it is the same
+proxy-for-identity mistake one row up, one step further back. State the basis in the report
+(*"no `waiting_for_user` records of any kind"*) so the claim can be checked, and treat a large
+unbracketed interval sitting where a human decision is known to have happened as a reason to
+doubt it rather than a reason to round.
 
 **Report unattributed time. Never redistribute it.** It is a number, not a rounding error.
 
@@ -360,6 +499,29 @@ indistinguishable from a short span unless something looks.
 
 1. Every `started` is closed by exactly one `finished` or `failed` with the same
    `(ticket, stage)`. **Spans only** — a note has nothing to close.
+
+   **`(ticket, stage)` is the whole key. `round` is not part of it** — it is a label carried
+   for attribution, so a reader can tell three adversary rounds from one lump. Spans that carry
+   `round` are sequential by construction: a round closes before the next one opens, so the
+   stage alone already pairs them unambiguously and a third key element buys nothing.
+
+   This is a clarification, not a change, and it is written down because the ambiguity cost a
+   real run. PLTF-2565 wrote its handoff round-1 `started` without `round` and its close with
+   `round: 1`. Paired on `(stage, round)` that file shows one unclosed span and one orphan
+   close; paired on `(stage)` — what this invariant has always said — it is clean. The
+   orchestrator applied the stricter key, declared its own record invalid, and correctly
+   refused to report timing for a run that had merged successfully. The numbers were
+   recoverable the entire time.
+
+   **Reporting no numbers is the right response to a broken record. The defect was that the
+   record was not broken.** A rule strict enough to reject valid files costs exactly what a
+   rule loose enough to accept invalid ones does, and it costs it while looking rigorous.
+
+1b. **`round` appears on both endpoints of a span, or on neither.** A span carrying it on one
+   side only is a **split pair** — report it by that name. It is neither an unclosed span nor
+   an orphan close, and calling it either sends the reader after the wrong cause: nothing was
+   dropped, the two halves were written to disagree. The span still pairs and its duration is
+   still valid, so a split pair does **not** suppress timing; it is a defect in the label.
 2. No `finished`/`failed` without a preceding `started` for that `(ticket, stage)`.
    **Spans only.** A stage recorded as a note cannot be an orphan close by construction,
    which is the point of marking them.
@@ -385,8 +547,89 @@ indistinguishable from a short span unless something looks.
    investigated; a zero that is averaged in silently corrupts every conclusion drawn from
    the file.
 
-**Validate at two points, without exception:** on resume, before continuing; and at run
-end, before reporting anything.
+**Validate at three points, without exception:** on resume, before continuing; at run end,
+before reporting anything; and **at every span open**.
+
+### Invariant 1 is checked when a span OPENS, not only at run end
+
+> **ADVISORY, as of BILL-496**, along with the gap accounting below. Both are prose, and prose
+> is the thing under test here — see the box further down quoting Anthropic's guidance that a
+> prompted rule can fail in a long session. Durations now come from the hook record, which
+> needs no cooperation from whoever is writing this file. Keep doing these: when they agree
+> with the hooks, that is evidence the prose held; when they do not, that is the measurement.
+
+Before writing any `started` line, check that no span is already open. If one is, the close
+you are about to skip is the one that just became due — say so and write it now.
+
+**And the mirror of it: before writing any `finished` or `failed`, check that a matching
+`(ticket, stage)` span IS open.** If none is, you skipped the `started` — write it now, at the
+time the work actually began, and then write the close. Do not emit the close on its own; that
+is an orphan, it fails invariant 2, and under the rule below it costs the whole run's timing
+rather than one span's.
+
+**The case this catches is a stage the process runs TWICE ON PURPOSE**, where the second run
+reads as a continuation of the first. There are two: `tamper` at stage 8a and again at 10b,
+and any 10b re-verification after the blessing is voided. **A second run is a second span** —
+open it. Do not reopen or re-close the first.
+
+Measured on SOP-261, which lost its entire 3h00m05s of timing to exactly this:
+
+```
+[25] span tamper started  21:39:43
+[26] span tamper finished 21:39:59   TAMPER CLEAN; FILEMAP CLEAN — implement commit 6192b78…
+[45] span tamper finished 22:08:16   TAMPER CLEAN (re-checked at current tip 3a13583…)  ← no started
+```
+
+The same run did it a second time, and there the stage was wrong as well as the pairing: the
+pre-merge blessing re-check was written as a `pr` close. It is not a re-run of `pr`. It belongs
+to `merge`, recorded in that span's `started` result — which is what PLTF-2565 did correctly,
+and why that file pairs clean while this one does not.
+
+**This is the same argument that justifies the open-time check, applied to the other end**, and
+it was not applied there for no better reason than that nobody wrote it down. Detection is
+cheap and the repair window is short: caught here, the missing `started` is seconds old and
+`date -u +%FT%TZ` is still nearly the right answer. Caught at run end, the honest timestamp is
+gone, this schema rightly forbids reconstructing one, and the only thing left to do is refuse
+to report.
+
+**Timing is the entire point of this check.** PLTF-2563 lost the close on `implement`: the
+orchestrator went from the worker's return straight to the next stage. Run-end validation
+caught it an hour later, at which point the honest end time was unknowable and this schema
+rightly forbids reconstructing one, so the run's own verdict was *"no timing numbers may be
+derived from this file."* The same defect caught at the next span open is caught **seconds**
+after it happens, while the worker has only just returned and `date -u +%FT%TZ` is still the
+correct answer rather than a guess.
+
+Detection is cheap and the repair window is short. Run-end detection has no repair window at
+all — it only converts a lost measurement into a reported one.
+
+> **This check is prose, and prose is not a guarantee.** Anthropic's own guidance is explicit
+> that a model "can fail to follow a prompted rule" under pressure or **in a long session**,
+> and that "a real guardrail needs to be deterministic — the enforcement methods are hooks and
+> permissions." PLTF-2563 was a 97-minute run; a long session is the documented failure
+> condition, not an unlucky one. So treat this as harm reduction, not enforcement: it narrows
+> the window in which the fault is unrecoverable, and it does not close it. The deterministic
+> form is a `PostToolUse` hook on `Agent` that appends the close and the launch note in code,
+> where no instruction can be skipped.
+
+### Unattributed gap time is named and summed
+
+Report every interval between spans, with its bounds and the preceding stage. **The one
+definition of how — including what the 120s threshold does and does not govern, and the
+three-way split it feeds — is "Computing time" above**; do not restate it here (universal §5).
+
+The part that belongs to *this* check is when to look: at every span open, not only at run
+end. A gap noticed while it is still the current one can still be explained.
+
+A run with zero `waiting_for_user` spans and hours of gaps must say which it is — measured
+zero, or unmeasured. This is the third defect PLTF-2563 recorded against itself: human waits
+went unbracketed, so idle time sat silently inside the stage durations and "active time" was
+not computable while still looking computable. That is the same shape as invariant 5's
+zero-second span, an omission that reads as a measurement, and it is why `unknown` is a
+reportable value above.
+
+The threshold matters less than the reporting. A stated gap can be investigated; an unstated
+one inflates whatever stage happens to precede it.
 
 **When validation fails, report no timing numbers at all.** Name what broke, precisely and
 by invariant — **unclosed spans** for invariant 1, **orphan closes** for invariant 2,
@@ -401,6 +644,33 @@ The `started` line is written **as part of the same step that launches the work*
 `finished` line **as part of the same step that receives the result** — never as a separate
 thing to remember afterwards. A stamp that is its own step is a stamp that gets skipped;
 that is precisely how the predecessor produced one file in three weeks across three repos.
+
+**This rule was already here, in these words, and PLTF-2563 skipped it anyway.** The
+orchestrator read the `implement` worker's return and moved to the next stage without writing
+the close. Nothing about the instruction was ambiguous, so treat the following as the reason
+rather than as an excuse:
+
+> Anthropic's guidance on steering Claude Code states that Claude "will follow the instruction
+> most of the time, but when under pressure, **in a long session** or an ambiguous situation …
+> the model can fail to follow a prompted rule," and that "a real guardrail needs to be
+> deterministic — the enforcement methods are hooks and permissions."
+
+A `:run` is a long session by construction. So the practical rules:
+
+- **Receiving a worker's result and writing its close are one act, not two.** If you have read
+  the result and not yet written the line, you are already in the failure. Write it before you
+  read the result closely enough to decide what comes next — the decision is what displaces the
+  stamp.
+- **Never batch stamps.** Four transitions reconstructed at the end of a phase share one second,
+  validate cleanly, and have lost the durations the file exists to record.
+- **The close is not bookkeeping you owe the file; it is the measurement.** A span with no close
+  did not measure a long stage — it measured nothing, and invariant 1 exists because those two
+  are indistinguishable afterwards.
+
+**And assume this will fail again.** `run-derived.jsonl` beside this file is written from the
+harness's own subagent transcripts by `tools/metrics/derive.py`, which needs no cooperation from
+whoever is writing this one. When the two disagree, the derived file is right: it is an
+observation, and this file is a claim.
 
 **Take the timestamp from the clock, not from memory.** Every `at` comes from an actual
 `date -u +%FT%TZ` at the instant of the transition. Reconstructing several stamps at the

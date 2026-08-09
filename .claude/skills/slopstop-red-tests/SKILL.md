@@ -2,7 +2,7 @@
 description: Write the phase-0 failing tests that define a ticket's contract before any implementation exists, run them, and return the test files, node-ids, test command, and the observed failure output proving they are red.
 ---
 
-<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop e37c68d by install-for-project.sh — do not edit.
      Edit skills/red-tests/ in the slopstop repo and re-run. (universal §5) -->
 
 # Phase 0 — write the red tests
@@ -37,9 +37,11 @@ implementing a gate, a file existing where a manifest says it does. Test those.
 If the ticket is prose-only, write no tests and return `PHASE 0: none — prose-only change`
 with a one-paragraph justification. Do not manufacture tests to look productive.
 
-**A refactor ticket gets no red tests either.** If you were launched with `--refactor`, or
-the ticket body carries the literal line `**Mode:** refactor`, return
-`PHASE 0: none — refactor` immediately and write nothing. A refactor adds no behaviour, so
+**A refactor ticket gets no red tests either.** If you were launched with `--refactor`,
+return `PHASE 0: none — refactor` immediately and write nothing. Judge this from the flag
+alone — mode lives in the ticket's `slopstop-refactor` label, the orchestrator resolves it at
+intake, and a worker re-deriving it from the body would be reading a source that no longer
+carries the answer. A refactor adds no behaviour, so
 there is no contract for a new test to describe; its guard is the **existing** suite, run by
 `implement` before and after, and a test you invented here would be a new contract smuggled
 into a ticket whose whole claim is that nothing changed. In the normal case the orchestrator
@@ -153,8 +155,9 @@ Run the resolved command. Four outcomes:
 
 Re-run the Step 3 baseline before reporting: a stub is real production surface and can
 break an existing test, and unreported that breakage gets blamed on the wrong work later.
-Then run the project's formatter over the new test files, so a later `gofmt`/`black` run
-produces no hunks and the downstream tamper gate never has to tell a reformat from a rewrite.
+Then format the test files you wrote, so the downstream tamper gate never has to tell a
+reformat from a rewrite. → `worker-launch.md`, "A worker that writes code formats what it
+touched" — the project's own formatter, never a named one.
 
 ## Step 7 — Report
 

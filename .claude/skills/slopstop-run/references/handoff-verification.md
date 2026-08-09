@@ -29,6 +29,15 @@ implement returns
           → a blessing bound to the branch tip SHA
 ```
 
+> **`tamper` runs twice, and a second run is a second span.** The 8a diff and the 10b
+> re-check at the current tip are two separate runs of the same check against two different
+> commits, so each gets its own `started` / `finished` pair. Do not treat the 10b run as a
+> continuation of the 8a span and do not write its close against the span 8a already closed —
+> that is an orphan close, and it costs the run's entire timing rather than one span's. SOP-261
+> lost 3h00m05s to exactly this: `tamper finished` at 22:08:16 with no `started` after 21:39:59.
+> The close-time check in `run-jsonl.md` (invariant 1's mirror) is what catches it while it is
+> still repairable.
+
 **The mechanical checks run first, and a FAIL ends verification there — no subagent is
 bought.** That ordering is not an optimisation. *A green suite is not evidence when the
 agent had write access to the tests*, so spending a checker on a branch a diff already
@@ -86,6 +95,19 @@ its own diff in `:run`'s refactor section. The two are complementary: for a norm
 some test files are frozen and additions are fine; for a refactor ticket every test file is
 frozen and nothing is fine. Neither check covers the other's case, so neither may be
 skipped on the strength of the other having run.
+
+> **The nearest relative: predict-then-verify.** The tamper diff works because the expected
+> change to a frozen file is **none**, which makes any change detectable without judgment.
+> Where a change is produced by a deterministic transform — a formatter run, codegen,
+> a dependency bump — the expected change is not empty but it is *computable*, and the same
+> trick applies: capture the transform's dry-run output before applying it, then confirm the
+> diff matches. It catches the one thing review and tests both miss, a hand edit riding along
+> inside a wholly cosmetic diff.
+>
+> **It is a DoD pattern a ticket opts into, not a gate this stage runs**, and the two are not
+> interchangeable — tamper asks whether frozen files changed, predict-then-verify asks whether
+> a computed change matches its computation. Do not fold either into the other. The one
+> definition is `tickets/references/ticket-standard.md`, §3.
 
 ### The frozen set is the commit, not a glob
 

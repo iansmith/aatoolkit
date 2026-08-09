@@ -2,7 +2,7 @@
 description: Verify that a set of freshly-written tests is pinned to the behavior it names — that a failing test is red for the RIGHT reason, or, under --backfill, that a passing test goes red when the behavior it claims to cover is broken. Returns a per-test verdict with evidence plus one overall PASS / FAIL / PINNED / NOT PINNED.
 ---
 
-<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop e37c68d by install-for-project.sh — do not edit.
      Edit skills/mutation-check/ in the slopstop repo and re-run. (universal §5) -->
 
 # Mutation check — prove the result is meaningful
@@ -212,6 +212,8 @@ Per node-id: `pinned` / `not-pinned` / `inconclusive`. Overall line, spelled exa
 a ticket claiming enumeration is **partially verified, never `PINNED`** — say so on the
 verdict line as `MUTATION CHECK NOT PINNED: enumeration unverified`. Reporting a partial
 check as a pass is the one failure this mode cannot survive.
+
+**Before returning, run the project's formatter over the files you touched.** One definition, in `worker-launch.md` — the project's own formatter, never a named one, and only the files this worker changed.
 
 ## Step 7 — Report
 

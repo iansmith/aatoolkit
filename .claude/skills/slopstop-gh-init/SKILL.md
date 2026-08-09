@@ -2,7 +2,7 @@
 description: Bootstrap a GitHub repo for the slopstop ticket workflow. Creates status labels, writes .project-conf.toml. Invoke as /slopstop-gh-init (or /slopstop-gh-init). Idempotent — safe to re-run.
 ---
 
-<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop e37c68d by install-for-project.sh — do not edit.
      Edit skills/gh-init/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-gh-init
@@ -117,6 +117,8 @@ Accept `3` or `4`. If empty or other: re-ask once, then stop with `"No changes m
   Labels to create (if missing):
     • <IN_PROGRESS_LABEL>   (#<IN_PROGRESS_COLOR>)
     [• <IN_REVIEW_LABEL>    (#<IN_REVIEW_COLOR>)   — 4-state only]
+    • slopstop-refactor     — mode label, fixed name
+    • slopstop-backfill     — mode label, fixed name
 
   .project-conf.toml to write in cwd:
     system = "github"
@@ -149,7 +151,8 @@ If `.project-conf.toml` already exists in cwd:
 
 ## Step 7 — Create labels (idempotent)
 
-For each required label (`IN_PROGRESS_LABEL` always; `IN_REVIEW_LABEL` only for 4-state):
+For each required label — `IN_PROGRESS_LABEL` always; `IN_REVIEW_LABEL` only for 4-state;
+and the two **mode** labels `slopstop-refactor` and `slopstop-backfill` always:
 
 **Check existence:**
 
@@ -168,6 +171,28 @@ $GH label create "<LABEL_NAME>" \
 Descriptions:
 - `status:in-progress` → `"Ticket is actively being worked on"`
 - `status:in-review` → `"Code complete; shake-down validation in progress"`
+- `slopstop-refactor` → `"slopstop: production code only — no test file may change"`
+- `slopstop-backfill` → `"slopstop: tests only — no production file may change"`
+
+**The two mode labels have fixed names and are not configurable** — no `--refactor-label`
+flag, no `[status_labels]` entry, nothing written to `.project-conf.toml` about them.
+`:run` resolves mode from these exact strings (its invariant-tickets section is the one
+definition), so a project that could rename them is a project that can silently get mode
+resolution wrong. The status labels are configurable because a project may already have its
+own; the mode labels are slopstop's own vocabulary.
+
+**Nothing depends on this step having run** — status labels included. `gh-init` is invoked by
+a human and by nothing else, so seeding any of these is a convenience, not a precondition:
+every site that *applies* a label ensures it exists first. `create-ticket` does it for the
+mode labels (its Step 3a is the one definition), and `:run` does it for the status labels it
+swaps at close. A project that skipped `gh-init` is not broken; each label gets created the
+first time something needs to apply it.
+
+> **This claim was false when BILL-508 first made it, and BILL-527 made it true.** `:run` was
+> told never to create a label *and* told to swap `$IN_PROGRESS_LABEL` at stage 14, so a
+> project that skipped `gh-init` merged its code and then failed to advance its ticket — the
+> work landed and the board did not move. If you ever narrow the apply-side ensure, this
+> sentence goes back to being a lie.
 
 If `gh label create` fails: stop immediately with the error. Do not proceed to the next label or to config write.
 
@@ -235,6 +260,8 @@ ticket-gh-init complete.
 
   <result for in-progress label>   (created | already existed)
   <result for in-review label>     (created | already existed | skipped — 3-state)
+  slopstop-refactor                (created | already existed)
+  slopstop-backfill                (created | already existed)
   .project-conf.toml               (written | updated — merged [status_labels])
   scratch/ + .gitignore entry      (seeded | already present | failed — warned)
 

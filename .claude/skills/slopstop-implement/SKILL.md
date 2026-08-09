@@ -2,7 +2,7 @@
 description: Implement a ticket's plan until its failing phase-0 tests pass — writes source code only, never touches the tests, and returns the changes made, before/after test results, and any findings it is reporting rather than fixing.
 ---
 
-<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop e37c68d by install-for-project.sh — do not edit.
      Edit skills/implement/ in the slopstop repo and re-run. (universal §5) -->
 
 # Implement the plan until the red tests are green
@@ -161,3 +161,5 @@ End with a report containing exactly these four parts:
    test you believe is wrong (named, with both values and your evidence), a blocker, a
    spec gap in the ticket, an unrelated defect you noticed. Write `none` if there are
    none. Never fold a finding into a code change to make it disappear.
+
+**Before returning, run the project's formatter over the files you touched.** One definition, in `worker-launch.md` — the project's own formatter, never a named one, and only the files this worker changed.

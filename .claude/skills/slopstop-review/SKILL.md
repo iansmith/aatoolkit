@@ -2,7 +2,7 @@
 description: One round of clean-context code review of a diff — find, verify each finding against the real code, apply what survives, report a verdict. Runs in its own forked context so the session that wrote the code never reviews it.
 ---
 
-<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop e37c68d by install-for-project.sh — do not edit.
      Edit skills/review/ in the slopstop repo and re-run. (universal §5) -->
 
 # One round of clean-context review
@@ -108,6 +108,8 @@ established convention (a reasoned rejection — the codebase wins), and stylist
 
 Apply with `Edit`. Do not hand findings back for the caller to apply — the caller is the
 context this fork exists to exclude.
+
+**Before returning, run the project's formatter over the files you touched.** One definition, in `worker-launch.md` — the project's own formatter, never a named one, and only the files this worker changed.
 
 ## Report
 

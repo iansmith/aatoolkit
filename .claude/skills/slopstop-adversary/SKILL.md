@@ -2,7 +2,7 @@
 description: One adversarial round against a target artifact — attack it for gaps against its stated goals, verify every claim in it against the real repo, and return numbered findings with severity plus a PASS / FAIL / GOAL DEFECT verdict the caller can branch on.
 ---
 
-<!-- GENERATED from slopstop be6277f by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop e37c68d by install-for-project.sh — do not edit.
      Edit skills/adversary/ in the slopstop repo and re-run. (universal §5) -->
 
 # One adversarial round
@@ -157,3 +157,5 @@ Then a numbered findings list, one entry each:
 name, `file:line`, a test function name. If a requested family found nothing, say so in
 one line rather than omitting it — a silently absent check reads as an oversight, and the
 next reader re-derives it.
+
+**Before returning, run the project's formatter over the files you touched.** One definition, in `worker-launch.md` — the project's own formatter, never a named one, and only the files this worker changed.
