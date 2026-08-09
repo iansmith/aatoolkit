@@ -32,7 +32,7 @@ func NewStreamHandler(realtimeURL string) StreamHandler {
 		return DefaultHandleStream
 	}
 	return func(ctx context.Context, conn *websocket.Conn, start Frame) error {
-		return HandleStreamRealtime(ctx, conn, start, realtimeURL)
+		return HandleStreamRealtime(ctx, conn, start, realtimeURL, 0)
 	}
 }
 
@@ -60,7 +60,14 @@ func NewStreamHandler(realtimeURL string) StreamHandler {
 // read error) or the backend goes away. A backend that fails to dial, or drops
 // mid-call, ends the call with a logged error rather than leaving the session
 // hung.
-func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame, url string) error {
+//
+// idleTimeout bounds how long the call may run with neither side producing any
+// event or frame. 0 disables it, matching today's behavior exactly: unbounded,
+// no timer armed. A positive value is reset on every backend event bridge.Run
+// observes and every carrier frame pumpCarrierToBridge reads; if it elapses
+// with no activity from either side, the call ends with an error naming "idle
+// timeout".
+func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame, url string, idleTimeout time.Duration) error {
 	// CloseNow on every exit path, not Close: there is no local session to
 	// drain, and closing the carrier is also what unblocks the carrier pump
 	// below if it is still parked in Read, so no goroutine outlives this
