@@ -62,12 +62,20 @@ func NewStreamHandler(realtimeURL string) StreamHandler {
 // mid-call, ends the call with a logged error rather than leaving the session
 // hung.
 //
-// idleTimeout bounds how long the call may run with neither side producing any
-// event or frame. 0 disables it, matching today's behavior exactly: unbounded,
-// no timer armed. A positive value is reset on every backend event bridge.Run
-// observes and every carrier frame pumpCarrierToBridge reads; if it elapses
-// with no activity from either side, the call ends with an error naming "idle
+// idleTimeout bounds how long the call may run with the backend producing no
+// event. 0 disables it, matching today's behavior exactly: unbounded, no
+// timer armed. A positive value is reset on every backend event bridge.Run
+// observes, of any type; carrier frames do NOT reset it, so a carrier that is
+// streaming continuously cannot mask a backend that has gone silent. If it
+// elapses with no backend activity, the call ends with an error naming "idle
 // timeout".
+//
+// A hung backend and a legitimately quiet one look identical on this path —
+// there is no local VAD or turn state to tell them apart (see
+// telephony.MaxSilenceMS for the order of magnitude the default transport
+// uses to make that call). Set idleTimeout longer than the longest
+// backend-quiet interval the deployment tolerates, or a normal pause in
+// conversation will end the call.
 func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame, url string, idleTimeout time.Duration) error {
 	// CloseNow on every exit path, not Close: there is no local session to
 	// drain, and closing the carrier is also what unblocks the carrier pump
@@ -105,31 +113,41 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
 
-	// PHASE 0 STUB — not the implementation. A flat timer, armed once and never
-	// reset by anything, ending the call with a message that deliberately does
-	// not name the idle timeout. It is the simplest wrong thing: it establishes
-	// that a bound exists at all while implementing neither half of the
-	// contract, so every assertion the ticket actually cares about is red
-	// against it rather than trivially satisfied. Replaced wholesale by the
-	// implementation.
+	// idleTimeout 0 arms no timer: idleC stays nil, which blocks forever in a
+	// select, so that case can never fire and the loop below reduces to the
+	// original two-case select — unbounded, exactly today's behavior.
+	var idleTimer *time.Timer
 	var idleC <-chan time.Time
 	if idleTimeout > 0 {
-		idleTimer := time.NewTimer(idleTimeout)
+		idleTimer = time.NewTimer(idleTimeout)
 		defer idleTimer.Stop()
 		idleC = idleTimer.C
 	}
 
-	// Whichever side ends first ends the call.
-	select {
-	case err := <-backendDone:
-		log.Printf("twilio: realtime: backend ended the call: %v", err)
-		return err
-	case err := <-carrierDone:
-		return err
-	case <-idleC:
-		// A nil idleC blocks forever, so idleTimeout 0 arms nothing and this
-		// case cannot fire — which is what keeps every existing assertion green.
-		return fmt.Errorf("twilio: realtime: stub: idle policy not implemented")
+	// One goroutine, one select: bridge.Activity() resets the timer without
+	// any Reset call crossing a goroutine boundary, which is what keeps this
+	// race-free under -race. Only backendDone, carrierDone, or the idle timer
+	// itself ends the loop; an activity signal just re-arms and loops again.
+	for {
+		select {
+		case err := <-backendDone:
+			log.Printf("twilio: realtime: backend ended the call: %v", err)
+			return err
+		case err := <-carrierDone:
+			return err
+		case <-idleC:
+			return fmt.Errorf("twilio: realtime: idle timeout: no backend activity for %s", idleTimeout)
+		case <-bridge.Activity():
+			if idleTimer != nil {
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(idleTimeout)
+			}
+		}
 	}
 }
 

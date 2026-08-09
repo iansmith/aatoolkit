@@ -36,11 +36,17 @@ type Bridge struct {
 	sink        MediaSink
 	transcripts chan Transcript
 	running     atomic.Bool
+	activity    chan struct{}
 }
 
 // NewBridge wires a client to a carrier media sink.
 func NewBridge(c *Client, sink MediaSink) *Bridge {
-	return &Bridge{client: c, sink: sink, transcripts: make(chan Transcript, 16)}
+	return &Bridge{
+		client:      c,
+		sink:        sink,
+		transcripts: make(chan Transcript, 16),
+		activity:    make(chan struct{}, 1),
+	}
 }
 
 // Forward sends one inbound carrier frame's base64 payload to the backend.
@@ -68,6 +74,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("realtime: read loop ended: %w", err)
 		}
+		b.signalActivity()
 
 		switch ev.Type {
 		case EventAudioDelta:
@@ -98,6 +105,31 @@ func (b *Bridge) Run(ctx context.Context) error {
 // closed when Run returns.
 func (b *Bridge) Transcripts() <-chan Transcript {
 	return b.transcripts
+}
+
+// Activity signals once per successful backend read, before that event is
+// dispatched to any sink or the transcript channel — so it covers every event
+// type Run observes, including ones its switch does not model and drops into
+// default:. A caller wanting a liveness bound on the backend (as opposed to
+// specific event types) should watch this rather than the sink or
+// Transcripts, both of which only see a subset.
+//
+// The channel is buffered by one and every send is non-blocking: a caller
+// that misses a tick sees the next one, and Run's read loop can never stall
+// waiting on a consumer that is not currently receiving.
+func (b *Bridge) Activity() <-chan struct{} {
+	return b.activity
+}
+
+// signalActivity is the non-blocking producer side of Activity. Coalescing
+// multiple unread signals into one pending signal is correct here: a consumer
+// only needs to know that activity happened since it last checked, not how
+// many times.
+func (b *Bridge) signalActivity() {
+	select {
+	case b.activity <- struct{}{}:
+	default:
+	}
 }
 
 // publish hands a transcript to the consumer, abandoning it if the context ends
