@@ -9,18 +9,22 @@ import (
 	"github.com/coder/websocket"
 )
 
-// Adversary gap tests for the idle timeout (AATK-76, round 1).
+// Adversary gap tests for the idle timeout (AATK-76 V2).
 //
 // realtime_idle_test.go pins the two headline cases: a silent call ends, and a
-// call fed backend audio deltas does not. Round 1 found that pair sufficient
-// for neither half of the contract:
+// call fed backend audio deltas does not. The adversary rounds found that pair
+// sufficient for no part of the contract:
 //
-//   - Observable behavior 3 names FOUR activity sources — backend audio deltas,
-//     speech-started, transcript events, and carrier media frames — and the
-//     bridge routes them through genuinely different side channels
-//     (MediaSink.Media, MediaSink.Clear, and bridge.Transcripts()). A timer
-//     reset from only the audio-delta path passes both existing tests and still
-//     kills a live call.
+//   - Observable behavior 3 makes EVERY backend event reset the timer, not a
+//     named subset — including types Bridge.Run's switch does not model and
+//     drops into its default: branch. The bridge routes the four it does model
+//     through genuinely different side channels (MediaSink.Media,
+//     MediaSink.Clear, and bridge.Transcripts()), so a reset wired to one of
+//     them passes both frozen tests and still kills a live call.
+//   - Observable behavior 4 says carrier frames do NOT reset the timer. The
+//     carrier streams continuously — 20ms/frame, silence carried as 0xFF in the
+//     payload — so a carrier-fed reset could never let the timer fire at all.
+//     Carrier traffic must not mask a hung backend.
 //   - Observable behavior 2 requires the carrier connection to be closed, which
 //     nothing asserted for the idle path.
 //   - Observable behavior 1 says 0 preserves today's behavior exactly, which
@@ -105,11 +109,12 @@ func assertStillRunning(t *testing.T, h *realtimeHarness, why string) {
 	}
 }
 
-// TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnSpeechStartedOnly covers the
-// EventSpeechStarted arm of observable behavior 3. Speech-started reaches the
-// handler through MediaSink.Clear, a different call site from the audio deltas
-// the frozen test drives, so an implementation instrumenting only Media passes
-// there and fails here.
+// TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnSpeechStartedOnly covers
+// EventSpeechStarted under observable behavior 3, which requires every backend
+// event to reset the timer. Speech-started reaches the handler through
+// MediaSink.Clear, a different call site from the audio deltas the frozen test
+// drives, so an implementation instrumenting only Media passes there and fails
+// here.
 func TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnSpeechStartedOnly(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := idleHarness(t, be.url(), idleGapTimeout)
@@ -125,9 +130,9 @@ func TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnSpeechStartedOnly(t *testi
 }
 
 // TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnTranscriptEventsOnly covers
-// the transcript arm of observable behavior 3. Transcript events do not touch
-// the media sink at all — they are published on bridge.Transcripts() — so this
-// is the arm an implementation that hooks only the sink cannot see.
+// the transcript events under observable behavior 3. They do not touch the media
+// sink at all — they are published on bridge.Transcripts() — so this is the case
+// an implementation that hooks only the sink cannot see.
 func TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnTranscriptEventsOnly(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := idleHarness(t, be.url(), idleGapTimeout)
@@ -143,20 +148,49 @@ func TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnTranscriptEventsOnly(t *te
 	assertStillRunning(t, h, "transcript events faster than idleTimeout apart must keep the call alive")
 }
 
-// TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnCarrierMediaOnly covers the
-// carrier arm of observable behavior 3 — the file map's own "every frame
-// pumpCarrierToBridge reads". The backend stays silent throughout, so this is
-// the case where a caller is still talking to a backend that has gone quiet:
-// the call must survive on the carrier's activity alone.
-func TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnCarrierMediaOnly(t *testing.T) {
+// TestHandleStreamRealtime_IdleTimeoutFiresDespiteCarrierMediaWhenBackendIsSilent
+// pins observable behavior 4, and it is the production shape: a caller still
+// talking to a backend that has hung. The carrier streams the whole time — as it
+// does on every live call, 20ms/frame with silence carried in the payload — and
+// the backend says nothing after the handshake. The call must still end.
+//
+// This is the case a carrier-fed reset could never end, which is why behavior 4
+// forbids one.
+func TestHandleStreamRealtime_IdleTimeoutFiresDespiteCarrierMediaWhenBackendIsSilent(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := idleHarness(t, be.url(), idleGapTimeout)
 
 	emitCarrierEvery(t, h, idleGapTimeout/10, 0)
 
+	err := h.waitDone(idleGapTimeout + 500*time.Millisecond)
+	if err == nil {
+		t.Fatal("a silent backend must end the call even while the carrier is streaming")
+	}
+	if !strings.Contains(err.Error(), "idle timeout") {
+		t.Fatalf("error must name the idle timeout, got: %v", err)
+	}
+}
+
+// TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnUnmodelledBackendEventOnly is
+// behavior 3's discriminating case. input_audio_buffer.speech_stopped is declared
+// in telephony/realtime's event list but Bridge.Run never cases it — it falls into
+// the default: branch and reaches no sink and no transcript channel. A backend
+// emitting only that is nonetheless alive and talking, so the timer must not fire.
+//
+// This fails against any implementation that resets by casing the four modelled
+// event types instead of resetting once per successful read.
+func TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnUnmodelledBackendEventOnly(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := idleHarness(t, be.url(), idleGapTimeout)
+	waitBackendReady(t, be, h)
+
+	be.emitEvery(t, idleGapTimeout/10, map[string]string{
+		"type": "input_audio_buffer.speech_stopped",
+	})
+
 	time.Sleep(idleGapTimeout * 5)
 
-	assertStillRunning(t, h, "carrier media frames faster than idleTimeout apart must keep the call alive")
+	assertStillRunning(t, h, "an unmodelled backend event is still backend activity and must keep the call alive")
 }
 
 // emitCarrierEvery sends a carrier media frame every interval, starting after
@@ -245,27 +279,21 @@ func TestHandleStreamRealtime_ZeroIdleTimeoutNeverEndsSilentCall(t *testing.T) {
 	assertStillRunning(t, h, "idleTimeout 0 must arm no timer, leaving a silent call running exactly as it does today")
 }
 
-// TestHandleStreamRealtime_IdleTimeoutDoesNotFireWithConcurrentBackendAndCarrierActivity
-// covers the shape every other activity test misses: both sides talking at once.
+// TestHandleStreamRealtime_IdleTimeoutFiresWhenBackendIsSlowerThanTimeoutDespiteCarrierChatter
+// covers a backend that is partially hung rather than fully silent: intermittently
+// alive, but slower than the bound. Nothing else in the suite covers it — every
+// other test drives a backend that is either silent or comfortably fast.
 //
-// Round 2 raised it, and the reason is in the production code's structure. Backend
-// activity is observed inside bridge.Run's goroutine and carrier activity inside
-// pumpCarrierToBridge's — two goroutines that must both reset one shared timer.
-// Every other test drives one side while the other is silent, so the reset path is
-// never contended and an implementation racing on Reset/Stop passes all of them.
-// A caller talking while the backend answers is the ordinary case, not an edge one.
-//
-// The intervals are chosen so neither source alone would keep the call alive —
-// each fires slower than the timeout — while their interleaving always does. That
-// makes the test fail if either arm's reset is dropped under contention, not only
-// if both are.
-func TestHandleStreamRealtime_IdleTimeoutDoesNotFireWithConcurrentBackendAndCarrierActivity(t *testing.T) {
-	// Wider than idleGapTimeout: this test's discriminating power comes from the
-	// interleave, which caps the usable margin at 25%, so the absolute slack has
-	// to come from a longer timeout.
+// The constants are the point. The backend emits every 600ms against a 400ms
+// timeout, so it is genuinely producing events and still too slow to hold the call
+// open. The carrier chatters on the same period offset by 300ms, so their union is
+// fast enough — which under V1's carrier arm would have kept the call alive. Under
+// behavior 4 it must not: carrier traffic does not reset anything, and a backend
+// this slow is a backend the bound exists to cut off.
+func TestHandleStreamRealtime_IdleTimeoutFiresWhenBackendIsSlowerThanTimeoutDespiteCarrierChatter(t *testing.T) {
 	const timeout = 400 * time.Millisecond
-	const perSource = timeout * 3 / 2 // 600ms — each source alone is too slow
-	const offset = perSource / 2      // 300ms — interleaved, the union is fast enough
+	const perSource = timeout * 3 / 2 // 600ms — the backend alone is too slow
+	const offset = perSource / 2      // 300ms — the union would be fast enough
 
 	be := newFakeRealtimeBackend(t)
 	h := idleHarness(t, be.url(), timeout)
@@ -277,9 +305,13 @@ func TestHandleStreamRealtime_IdleTimeoutDoesNotFireWithConcurrentBackendAndCarr
 	})
 	emitCarrierEvery(t, h, perSource, offset)
 
-	time.Sleep(timeout * 5)
-
-	assertStillRunning(t, h, "interleaved backend and carrier activity must keep the call alive even though neither source alone would")
+	err := h.waitDone(timeout + 500*time.Millisecond)
+	if err == nil {
+		t.Fatal("a backend slower than idleTimeout must end the call even while the carrier chatters")
+	}
+	if !strings.Contains(err.Error(), "idle timeout") {
+		t.Fatalf("error must name the idle timeout, got: %v", err)
+	}
 }
 
 // TestHandleStreamRealtime_StopFrameEndsCallWhileIdleTimeoutArmed pins that an
