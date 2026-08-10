@@ -55,6 +55,14 @@ type RealtimeOption func(*realtimeConfig)
 // same value.
 type realtimeConfig struct {
 	idleTimeout time.Duration
+
+	// instructionsFor is resolved per call rather than stored as a string, and
+	// that is the whole point. NewStreamHandler binds its options once at
+	// construction and reuses them for every call it serves, so a plain string
+	// here would be per-process on that path — a consumer could never vary the
+	// persona by caller, which is the case this exists for. A function of the
+	// call is resolved when the call arrives, on both entry points.
+	instructionsFor func(start Frame) string
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -82,6 +90,41 @@ func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
 // call.
 func WithIdleTimeout(d time.Duration) RealtimeOption {
 	return func(c *realtimeConfig) { c.idleTimeout = d }
+}
+
+// WithInstructions sets one session persona for every call this option is
+// applied to. It is the constant case, and it is sugar for WithInstructionsFor
+// with a function that ignores the call.
+//
+// Empty text sends no instructions field at all, which is byte-for-byte the
+// handshake a caller supplying no option gets.
+func WithInstructions(text string) RealtimeOption {
+	return WithInstructionsFor(func(Frame) string { return text })
+}
+
+// WithInstructionsFor resolves the session persona when the call arrives, from
+// the start frame — which carries the caller identity, so a consumer can vary
+// the persona per caller.
+//
+// Prefer this over WithInstructions wherever the text is not a constant.
+// Options given to NewStreamHandler are bound once, at construction, and reused
+// for every call that handler serves; passing a function is what makes the text
+// per-call there rather than per-process. On a direct HandleStreamRealtime call
+// the distinction does not arise, because the options are supplied per call
+// already.
+//
+// A nil function, or one returning empty, sends no instructions field.
+func WithInstructionsFor(fn func(start Frame) string) RealtimeOption {
+	return func(c *realtimeConfig) { c.instructionsFor = fn }
+}
+
+// instructions resolves the persona for one call. Kept off the option
+// constructors so the nil-function case has exactly one home.
+func (c realtimeConfig) instructions(start Frame) string {
+	if c.instructionsFor == nil {
+		return ""
+	}
+	return c.instructionsFor(start)
 }
 
 // HandleStreamRealtime drives one call over the realtime voice backend. It is
@@ -124,7 +167,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	dialCtx, cancelDial := context.WithTimeout(ctx, realtimeDialTimeout)
 	defer cancelDial()
 
-	client, err := realtime.Dial(dialCtx, url)
+	client, err := realtime.Dial(dialCtx, url, realtime.WithInstructions(cfg.instructions(start)))
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)
 		return err

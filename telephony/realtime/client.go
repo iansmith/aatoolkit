@@ -22,7 +22,12 @@ type Client struct {
 // Dial has a negotiated session; on any failure the connection is torn down and
 // the returned Client is nil, so a half-open Client can never escape and defer
 // its error to the first frame of a live call.
-func Dial(ctx context.Context, url string) (*Client, error) {
+func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) {
+	var cfg dialConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	// The handshake response never needs closing — coder/websocket owns it.
 	conn, _, err := websocket.Dial(ctx, url, nil)
 	if err != nil {
@@ -32,7 +37,7 @@ func Dial(ctx context.Context, url string) (*Client, error) {
 	}
 	c := &Client{conn: conn}
 
-	if err := c.send(ctx, newSessionUpdate()); err != nil {
+	if err := c.send(ctx, newSessionUpdate(cfg.instructions)); err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("realtime: sending %s: %w", EventSessionUpdate, err)
 	}
@@ -49,6 +54,22 @@ func Dial(ctx context.Context, url string) (*Client, error) {
 			return c, nil
 		}
 	}
+}
+
+// DialOption configures the session negotiated by Dial. Supplying none
+// produces the handshake this package sent before options existed.
+type DialOption func(*dialConfig)
+
+type dialConfig struct {
+	instructions string
+}
+
+// WithInstructions sets the session persona the backend is told to adopt. The
+// protocol's session object defines this field; a backend that builds its
+// runtime config from the session request reads it and prepends it as a system
+// message. Empty omits the field rather than sending "".
+func WithInstructions(s string) DialOption {
+	return func(c *dialConfig) { c.instructions = s }
 }
 
 // AppendAudio forwards one carrier frame's payload to the backend. payload is

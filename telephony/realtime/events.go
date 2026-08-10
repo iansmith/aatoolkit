@@ -45,8 +45,13 @@ type sessionAudio struct {
 }
 
 type sessionSpec struct {
-	Type  string       `json:"type"`
-	Audio sessionAudio `json:"audio"`
+	Type string `json:"type"`
+	// Instructions is omitempty on purpose: a backend is free to distinguish
+	// an absent field from an empty string, so a caller who supplies nothing
+	// must produce the handshake this engine sent before the field existed —
+	// not a near-equivalent carrying "".
+	Instructions string       `json:"instructions,omitempty"`
+	Audio        sessionAudio `json:"audio"`
 }
 
 type sessionUpdate struct {
@@ -71,13 +76,16 @@ type ServerEvent struct {
 // newSessionUpdate builds the handshake declaring G.711 mu-law on BOTH
 // directions. Declaring only input leaves output at the backend's default,
 // which is the silent half-configuration this constructor exists to prevent.
-func newSessionUpdate() sessionUpdate {
+//
+// instructions is the session persona. Empty omits the field entirely.
+func newSessionUpdate(instructions string) sessionUpdate {
 	g711 := audioChannel{Format: audioFormat{Type: FormatG711ULaw}}
 	return sessionUpdate{
 		Type: EventSessionUpdate,
 		Session: sessionSpec{
-			Type:  "realtime",
-			Audio: sessionAudio{Input: g711, Output: g711},
+			Type:         "realtime",
+			Instructions: instructions,
+			Audio:        sessionAudio{Input: g711, Output: g711},
 		},
 	}
 }
