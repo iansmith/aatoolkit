@@ -1,46 +1,28 @@
 package twilio
 
 import (
+	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
 
-// Transcript-sink tests for the realtime path (AATK-75).
+// Transcript-channel tests for the realtime path (AATK-79, succeeding AATK-75).
 //
-// Bridge publishes transcripts and HandleStreamRealtime used to throw them
-// away, so a consumer had no way to observe what was said. The drain it threw
-// them away with was not incidental: Bridge.publish parks Run's read loop when
-// nobody reads, and that loop also drives audio to the carrier, so a consumer
-// handed a raw channel could break audio silently. Every test here exists to
-// keep that protection while opening the seam.
+// Bridge publishes transcripts and HandleStreamRealtime used to throw them away,
+// so a consumer had no way to observe what was said. Two constraints shape the
+// seam, and every test here defends one of them:
+//
+//   - Bridge.publish parks Run's read loop when nobody reads, and that loop also
+//     drives audio to the carrier. A consumer handed a raw channel could break
+//     audio silently. Hence non-blocking delivery with drops.
+//   - The engine must never run consumer code on a goroutine it owns, because Go
+//     cannot make a goroutine return from a call it is executing. Hence a channel
+//     the consumer reads, not a callback the engine invokes.
 
-// collector is a sink that records what it receives, safely.
-type collector struct {
-	mu   sync.Mutex
-	got  []Transcript
-	hold time.Duration // block this long inside the sink, simulating a slow consumer
-}
-
-func (c *collector) sink(tr Transcript) {
-	if c.hold > 0 {
-		time.Sleep(c.hold)
-	}
-	c.mu.Lock()
-	c.got = append(c.got, tr)
-	c.mu.Unlock()
-}
-
-func (c *collector) texts() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([]string, len(c.got))
-	for i, tr := range c.got {
-		out[i] = tr.Text
-	}
-	return out
-}
+// testChanBuffer is the buffer the tests give their own channels. The engine has
+// no buffer of its own any more — the consumer owns the channel and its depth.
+const testChanBuffer = 8
 
 // emitTranscript pushes one transcription event from the backend.
 func emitTranscript(t *testing.T, be *fakeRealtimeBackend, text string, final bool) {
@@ -52,41 +34,45 @@ func emitTranscript(t *testing.T, be *fakeRealtimeBackend, text string, final bo
 	be.emitOnce(t, map[string]string{"type": typ, "transcript": text})
 }
 
-// TestTranscriptSink_ConsumerReceivesPartialAndFinal is the headline: a consumer
-// can observe what was said. Red before the seam existed, because there was no
-// way to receive anything.
-func TestTranscriptSink_ConsumerReceivesPartialAndFinal(t *testing.T) {
-	var c collector
+// TestTranscriptChan_ConsumerReceivesPartialAndFinal is the headline: a consumer
+// can observe what was said, partial and final, in order.
+func TestTranscriptChan_ConsumerReceivesPartialAndFinal(t *testing.T) {
+	ch := make(chan Transcript, testChanBuffer)
 
 	be := newFakeRealtimeBackend(t)
-	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithTranscriptSink(c.sink)))
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithTranscriptChan(ch)))
 	waitBackendReady(t, be, h)
 
 	emitTranscript(t, be, "hello", false)
 	emitTranscript(t, be, "hello there", true)
 
-	waitFor(t, 5*time.Second, func() bool { return len(c.texts()) >= 2 })
+	var got []string
+	for len(got) < 2 {
+		select {
+		case tr := <-ch:
+			got = append(got, tr.Text)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("consumer received %d transcript(s), want 2", len(got))
+		}
+	}
 
-	got := strings.Join(c.texts(), "|")
-	if got != "hello|hello there" {
+	if strings.Join(got, "|") != "hello|hello there" {
 		t.Fatalf("consumer must receive partial and final in order, got %q", got)
 	}
 }
 
-// TestTranscriptSink_SlowConsumerDoesNotStallAudio is the important one, and the
-// one most likely to be skipped. A sink that is far slower than the transcript
-// stream must not delay the carrier's audio, because both are driven by the same
-// read loop.
-func TestTranscriptSink_SlowConsumerDoesNotStallAudio(t *testing.T) {
-	c := collector{hold: 200 * time.Millisecond}
+// TestTranscriptChan_ConsumerThatNeverReadsDoesNotStallAudio is the constraint
+// AATK-75 was written around. Both transcripts and audio are driven by the same
+// backend read loop, so a consumer that stops reading must not delay audio.
+func TestTranscriptChan_ConsumerThatNeverReadsDoesNotStallAudio(t *testing.T) {
+	ch := make(chan Transcript, 1) // deliberately tiny, and never drained
 
 	be := newFakeRealtimeBackend(t)
-	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithTranscriptSink(c.sink)))
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithTranscriptChan(ch)))
 	waitBackendReady(t, be, h)
 	seen := h.countMediaFrames(t)
 
-	// Far more transcripts than the sink can absorb in the window below.
-	for i := 0; i < transcriptSinkBuffer*3; i++ {
+	for i := 0; i < 50; i++ {
 		emitTranscript(t, be, "chatter", false)
 	}
 	// Audio queued behind all of it must still reach the carrier promptly.
@@ -95,23 +81,21 @@ func TestTranscriptSink_SlowConsumerDoesNotStallAudio(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return seen() > 0 })
 }
 
-// TestTranscriptSink_SlowConsumerDoesNotTripTheIdleTimer covers the interaction
-// AATK-76's idle bound introduced. A sink that stalls the read loop would starve
-// the activity signal and end the call reporting "idle timeout" — blaming the
-// backend for a consumer's fault. The bounded, lossy seam is what prevents it,
-// and this is the configuration a real consumer runs.
-func TestTranscriptSink_SlowConsumerDoesNotTripTheIdleTimer(t *testing.T) {
-	c := collector{hold: 100 * time.Millisecond}
+// TestTranscriptChan_ConsumerThatNeverReadsDoesNotTripTheIdleTimer covers the
+// interaction AATK-76's idle bound introduced. A consumer that stalled the read
+// loop would starve the activity signal and end the call reporting "idle
+// timeout" — blaming the backend for a consumer's fault. This is the
+// configuration a real consumer runs.
+func TestTranscriptChan_ConsumerThatNeverReadsDoesNotTripTheIdleTimer(t *testing.T) {
+	ch := make(chan Transcript, 1) // never drained
 
 	be := newFakeRealtimeBackend(t)
 	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
-		WithTranscriptSink(c.sink),
+		WithTranscriptChan(ch),
 		WithIdleTimeout(idleGapTimeout),
 	))
 	waitBackendReady(t, be, h)
 
-	// Backend stays active throughout, so nothing should end this call — but a
-	// sink that stalled the read loop would starve the activity signal.
 	be.emitEvery(t, idleGapTimeout/10, map[string]string{
 		"type":       "conversation.item.input_audio_transcription.delta",
 		"transcript": "still talking",
@@ -119,40 +103,120 @@ func TestTranscriptSink_SlowConsumerDoesNotTripTheIdleTimer(t *testing.T) {
 
 	time.Sleep(idleGapTimeout * 5)
 
-	assertStillRunning(t, h, "a slow transcript sink must not let the idle timer fire on a live backend")
+	assertStillRunning(t, h, "a consumer that never reads must not let the idle timer fire on a live backend")
 }
 
-// TestTranscriptSink_PanickingConsumerDoesNotEndTheCall pins the stated decision
-// at the seam: the consumer's bug is contained.
-func TestTranscriptSink_PanickingConsumerDoesNotEndTheCall(t *testing.T) {
-	be := newFakeRealtimeBackend(t)
-	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithTranscriptSink(func(Transcript) {
-		panic("consumer exploded")
-	})))
-	waitBackendReady(t, be, h)
+// TestTranscriptChan_EngineNeverClosesTheConsumersChannel pins ownership. The
+// engine did not create the channel, so closing it would hand the consumer a
+// zero value indistinguishable from a real transcript — and would panic the
+// second call to reuse it.
+func TestTranscriptChan_EngineNeverClosesTheConsumersChannel(t *testing.T) {
+	ch := make(chan Transcript, testChanBuffer)
 
-	emitTranscript(t, be, "boom", true)
-	time.Sleep(200 * time.Millisecond)
+	for i, text := range []string{"first call", "second call"} {
+		be := newFakeRealtimeBackend(t)
+		h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithTranscriptChan(ch)))
+		waitBackendReady(t, be, h)
 
-	assertStillRunning(t, h, "a panicking transcript sink must not take the call down")
+		emitTranscript(t, be, text, true)
+
+		select {
+		case tr := <-ch:
+			if tr.Text != text {
+				t.Fatalf("call %d: got %q, want %q", i+1, tr.Text, text)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("call %d: no transcript arrived", i+1)
+		}
+
+		h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
+		_ = h.waitDone(5 * time.Second)
+	}
+
+	// A closed channel would yield a zero value immediately rather than block.
+	select {
+	case tr, ok := <-ch:
+		t.Fatalf("engine must not close the consumer's channel; received %+v (open=%v)", tr, ok)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
-// TestTranscriptSink_AbsentSinkIsTodaysDrain pins the no-regression half: a
-// consumer that asks for nothing gets exactly the previous behaviour, including
-// that transcripts never wedge the read loop.
-func TestTranscriptSink_AbsentSinkIsTodaysDrain(t *testing.T) {
+// TestTranscriptChan_NoEngineGoroutineOutlivesTheCall is the item AATK-75 could
+// not meet and the reason AATK-79 exists.
+//
+// Measured differentially rather than absolutely: each call leaves fixed
+// overhead behind (the httptest server and carrier conn live until t.Cleanup),
+// so an absolute count proves nothing. A leak scales with the number of calls
+// and fixed overhead does not, so the same run with a consumer that never reads
+// must cost no more than the same run with no consumer at all.
+func TestTranscriptChan_NoEngineGoroutineOutlivesTheCall(t *testing.T) {
+	const calls = 5
+
+	run := func(withConsumer bool) int {
+		runtime.GC()
+		time.Sleep(50 * time.Millisecond)
+		before := runtime.NumGoroutine()
+
+		for i := 0; i < calls; i++ {
+			be := newFakeRealtimeBackend(t)
+			opts := []RealtimeOption{}
+			if withConsumer {
+				// Buffer 1 and never drained: the consumer is present and
+				// permanently behind, which is the worst case.
+				opts = append(opts, WithTranscriptChan(make(chan Transcript, 1)))
+			}
+			h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), opts...))
+			waitBackendReady(t, be, h)
+			for j := 0; j < 20; j++ {
+				emitTranscript(t, be, "chatter", false)
+			}
+			h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
+			_ = h.waitDone(5 * time.Second)
+		}
+
+		// Poll rather than trust one instantaneous reading: a goroutine that is
+		// exiting correctly may not have been descheduled yet.
+		deadline := time.After(3 * time.Second)
+		growth := runtime.NumGoroutine() - before
+		for {
+			select {
+			case <-deadline:
+				return growth
+			default:
+			}
+			runtime.GC()
+			time.Sleep(25 * time.Millisecond)
+			if g := runtime.NumGoroutine() - before; g < growth {
+				growth = g
+			}
+		}
+	}
+
+	withConsumer := run(true)
+	withNone := run(false)
+
+	// Zero growth is the contract; the tolerance covers only the fixed
+	// per-harness overhead both runs share, which cancels in the comparison.
+	if withConsumer > withNone {
+		t.Fatalf("a consumer that never reads must cost no goroutines: %d over %d calls, against %d with no consumer",
+			withConsumer, calls, withNone)
+	}
+}
+
+// TestTranscriptChan_AbsentConsumerIsTodaysDrain pins the no-regression half.
+func TestTranscriptChan_AbsentConsumerIsTodaysDrain(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url()))
 	waitBackendReady(t, be, h)
 	seen := h.countMediaFrames(t)
 
-	for i := 0; i < transcriptSinkBuffer*3; i++ {
+	for i := 0; i < 50; i++ {
 		emitTranscript(t, be, "ignored", false)
 	}
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": carrierPayloadB64()})
 
 	waitFor(t, 5*time.Second, func() bool { return seen() > 0 })
-	assertStillRunning(t, h, "an absent sink must leave the call exactly as it was")
+	assertStillRunning(t, h, "an absent consumer must leave the call exactly as it was")
 }
 
 // waitFor polls cond until it holds or the deadline passes.

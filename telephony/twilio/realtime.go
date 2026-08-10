@@ -64,21 +64,22 @@ type realtimeConfig struct {
 	// call is resolved when the call arrives, on both entry points.
 	instructionsFor func(start Frame) string
 
-	transcriptSink func(Transcript)
+	transcriptChanFor func(start Frame) chan<- Transcript
 }
 
 // Transcript is one transcription result from the backend, re-exported so a
-// consumer supplying a sink does not have to import telephony/realtime to name
-// the type it receives.
+// consumer does not have to import telephony/realtime to name the type its
+// channel carries.
 type Transcript = realtime.Transcript
 
-// transcriptSinkBuffer bounds how far a sink may fall behind before transcripts
-// are dropped. It exists so the drain never blocks: Bridge.publish parks Run's
-// read loop when nobody is reading, and that same loop drives audio to the
-// carrier, so a slow sink would stall the caller's audio. Dropping is the
-// correct trade — a late transcript is worth less than unbroken audio — and the
-// drop is logged rather than silent.
-const transcriptSinkBuffer = 32
+// transcriptChan resolves the destination for one call, or nil when the
+// consumer asked for none.
+func (c realtimeConfig) transcriptChan(start Frame) chan<- Transcript {
+	if c.transcriptChanFor == nil {
+		return nil
+	}
+	return c.transcriptChanFor(start)
+}
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
 	var cfg realtimeConfig
@@ -117,24 +118,40 @@ func WithInstructions(text string) RealtimeOption {
 	return WithInstructionsFor(func(Frame) string { return text })
 }
 
-// WithTranscriptSink delivers each transcript the backend produces, partial and
-// final alike, to fn. Without it the engine drains transcripts and discards
+// WithTranscriptChan delivers each transcript the backend produces, partial and
+// final alike, to ch. Without it the engine drains transcripts and discards
 // them, which is what it did before this existed.
 //
-// fn is called from one goroutine, never concurrently with itself, and never
-// from the loop that drives audio. It must nonetheless RETURN PROMPTLY. The
-// engine will not wait for a slow sink: once transcriptSinkBuffer results are
-// outstanding, further transcripts are dropped and the drop is logged. That is
-// deliberate — Bridge.publish parks the backend read loop when nobody reads,
-// and that loop also drives audio to the carrier, so waiting on a sink would
-// stall the call.
+// The consumer owns ch: its buffer, its reader, and its lifetime. The engine
+// NEVER closes it, so it may be reused across calls and a reader is never handed
+// a spurious zero value.
 //
-// A panic in fn is recovered and logged; it does not end the call. A fn that
-// blocks forever cannot be interrupted — Go offers no way to abandon a running
-// call — so it leaks exactly one goroutine per call. That is the one failure
-// mode the engine cannot absorb for you, and it is a bug in the sink.
-func WithTranscriptSink(fn func(Transcript)) RealtimeOption {
-	return func(c *realtimeConfig) { c.transcriptSink = fn }
+// Delivery is non-blocking. When ch is full the transcript is DROPPED and the
+// drop is logged. That is deliberate rather than a limitation: Bridge.publish
+// parks the backend read loop when nobody reads, and that loop also drives audio
+// to the carrier, so waiting on a slow consumer would break the call. A late
+// transcript is worth less than unbroken audio.
+//
+// The engine runs no consumer code, which is the point of the shape. Every
+// goroutine it creates blocks only on things it owns — a channel it closes, a
+// context it cancels, a select with a default — so a consumer that never reads
+// costs nothing once the call ends.
+func WithTranscriptChan(ch chan<- Transcript) RealtimeOption {
+	return WithTranscriptChanFor(func(Frame) chan<- Transcript { return ch })
+}
+
+// WithTranscriptChanFor resolves the destination when the call arrives, from the
+// start frame — so a consumer can route calls to different channels.
+//
+// Prefer this over WithTranscriptChan wherever one channel will not do. Options
+// given to NewStreamHandler are bound once, at construction, and reused for
+// every call that handler serves; passing a function is what makes the choice
+// per-call there rather than per-process. Mirrors WithInstructionsFor.
+//
+// A nil function, or one returning nil, means no consumer: the engine drains and
+// discards, exactly as with no option at all.
+func WithTranscriptChanFor(fn func(start Frame) chan<- Transcript) RealtimeOption {
+	return func(c *realtimeConfig) { c.transcriptChanFor = fn }
 }
 
 // WithInstructionsFor resolves the session persona when the call arrives, from
@@ -219,7 +236,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 
 	// Drain transcripts so a full channel can never wedge the read loop. The
 	// channel closes when Run returns, which ends this goroutine.
-	go deliverTranscripts(bridge.Transcripts(), cfg.transcriptSink)
+	go deliverTranscripts(bridge.Transcripts(), cfg.transcriptChan(start))
 
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
@@ -296,56 +313,43 @@ func (g *idleGuard) stop() {
 	}
 }
 
-// deliverTranscripts drains src, handing each result to sink if one was
-// supplied. It never blocks on the sink, which is the whole design: src is fed
-// by Bridge.publish, which parks Run's read loop when nobody is reading, and
-// that loop also drives audio to the carrier. A sink that fell behind would
-// therefore break the caller's audio, so it is bounded and lossy instead.
+// deliverTranscripts drains src, forwarding each result to out if a consumer
+// asked for one. It never blocks and it never runs consumer code, which is the
+// whole design.
 //
-// With no sink this is the bare drain it replaced, byte for byte in behaviour.
-func deliverTranscripts(src <-chan realtime.Transcript, sink func(Transcript)) {
-	if sink == nil {
+// src is fed by Bridge.publish, which parks Run's read loop when nobody is
+// reading, and that loop also drives audio to the carrier — so a consumer that
+// fell behind would break the caller's audio. Hence the non-blocking send and
+// the drop.
+//
+// The goroutine running this blocks only on src, which Run closes, and on a
+// select that always has a default. It therefore exits on every call ending, no
+// matter what the consumer does or fails to do.
+//
+// With no consumer this is the bare drain it replaced, byte for byte in
+// behaviour.
+func deliverTranscripts(src <-chan realtime.Transcript, out chan<- Transcript) {
+	if out == nil {
 		for range src {
 		}
 		return
 	}
-
-	out := make(chan Transcript, transcriptSinkBuffer)
-	delivered := make(chan struct{})
-	go func() {
-		defer close(delivered)
-		for tr := range out {
-			callTranscriptSink(sink, tr)
-		}
-	}()
 
 	var dropped int
 	for tr := range src {
 		select {
 		case out <- tr:
 		default:
-			// The sink is more than transcriptSinkBuffer behind. Drop, and say
-			// so: a silently lossy seam is worse than a lossy one, because the
-			// consumer cannot tell an absent transcript from an unspoken word.
+			// The consumer is behind. Drop, and say so: a silently lossy seam is
+			// worse than a lossy one, because the consumer cannot tell an absent
+			// transcript from an unspoken word.
 			dropped++
-			log.Printf("twilio: realtime: transcript dropped, sink is behind (%d dropped on this call)", dropped)
+			log.Printf("twilio: realtime: transcript dropped, consumer is behind (%d dropped on this call)", dropped)
 		}
 	}
-
-	close(out)
-	<-delivered
-}
-
-// callTranscriptSink isolates the consumer's callback. A panic in it is the
-// consumer's bug and must not take the call down with it — the caller is still
-// talking to a working backend.
-func callTranscriptSink(sink func(Transcript), tr Transcript) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("twilio: realtime: transcript sink panicked: %v", r)
-		}
-	}()
-	sink(tr)
+	// out is deliberately NOT closed: the engine did not create it, the consumer
+	// may reuse it across calls, and closing a channel you do not own hands its
+	// receiver a zero value it cannot distinguish from a real one.
 }
 
 // pumpCarrierToBridge reads carrier frames and forwards media to the backend.
