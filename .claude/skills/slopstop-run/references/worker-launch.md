@@ -13,8 +13,9 @@ Agent(subagent_type: "slopstop-effort-<resolved effort>",   # general-purpose if
                exactly. Return its report verbatim as your result.")
 ```
 
-That is the whole mechanism. No headless `claude -p`. No worktree flags. No router env
-vars. No bespoke per-worker prompt templates — **the worker skill is the prompt**; a
+That is the whole mechanism. No headless `claude -p`. No router env
+vars. **No worktree *flags*** — `Agent()` has none, and worktree entry is done in the prompt
+(next section), which is a different thing from the flags this line was written to refuse. No bespoke per-worker prompt templates — **the worker skill is the prompt**; a
 template that restates it is a second copy that will drift.
 
 **`subagent_type` selects the effort carrier** — `slopstop-effort-<level>` — with
@@ -22,6 +23,94 @@ template that restates it is a second copy that will drift.
 `install-for-project.sh` writes `.claude/agents/` (project scope, priority 3) and a plugin
 ships an `agents/` directory (priority 5). This paragraph previously said the opposite; see
 the Effort section for what was wrong and how it was probed.
+
+## Pointing a worker at a worktree
+
+`Agent()` has **no cwd parameter**. A worker that must work in a ticket's worktree is told to
+enter it, as the first thing it does:
+
+```text
+Agent(subagent_type: "slopstop-effort-<resolved>",
+      model: <resolved>,
+      prompt: "First call EnterWorktree(path: \".claude/worktrees/<TICKET>\").
+               Then run `pwd` and confirm it ends in `.claude/worktrees/<TICKET>`.
+               If EnterWorktree errored, or pwd is anywhere else, STOP: return
+               `<WORKER> BLOCKED: not in the ticket worktree — <what pwd showed>`
+               and do NOT invoke the skill.
+               Only then invoke Skill({skill: \"slopstop-<worker>\", args: \"…\"}) and
+               follow it exactly. Return its report verbatim as your result.")
+```
+
+**Entry is a precondition, not a first step, and the check is not ceremony.** A worker whose
+`EnterWorktree` failed is a worker sitting in the **main checkout** — and it will happily run
+`implement` there, writing one ticket's changes into the shared tree while another ticket's
+branch is live. That is precisely the interleaving BILL-466 exists to prevent, arriving
+through the mechanism meant to prevent it. Confirm the working directory; do not assume the
+call succeeded because it was made.
+
+**This works and needed no contract change** (BILL-466, probed): a subagent entering a
+worktree reported its own `pwd` inside it, and every path a worker uses stays relative. The
+feared alternative — absolute paths threaded through `implement`, `red-tests`,
+`mutation-check`, `vacuity-check` and `complexity-check` — is not required.
+
+**`.claude/worktrees/` is the only location this works from.** Outside it, `EnterWorktree`
+raises an approval prompt no permission rule suppresses. See `:run`'s `## Worktrees`.
+
+**Isolation is enforced from the other side too, and that is a feature.** While a session is
+in a worktree, Claude Code blocks edits targeting the main checkout, commands whose working
+directory resolves there, and **git redirected into it — `git -C`, `--git-dir`, `GIT_DIR`,
+`GIT_WORK_TREE`, or a `cd` before running git.** That containment is the point of the scheme.
+It also means orchestrator instructions written as `git -C <the branch's checkout>` do not
+survive being handed to a worker inside a worktree; the orchestrator runs those itself, from
+the main worktree — see `handoff-verification.md`.
+
+**One hole, and it is the one you dug: `worktree.symlinkDirectories`.** A symlinked directory
+is the *same physical directory* in every worktree and in the main checkout. Writes through it
+are not isolated from anything — not from the main checkout, not from a concurrently running
+ticket — and whether Claude Code's path check follows the link before deciding is **not
+established** (undocumented setting; not probed). Assume it does not.
+
+**So symlink only read-mostly, shared-by-design data** — a font corpus, a fixture tree, a
+package cache. Never a build output directory, never anything a worker writes as part of
+doing its job, and never anything two tickets could touch at once. If a directory is both
+large and mutable, it is not a symlink candidate: give each worktree its own, or accept the
+copy. The isolation guarantee above holds for the worktree's tracked files; it does not
+extend through a link you added.
+
+## The containment contract — in every worktree launch
+
+Universal §6 already says a worktree agent commits only to its own branch and never touches
+`main`/`master`. **Necessary, not sufficient**: the prior art records an agent that was denied
+a write and *silently created its own `.local-tracking/` directory and carried on*. Each rule
+below closes an observed way out of the box, so put them in the brief:
+
+- **Do not go looking for "the root."** `git rev-parse --show-toplevel` from a linked
+  worktree, or walking upward until something looks like a repo, is how an agent finds its way
+  back into the shared checkout. *(The orchestrator's own tracking-dir resolution does use
+  `--git-common-dir` deliberately — see `tracking-dir-resolution.md`. That is why the rule is
+  "do not locate the root yourself", not "the common dir is off limits".)*
+- **Commit nowhere but this worktree's branch.**
+- **Write nothing in another repo or checkout — including untracked and scratch files.** "It
+  wasn't tracked" is not a defence; that is precisely the write this catches.
+- **One ticket. Neither expand nor contract it.** A cleanup noticed in passing is not this
+  ticket's work (universal §3). A piece of the ticket skipped as unnecessary is a `DROP` for
+  10b to find, not a judgement the worker makes.
+
+**Prefer the mechanism, and know which rules have one.** Most of this is already enforced by
+Claude Code while a session is in a worktree — edits into the main checkout, commands whose
+cwd resolves there, and git redirected into it are all **blocked**, for the worker and for
+every subagent it spawns. So the first three rules are backed by enforcement, and the prose is
+there to stop an agent wasting a turn discovering it.
+
+**The fourth is not enforced by anything.** "One ticket, neither expanded nor contracted" is a
+judgement no mechanism checks at write time — it is caught *after the fact*, by stage 8a's
+file-map violation check against `$OWN` and by 10b's adversary. Prose is genuinely the only
+control at the moment of writing, which is exactly why it must be in the brief rather than
+assumed.
+
+**`--add-dir` grants are the orchestrator's to make.** Where a worker legitimately needs a
+path outside its worktree, grant it explicitly. The prior art is direct about the alternative:
+an agent that improvises access is the failure mode, not the fix.
 
 ## Model — resolved by the orchestrator, passed explicitly
 
@@ -113,6 +202,45 @@ Why this is here rather than left to each skill: it *was* left to each skill, an
 `red-tests` had it. The same run formatted its tests and left its implementation unformatted —
 which is how a repo accumulates 110 unformatted files while every gate reports clean.
 
+## Proving a finding by mutation — the one definition
+
+**A worker may temporarily edit production code to prove a finding, and must restore it.**
+`adversary` and `review` have both been doing this on real runs for months — perturb the
+code, observe what the suite does, restore, then run a control mutation to prove the suite
+was actually watching. It works, it is why their findings are trustworthy, and until
+BILL-542 it was written down **nowhere**: `grep -i "mutat\|revert" skills/adversary/SKILL.md
+skills/review/SKILL.md` returned nothing. An undocumented protocol is one that varies by
+model and by run, and its absence is what let two checkers be launched into the same working
+tree with nothing warning the orchestrator they would collide.
+
+The protocol, in order, every time:
+
+1. **Perturb.** Change the production code so the behaviour under test is broken. Never the
+   test — a frozen Phase 0 test is a tamper hard-stop, and mutating the assertion proves the
+   assertion runs, not that it is right.
+2. **Observe.** Run the relevant tests. The finding survives only if the suite responds the
+   way the finding predicts.
+3. **Restore.** Put the file back exactly. **`git status` must be clean of the probe before
+   you return** — see below.
+4. **Control.** Mutate something the suite *should* catch and confirm it dies. A suite that
+   stays green under a control mutation was never watching, and a "confirmed" finding taken
+   from it is worthless.
+
+**Name every probe file `zz_probe_tmp_*`.** One prefix, so a stray one is greppable and
+obviously not production, and so a second worker can recognise it as somebody else's.
+
+**Restoration is not best-effort.** Before returning, `git status --porcelain` over the files
+you touched must show only edits you intend to hand back — never a probe. A round that ends
+with a mutation still applied hands the next stage a sabotaged tree and attributes the
+breakage to whoever runs next. If you cannot restore, say so in your verdict **by name and
+path** and treat it as a blocking failure of your own round; do not report a clean verdict
+over a dirty tree.
+
+**Two mutating workers must never share a working tree at the same time.** This is not
+theoretical: PLTF-2562 launched 10b's two agents in parallel and *"they contaminated each
+other — the adversary observed the reviewer's `zz_probe_tmp_test`"*. The caller owns this —
+see `handoff-verification.md` for how 10b serializes them.
+
 ## Workers never launch workers
 
 Whether a skill can be invoked from inside a subagent in the way these workers are is
@@ -150,10 +278,10 @@ than guesses** a missing one.
 |---|---|---|
 | `investigate` | the ticket | findings + a **predicted file map** |
 | `red-tests` | the ticket + its DoD, `--backfill` | test files, node-ids, test command, stub paths, observed failure output (or, under `--backfill`, the behaviour each test pins) |
-| `mutation-check` | `--tests` `--node-ids` `--command` `--targets` `--stubs` `--backfill` | per-node-id verdict + `MUTATION CHECK PASS` / `FAIL: n of m` / `BLOCKED`; under `--backfill`, `PINNED: n of n` / `NOT PINNED: n of m` |
+| `mutation-check` | `--tests` `--node-ids` `--command` `--targets` `--stubs` `--backfill` `--implemented` | per-node-id verdict + `MUTATION CHECK PASS` / `FAIL: n of m` / `BLOCKED`; under `--backfill` **or `--implemented`**, `PINNED: n of n` / `NOT PINNED: n of m`. Launched twice per run — stage 5 against the stubs, stage 9 with `--implemented` against `$OWN`'s production diff |
 | `adversary` | `--target` `--goals` `--caliber` `--round` `--prior` `--baseline` | numbered findings with severity + `ADVERSARY PASS` / `FAIL: n` / `GOAL DEFECT: n` / `BLOCKED` |
 | `implement` | the ticket, the plan, the failing tests, `--refactor` | changes made, tests before/after, findings reported-not-fixed |
-| `review` | `--scope` `--mode` `--frozen` | `REVIEW CLEAN` / `APPLIED: n` / `BLOCKED` |
+| `review` | `--scope` `--mode` `--frozen` | findings with severity + class, and `REVIEW CLEAN \| reported r (…)` / `APPLIED: n \| applied n (…) \| reported r (…)` / `BLOCKED` (no counts). Branch on the token left of the first `\|` |
 | `slop-check` | `--scope` `--ticket` `--frozen` `--refactor` `--backfill` | findings with signal + severity + verdict |
 | `vacuity-check` | `--base` `--frozen` `--node-ids` `--test-files` `--stubs` `--command` | per-node-id `vacuous` / `meaningful` / `could-not-determine` + verdict |
 | `complexity-check` | `--base` `--repo` `--warn` `--reject` `--exempt-pre-existing` `--file-nloc-warn` | breaching functions + `CC CLEAN` / `VIOLATIONS: …` / `SKIPPED` / `BLOCKED` |
@@ -204,14 +332,24 @@ perfectly healthy.
 ```
 investigate ──► predicted file map ──► conflict scheduling (which tickets run together)
 
-red-tests ──┬─► node-ids, --command, --stubs, --tests ──► mutation-check
+red-tests ──┬─► node-ids, --command, --stubs, --tests ──► mutation-check   (stage 5: the STUBS)
             ├─► node-ids, --command, --stubs, --test-files ──► vacuity-check
             └─► the Phase 0 commit sha ──► --frozen ──► slop-check, review, vacuity-check
+
+implement ──► $OWN's production files ──► --targets --implemented ──► mutation-check
+                                                          (stage 9: the REAL IMPLEMENTATION)
 
 branch point ──► --base ──► vacuity-check, complexity-check
 
 .project-conf.toml ──► resolved CC thresholds ──► complexity-check
 ```
+
+**`mutation-check` is fed twice, from two different producers, and that is the point.** Stage
+5 mutates what `red-tests` stubbed and asks *"is this test red for the right reason?"*; stage
+9 mutates what `implement` actually wrote and asks *"does anything pin it?"* Same worker, same
+mechanism, two questions — told apart by `--implemented` on the call and by the stage in
+`run.jsonl`. Feeding stage 9 from `red-tests` instead of from `$OWN` would re-run stage 5 with
+extra steps (BILL-538).
 
 **Capture `--frozen` when the Phase 0 commit is made** — that is the only moment it is
 unambiguous. Recovering it later by scanning history (`git log | grep 'Phase 0' | tail -1`)

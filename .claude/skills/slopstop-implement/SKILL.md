@@ -2,7 +2,7 @@
 description: Implement a ticket's plan until its failing phase-0 tests pass — writes source code only, never touches the tests, and returns the changes made, before/after test results, and any findings it is reporting rather than fixing.
 ---
 
-<!-- GENERATED from slopstop 61426cf by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 975aadc by install-for-project.sh — do not edit.
      Edit skills/implement/ in the slopstop repo and re-run. (universal §5) -->
 
 # Implement the plan until the red tests are green
@@ -41,6 +41,37 @@ You must never:
 - amend, rebase, or revert the phase-0 test commit.
 
 You may **add** tests. You may never weaken, retarget, or remove an existing one.
+
+## Your production code will be mutated after you return
+
+This is a statement of a check that runs, not encouragement to be thorough.
+
+**Every production symbol you add or change is mutated at stage 9, after you return.** The
+mutation is the smallest edit that genuinely changes behaviour — a returned value replaced, a
+branch dropped, a wiring line deleted — and then the suite runs. **A mutation that leaves the
+suite green is a defect attributed to this ticket**, reported by production symbol and by the
+mutation that survived, and it stops the ticket at stage 9.
+
+So the question to ask yourself about each thing you write is not *"did I make the tests
+pass"* — you did, or you would not be returning — but ***"if I broke this line, would
+anything go red?"*** A value that travels through a call you added and is never asserted on
+is exactly what survives.
+
+**Under `--refactor` this clause inverts: report the gap, do not close it.** You may modify
+no test file at all in that mode — additions included — so an unpinned symbol you notice is a
+**finding you return**, named with the symbol and what would go unnoticed if it broke. Writing
+a test to close it there is the violation, not the fix.
+
+**Otherwise, closing a gap you can see is legal and welcome.** Adding a test to a non-frozen
+file was always allowed; the frozen-test rule above is about *weakening* tests, and adding one
+is its opposite. What you may never do is reach for the other lever — the one that also makes
+stage 9 quiet — and weaken, retarget, or delete an existing test.
+
+Why this is written down rather than left implicit: the recorded escapes are all symbols that
+did not exist when the Phase 0 tests were written, so **no test author could have pinned
+them** — only you can, and only while you are writing them. SOP-262 shipped
+`readRealtimeVoiceURL` whose entire return value was unpinned; mutating `return url` to
+`return ""` left the suite green and the feature a silent no-op.
 
 **If you believe a test is genuinely wrong — that its expected value contradicts the
 ticket or a real spec — that is a FINDING, not a fix.** Stop work on that item, leave

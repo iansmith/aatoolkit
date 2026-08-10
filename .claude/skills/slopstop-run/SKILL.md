@@ -3,7 +3,7 @@ description: The single lifecycle entry point — take one or more tickets and d
 disable-model-invocation: true
 ---
 
-<!-- GENERATED from slopstop 61426cf by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 975aadc by install-for-project.sh — do not edit.
      Edit skills/run/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-run
@@ -169,17 +169,17 @@ Per ticket, in order. **W** = a worker launch (one `Agent()` per `worker-launch.
 |---|---|---|---|---|
 | 1 | `intake` | I | **note** | fetch the ticket, its five sections and its **DoD**; set `$REFACTOR` / `$BACKFILL` (below); **parse `Blocked by:`** (see Scheduling); seed `$TRACKING_DIR/<TICKET>/` with `task_plan.md` + `findings.md` and open `run.jsonl` |
 | 2 | `investigate` | W | **span** | returns findings + the **predicted file map**. Run for all N tickets before anything else — see Scheduling |
-| 3 | `branch` | I | **note** | label/state → in progress; `git switch -c <type>/<TICKET> $ORIGIN_REMOTE/$BASE_BRANCH`, `<type>` per `.claude/skills/slopstop-run/references/branch-type.md`. Record `$BASE` = the branch point sha |
+| 3 | `branch` | I | **note** | label/state → in progress; create the ticket's **worktree and branch** — see `## Worktrees` below. `<type>` per `.claude/skills/slopstop-run/references/branch-type.md`. Record `$WT` = the worktree path and `$BASE` = the branch point sha. **You never `git switch` the main worktree**, at this stage or any other. The stage keeps the `stage` value `branch` — it is a record key, and renaming it would break invariant 6 and orphan every run.jsonl already on disk |
 | 4 | `red-tests` | W | **span** | returns test files, node-ids, `--command`, stub paths, observed failure output. `--backfill` when `$BACKFILL` — then it confirms **green**. Not launched when `$REFACTOR` |
 | 5 | `mutation-check` | W | **span** | `--tests --node-ids --command --targets --stubs` from stage 4. `--backfill` when `$BACKFILL` — then it is **the gate**, not a sanity check, and it **re-runs after stage 7** if stage 7 changed the tests. Not launched when `$REFACTOR` |
 | 6 | `phase0-commit` | I | **note** | commit the red tests + stubs. **Capture `$FROZEN` here.** Under `$BACKFILL` the commit holds green tests and no stubs — `$FROZEN` is captured the same way and means the same thing |
 | 7 | `adversary` | W+I | **span** | the loop, the add/skip decision, gap-test authoring, RED re-verify, gap commit — all yours. **One span per round**, never one span per loop |
-| 8 | `implement` | W | **span** | the ticket, the plan, the failing tests. It may not touch the tests. `--refactor` when `$REFACTOR`. **Not launched when `$BACKFILL`** — the tests are the deliverable and they already pass, so there is nothing to implement |
+| 8 | `implement` | W | **span** | the ticket, the plan, the failing tests. **It may add tests; it may never weaken, retarget or remove one** — `skills/implement/SKILL.md` is the definition and this row used to compress it, wrongly, to "may not touch the tests". Under `--refactor` it may modify no test file at all. `--refactor` when `$REFACTOR`. **Not launched when `$BACKFILL`** — the tests are the deliverable and they already pass, so there is nothing to implement |
 | 8a | `tamper` | I | **span** | **mechanical, yours, before any checker is spawned**: the tamper diff against `$FROZEN` and the file-map violation check against `$OWN`. A FAIL stops the ticket here — no worker is bought. Under `$BACKFILL` the trigger is unchanged and the **resolution** is a mutation re-run, not a judgment — see below |
-| 9 | `gates` | W×3 | **span** | `slop-check`, `vacuity-check`, `complexity-check` — launch together, they are independent. **After `implement`, deliberately**: the adversary's false-negative vector at stage 7 cannot see tests written later, and `vacuity-check` here is what covers them (BILL-343). W×2 when `$REFACTOR` or `$BACKFILL` |
+| 9 | `gates` | W×3, then W×1–3 | **span** | `slop-check`, `vacuity-check`, `complexity-check` — launch together, they are independent **because all three are read-only**. That is the reason, and it does not generalise: 10b's two workers mutate production and must be serialized. **Then the pinning pass** — `mutation-check --implemented` against `$OWN`'s production diff, looping to a cap of 3, one span per round. It runs *after* the three, never beside them: it mutates, and a mutating worker never shares a tree. **After `implement`, deliberately**: the adversary's false-negative vector at stage 7 cannot see tests written later, and `vacuity-check` here is what covers them (BILL-343). W×2 when `$REFACTOR` or `$BACKFILL` |
 | 10 | `review` | W | **span** | loop until `REVIEW CLEAN`, cap 5 rounds |
 | 10a | `size` | I | **note** | once the diff exists: `git diff --numstat "$BASE"..HEAD`, then record **one entry per file** (path, added, removed, kind) plus the aggregates, the `test_globs` you classified by, and the provisional `tier` computed from **production counts**. **Nothing reads it** — it is the data that will later decide what is safe to skip |
-| 10b | `handoff` | W×2 | **span** | a **fresh** requirements adversary and code reviewer at the tier above, fed artifacts only — never the agent's comments or the PR description. Produces a blessing bound to the **branch tip SHA** **W×1 for an invariant ticket**: requirements adversary only under `$BACKFILL`, code reviewer only under `$REFACTOR` — see `handoff-verification.md` |
+| 10b | `handoff` | W×2 | **span** | a **fresh** requirements adversary and code reviewer at the tier above, **launched SERIALLY — never in parallel** (both mutate production to prove findings and contaminate each other otherwise; PLTF-2562), fed artifacts only — never the agent's comments or the PR description. Applied fixes are committed before the round closes, then re-verified on the new tip. Produces a blessing bound to the **branch tip SHA**. **W×1 for an invariant ticket**: requirements adversary only under `$BACKFILL`, code reviewer only under `$REFACTOR` — see `handoff-verification.md` |
 | 11 | `pr` | I | **span** | commit, push to `$PR_REMOTE`, open the PR against `$OWNER/$REPO` |
 | 12 | `bot-read` | I | **note** | read existing bot comments **once**. Never poll |
 | 13 | `merge` | I | **span** | serial across tickets; `gh pr merge --merge --delete-branch` |
@@ -193,15 +193,118 @@ and every consumer of `$FROZEN` is told so explicitly rather than being handed a
 Prose that names a stage in `run.jsonl` uses **exactly these `stage` values**, so one pass
 over the file reconstructs the run.
 
+## Worktrees — where concurrent work physically happens
+
+**Two branches cannot be checked out in one working tree.** A `git switch` between tickets
+mid-flight interleaves their edits into whichever branch happens to be checked out when each
+write lands: both PRs look plausible and both diffs are wrong, and no gate catches it because
+every gate examines one branch against its own base. So each ticket gets its own worktree,
+and **the main worktree is never switched.**
+
+**Every ticket, unconditionally — including a single ticket with no concurrency at all**
+(BILL-535). Isolation is the execution environment, not an optimisation that switches on when
+two tickets happen to overlap. Two reasons it is not conditional:
+
+- **A conditional rule is one an orchestrator can reason its way out of**, and the reasoning
+  is always available ("only one ticket, so the main tree is fine"). The failure it prevents
+  is silent, so the run that skips it looks exactly like the run that did not.
+- **The second half of this process needs it.** A worktree can be judged whole, repaired, or
+  thrown away without touching anything else — that is what makes `SALVAGE` and `DROP`
+  possible at stage 10b. Work done in the shared checkout has no such unit.
+
+### Creating one
+
+```bash
+claude --worktree <TICKET>                 # Claude Code creates .claude/worktrees/<TICKET>
+git -C .claude/worktrees/<TICKET> branch -m <type>/<TICKET>
+```
+
+**Location is `.claude/worktrees/<TICKET>` and is not a free choice.** `EnterWorktree` on a
+path outside that directory raises an approval prompt that **no permission rule suppresses** —
+only `bypassPermissions` skips it — so any other location stops an autonomous run dead at
+every worker launch. It is gitignored fleet-wide by the `.claude/*` rule `setup-project.py`
+installs, so a worktree there never appears in the parent's `git status` and cannot be staged
+by accident (BILL-466: verified across all eight repos, and by live test).
+
+**Why not `git worktree add`,** which would give the branch name directly: worktrees created
+by plain git get none of Claude Code's setup — in particular `worktree.symlinkDirectories`,
+which links configured directories from the main checkout into each new worktree and is how
+universal §6's symlink rule is finally mechanized. Creating with `--worktree` and renaming
+the branch afterwards gets both, and was probed end to end.
+
+**A project that needs untracked directories present** (a font corpus, `node_modules`, a
+fixture tree) declares them in `.claude/settings.json`:
+
+```json
+{ "worktree": { "symlinkDirectories": ["fonts"] } }
+```
+
+Symlinked, not copied. **Write the ignore pattern without a trailing slash** — `fonts`, not
+`fonts/` — because a trailing slash matches directories only, and in a worktree the entry is
+a *symlink*, which git records as a file. Get this wrong and every worktree carries a
+permanent `?? fonts`, and a `git add -A` commits an absolute-path symlink into the repo.
+
+### Everything the orchestrator writes stays in the MAIN worktree
+
+`run.jsonl`, `task_plan.md` and `findings.md` are yours, not the worker's, and they live in
+the main worktree's tracking dir. That is already how resolution works and needs no special
+case — `tracking-dir-resolution.md`'s `$ROOT` is
+`dirname "$(git rev-parse --git-common-dir)"`, which resolves to the **main** worktree root
+from inside a linked one. Use that form and never `[ -d .slopstop ]` from the cwd, which
+finds nothing in a worktree and falls through to a path a headless agent cannot write.
+
+### Teardown is verdict-driven
+
+- **Merged** → remove the worktree, then the branch: `git worktree remove <path>` then
+  `git branch -d <type>/<TICKET>`. In that order — `remove` detaches without deleting the
+  branch.
+- **Stopped, or the attempt cap exhausted** → **the worktree stays, and you lock it.** Never
+  clean it on a kill. Worktree, branch, commits, tracking dir and findings are all preserved
+  for post-mortem. The full rule, the lock command, and the `unlock → remove → branch -D`
+  abandon order are one definition in `failure-and-salvage.md`.
+- **`DROP`** → the *new* attempt gets a **fresh worktree**; the dropped one is preserved and
+  locked like any stop. Relaunching into the same directory would hand the next agent the
+  previous one's tree to be confused by, and destroy the evidence of what went wrong.
+
+**So `git worktree list` after a run shows the main worktree plus one per *stopped* ticket.**
+An all-merged run leaves only the main worktree. A run that stopped a ticket and left nothing
+behind has destroyed the evidence, which is the more expensive failure.
+
 ## Scheduling across tickets (PRD D14)
 
 1. **Fan out `investigate` for all N tickets first.** It is read-only, so it is always safe
    and always parallel. Collect each ticket's predicted file map.
 2. **Explicit relations first — `Blocked by:` is a hard edge.** Below.
-3. **Then schedule by overlap.** Among tickets that are *not* blocked, those whose predicted
-   file maps are disjoint run stages 3–12 concurrently; overlapping ones run serially, later
-   ones starting from the updated tip. Prediction is never perfect; this buys efficiency,
-   not correctness.
+3. **Then schedule by overlap, deterministically.** Among tickets that are *not* blocked,
+   those whose predicted file maps are disjoint run stages 3–12 concurrently; overlapping
+   ones run serially, later ones starting from the updated tip. Prediction is never perfect;
+   this buys efficiency, not correctness.
+
+   **Order overlapping tickets by ticket key, ascending.** A stable, stated tie-break — not
+   whichever the model considered first. Re-running the same list against the same tickets
+   must produce the same schedule, or the timing record in `run.jsonl` reports a coin flip as
+   a fact and corrupts the measurements the file exists to collect.
+
+   **Write the computed schedule as a `note` before stage 3 opens**, naming every
+   serialisation and its cause. **It is provisional, and it will be superseded** — step 2
+   re-checks blockers after every merge, and a ticket released by that merge was *held* when
+   this note was written, so it appears in no schedule yet. Append a **new** `schedule` note
+   each time the runnable set changes, naming what released and what it changed; never edit
+   the first one, and never let the run end with a schedule that omits tickets it actually
+   ran. A single note claiming to be the plan, while three tickets entered later by another
+   route, is worse than no note — it reads as the whole story:
+
+   ```json
+   {"event":"note","stage":"schedule","at":"…","result":
+    "concurrent: [BILL-501, BILL-504]; serial: BILL-502 -> BILL-503 (overlap on
+     internal/handler/services.go); order within an overlap group is ticket-key ascending"}
+   ```
+
+   **A key-order tie-break is conflict avoidance, never correctness.** If two overlapping
+   tickets have a *semantic* order — B must land after A — that belongs in `Blocked by:`,
+   which step 2 already honours as a hard edge. PLTF-2563 and PLTF-2564 both touch
+   `services.go` and 2564 must go first; overlap alone cannot express that, and the fix was
+   an explicit `Blocked by:` line. Never promote the heuristic into the thing that decides.
 4. **Merge serially, always** — regardless of overlap. One PR at a time.
    On conflict: `git merge master` (i.e. `$BASE_BRANCH`) **into the losing branch**, resolve,
    re-run that ticket's test command, push, merge. **Never rebase.** A rebase of a pushed
@@ -693,6 +796,13 @@ The loop and all the machinery below are yours; this is the largest thing you ow
 --caliber <the families relevant to a test suite> --round <n>` and, from round 2,
 `--prior <the previous round's findings>`.
 
+**`adversary` is a review primitive: every round's close carries `findings`.** It already
+assigns `blocker`/`major`/`minor` and `behavioural`/`presentational` to each numbered finding,
+so this is transcription, not judgment — count them into the object `run-jsonl.md` defines and
+leave the verdict line in `result` beside it. `ADVERSARY PRESENTATIONAL: n` is reproducible
+from the record only if the class split is in it; without that, the verdict cannot be
+explained by the numbers next to it.
+
 **Branch on its verdict line, which is not prose:**
 
 - `ADVERSARY PASS` → advance to stage 8.
@@ -785,7 +895,46 @@ Three things govern the shape and are worth having in front of you before you re
 Bracket 8a as an inline span and each 10b launch as its own span, and write each verdict
 line into `run.jsonl` verbatim.
 
-## Stage 9 — the three gates
+### Branch on the three-way verdict (BILL-535)
+
+10b returns a **disposition**, not a pass/fail. The decision rule between the last two lives in
+`handoff-verification.md` and is not restated here; this is what you do with each.
+
+```
+HANDOFF CORRECT: <sha>  -> record blessed_sha, go to stage 11
+HANDOFF SALVAGE: <n>    -> repair IN THIS WORKTREE, on this branch, guided by the findings;
+                           commit; then re-run 10b. Never self-certify the repair.
+HANDOFF DROP: <n>       -> preserve and lock this worktree; relaunch a fresh agent into a
+                           FRESH worktree with the findings quoted verbatim
+anything else           -> stop, surface the raw verdict verbatim
+```
+
+**`SALVAGE` is the orchestrator implementing, which it otherwise never does.** That is a
+deliberate reversal of a rule that used to require a human — the reasoning is recorded in
+`failure-and-salvage.md`, and the constraints it does *not* relax (frozen tests stay frozen,
+the repaired branch re-enters at 10b) bind here.
+
+**Findings cross back verbatim, never paraphrased.** They are the retry contract. An empty
+finding list on a `SALVAGE` or `DROP` means the evaluator is broken, not the attempt: re-run
+the check rather than acting on it.
+
+**Three attempts total** — one on a clean brief, then two carrying findings — and the
+**second** failure is still the diagnosis point that forks on *why*. The third attempt is that
+fork's output, launched into an escalated tier or against a rewritten ticket. `:run` does not
+author the rewrite; that is `:tickets`. On exhaustion the ticket stops and everything is
+preserved.
+
+**10b is a review primitive, so its closes carry `findings` too** — both agents'. The reviewer
+returns a severity split on its verdict line; the requirements adversary returns severities on
+its numbered findings. Transcribe both, per `run-jsonl.md`. **This stage is the reason the
+field exists**: "does the tier above find things the tier below did not?" is unanswerable if
+10's counts are structured and 10b's are not, and an uninstrumented 10b close reads as a tier
+that found nothing — the error that flatters the cheaper option.
+
+**One launch note per agent, not per span.** W×2 here means two notes, and their `tier` will
+differ from stage 10's by exactly one rung — which is the measurement.
+
+## Stage 9 — the three gates, then the pinning pass
 
 Launch all three together; they do not depend on each other.
 
@@ -835,6 +984,73 @@ the only place the complexity the run declined to block is ever visible. A run t
 23 violations and reports `CC CLEAN` with no list has hidden exactly what the exemption was
 supposed to make actionable.
 
+### The pinning pass — mutate what `implement` actually wrote
+
+**Nothing between stage 8 and 10b perturbs the real implementation.** Stage 5's
+`mutation-check` mutates the **stubs**, before `implement` exists. `vacuity-check` asks
+whether a test would have failed *before the branch*, which is a different question and
+contains no mutation logic. So every "the suite does not actually pin this" defect had to
+survive to the tier above, and the measured record shows it doing exactly that — SOP-262's own
+log: *"NEW test-adequacy gaps proven by live mutation, **not previously seen in rounds 1–2 or
+in stage 9's earlier mutation-check (which only covered the two node-ids)**."*
+
+Launch after the three gates return, **not with them**, for two independent reasons. It
+**mutates production**, and `worker-launch.md`'s protocol is explicit that two workers never
+share a working tree while one is perturbing it — the rule PLTF-2562 paid for at 10b. And it
+is worth nothing on a branch a gate has already condemned. The three gates are safe to launch
+together precisely because they are read-only; this one is not, and that is the whole
+difference:
+
+```
+$ROUND = 1
+loop:
+  mutation-check --implemented --targets <$OWN's production files>
+                 --node-ids <stage 4 + 7> --tests <…> --command <…>
+
+  MUTATION CHECK PINNED: n of n      -> converged, go to stage 10
+  MUTATION CHECK NOT PINNED: n of m  -> write a test pinning each named symbol,
+                                        confirm it is RED against the same mutation,
+                                        commit, then run another round
+  MUTATION CHECK BLOCKED: <r>        -> stop this ticket, surface <r>
+  anything else                      -> stop, surface the raw verdict verbatim
+
+  if $ROUND >= 3  -> capped: stop the ticket, report every symbol still unpinned
+  $ROUND += 1
+```
+
+**One span per round**, never one span per loop — same rule and same reason as stage 7's
+adversary; `run-jsonl.md` states it once and this does not restate it.
+
+**Authoring the pinning test is yours, exactly as stage 7's gap tests are.** Adding a test to
+a non-frozen file is already legal, so nothing about the frozen-test rule, the tamper diff or
+the file-map kill is relaxed to make room for it. Confirm the new test is **red against the
+surviving mutation** before you commit it — a pinning test that was never red pins nothing,
+and writing one is the same defect this pass exists to catch, committed by the fixer.
+
+**Targets come from `$OWN`, never `$BASE`.** The set is this branch's production changes. A
+symbol the branch did not touch is somebody else's debt, and mutating it buries this ticket's
+finding in noise.
+
+**Mode:**
+
+- **`$REFACTOR`** — **run it, and report rather than fix.** A refactor's whole claim is that
+  behaviour is unchanged and the suite proves it, so this is the sharpest possible test of that
+  claim. But `implement --refactor` may modify no test file at all, so a surviving mutation is
+  reported as a finding against the ticket and **does not open a fix round** — record
+  `PINNING REPORTED: <n> unpinned — refactor ticket, no test may be added` and carry it to the
+  final report.
+- **`$BACKFILL`** — **skipped, and say so.** `implement` is not launched and there is no
+  production diff, so there is nothing this branch wrote to mutate. Record
+  `PINNING SKIPPED: backfill ticket — no production diff`. The `mutation-check` that carries a
+  backfill ticket is stage 5's, in `--backfill` mode, and it is already the gate there.
+
+**This is a mechanical gate and mechanical gates run in every mode** — see above. What the
+mode changes is whether a finding opens a fix round, never whether the check runs.
+
+**Record the round count and the wall-clock.** A gate that materially lengthens the run is a
+trade to make knowingly. If it turns out to cost more than the 10b rounds it saves, that is a
+finding about this stage, and the spans are what make it arguable rather than felt.
+
 ## Stage 10 — review
 
 ```
@@ -842,6 +1058,9 @@ $ROUND = 1
 loop:
   Agent(... prompt: invoke slopstop-review with
         "--scope <PR-or-ref-range> --mode $MODE --frozen $FROZEN")
+
+  # Branch on the LEADING TOKEN: everything from REVIEW up to the first `|`.
+  # Anything after the `|` is the severity split — data for the record, never for the branch.
 
   REVIEW CLEAN         -> converged, go to stage 11
   REVIEW APPLIED: <n>  -> commit and push this round's fixes, then continue
@@ -851,6 +1070,40 @@ loop:
   if $ROUND >= 5       -> capped: report the LAST round's findings and stop this ticket
   $ROUND += 1
 ```
+
+**Branch on the token, record the whole line.** `review` returns
+`REVIEW CLEAN | reported <r> (blocker <b>, major <M>, minor <m>)` and
+`REVIEW APPLIED: <n> | applied <n> (…) | reported <r> (…)`; `REVIEW BLOCKED: <reason>` takes
+no counts. **Split on the first `|` and match the left side** — the token is unchanged from
+what it has always been, so this reads correctly whether or not the worker emits a suffix.
+A `review` that returns a bare `REVIEW CLEAN` is not a malformed verdict; it is an older
+worker, and it branches identically.
+
+**Put the verdict line verbatim into the span's `result`.** Not a paraphrase, not a
+count you recomputed — the line as returned, counts included:
+
+```json
+{"ticket":"BILL-544","event":"span","stage":"review","state":"finished","round":1,
+ "result":"REVIEW CLEAN | reported 3 (blocker 0, major 1, minor 2)"}
+```
+
+This is the only record of what the round found: the worker applies with `Edit` and hands
+nothing back, so a summary that drops the counts destroys the evidence rather than
+compressing it.
+
+**And transcribe the same numbers into a `findings` object on that close** — schema in
+`run-jsonl.md`, not restated here. Copy them from the verdict line; never re-derive a severity
+the worker did not state. `result` stays on the line beside `findings` so the transcription
+can be audited against its source. **An absent `findings` and an all-zero one are different
+facts** and invariant 8 fails a close that has neither.
+
+The same two rules apply to the `handoff` span at stage 10b, which runs this same worker, and
+to every `adversary` round at stage 7.
+
+**A `REVIEW CLEAN` carrying a reported `blocker` is a contract violation, not a pass.** A
+confirmed blocker is never left unfixed in either mode, so that line cannot be true. Take
+the `anything else` exit and surface it verbatim. This is the shape every lethal gate
+failure in this repo has had: something measured zero and zero read as fine.
 
 **Commit before the cap check.** The worker applies with `Edit` and hands nothing back, so a
 cap that fires first strands round 5's fixes uncommitted. Each round is a fresh worker, so
@@ -1167,7 +1420,7 @@ already made; this path reads it, scores it, and closes out.
 ## Failure handling
 
 A ticket that stops — `GOAL DEFECT`, a 🔴 gate, `TAMPER FAIL`, `FILEMAP FAIL`,
-`HANDOFF FAIL`, `REVIEW BLOCKED`, a capped review loop, a blocked DoD — is closed in
+an exhausted attempt cap, `REVIEW BLOCKED`, a capped review loop, a blocked DoD — is closed in
 `run.jsonl` with `failed` and its reason, and **every independent ticket keeps running**.
 
 **A stopped ticket is not a held one.** A stop means the ticket ran and something went

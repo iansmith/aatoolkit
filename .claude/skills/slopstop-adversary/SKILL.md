@@ -2,7 +2,7 @@
 description: One adversarial round against a target artifact — attack it for gaps against its stated goals, verify every claim in it against the real repo, and return numbered findings with severity plus a PASS / FAIL / GOAL DEFECT verdict the caller can branch on.
 ---
 
-<!-- GENERATED from slopstop 61426cf by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 975aadc by install-for-project.sh — do not edit.
      Edit skills/adversary/ in the slopstop repo and re-run. (universal §5) -->
 
 # One adversarial round
@@ -69,6 +69,48 @@ shape.
 | `circularity` | No claim rests **solely** on another claim from the same document. Two claims citing only each other are internally consistent and jointly unfounded. Fire only on sole support — a claim citing source text *and* a sibling is legitimate, and rejecting all cross-references rejects sound documents. |
 | `scope-subtraction` | Precondition: `--baseline` given. The target is a **rewrite** of `--baseline`, and a rewrite after failure is the most drift-prone moment there is: the cheapest way to make a failing ticket pass is to quietly shrink what it demands. Answer one question — did this rewrite **add specificity**, or did it **subtract scope**? Quote every requirement, done-when item, or file-map entry present in `--baseline` and absent or weakened in the target. Added detail, tightened wording, and newly-cited file:line are specificity. A dropped DoD item, a loosened "must" to "should", or a narrowed file map is subtraction — **each one is a finding, at `blocker` severity**, even when the new text reads better. This is the frozen-test rule one level up: you may not weaken the contract to make it satisfiable. If the scope genuinely was wrong, that is a `GOAL DEFECT` for a human, not a rewrite to wave through. |
 | `test-adequacy` | Precondition: the target is a test suite. Attack it on six vectors — **boundary omissions** (empty, single-element, max-size, zero/null); **error-path gaps** (the code fails N ways, the tests cover M < N); **state-interaction gaps** (happy path on clean state only, never on pre-populated or partially-failed state); **specification drift** (the name says X, the assertion checks Y); **false negatives** (the assertion checks a value the test itself set up, so it passes even against a wrong implementation); **coverage asymmetry** (several tests for the easy case, none for the hard one). For each gap name a concrete test function that would cover it. Do not suggest implementation changes and do not rewrite existing tests. |
+
+## Scoring a DoD — an `(out-of-band)` item is scored once and never again
+
+When `--goals` carries a Definition of Done, you score it item by item. **The verdict
+vocabulary is not defined here** — it is `.claude/skills/slopstop-run/references/dod-scoring.md`, shared with
+`:run` so the two scorers cannot disagree about whether a ticket is done. Read it there.
+
+One rule belongs in front of you because it changes what you *report*, not just how you
+score: **an item marked `(out-of-band)` in the ticket is `out-of-band`, never `not-met`.**
+Report it **once**, naming what evidence is owed and from whom, and do not raise it again in
+later rounds. It is not a finding, it does not consume a finding slot, and it is not evidence
+against the implementation.
+
+`(out-of-band)` means the ticket declared at authoring time that no artifact can settle the
+item — a human action, live infrastructure, a physical device. That is a legitimate ticket
+shape (`ticket-standard.md` §3), and re-finding it every round is the failure this marker
+exists to end: SOP-262's item 8 was scored `not-met` **19 times across 12 handoff rounds**,
+correctly each time, by an adversary doing its job on an item no attempt could ever close.
+
+**An unmarked item that you judge unsatisfiable by any artifact is a different thing, and it
+IS a finding** — against the *ticket*, at `blocker`, in the `structure` family. The ticket
+should not have passed authoring. Say that, rather than scoring the implementation down for
+a contract it was never able to meet.
+
+## Proving a finding by mutation
+
+**You may temporarily edit production code to prove a finding, and you must restore it.**
+Perturb the code, observe the suite, restore it exactly, then run a control mutation to prove
+the suite was watching at all. **One definition, in `worker-launch.md`** — probe-file naming,
+the `git status` check before you return, and why the control mutation is not optional. Do
+not restate it here and do not invent a variant.
+
+This is what `live-mutation-proven, all restored, tree clean, control mutation correctly
+killed` means in the run logs. You were already doing it; BILL-542 wrote it down, because an
+undocumented protocol varies by model and by run — and because nothing warned an orchestrator
+that two mutating checkers in one working tree would collide, which is exactly what happened
+on PLTF-2562.
+
+**Never mutate a frozen Phase 0 test.** Perturbing an assertion proves the assertion *runs*,
+not that it is *right*, and editing a frozen file is a tamper hard-stop attributed to you.
+The `shadow-test` and `expectation-location` calibers exist precisely because the interesting
+defects are *around* those tests, not in them.
 
 ## Severity
 
