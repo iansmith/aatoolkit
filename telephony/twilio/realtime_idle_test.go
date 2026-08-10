@@ -26,7 +26,7 @@ func TestHandleStreamRealtime_IdleTimeoutEndsSilentCall(t *testing.T) {
 
 	const idleTimeout = 100 * time.Millisecond
 	h := newRealtimeHarnessWith(t, func(ctx context.Context, conn *websocket.Conn, start Frame) error {
-		return HandleStreamRealtime(ctx, conn, start, be.url(), idleTimeout)
+		return HandleStreamRealtime(ctx, conn, start, be.url(), WithIdleTimeout(idleTimeout))
 	})
 
 	// The harness's own start frame is the only thing either side ever sends;
@@ -54,7 +54,7 @@ func TestHandleStreamRealtime_IdleTimeoutDoesNotFireDuringActiveTraffic(t *testi
 	be.emitInterval = idleTimeout / 4 // well inside idleTimeout, every time
 
 	h := newRealtimeHarnessWith(t, func(ctx context.Context, conn *websocket.Conn, start Frame) error {
-		return HandleStreamRealtime(ctx, conn, start, be.url(), idleTimeout)
+		return HandleStreamRealtime(ctx, conn, start, be.url(), WithIdleTimeout(idleTimeout))
 	})
 
 	// Run for several multiples of idleTimeout while the backend keeps
