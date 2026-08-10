@@ -203,6 +203,21 @@ func (b *fakeRealtimeBackend) handshakeCount() int {
 	return len(b.handshakes)
 }
 
+// emitOnce writes a single event from the backend, now. Safe once the handshake
+// has completed — see emitEvery's note on concurrent writers.
+func (b *fakeRealtimeBackend) emitOnce(t *testing.T, ev map[string]string) {
+	t.Helper()
+	b.mu.Lock()
+	c := b.conn
+	b.mu.Unlock()
+	if c == nil {
+		t.Fatal("backend has no connection to emit on — call waitBackendReady first")
+	}
+	if err := writeRealtimeJSON(context.Background(), c, ev); err != nil {
+		t.Fatalf("emit %s: %v", ev["type"], err)
+	}
+}
+
 func (b *fakeRealtimeBackend) url() string {
 	return "ws" + strings.TrimPrefix(b.srv.URL, "http")
 }
@@ -303,6 +318,41 @@ func (h *realtimeHarness) sendRaw(msg []byte) {
 	h.t.Helper()
 	if err := h.conn.Write(context.Background(), websocket.MessageText, msg); err != nil {
 		h.t.Fatalf("write: %v", err)
+	}
+}
+
+// countMediaFrames starts reading the carrier side and counts the media frames
+// the handler writes to it, returning a query function.
+//
+// Opt-in rather than always-on: several tests read h.conn themselves to prove
+// the handler closed it, and a background reader would race them for the same
+// bytes.
+func (h *realtimeHarness) countMediaFrames(t *testing.T) func() int {
+	t.Helper()
+	var mu sync.Mutex
+	var n int
+
+	go func() {
+		for {
+			_, data, err := h.conn.Read(context.Background())
+			if err != nil {
+				return
+			}
+			var ev struct {
+				Event string `json:"event"`
+			}
+			if json.Unmarshal(data, &ev) == nil && ev.Event == "media" {
+				mu.Lock()
+				n++
+				mu.Unlock()
+			}
+		}
+	}()
+
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
 	}
 }
 
