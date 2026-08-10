@@ -28,13 +28,60 @@ const realtimeDialTimeout = 10 * time.Second
 // not transfer. Which turn-taking is better is a question for measurement, in
 // its own ticket; this switch exists so both stacks can be run and compared
 // without a redeploy.
-func NewStreamHandler(realtimeURL string) StreamHandler {
+//
+// Options apply to the realtime path only. Supplying one alongside an empty
+// realtimeURL is a no-op, because the default path returns DefaultHandleStream
+// and never reaches the realtime transport at all.
+func NewStreamHandler(realtimeURL string, opts ...RealtimeOption) StreamHandler {
 	if realtimeURL == "" {
 		return DefaultHandleStream
 	}
 	return func(ctx context.Context, conn *websocket.Conn, start Frame) error {
-		return HandleStreamRealtime(ctx, conn, start, realtimeURL, 0)
+		return HandleStreamRealtime(ctx, conn, start, realtimeURL, opts...)
 	}
+}
+
+// RealtimeOption configures one call on the realtime transport. It mirrors
+// telephony.SessionOption, which configures the default path the same way, so
+// the two transports are extended with one vocabulary rather than two.
+//
+// The zero set of options is today's behavior exactly. Every option is
+// therefore additive: a caller that supplies none gets what a caller before
+// that option existed got.
+type RealtimeOption func(*realtimeConfig)
+
+// realtimeConfig is the resolved option set for one call. Unexported: the
+// options are the API, and a struct literal would be a second way to build the
+// same value.
+type realtimeConfig struct {
+	idleTimeout time.Duration
+}
+
+func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
+	var cfg realtimeConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}
+
+// WithIdleTimeout bounds how long the call may run with the backend producing
+// no event. Unset, or zero, arms no timer: unbounded, exactly the behavior of a
+// call with no options at all.
+//
+// A positive value is reset on every backend event bridge.Run observes, of any
+// type. Carrier frames do NOT reset it, so a carrier that is streaming
+// continuously cannot mask a backend that has gone silent. If it elapses with
+// no backend activity, the call ends with an error naming "idle timeout".
+//
+// A hung backend and a legitimately quiet one look identical on this path —
+// there is no local VAD or turn state to tell them apart (see
+// telephony.MaxSilenceMS for the order of magnitude the default transport uses
+// to make that call). Set this longer than the longest backend-quiet interval
+// the deployment tolerates, or a normal pause in conversation will end the
+// call.
+func WithIdleTimeout(d time.Duration) RealtimeOption {
+	return func(c *realtimeConfig) { c.idleTimeout = d }
 }
 
 // HandleStreamRealtime drives one call over the realtime voice backend. It is
@@ -62,21 +109,12 @@ func NewStreamHandler(realtimeURL string) StreamHandler {
 // mid-call, ends the call with a logged error rather than leaving the session
 // hung.
 //
-// idleTimeout bounds how long the call may run with the backend producing no
-// event. 0 disables it, matching today's behavior exactly: unbounded, no
-// timer armed. A positive value is reset on every backend event bridge.Run
-// observes, of any type; carrier frames do NOT reset it, so a carrier that is
-// streaming continuously cannot mask a backend that has gone silent. If it
-// elapses with no backend activity, the call ends with an error naming "idle
-// timeout".
-//
-// A hung backend and a legitimately quiet one look identical on this path —
-// there is no local VAD or turn state to tell them apart (see
-// telephony.MaxSilenceMS for the order of magnitude the default transport
-// uses to make that call). Set idleTimeout longer than the longest
-// backend-quiet interval the deployment tolerates, or a normal pause in
-// conversation will end the call.
-func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame, url string, idleTimeout time.Duration) error {
+// Options configure one call; see RealtimeOption and WithIdleTimeout. Supplying
+// none is unbounded, exactly the behavior this function had before options
+// existed.
+func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame, url string, opts ...RealtimeOption) error {
+	cfg := resolveRealtimeConfig(opts)
+
 	// CloseNow on every exit path, not Close: there is no local session to
 	// drain, and closing the carrier is also what unblocks the carrier pump
 	// below if it is still parked in Read, so no goroutine outlives this
@@ -113,7 +151,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
 
-	idle := newIdleGuard(idleTimeout)
+	idle := newIdleGuard(cfg.idleTimeout)
 	defer idle.stop()
 
 	// One goroutine, one select: bridge.Activity() resets the guard without any
@@ -128,7 +166,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 		case err := <-carrierDone:
 			return err
 		case <-idle.fired():
-			return fmt.Errorf("twilio: realtime: idle timeout: no backend activity for %s", idleTimeout)
+			return fmt.Errorf("twilio: realtime: idle timeout: no backend activity for %s", cfg.idleTimeout)
 		case <-bridge.Activity():
 			idle.reset()
 		}

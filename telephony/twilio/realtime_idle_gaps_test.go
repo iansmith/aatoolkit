@@ -94,7 +94,7 @@ func waitBackendReady(t *testing.T, be *fakeRealtimeBackend, h *realtimeHarness)
 func idleHarness(t *testing.T, url string, idleTimeout time.Duration) *realtimeHarness {
 	t.Helper()
 	return newRealtimeHarnessWith(t, func(ctx context.Context, conn *websocket.Conn, start Frame) error {
-		return HandleStreamRealtime(ctx, conn, start, url, idleTimeout)
+		return HandleStreamRealtime(ctx, conn, start, url, WithIdleTimeout(idleTimeout))
 	})
 }
 
