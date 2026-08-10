@@ -63,10 +63,11 @@ func TestDecodeFrame_CarriesEncodedPayloadVerbatim(t *testing.T) {
 type fakeRealtimeBackend struct {
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	conns    int
-	received []json.RawMessage
-	conn     *websocket.Conn
+	mu         sync.Mutex
+	conns      int
+	received   []json.RawMessage
+	handshakes []json.RawMessage
+	conn       *websocket.Conn
 
 	closeAfterHandshake bool
 
@@ -97,10 +98,16 @@ func newFakeRealtimeBackend(t *testing.T) *fakeRealtimeBackend {
 		b.mu.Unlock()
 		ctx := r.Context()
 
-		// The session.update handshake the client opens with.
-		if _, _, err := c.Read(ctx); err != nil {
+		// The session.update handshake the client opens with. Recorded, not
+		// discarded: it is the only place the negotiated session config is
+		// observable, and it is what the handshake tests assert on.
+		_, hs, err := c.Read(ctx)
+		if err != nil {
 			return
 		}
+		b.mu.Lock()
+		b.handshakes = append(b.handshakes, json.RawMessage(append([]byte(nil), hs...)))
+		b.mu.Unlock()
 		if err := writeRealtimeJSON(ctx, c, map[string]string{"type": "session.created"}); err != nil {
 			return
 		}
@@ -176,6 +183,24 @@ func (b *fakeRealtimeBackend) closeNow() {
 	if c != nil {
 		_ = c.Close(websocket.StatusNormalClosure, "bye")
 	}
+}
+
+// handshake returns the nth session.update the backend received, as the raw
+// bytes that arrived. Tests assert on these rather than on a struct: what goes
+// on the wire is the contract.
+func (b *fakeRealtimeBackend) handshake(n int) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n >= len(b.handshakes) {
+		return ""
+	}
+	return string(b.handshakes[n])
+}
+
+func (b *fakeRealtimeBackend) handshakeCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.handshakes)
 }
 
 func (b *fakeRealtimeBackend) url() string {
