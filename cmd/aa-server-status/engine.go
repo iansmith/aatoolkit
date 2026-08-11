@@ -717,13 +717,14 @@ func (e *RealEngine) warmUp(s config.Server, proc *lifecycle.Process, budget tim
 	return err
 }
 
-// pollReady warms s up (if it declares a warm-up), then polls its health
-// endpoint, until it is ready or its resolved ready-timeout elapses.
+// pollReady warms s up (if it declares a warm-up), polls its health endpoint
+// (if it declares one), and finally verifies its exact listen-set, until it
+// is ready or its resolved ready-timeout elapses.
 //
-// ready_timeout bounds the two together, not each. It is the answer to "how
+// ready_timeout bounds all three together, not each. It is the answer to "how
 // long may this server take to become ready", and a server does not become
 // ready twice: giving each stage the full budget would let a server declaring
-// 180s take 360s before `up` reports anything, which is neither what the knob
+// 180s take 540s before `up` reports anything, which is neither what the knob
 // says nor what an operator watching a REPL would assume.
 func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 	sup := e.config().Supervisor
@@ -732,25 +733,174 @@ func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 	if err := e.warmUp(s, proc, time.Until(deadline)); err != nil {
 		return err
 	}
-	if !s.Health.Declared() {
+
+	if s.Health.Declared() {
+		// Whatever the warm-up did not spend. A warm-up that used the whole
+		// budget leaves a non-positive remainder; PollReady always attempts one
+		// probe regardless, so the server still gets a chance to answer rather
+		// than failing on arithmetic alone.
+		spec := health.ResolveSpec(s.Health, s.Host, s.Port)
+		cfg := health.PollConfig{
+			Spec:         spec,
+			ProbeTimeout: resolveHealthTimeout(sup),
+			PollInterval: resolvePollInterval(sup),
+			ReadyTimeout: time.Until(deadline),
+			ServerName:   s.Name,
+			LogPath:      proc.LogPath,
+		}
+		if _, err := health.PollReady(context.Background(), cfg); err != nil {
+			return err
+		}
+	}
+
+	// Deliberately last, and deliberately outside the Health.Declared() branch
+	// above — see pollPortsReady's own comment for both reasons.
+	return e.pollPortsReady(s, proc, time.Until(deadline))
+}
+
+// pollPortsReady enforces the exact-listen-set contract
+// (design/aa-server-status.md §6.2) against a server we have just launched:
+// its observed listen-set, unioned across its whole process tree, must equal
+// its declared {port} ∪ listens. A declared port that never appears leaves it
+// `partial`; a port bound outside the declared set is a stray, the loud
+// anomaly. Either one fails `up` for this server on exactly the same terms as
+// a failed health check — the error is reported and the child is left running
+// and registered, so its log survives for inspection and `down` can still
+// tear it down.
+//
+// Why this runs LAST, after warm-up and health, rather than first:
+// ports appear asynchronously after exec, so this stage has to poll — and
+// warm-up and health already absorb that wait, because both are HTTP requests
+// against a declared port and neither can answer until the tree is listening.
+// Running last therefore costs nothing in the common case: by the time health
+// has returned 2xx the ports are necessarily bound, the first probe here
+// succeeds, and no polling happens at all. Running it first would serialize a
+// wait the later stages were going to perform anyway, adding its full duration
+// to every successful `up`.
+//
+// Why it runs even when no health check is declared: that is the case it is
+// worth most for. Such a server previously got no readiness verification of
+// any kind — `up` reported success on exec not failing — so an early return on
+// Health.Declared() would skip the check for precisely the servers with
+// nothing else watching them.
+func (e *RealEngine) pollPortsReady(s config.Server, proc *lifecycle.Process, budget time.Duration) error {
+	declared := lifecycle.DeclaredPorts(s)
+	if len(declared) == 0 {
 		return nil
 	}
 
-	// Whatever the warm-up did not spend. A warm-up that used the whole
-	// budget leaves a non-positive remainder; PollReady always attempts one
-	// probe regardless, so the server still gets a chance to answer rather
-	// than failing on arithmetic alone.
-	spec := health.ResolveSpec(s.Health, s.Host, s.Port)
-	cfg := health.PollConfig{
-		Spec:         spec,
-		ProbeTimeout: resolveHealthTimeout(sup),
-		PollInterval: resolvePollInterval(sup),
-		ReadyTimeout: time.Until(deadline),
-		ServerName:   s.Name,
-		LogPath:      proc.LogPath,
+	// No live child means there is no tree to observe, which is the same
+	// judgement livePIDLocked makes about the same state — not an error, just
+	// nothing of ours to compare against. The three real launch paths cannot
+	// reach it: launch() returns an error if the child never started, and
+	// upOne returns on that before pollReady runs, so Cmd.Process is non-nil
+	// by construction here. It is reachable only from a unit test that
+	// fabricates a Process to exercise the warm-up and health stages without
+	// a subprocess. The end-to-end Up tests in engine_ports_test.go are what
+	// guard the gate itself, precisely because they use real children.
+	if proc == nil || proc.Cmd == nil || proc.Cmd.Process == nil {
+		return nil
 	}
-	_, err := health.PollReady(context.Background(), cfg)
-	return err
+	pid := int32(proc.Cmd.Process.Pid)
+
+	deadline := time.Now().Add(budget)
+	interval := resolvePollInterval(e.config().Supervisor)
+
+	var (
+		class  observe.Result
+		obs    observe.TreeObservation
+		obsErr error
+	)
+	for {
+		// One probe always runs, whatever the budget arithmetic says, so a
+		// server is never failed on a non-positive remainder alone. PollReady
+		// makes the same guarantee, for the same reason.
+		obs, obsErr = observe.TreeListenSet(pid)
+		if obsErr == nil {
+			class = observe.Classify(declared, obs)
+			if class.Classification == observe.CandidateUp && len(class.ForeignHolders) == 0 {
+				return nil
+			}
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		if remaining < interval {
+			time.Sleep(remaining)
+			continue
+		}
+		time.Sleep(interval)
+	}
+
+	if obsErr != nil {
+		return fmt.Errorf("up %s: observing listening ports: %w", s.Name, obsErr)
+	}
+	return listenSetError(s, class, obs)
+}
+
+// listenSetError renders a failed exact-listen-set check as one actionable
+// error naming every anomaly found: declared ports that never appeared, ports
+// the tree bound without declaring — each with the PID holding it, which is
+// what makes a stray actionable rather than merely alarming — and declared
+// ports held by a process this supervisor did not start.
+func listenSetError(s config.Server, class observe.Result, obs observe.TreeObservation) error {
+	var parts []string
+
+	if len(class.Missing) > 0 {
+		missing := append([]int(nil), class.Missing...)
+		sort.Ints(missing)
+		parts = append(parts, fmt.Sprintf("declared %s never started listening", portList(missing)))
+	}
+
+	if len(class.Stray) > 0 {
+		stray := append([]int(nil), class.Stray...)
+		sort.Ints(stray)
+		named := make([]string, 0, len(stray))
+		for _, p := range stray {
+			if h, ok := obs.Holders[p]; ok && h.Identity.PID != 0 {
+				named = append(named, fmt.Sprintf("%d (pid %d)", p, h.Identity.PID))
+				continue
+			}
+			named = append(named, fmt.Sprintf("%d", p))
+		}
+		parts = append(parts, fmt.Sprintf("this server's process tree is listening on undeclared port %s", strings.Join(named, ", ")))
+	}
+
+	if len(class.ForeignHolders) > 0 {
+		ports := make([]int, 0, len(class.ForeignHolders))
+		for p := range class.ForeignHolders {
+			ports = append(ports, p)
+		}
+		sort.Ints(ports)
+		named := make([]string, 0, len(ports))
+		for _, p := range ports {
+			named = append(named, fmt.Sprintf("%d (pid %d)", p, class.ForeignHolders[p].PID))
+		}
+		parts = append(parts, fmt.Sprintf("declared port %s is held by a process this supervisor did not start", strings.Join(named, ", ")))
+	}
+
+	if len(class.Degraded) > 0 {
+		parts = append(parts, fmt.Sprintf("%d process(es) in the tree could not be read, so this comparison may be incomplete", len(class.Degraded)))
+	}
+
+	if len(parts) == 0 {
+		return fmt.Errorf("up %s: could not confirm the declared listen-set within the ready timeout", s.Name)
+	}
+	return fmt.Errorf("up %s: %s (design §6.2: {port} ∪ listens is exhaustive)", s.Name, strings.Join(parts, "; "))
+}
+
+// portList renders ports for a message, singular or plural to match.
+func portList(ports []int) string {
+	strs := make([]string, len(ports))
+	for i, p := range ports {
+		strs[i] = fmt.Sprintf("%d", p)
+	}
+	if len(strs) == 1 {
+		return "port " + strs[0]
+	}
+	return "ports " + strings.Join(strs, ", ")
 }
 
 // ============================================================================
