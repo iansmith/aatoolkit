@@ -2,7 +2,7 @@
 description: Run the cyclomatic-complexity gate over a branch diff with lizard and return every function at or over the configured warn/reject thresholds — file, line, measured CC, its CC at the base commit, the threshold it broke, and whether the did-not-get-worse exemption applies — plus one overall verdict and a ranked list of what was exempted. Mechanical measurement only; never fixes anything.
 ---
 
-<!-- GENERATED from slopstop d0b036d by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop f03aabb by install-for-project.sh — do not edit.
      Edit skills/complexity-check/ in the slopstop repo and re-run. (universal §5) -->
 
 # Complexity check — measure CC over a branch diff
@@ -131,6 +131,32 @@ threshold named `reject = 10` that let CC 10 through would not mean what it says
 boundary is exactly where a reader checks the rule. The 🟡 band is `[warn, reject)`, so no
 value is ever both. Label the bands with these comparisons verbatim; writing `CC > T` or
 `W < CC <= T` in the report contradicts the rule at the boundary.
+
+## Step 4a — Partition production from test, because only production blocks
+
+**A 🔴 in a test function is reported, never blocking** (BILL-566). Classify every row by its
+`filename` against the project's `test_globs` — the same list `run-jsonl.md` defines and stage
+10a classifies by. Do not invent a second convention here (universal §5); read that one, and
+say which list you used.
+
+- **production row** → participates in `N` exactly as before. Nothing about it changes.
+- **test row** → measured, ranked and reported as **informational**, and excluded from `N`.
+
+**Why the gate stops at the production boundary.** This gate measures *testability* — linearly
+independent paths ≈ the tests needed for branch coverage. That consequence is real for
+production code and does not exist for a test function: nobody writes tests for tests, and a
+table-driven case with subtests is high-CC by construction and none the worse for it. The
+scope was never argued, merely never restricted.
+
+**It became load-bearing the first time a real run met it.** AATK-81 was stopped by two 🔴s,
+both test functions, one of them in a **frozen** file — so the CC gate demanded a change that
+the stage-8a tamper gate forbids. Two mechanical gates, neither of which softens, and no move
+satisfying both. Restricting the scope dissolves that deadlock instead of adjudicating it.
+
+**Report test rows; do not drop them.** Not measuring is not the fix — not *gating* is. Keep
+them ranked alongside production so the data exists for anyone who later wants to ask whether
+test complexity is worth acting on. This ticket does not answer that question; it stops the
+question from stopping a run.
 
 ## Step 5 — Attribute each function, by line-range overlap
 
@@ -317,9 +343,12 @@ spell it exactly:
 - **`CC CLEAN`** — no blocking 🔴 (after the exemption) and no 🟡. Exempt violations may
   still exist; when they do, append `— K exempt` so a clean verdict never reads as an empty
   queue.
-- **`CC VIOLATIONS: N 🔴, M 🟡[, K exempt]`** — `N` counts only **blocking** violations;
-  exempted ones are `K`, listed but not in `N`. Any `N > 0` is a blocking result; what to
-  do about it is the orchestrator's call, not yours.
+- **`CC VIOLATIONS: N 🔴, M 🟡[, K exempt][, T test-info]`** — `N` and `M` count
+  **production** rows only. Exempted ones are `K`, listed but not in `N`. `T` counts test-file
+  rows at or over either threshold: **listed, never blocking, never in `N` or `M`** (Step 4a).
+  Any `N > 0` is a blocking result; what to do about it is the orchestrator's call, not yours.
+  **`T > 0` with `N = 0` is a `CC CLEAN` run** — say `CC CLEAN — T test-info` rather than
+  `CC VIOLATIONS`, or the verdict line reports a stop that is not one.
 - **`CC INCONCLUSIVE: <files>`** — exit 0, no rows, changed files present.
 - **`CC SKIPPED: <reason>`** — no measurable files changed, or lizard unavailable.
 - **`CC ERROR: exit <code> — <stderr>`** — lizard failed to run.

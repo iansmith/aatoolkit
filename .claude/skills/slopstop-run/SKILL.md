@@ -3,7 +3,7 @@ description: The single lifecycle entry point — take one or more tickets and d
 disable-model-invocation: true
 ---
 
-<!-- GENERATED from slopstop d0b036d by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop f03aabb by install-for-project.sh — do not edit.
      Edit skills/run/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-run
@@ -1010,8 +1010,8 @@ differ from stage 10's by exactly one rung — which is the measurement.
 Launch all three together; they do not depend on each other.
 
 - `slop-check --scope <ref-range-or-PR> --ticket <the ticket's stated scope> --frozen $FROZEN`
-- `vacuity-check --base $BASE --frozen $FROZEN --node-ids <from stage 4+7> --test-files <…>
-  --stubs <…> --command <…>`
+- `vacuity-check --base $BASE --frozen $FROZEN --node-ids <from stage 4+7, MINUS the declared
+  invariance ids> --test-files <…> --stubs <…> --command <…>`
 - `complexity-check --base $FORK --repo <root> --warn $CC_WARN --reject $CC_REJECT
   --exempt-pre-existing $CC_EXEMPT --file-nloc-warn $FILE_NLOC_WARN`
 
@@ -1048,6 +1048,69 @@ A 🔴 from `slop-check`, a `vacuity`-verdict of `vacuous`, or a `VIOLATIONS` at
 threshold **stops this ticket** and goes to the human. A warn-level breach is reported and
 proceeds. `SKIPPED` / `BLOCKED` / `could-not-determine` are reported as themselves — never
 rounded to a pass.
+
+### Invariance tests never reach `vacuity-check`, and the omission is recorded
+
+**Omit the node-ids `red-tests` declared as invariance tests** (its Step 6a) from the list you
+pass, and write **one `note` naming each omitted id with the DoD item it cited**, before the
+gate launches. Omitted, logged and attributable — never waived, and never silent.
+
+**Refuse a declaration that cites no DoD item.** The citation is the entire control: it is what
+makes this a classification rather than an escape hatch, and an entry without one is not a
+declaration. Refuse it by name and let the id go to the gate.
+
+**Only Phase 0 declarations count.** A test relabelled after a gate flagged it is the failure
+mode this guards against, and `$FROZEN` is what makes the check cheap: the declaration is in the
+`red-tests` report that produced the frozen commit, or it does not exist.
+
+**Everything still flagged `vacuous` is classified, then fixed in one pass** — the same
+economics as CC, since re-running means re-running a gate stage:
+
+- **The test does not pin its new behaviour** → strengthen the assertion until it fails against
+  base. **Never** delete, narrow, or skip it; universal §2 binds here, and satisfying a gate by
+  weakening a test is precisely what it forbids.
+- **The Phase 0 stub satisfied it** → a `red-tests` defect, and it has appeared on both live
+  runs of this path. Two shapes, and they need opposite fixes:
+  - *The stub was too complete* — it implemented the behaviour. **Thin it** to the minimum that
+    lets the test reach its assertion.
+  - *The assertion is purely negative* — "does not stall the audio", "does not trip the idle
+    timer", "no goroutine outlives the call". **A do-nothing stub satisfies these**, and no
+    sentinel can fail them, so Step 5's "non-satisfying by construction" rule cannot be met.
+    Thinning the stub makes it *more* vacuous. **Give the test a positive component** — assert
+    the consumer actually received the events *and* that audio kept flowing — so the
+    do-nothing stub fails the positive half and the negative half stops standing alone.
+
+> **Why this exists** (BILL-567). AATK-81 stopped on `VACUITY VACUOUS: 6`. The verdict was
+> factually right — all six passed against pre-branch code — and four of them traced directly to
+> DoD items *demanding* invariance: *"behaviour is byte-identical to today"*, *"a concurrent
+> second `Run` still returns the refusal error"*, *"does not delay carrier audio"*, *"does not
+> trip the idle timer"*. A regression guard that fails against old code is not a guard. Most
+> tickets carry such an item, so a plain stop-and-ask here asks the same question every run,
+> about the same class, and gets the same answer — which is how a gate stops being read.
+
+**A 🔴 in a test function does not stop the ticket** (BILL-566). `complexity-check` Step 4a
+partitions production from test and reports test rows as `T test-info`, outside `N`. Record
+them in `run.jsonl` with the verdict — they are data, not a queue — and read `T > 0, N = 0` as
+the clean run it is. The gate measures testability, which is a statement about production code;
+it met its first real test function in a **frozen** file, where reducing the number and
+honouring stage 8a were mutually exclusive.
+
+### Reducing a production CC breach — one pass, real seams
+
+**Refactor around the code's existing seams. Do not transform mechanically.** Extracting a
+helper whose only purpose is to move branches out of the measured function moves the number and
+improves nothing — the metric is a proxy for testability, and gaming a proxy is the failure the
+gate exists to catch, not a way through it.
+
+**Attack the whole reject set in one pass.** Re-measuring means re-running a gate stage: ~8
+minutes of workers plus orchestrator overhead on the run that prompted this rule. Fixing one
+violation, re-running, and finding the next is the expensive way to do it. Take them together,
+then re-measure once.
+
+**Ask the human only after real effort, and say which it was.** A number that genuinely will
+not come down below the threshold is a legitimate thing to escalate. *"I refactored around the
+seams and it is still 11"* and *"I did not try"* are different reports, and the second is not an
+escalation.
 
 **Carry `complexity-check`'s exempt list into the final report, ranked, with its total.**
 It is not a footnote — it is the queue for `/slopstop-tickets --refactor <fn>…`, and it is
