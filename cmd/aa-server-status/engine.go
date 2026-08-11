@@ -94,15 +94,25 @@ func (e *RealEngine) serverByName(name string) (config.Server, bool) {
 	return config.Server{}, false
 }
 
+// pidOf returns p's OS pid and true when p is a live child we can observe,
+// else 0, false. One definition of what "we hold a live process" means, so a
+// change to lifecycle.Process's nil-safety contract lands in one place.
+func pidOf(p *lifecycle.Process) (int32, bool) {
+	if p == nil || p.Cmd == nil || p.Cmd.Process == nil {
+		return 0, false
+	}
+	return int32(p.Cmd.Process.Pid), true
+}
+
 // livePID returns the PID and true if we currently hold a live child
 // process for name (registered by a prior Up), else 0, false. Must be
 // called with e.mu held.
 func (e *RealEngine) livePIDLocked(name string) (int32, bool) {
 	p, ok := e.procs[name]
-	if !ok || p.Cmd == nil || p.Cmd.Process == nil {
+	if !ok {
 		return 0, false
 	}
-	return int32(p.Cmd.Process.Pid), true
+	return pidOf(p)
 }
 
 // ============================================================================
@@ -239,12 +249,7 @@ func hostObservationFor(declared []int) observe.TreeObservation {
 }
 
 func firstForeignHolder(m map[int]observe.Identity) observe.Identity {
-	ports := make([]int, 0, len(m))
-	for p := range m {
-		ports = append(ports, p)
-	}
-	sort.Ints(ports)
-	return m[ports[0]]
+	return m[sortedKeys(m)[0]]
 }
 
 func renderPorts(declared []int, class observe.Result) []PortStatus {
@@ -755,7 +760,20 @@ func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 
 	// Deliberately last, and deliberately outside the Health.Declared() branch
 	// above — see pollPortsReady's own comment for both reasons.
-	return e.pollPortsReady(s, proc, time.Until(deadline))
+	//
+	// No live child means there is no tree to observe — the same judgement
+	// livePIDLocked makes about the same state, and not an error. The three real
+	// launch paths cannot reach it: launch() returns an error if the child never
+	// started and upOne returns on that before pollReady runs, so a pid exists
+	// by construction here. It is reachable only from a unit test that
+	// fabricates a Process to exercise the warm-up and health stages without a
+	// subprocess (warm_order_test.go). Deciding it here keeps pollPortsReady
+	// unconditional: given a pid, it verifies.
+	pid, ok := pidOf(proc)
+	if !ok {
+		return nil
+	}
+	return e.pollPortsReady(s, pid, time.Until(deadline))
 }
 
 // pollPortsReady enforces the exact-listen-set contract
@@ -783,25 +801,11 @@ func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 // any kind — `up` reported success on exec not failing — so an early return on
 // Health.Declared() would skip the check for precisely the servers with
 // nothing else watching them.
-func (e *RealEngine) pollPortsReady(s config.Server, proc *lifecycle.Process, budget time.Duration) error {
+func (e *RealEngine) pollPortsReady(s config.Server, pid int32, budget time.Duration) error {
 	declared := lifecycle.DeclaredPorts(s)
 	if len(declared) == 0 {
 		return nil
 	}
-
-	// No live child means there is no tree to observe, which is the same
-	// judgement livePIDLocked makes about the same state — not an error, just
-	// nothing of ours to compare against. The three real launch paths cannot
-	// reach it: launch() returns an error if the child never started, and
-	// upOne returns on that before pollReady runs, so Cmd.Process is non-nil
-	// by construction here. It is reachable only from a unit test that
-	// fabricates a Process to exercise the warm-up and health stages without
-	// a subprocess. The end-to-end Up tests in engine_ports_test.go are what
-	// guard the gate itself, precisely because they use real children.
-	if proc == nil || proc.Cmd == nil || proc.Cmd.Process == nil {
-		return nil
-	}
-	pid := int32(proc.Cmd.Process.Pid)
 
 	deadline := time.Now().Add(budget)
 	interval := resolvePollInterval(e.config().Supervisor)
@@ -815,6 +819,7 @@ func (e *RealEngine) pollPortsReady(s config.Server, proc *lifecycle.Process, bu
 		// One probe always runs, whatever the budget arithmetic says, so a
 		// server is never failed on a non-positive remainder alone. PollReady
 		// makes the same guarantee, for the same reason.
+		probeStart := time.Now()
 		obs, obsErr = observe.TreeListenSet(pid)
 		if obsErr == nil {
 			class = observe.Classify(declared, obs)
@@ -822,16 +827,23 @@ func (e *RealEngine) pollPortsReady(s config.Server, proc *lifecycle.Process, bu
 				return nil
 			}
 		}
+		probeCost := time.Since(probeStart)
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			break
 		}
-		if remaining < interval {
-			time.Sleep(remaining)
-			continue
-		}
-		time.Sleep(interval)
+		// Never sleep less than the probe itself took, so this loop cannot
+		// exceed a 50% duty cycle however the interval is configured.
+		// resolvePollInterval is tuned for health.PollReady's local HTTP
+		// round-trip; a TreeListenSet probe is far more expensive — on darwin
+		// gopsutil has no connections-by-pid syscall and shells out to `lsof`
+		// once per process in the tree, measured at ~100ms for a single-process
+		// tree and scaling with it. At the interval health uses, a server that
+		// is slow to bind would otherwise fork subprocesses back-to-back for
+		// the whole ready_timeout. Backing off by the observed cost adapts to
+		// the real tree size instead of guessing at a second constant.
+		time.Sleep(min(remaining, max(interval, probeCost)))
 	}
 
 	if obsErr != nil {
@@ -849,36 +861,26 @@ func listenSetError(s config.Server, class observe.Result, obs observe.TreeObser
 	var parts []string
 
 	if len(class.Missing) > 0 {
-		missing := append([]int(nil), class.Missing...)
-		sort.Ints(missing)
-		parts = append(parts, fmt.Sprintf("declared %s never started listening", portList(missing)))
+		listed := listPorts(class.Missing, nil)
+		parts = append(parts, fmt.Sprintf("declared %s never started listening", listed))
 	}
 
 	if len(class.Stray) > 0 {
-		stray := append([]int(nil), class.Stray...)
-		sort.Ints(stray)
-		named := make([]string, 0, len(stray))
-		for _, p := range stray {
-			if h, ok := obs.Holders[p]; ok && h.Identity.PID != 0 {
-				named = append(named, fmt.Sprintf("%d (pid %d)", p, h.Identity.PID))
-				continue
+		listed := listPorts(class.Stray, func(p int) (int32, bool) {
+			h, ok := obs.Holders[p]
+			if !ok || h.Identity.PID == 0 {
+				return 0, false
 			}
-			named = append(named, fmt.Sprintf("%d", p))
-		}
-		parts = append(parts, fmt.Sprintf("this server's process tree is listening on undeclared port %s", strings.Join(named, ", ")))
+			return h.Identity.PID, true
+		})
+		parts = append(parts, fmt.Sprintf("this server's process tree is listening on undeclared %s", listed))
 	}
 
 	if len(class.ForeignHolders) > 0 {
-		ports := make([]int, 0, len(class.ForeignHolders))
-		for p := range class.ForeignHolders {
-			ports = append(ports, p)
-		}
-		sort.Ints(ports)
-		named := make([]string, 0, len(ports))
-		for _, p := range ports {
-			named = append(named, fmt.Sprintf("%d (pid %d)", p, class.ForeignHolders[p].PID))
-		}
-		parts = append(parts, fmt.Sprintf("declared port %s is held by a process this supervisor did not start", strings.Join(named, ", ")))
+		listed := listPorts(sortedKeys(class.ForeignHolders), func(p int) (int32, bool) {
+			return class.ForeignHolders[p].PID, true
+		})
+		parts = append(parts, fmt.Sprintf("declared %s held by a process this supervisor did not start", listed))
 	}
 
 	if len(class.Degraded) > 0 {
@@ -891,16 +893,41 @@ func listenSetError(s config.Server, class observe.Result, obs observe.TreeObser
 	return fmt.Errorf("up %s: %s (design §6.2: {port} ∪ listens is exhaustive)", s.Name, strings.Join(parts, "; "))
 }
 
-// portList renders ports for a message, singular or plural to match.
-func portList(ports []int) string {
-	strs := make([]string, len(ports))
-	for i, p := range ports {
-		strs[i] = fmt.Sprintf("%d", p)
+// listPorts renders ports for a prose message, sorted for determinism and
+// pluralized to match: "port 8080", "ports 8080, 8081". When pidFor resolves a
+// PID for a port, it is cited as "8080 (pid 4711)" — naming the holder is what
+// makes an anomaly actionable rather than merely alarming. A nil pidFor names
+// no PIDs, for the cases where there is no holder to name.
+func listPorts(ports []int, pidFor func(port int) (int32, bool)) string {
+	sorted := append([]int(nil), ports...)
+	sort.Ints(sorted)
+
+	named := make([]string, len(sorted))
+	for i, p := range sorted {
+		named[i] = fmt.Sprintf("%d", p)
+		if pidFor == nil {
+			continue
+		}
+		if pid, ok := pidFor(p); ok {
+			named[i] = fmt.Sprintf("%d (pid %d)", p, pid)
+		}
 	}
-	if len(strs) == 1 {
-		return "port " + strs[0]
+
+	if len(named) == 1 {
+		return "port " + named[0]
 	}
-	return "ports " + strings.Join(strs, ", ")
+	return "ports " + strings.Join(named, ", ")
+}
+
+// sortedKeys returns m's port keys in ascending order, so a message built from
+// a map is deterministic.
+func sortedKeys(m map[int]observe.Identity) []int {
+	ports := make([]int, 0, len(m))
+	for p := range m {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+	return ports
 }
 
 // ============================================================================
@@ -1347,8 +1374,8 @@ func (e *RealEngine) TeardownAll() []string {
 	pids := make(map[string]int32, len(e.procs))
 	names := make([]string, 0, len(e.procs))
 	for name, proc := range e.procs {
-		if proc.Cmd != nil && proc.Cmd.Process != nil {
-			pids[name] = int32(proc.Cmd.Process.Pid)
+		if pid, ok := pidOf(proc); ok {
+			pids[name] = pid
 			names = append(names, name)
 		}
 	}
