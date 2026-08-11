@@ -2,7 +2,7 @@
 description: One round of clean-context code review of a diff — find, verify each finding against the real code, apply what survives, report a verdict. Runs in its own forked context so the session that wrote the code never reviews it.
 ---
 
-<!-- GENERATED from slopstop 975aadc by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 90087aa by install-for-project.sh — do not edit.
      Edit skills/review/ in the slopstop repo and re-run. (universal §5) -->
 
 # One round of clean-context review

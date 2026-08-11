@@ -3,7 +3,7 @@ description: Stage 1 of the slopstop process — grill the user to shared unders
 disable-model-invocation: true
 ---
 
-<!-- GENERATED from slopstop 975aadc by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 90087aa by install-for-project.sh — do not edit.
      Edit skills/design/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-design
