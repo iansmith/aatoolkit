@@ -291,6 +291,11 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// channel closes when Run returns, which ends this goroutine.
 	go deliverTranscripts(bridge.Transcripts(), cfg.transcriptChan(start))
 
+	// Drain server events the same way, and for the same reason: bridge.events
+	// is fed synchronously from Run's read loop (which also drives carrier
+	// audio), so a consumer that fell behind must never be able to stall it.
+	go deliverServerEvents(bridge.Events(), cfg.serverEventChan(start))
+
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
 
@@ -398,6 +403,43 @@ func deliverTranscripts(src <-chan realtime.Transcript, out chan<- Transcript) {
 			// transcript from an unspoken word.
 			dropped++
 			log.Printf("twilio: realtime: transcript dropped, consumer is behind (%d dropped on this call)", dropped)
+		}
+	}
+	// out is deliberately NOT closed: the engine did not create it, the consumer
+	// may reuse it across calls, and closing a channel you do not own hands its
+	// receiver a zero value it cannot distinguish from a real one.
+}
+
+// deliverServerEvents drains src, forwarding each event to out if a consumer
+// asked for one. It mirrors deliverTranscripts exactly, for the same reason:
+// src is fed synchronously from Bridge.Run's read loop, which also drives
+// audio to the carrier, so a consumer that fell behind must never be able to
+// stall it.
+//
+// src is Bridge.events, closed when Run returns (see the CAS-guarded defer
+// beside close(b.transcripts) in bridge.go), so the goroutine running this
+// exits on every call ending, no matter what the consumer does or fails to
+// do.
+//
+// With no consumer this is the bare drain it replaced, byte for byte in
+// behaviour.
+func deliverServerEvents(src <-chan realtime.ServerEvent, out chan<- ServerEvent) {
+	if out == nil {
+		for range src {
+		}
+		return
+	}
+
+	var dropped int
+	for ev := range src {
+		select {
+		case out <- ev:
+		default:
+			// The consumer is behind. Drop, and say so: a silently lossy seam is
+			// worse than a lossy one, because the consumer cannot tell an absent
+			// event from one that never happened.
+			dropped++
+			log.Printf("twilio: realtime: server event dropped, consumer is behind (%d dropped on this call)", dropped)
 		}
 	}
 	// out is deliberately NOT closed: the engine did not create it, the consumer

@@ -92,6 +92,11 @@ func (c *Client) Read(ctx context.Context) (ServerEvent, error) {
 	if err := json.Unmarshal(data, &ev); err != nil {
 		return ServerEvent{}, fmt.Errorf("realtime: decoding server event: %w", err)
 	}
+	// Raw must be the verbatim wire bytes, not a re-marshal of ev: a re-marshal
+	// would re-order keys and drop fields this package does not model. Copy
+	// defensively — data is the connection's read buffer and must not be
+	// retained past this call.
+	ev.Raw = append([]byte(nil), data...)
 	return ev, nil
 }
 

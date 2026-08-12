@@ -70,6 +70,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 		return fmt.Errorf("realtime: Run already in progress")
 	}
 	defer close(b.transcripts)
+	// Guarded by the same CAS as the transcripts close above: the loser
+	// returns before either defer is registered, so this can never be a
+	// second close racing the first — see the doc comment above Run.
+	defer close(b.events)
 
 	for {
 		ev, err := b.client.Read(ctx)
@@ -77,6 +81,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 			return fmt.Errorf("realtime: read loop ended: %w", err)
 		}
 		b.signalActivity()
+		b.publishEvent(ctx, ev)
 
 		switch ev.Type {
 		case EventAudioDelta:
@@ -111,11 +116,9 @@ func (b *Bridge) Transcripts() <-chan Transcript {
 
 // Events yields every server event Run reads, including ones its switch does
 // not model (see the default: branch below) — the same coverage Activity
-// documents, carried as data rather than a signal.
-//
-// Phase 0 stub for AATK-81: the channel exists but Run does not yet publish
-// to it, so a consumer never receives anything. That is the sentinel this
-// stub is built to fail against.
+// documents, carried as data rather than a signal. Events are published in
+// arrival order, before the event is dispatched into the switch below, so a
+// modelled event reaches both Events() and its existing destination.
 func (b *Bridge) Events() <-chan ServerEvent {
 	return b.events
 }
@@ -150,6 +153,19 @@ func (b *Bridge) signalActivity() {
 func (b *Bridge) publish(ctx context.Context, tr Transcript) {
 	select {
 	case b.transcripts <- tr:
+	case <-ctx.Done():
+	}
+}
+
+// publishEvent hands ev to Events(), abandoning it if the context ends first
+// so a caller that stops reading cannot wedge the read loop — the same
+// blocking-with-context-abandon discipline as publish, and for the same
+// reason: b.events is the engine-internal buffered channel, not the
+// consumer-facing one (that one is non-blocking-drop-and-log, in the twilio
+// package).
+func (b *Bridge) publishEvent(ctx context.Context, ev ServerEvent) {
+	select {
+	case b.events <- ev:
 	case <-ctx.Done():
 	}
 }
