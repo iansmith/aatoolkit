@@ -8,6 +8,8 @@
 // per 20 ms frame to reproduce the input. Nothing here imports a G.711 codec.
 package realtime
 
+import "encoding/json"
+
 // Client event types (this package -> backend).
 const (
 	EventSessionUpdate = "session.update"
@@ -67,10 +69,17 @@ type audioAppend struct {
 // ServerEvent is one decoded server event, flattened to the fields this
 // package reads. Delta carries base64 audio for EventAudioDelta; Transcript
 // carries text for the transcription events.
+//
+// Raw carries the whole frame exactly as it arrived on the wire, for every
+// event type — including ones this package does not model into Type/Delta/
+// Transcript. It has no json tag mapping any wire field onto it: nothing in
+// the protocol names "the whole document", so Client.Read must assign it
+// explicitly after decoding, from the same bytes it unmarshalled.
 type ServerEvent struct {
-	Type       string `json:"type"`
-	Delta      string `json:"delta,omitempty"`
-	Transcript string `json:"transcript,omitempty"`
+	Type       string          `json:"type"`
+	Delta      string          `json:"delta,omitempty"`
+	Transcript string          `json:"transcript,omitempty"`
+	Raw        json.RawMessage `json:"-"`
 }
 
 // newSessionUpdate builds the handshake declaring G.711 mu-law on BOTH

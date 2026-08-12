@@ -65,12 +65,25 @@ type realtimeConfig struct {
 	instructionsFor func(start Frame) string
 
 	transcriptChanFor func(start Frame) chan<- Transcript
+
+	// serverEventChanFor mirrors transcriptChanFor: resolved per call rather
+	// than stored as a plain channel, for the same reason.
+	//
+	// Phase 0 stub for AATK-81: stored but not yet wired to anything —
+	// HandleStreamRealtime does not read this field. A consumer supplying
+	// WithServerEventChan therefore receives nothing yet.
+	serverEventChanFor func(start Frame) chan<- ServerEvent
 }
 
 // Transcript is one transcription result from the backend, re-exported so a
 // consumer does not have to import telephony/realtime to name the type its
 // channel carries.
 type Transcript = realtime.Transcript
+
+// ServerEvent is one backend server event, re-exported so a consumer does not
+// have to import telephony/realtime to name the type its channel carries. It
+// mirrors Transcript's re-export.
+type ServerEvent = realtime.ServerEvent
 
 // transcriptChan resolves the destination for one call, or nil when the
 // consumer asked for none.
@@ -79,6 +92,15 @@ func (c realtimeConfig) transcriptChan(start Frame) chan<- Transcript {
 		return nil
 	}
 	return c.transcriptChanFor(start)
+}
+
+// serverEventChan resolves the destination for one call, or nil when the
+// consumer asked for none. Mirrors transcriptChan.
+func (c realtimeConfig) serverEventChan(start Frame) chan<- ServerEvent {
+	if c.serverEventChanFor == nil {
+		return nil
+	}
+	return c.serverEventChanFor(start)
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -152,6 +174,37 @@ func WithTranscriptChan(ch chan<- Transcript) RealtimeOption {
 // discards, exactly as with no option at all.
 func WithTranscriptChanFor(fn func(start Frame) chan<- Transcript) RealtimeOption {
 	return func(c *realtimeConfig) { c.transcriptChanFor = fn }
+}
+
+// WithServerEventChan delivers every backend server event to ch, mirroring
+// WithTranscriptChan — including event types this engine does not model into
+// a transcript or a media/clear call, carried with Raw set to the whole frame
+// as it arrived. Without it those events are observed only by Bridge.Activity
+// and otherwise dropped, which is what happens before this existed.
+//
+// The consumer owns ch: its buffer, its reader, and its lifetime. The engine
+// NEVER closes it, so it may be reused across calls and a reader is never
+// handed a spurious zero value.
+//
+// Delivery is non-blocking. When ch is full the event is DROPPED and the drop
+// is logged, for the same reason WithTranscriptChan drops: a slow consumer
+// must never be able to stall the read loop that also drives carrier audio.
+//
+// Phase 0 stub for AATK-81: this stores ch on the config, but
+// HandleStreamRealtime does not yet read it, so no event reaches ch.
+func WithServerEventChan(ch chan<- ServerEvent) RealtimeOption {
+	return WithServerEventChanFor(func(Frame) chan<- ServerEvent { return ch })
+}
+
+// WithServerEventChanFor resolves the destination when the call arrives, from
+// the start frame — so a consumer can route calls to different channels.
+// Mirrors WithTranscriptChanFor.
+//
+// A nil function, or one returning nil, means no consumer.
+//
+// Phase 0 stub for AATK-81: see WithServerEventChan.
+func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOption {
+	return func(c *realtimeConfig) { c.serverEventChanFor = fn }
 }
 
 // WithInstructionsFor resolves the session persona when the call arrives, from

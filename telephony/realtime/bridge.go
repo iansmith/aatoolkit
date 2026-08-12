@@ -35,6 +35,7 @@ type Bridge struct {
 	client      *Client
 	sink        MediaSink
 	transcripts chan Transcript
+	events      chan ServerEvent
 	running     atomic.Bool
 	activity    chan struct{}
 }
@@ -45,6 +46,7 @@ func NewBridge(c *Client, sink MediaSink) *Bridge {
 		client:      c,
 		sink:        sink,
 		transcripts: make(chan Transcript, 16),
+		events:      make(chan ServerEvent, 16),
 		activity:    make(chan struct{}, 1),
 	}
 }
@@ -105,6 +107,17 @@ func (b *Bridge) Run(ctx context.Context) error {
 // closed when Run returns.
 func (b *Bridge) Transcripts() <-chan Transcript {
 	return b.transcripts
+}
+
+// Events yields every server event Run reads, including ones its switch does
+// not model (see the default: branch below) — the same coverage Activity
+// documents, carried as data rather than a signal.
+//
+// Phase 0 stub for AATK-81: the channel exists but Run does not yet publish
+// to it, so a consumer never receives anything. That is the sentinel this
+// stub is built to fail against.
+func (b *Bridge) Events() <-chan ServerEvent {
+	return b.events
 }
 
 // Activity signals once per successful backend read, before that event is
