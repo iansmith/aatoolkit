@@ -120,3 +120,56 @@ func TestClientRead_RawIsByteIdenticalToWireFrame(t *testing.T) {
 			ev.Raw, frame)
 	}
 }
+
+// TestBridgeEvents_PreservesArrivalOrder closes the round-2 major one layer
+// below TestServerEventChan_PreservesArrivalOrder.
+//
+// Transcripts() is documented to yield "transcription results in arrival
+// order". Events() carries the same expectation and had none of the same
+// enforcement: a publish path that dispatched every other event from a
+// short-lived goroutine reordered consecutive events and was accepted by every
+// other test in the suite.
+//
+// slopstop:test contract
+func TestBridgeEvents_PreservesArrivalOrder(t *testing.T) {
+	ids := []string{"first", "second", "third"}
+
+	be := newFakeBackend(t)
+	for _, id := range ids {
+		be.toSend = append(be.toSend, json.RawMessage(
+			`{"type":"`+EventSpeechStopped+`","item_id":"`+id+`"}`))
+	}
+	ctx := testCtx(t)
+
+	c, err := Dial(ctx, be.url())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	b := NewBridge(c, &recordingSink{})
+	go func() { _ = b.Run(ctx) }()
+
+	var got []string
+	for len(got) < len(ids) {
+		select {
+		case ev, ok := <-b.Events():
+			if !ok {
+				t.Fatalf("Events() closed after %d of %d", len(got), len(ids))
+			}
+			var raw map[string]string
+			if err := json.Unmarshal(ev.Raw, &raw); err != nil {
+				t.Fatalf("Raw did not decode as the original frame: %v", err)
+			}
+			got = append(got, raw["item_id"])
+		case <-time.After(3 * time.Second):
+			t.Fatalf("received %d of %d events (%v)", len(got), len(ids), got)
+		}
+	}
+
+	for i := range ids {
+		if got[i] != ids[i] {
+			t.Fatalf("Events() must yield events in arrival order: got %v, want %v", got, ids)
+		}
+	}
+}

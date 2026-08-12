@@ -244,7 +244,10 @@ func TestServerEventChan_NoGoroutineOutlivesCallAndEventsActuallyFlow(t *testing
 //
 // slopstop:test contract
 func TestServerEventChan_DropIsLogged(t *testing.T) {
-	var buf bytes.Buffer
+	// syncBuffer, not bytes.Buffer: drops are logged from the delivery
+	// goroutine, so an unguarded buffer read here is a data race under -race
+	// against any compliant implementation. See realtime_serverevents_gaps_test.go.
+	var buf syncBuffer
 	origOutput := log.Writer()
 	origFlags := log.Flags()
 	log.SetOutput(&buf)
