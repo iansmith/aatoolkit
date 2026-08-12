@@ -467,9 +467,50 @@ func TestBridgeEvents_DropLoggingIsRateBounded(t *testing.T) {
 	if got == 0 {
 		t.Fatal("drops must not be silent: nothing was logged")
 	}
-	if got >= wantDrops {
-		t.Fatalf("drop logging must be rate-bounded: %d lines for ~%d drops. A line per "+
+	// Exactly one, not merely fewer than the drop count: every one of these
+	// drops is below dropLogEvery, so the first is the only line the policy
+	// permits. Measured — a `got >= wantDrops` assertion here passes with
+	// dropLogEvery set to 2, which is 25 lines/second at audio rate and is the
+	// regression this test exists to catch.
+	if got != 1 {
+		t.Fatalf("drop logging must be rate-bounded: %d lines for ~%d drops, want 1. A line per "+
 			"drop is ~50/second at audio rate and writes synchronously on the goroutine "+
 			"driving the MediaSink", got, wantDrops)
+	}
+}
+
+// TestLogDrop pins the policy's arithmetic, and specifically its periodic arm.
+//
+// Review gap, measured: replacing LogDrop's body with `return n == 1` left both
+// packages green, because no test drops as many as dropLogEvery times. That
+// mutation is the one failure the bound must not have — a five-minute call
+// dropping ~15,000 events would report "1 dropped on this call" once and never
+// again, and the running total that makes the aggregate recoverable would be
+// gone. The bound is a deliberate departure from "each drop is logged"; it is
+// only defensible while the total keeps arriving.
+//
+// The wanted values are literals rather than expressions over dropLogEvery: a
+// test deriving its expectation from the constant it is pinning would follow
+// any change to it and assert nothing.
+//
+// slopstop:test contract
+func TestLogDrop(t *testing.T) {
+	cases := []struct {
+		n    int
+		want bool
+	}{
+		{1, true},    // the first drop always surfaces: a lossy call is never wholly invisible
+		{2, false},   // ...and the second does not, or the bound would not bound
+		{99, false},  // just below the period
+		{100, true},  // the periodic arm: the running total arrives again
+		{101, false}, // just past it
+		{199, false},
+		{200, true},   // and keeps arriving, every dropLogEvery-th, for the whole call
+		{15000, true}, // ~a five-minute call's worth of drops at audio rate
+	}
+	for _, c := range cases {
+		if got := LogDrop(c.n); got != c.want {
+			t.Errorf("LogDrop(%d) = %v, want %v", c.n, got, c.want)
+		}
 	}
 }

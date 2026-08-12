@@ -144,8 +144,11 @@ func WithInstructions(text string) RealtimeOption {
 // NEVER closes it, so it may be reused across calls and a reader is never handed
 // a spurious zero value.
 //
-// Delivery is non-blocking. When ch is full the transcript is DROPPED and the
-// drop is logged. That is deliberate rather than a limitation: Bridge.publish
+// Delivery is non-blocking. When ch is full the transcript is DROPPED. Every
+// drop is counted and the count is logged at the bounded rate realtime.LogDrop
+// defines — the first drop of a call and periodically after it, each line
+// carrying the running total. That is deliberate rather than a limitation:
+// Bridge.publish
 // parks the backend read loop when nobody reads, and that loop also drives audio
 // to the carrier, so waiting on a slow consumer would break the call. A late
 // transcript is worth less than unbroken audio.
@@ -182,8 +185,9 @@ func WithTranscriptChanFor(fn func(start Frame) chan<- Transcript) RealtimeOptio
 // NEVER closes it, so it may be reused across calls and a reader is never
 // handed a spurious zero value.
 //
-// Delivery is non-blocking. When ch is full the event is DROPPED and the drop
-// is logged — but not for WithTranscriptChan's reason, and the difference is
+// Delivery is non-blocking. When ch is full the event is DROPPED, counted, and
+// the count logged at realtime.LogDrop's bounded rate as above — but not for
+// WithTranscriptChan's reason, and the difference is
 // worth stating. That one drops because Bridge.publish parks the backend read
 // loop when nobody reads, and that loop also drives carrier audio.
 // Bridge.publishEvent already drops rather than parking, so a blocking send

@@ -133,8 +133,11 @@ func (b *Bridge) Transcripts() <-chan Transcript {
 // Transcripts and a dropped audio delta still reaches the MediaSink.
 //
 // Delivery never blocks Run. A caller that stops draining loses events rather
-// than stalling the call: once the 16-event buffer is full the publish drops,
-// and logs each drop. That is deliberate — every event is published, including
+// than stalling the call: once the 16-event buffer is full the publish drops.
+// Every drop is counted, and the count is logged at a bounded rate — the first
+// drop of a call and every dropLogEvery-th after it, each line carrying the
+// running total, so no loss is invisible and none of it is logged per drop at
+// audio rate. That is deliberate — every event is published, including
 // one audio delta per 20 ms frame, and Run's read loop is also what drives the
 // MediaSink, so a blocking publish would silence audio within ~320 ms of a
 // consumer looking away. The channel is closed when Run returns.

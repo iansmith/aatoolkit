@@ -3,6 +3,7 @@ package twilio
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"sync"
 	"testing"
 	"time"
@@ -165,5 +166,59 @@ func TestServerEventChan_PreservesArrivalOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("events must arrive in the order the backend sent them: got %v, want %v", got, want)
 		}
+	}
+}
+
+// TestDeliver_DropLoggingIsRateBounded pins the drop-log bound at the twilio
+// drain, which no realtime-layer test can reach.
+//
+// Review gap, measured: with the bound removed from deliver's drop branch and
+// left in place at Bridge.publishEvent, the whole twilio suite stayed green.
+// Only telephony/realtime pinned the bound — and this is the seam that actually
+// drops in the shipped path, because the twilio layer drains the Bridge
+// promptly (199 drops here against 0 at the Bridge layer, measured earlier on
+// this branch). Unpinned, it could go back to a line per drop unobserved.
+//
+// deliver is driven directly rather than through a call: the bound is a
+// property of that loop's drop branch, and going through the websocket harness
+// would pin timing instead. src is closed, so deliver returns on its own and
+// the log write happens-before the read.
+//
+// slopstop:test contract
+func TestDeliver_DropLoggingIsRateBounded(t *testing.T) {
+	var buf syncBuffer
+	origOutput, origFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	// out holds one value and nothing ever reads it, so everything past the
+	// first send drops. All 49 drops sit below the bound, which is the
+	// interesting range: a bounded policy logs the first and nothing else.
+	const n = 50
+	const wantDrops = n - 1
+
+	src := make(chan ServerEvent, n)
+	for i := 0; i < n; i++ {
+		src <- ServerEvent{Type: "response.output_item.done"}
+	}
+	close(src)
+	out := make(chan ServerEvent, 1)
+
+	deliver(src, out, "server event")
+
+	// "dropped on this call" identifies one whole line; a bare "dropped"
+	// appears twice in each.
+	got := bytes.Count(buf.Bytes(), []byte("dropped on this call"))
+	if got == 0 {
+		t.Fatalf("drops must not be silent: nothing was logged for %d dropped server events", wantDrops)
+	}
+	if got != 1 {
+		t.Fatalf("drop logging must be rate-bounded at this seam too: %d lines for %d drops, "+
+			"want 1 — the first drop, with the rest below the bound. Unbounded, this is the "+
+			"drain that logs once per drop at audio rate", got, wantDrops)
 	}
 }
