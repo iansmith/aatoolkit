@@ -417,9 +417,13 @@ func deliver[T any](src <-chan T, out chan<- T, what string) {
 		default:
 			// The consumer is behind. Drop, and say so: a silently lossy seam is
 			// worse than a lossy one, because the consumer cannot tell an absent
-			// value from one that never happened.
+			// value from one that never happened. Rate-bounded for the reason
+			// realtime.LogDrop documents — every drop is counted and every line
+			// carries the running total, so nothing is silent in aggregate.
 			dropped++
-			log.Printf("twilio: realtime: %s dropped, consumer is behind (%d dropped on this call)", what, dropped)
+			if realtime.LogDrop(dropped) {
+				log.Printf("twilio: realtime: %s dropped, consumer is behind (%d dropped on this call)", what, dropped)
+			}
 		}
 	}
 	// out is deliberately NOT closed: the engine did not create it, the consumer

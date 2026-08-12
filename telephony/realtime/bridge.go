@@ -176,6 +176,26 @@ func (b *Bridge) publish(ctx context.Context, tr Transcript) {
 	}
 }
 
+// dropLogEvery bounds how often a drop is logged. Every drop is COUNTED and
+// every line carries the running total, so nothing is silent in aggregate —
+// but a line per drop is not survivable here.
+//
+// Events carries one audio delta per 20 ms frame, and Events() is new, so every
+// existing direct Bridge consumer is undrained by construction: after the first
+// 16 events, every event is a drop. Unbounded, that is ~50 lines/second and
+// roughly 15,000 for a five-minute call. Worse than the volume, log.Printf takes
+// a mutex and writes synchronously on Run's goroutine — the one driving the
+// MediaSink — so a slow or blocked stderr stalls audio, which is precisely the
+// failure mode the non-blocking publish was introduced to remove.
+const dropLogEvery = 100
+
+// LogDrop reports whether the nth drop of a call should be logged: the first
+// one always, then every dropLogEvery-th. Exported so the twilio drain applies
+// one policy rather than a second copy of it (universal §5).
+func LogDrop(n int) bool {
+	return n == 1 || n%dropLogEvery == 0
+}
+
 // publishEvent hands ev to Events() without ever blocking Run's read loop.
 //
 // Non-blocking-with-drop, matching signalActivity rather than publish, and the
@@ -197,7 +217,9 @@ func (b *Bridge) publishEvent(ev ServerEvent) {
 	case b.events <- ev:
 	default:
 		b.eventsDropped++
-		log.Printf("realtime: server event dropped, consumer is behind (%d dropped on this call)",
-			b.eventsDropped)
+		if LogDrop(b.eventsDropped) {
+			log.Printf("realtime: server event dropped, consumer is behind (%d dropped on this call)",
+				b.eventsDropped)
+		}
 	}
 }

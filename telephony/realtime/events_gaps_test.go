@@ -401,3 +401,75 @@ func TestBridgeEvents_DropIsLogged(t *testing.T) {
 		t.Fatalf("a dropped server event must be logged, not silent; log output: %q", buf.Bytes())
 	}
 }
+
+// TestBridgeEvents_DropLoggingIsRateBounded pins the bound on the drop log.
+//
+// Stage-10b round 3 reported it as a major behavioural finding: Events() is
+// new, so every existing direct Bridge consumer is undrained by construction,
+// and after the first 16 events every event is a drop. A line per drop is
+// ~50/second at one audio delta per 20 ms frame — roughly 15,000 for a
+// five-minute call — and log.Printf writes synchronously under a mutex on
+// Run's goroutine, the one driving the MediaSink, so a slow stderr stalls
+// audio. That is the failure mode the non-blocking publish exists to remove,
+// arriving through the logging that replaced it.
+//
+// The bound must not make drops silent: every drop is still counted and every
+// line carries the running total. This test pins both halves — that something
+// is logged, and that it is not one line per drop.
+//
+// slopstop:test contract
+func TestBridgeEvents_DropLoggingIsRateBounded(t *testing.T) {
+	var buf syncLogBuffer
+	origOutput, origFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	// 40 events against a 16-slot buffer that nothing drains: 24 drops, well
+	// under dropLogEvery, so a bounded policy logs exactly the first one.
+	const n = 40
+	const wantDrops = n - 16
+
+	delta := frameB64()
+	be := newFakeBackend(t)
+	for i := 0; i < n; i++ {
+		be.toSend = append(be.toSend, ServerEvent{Type: EventAudioDelta, Delta: delta})
+	}
+	ctx := testCtx(t)
+
+	c, err := Dial(ctx, be.url())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	sink := &recordingSink{}
+	b := NewBridge(c, sink)
+	go func() { _ = b.Run(ctx) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if media, _ := sink.snapshot(); len(media) == n {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if media, _ := sink.snapshot(); len(media) != n {
+		t.Fatalf("sink received %d of %d media frames; the drop path was never exercised", len(media), n)
+	}
+
+	// "dropped on this call" appears once per line; a bare "dropped" appears
+	// twice, so count the phrase that identifies a whole line.
+	got := bytes.Count(buf.Bytes(), []byte("dropped on this call"))
+	if got == 0 {
+		t.Fatal("drops must not be silent: nothing was logged")
+	}
+	if got >= wantDrops {
+		t.Fatalf("drop logging must be rate-bounded: %d lines for ~%d drops. A line per "+
+			"drop is ~50/second at audio rate and writes synchronously on the goroutine "+
+			"driving the MediaSink", got, wantDrops)
+	}
+}
