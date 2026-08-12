@@ -731,12 +731,26 @@ func (e *RealEngine) warmUp(s config.Server, proc *lifecycle.Process, budget tim
 // ready twice: giving each stage the full budget would let a server declaring
 // 180s take 540s before `up` reports anything, which is neither what the knob
 // says nor what an operator watching a REPL would assume.
+//
+// The port verdict always wins when it has one to render — not only on the
+// path where warm-up and health both succeed. If warm-up or health fails
+// first, that looks identical from the port check's point of view to health
+// never having been declared at all: either way, ports have to be observed to
+// know whether the declared set ever appeared. A warm-up or health failure
+// that turns out to be caused by a declared port never binding — the server
+// never started listening, so nothing it needed to warm up or answer health
+// checks on was ever there — should be reported as the missing port, not as
+// "did not become healthy", which sends an operator looking at the wrong
+// layer. Both early-return sites below route through pollPortsVerdict, which
+// renders the same pollPortsReady call the unconditional tail path always
+// made and lets it override the stage error; the stage error survives only
+// when the ports are fine or there is no live child to observe.
 func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 	sup := e.config().Supervisor
 	deadline := time.Now().Add(resolveReadyTimeout(s, sup))
 
 	if err := e.warmUp(s, proc, time.Until(deadline)); err != nil {
-		return err
+		return e.pollPortsVerdict(s, proc, deadline, err)
 	}
 
 	if s.Health.Declared() {
@@ -754,26 +768,45 @@ func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 			LogPath:      proc.LogPath,
 		}
 		if _, err := health.PollReady(context.Background(), cfg); err != nil {
-			return err
+			return e.pollPortsVerdict(s, proc, deadline, err)
 		}
 	}
 
 	// Deliberately last, and deliberately outside the Health.Declared() branch
 	// above — see pollPortsReady's own comment for both reasons.
-	//
-	// No live child means there is no tree to observe — the same judgement
-	// livePIDLocked makes about the same state, and not an error. The three real
-	// launch paths cannot reach it: launch() returns an error if the child never
-	// started and upOne returns on that before pollReady runs, so a pid exists
-	// by construction here. It is reachable only from a unit test that
-	// fabricates a Process to exercise the warm-up and health stages without a
-	// subprocess (warm_order_test.go). Deciding it here keeps pollPortsReady
-	// unconditional: given a pid, it verifies.
+	return e.pollPortsVerdict(s, proc, deadline, nil)
+}
+
+// pollPortsVerdict is the single decision point pollReady's three exits — the
+// warm-up early return, the health early return, and the unconditional tail
+// — all route through, so the port verdict is rendered the same way and can
+// win the same way regardless of which stage failed or how much of the
+// shared budget it spent getting there.
+//
+// stageErr is the fallback: the error of whichever stage failed first
+// (warm-up or health), or nil on the path where both succeeded (or were
+// never declared). It is what pollPortsVerdict returns when pollPortsReady
+// has nothing to say — either because the exact-listen-set check itself
+// passes, so the failure genuinely was the earlier stage's and not a missing
+// port, or because there is no live PID to check against at all.
+//
+// No live child means there is no tree to observe — the same judgement
+// livePIDLocked makes about the same state, and not a new error on top of
+// stageErr. The three real launch paths cannot reach it: launch() returns an
+// error if the child never started and upOne returns on that before
+// pollReady runs, so a pid exists by construction here. It is reachable only
+// from a unit test that fabricates a Process to exercise the warm-up and
+// health stages without a subprocess (warm_order_test.go). Deciding it here
+// keeps pollPortsReady itself unconditional: given a pid, it verifies.
+func (e *RealEngine) pollPortsVerdict(s config.Server, proc *lifecycle.Process, deadline time.Time, stageErr error) error {
 	pid, ok := pidOf(proc)
 	if !ok {
-		return nil
+		return stageErr
 	}
-	return e.pollPortsReady(s, pid, time.Until(deadline))
+	if err := e.pollPortsReady(s, pid, time.Until(deadline)); err != nil {
+		return err
+	}
+	return stageErr
 }
 
 // pollPortsReady enforces the exact-listen-set contract
@@ -801,6 +834,15 @@ func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 // any kind — `up` reported success on exec not failing — so an early return on
 // Health.Declared() would skip the check for precisely the servers with
 // nothing else watching them.
+//
+// It runs, too, when warm-up or health has already failed — the only caller
+// of this function is pollPortsVerdict, invoked from both of pollReady's
+// early-return sites as well as its unconditional tail. A warm-up
+// or health failure caused by a declared port never binding looks, from
+// here, exactly like the "no health declared" case above: either way this is
+// the only stage that can tell the difference between "the server is merely
+// slow" and "the server never bound what it declared". Skipping the check on
+// an earlier stage's error would leave exactly that distinction unreported.
 func (e *RealEngine) pollPortsReady(s config.Server, pid int32, budget time.Duration) error {
 	declared := lifecycle.DeclaredPorts(s)
 	if len(declared) == 0 {
