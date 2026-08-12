@@ -68,10 +68,6 @@ type realtimeConfig struct {
 
 	// serverEventChanFor mirrors transcriptChanFor: resolved per call rather
 	// than stored as a plain channel, for the same reason.
-	//
-	// Phase 0 stub for AATK-81: stored but not yet wired to anything —
-	// HandleStreamRealtime does not read this field. A consumer supplying
-	// WithServerEventChan therefore receives nothing yet.
 	serverEventChanFor func(start Frame) chan<- ServerEvent
 }
 
@@ -189,9 +185,6 @@ func WithTranscriptChanFor(fn func(start Frame) chan<- Transcript) RealtimeOptio
 // Delivery is non-blocking. When ch is full the event is DROPPED and the drop
 // is logged, for the same reason WithTranscriptChan drops: a slow consumer
 // must never be able to stall the read loop that also drives carrier audio.
-//
-// Phase 0 stub for AATK-81: this stores ch on the config, but
-// HandleStreamRealtime does not yet read it, so no event reaches ch.
 func WithServerEventChan(ch chan<- ServerEvent) RealtimeOption {
 	return WithServerEventChanFor(func(Frame) chan<- ServerEvent { return ch })
 }
@@ -201,8 +194,6 @@ func WithServerEventChan(ch chan<- ServerEvent) RealtimeOption {
 // Mirrors WithTranscriptChanFor.
 //
 // A nil function, or one returning nil, means no consumer.
-//
-// Phase 0 stub for AATK-81: see WithServerEventChan.
 func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOption {
 	return func(c *realtimeConfig) { c.serverEventChanFor = fn }
 }
