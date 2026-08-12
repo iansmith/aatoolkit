@@ -278,14 +278,21 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	backendDone := make(chan error, 1)
 	go func() { backendDone <- bridge.Run(runCtx) }()
 
+	// Start the server-event drain FIRST, ahead of the transcript one. Order
+	// matters here and is not cosmetic: both destinations are resolved by
+	// consumer code on this goroutine (WithTranscriptChanFor and
+	// WithServerEventChanFor exist to let a consumer route per call), so
+	// whichever is resolved first delays the drain spawned after it by however
+	// long that consumer takes. bridge.Events() is fed for EVERY backend event,
+	// so its 16-slot buffer fills in roughly 320 ms of audio deltas, after which
+	// Run parks on the publish and carrier audio stops. Transcripts have no such
+	// urgency — they arrive per utterance, not per 20 ms frame — so they are the
+	// safe one to make wait.
+	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event")
+
 	// Drain transcripts so a full channel can never wedge the read loop. The
 	// channel closes when Run returns, which ends this goroutine.
-	go deliverTranscripts(bridge.Transcripts(), cfg.transcriptChan(start))
-
-	// Drain server events the same way, and for the same reason: bridge.events
-	// is fed synchronously from Run's read loop (which also drives carrier
-	// audio), so a consumer that fell behind must never be able to stall it.
-	go deliverServerEvents(bridge.Events(), cfg.serverEventChan(start))
+	go deliver(bridge.Transcripts(), cfg.transcriptChan(start), "transcript")
 
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
@@ -362,22 +369,26 @@ func (g *idleGuard) stop() {
 	}
 }
 
-// deliverTranscripts drains src, forwarding each result to out if a consumer
-// asked for one. It never blocks and it never runs consumer code, which is the
-// whole design.
+// deliver drains src, forwarding each value to out if a consumer asked for
+// one. It never blocks and it never runs consumer code, which is the whole
+// design. One function serves both consumer-facing channels on this path —
+// transcripts and server events — because the discipline is the same one, and
+// two copies of it would be two places for a fix to have to land.
 //
-// src is fed by Bridge.publish, which parks Run's read loop when nobody is
-// reading, and that loop also drives audio to the carrier — so a consumer that
-// fell behind would break the caller's audio. Hence the non-blocking send and
-// the drop.
+// what names the payload in the drop log ("transcript", "server event"), which
+// is the only thing that differs between the two.
+//
+// src is fed from Bridge.Run's read loop, which parks when nobody is reading
+// and which also drives audio to the carrier — so a consumer that fell behind
+// would break the caller's audio. Hence the non-blocking send and the drop.
 //
 // The goroutine running this blocks only on src, which Run closes, and on a
 // select that always has a default. It therefore exits on every call ending, no
 // matter what the consumer does or fails to do.
 //
-// With no consumer this is the bare drain it replaced, byte for byte in
-// behaviour.
-func deliverTranscripts(src <-chan realtime.Transcript, out chan<- Transcript) {
+// With no consumer this is a bare drain: byte for byte the behaviour of a call
+// supplying no channel option at all.
+func deliver[T any](src <-chan T, out chan<- T, what string) {
 	if out == nil {
 		for range src {
 		}
@@ -385,52 +396,15 @@ func deliverTranscripts(src <-chan realtime.Transcript, out chan<- Transcript) {
 	}
 
 	var dropped int
-	for tr := range src {
+	for v := range src {
 		select {
-		case out <- tr:
+		case out <- v:
 		default:
 			// The consumer is behind. Drop, and say so: a silently lossy seam is
 			// worse than a lossy one, because the consumer cannot tell an absent
-			// transcript from an unspoken word.
+			// value from one that never happened.
 			dropped++
-			log.Printf("twilio: realtime: transcript dropped, consumer is behind (%d dropped on this call)", dropped)
-		}
-	}
-	// out is deliberately NOT closed: the engine did not create it, the consumer
-	// may reuse it across calls, and closing a channel you do not own hands its
-	// receiver a zero value it cannot distinguish from a real one.
-}
-
-// deliverServerEvents drains src, forwarding each event to out if a consumer
-// asked for one. It mirrors deliverTranscripts exactly, for the same reason:
-// src is fed synchronously from Bridge.Run's read loop, which also drives
-// audio to the carrier, so a consumer that fell behind must never be able to
-// stall it.
-//
-// src is Bridge.events, closed when Run returns (see the CAS-guarded defer
-// beside close(b.transcripts) in bridge.go), so the goroutine running this
-// exits on every call ending, no matter what the consumer does or fails to
-// do.
-//
-// With no consumer this is the bare drain it replaced, byte for byte in
-// behaviour.
-func deliverServerEvents(src <-chan realtime.ServerEvent, out chan<- ServerEvent) {
-	if out == nil {
-		for range src {
-		}
-		return
-	}
-
-	var dropped int
-	for ev := range src {
-		select {
-		case out <- ev:
-		default:
-			// The consumer is behind. Drop, and say so: a silently lossy seam is
-			// worse than a lossy one, because the consumer cannot tell an absent
-			// event from one that never happened.
-			dropped++
-			log.Printf("twilio: realtime: server event dropped, consumer is behind (%d dropped on this call)", dropped)
+			log.Printf("twilio: realtime: %s dropped, consumer is behind (%d dropped on this call)", what, dropped)
 		}
 	}
 	// out is deliberately NOT closed: the engine did not create it, the consumer

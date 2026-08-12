@@ -59,12 +59,16 @@ func (b *Bridge) Forward(ctx context.Context, payload string) error {
 
 // Run reads server events until the connection ends or ctx is cancelled,
 // driving the sink: audio deltas become Media, speech starts become Clear,
-// and transcripts are published on Transcripts. It always returns a non-nil
-// error describing why it stopped — a backend that goes away is a fact the
-// caller must see, never a silent return.
+// and transcripts are published on Transcripts. Every event, of every type, is
+// also published on Events — which the caller must drain, or this loop parks
+// and the sink goes quiet; see Events. It always returns a non-nil error
+// describing why it stopped — a backend that goes away is a fact the caller
+// must see, never a silent return.
 // A second concurrent Run is refused rather than allowed to proceed: two
 // readers on one connection is undefined, and the loser would panic closing an
-// already-closed transcript channel on the way out.
+// already-closed channel on the way out — both Transcripts and Events are
+// closed here, so there are now two ways for that to go wrong and one guard
+// covering both.
 func (b *Bridge) Run(ctx context.Context) error {
 	if !b.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("realtime: Run already in progress")
@@ -115,10 +119,19 @@ func (b *Bridge) Transcripts() <-chan Transcript {
 }
 
 // Events yields every server event Run reads, including ones its switch does
-// not model (see the default: branch below) — the same coverage Activity
+// not model (see the default: branch in Run above) — the same coverage Activity
 // documents, carried as data rather than a signal. Events are published in
-// arrival order, before the event is dispatched into the switch below, so a
+// arrival order, before the event is dispatched into Run's switch, so a
 // modelled event reaches both Events() and its existing destination.
+//
+// A CALLER THAT STARTS Run MUST DRAIN THIS CHANNEL. Unlike Activity, which
+// coalesces and never blocks, the publish behind Events blocks once the
+// 16-event buffer is full and only abandons the event when ctx ends — see
+// publishEvent. Because every event is published, including one audio delta
+// per 20 ms frame, an undrained Events parks Run's read loop after roughly
+// 320 ms, and that loop is also what drives the MediaSink: audio to the caller
+// stops, silently, with Run neither returning nor erroring. The channel is
+// closed when Run returns.
 func (b *Bridge) Events() <-chan ServerEvent {
 	return b.events
 }
@@ -157,12 +170,18 @@ func (b *Bridge) publish(ctx context.Context, tr Transcript) {
 	}
 }
 
-// publishEvent hands ev to Events(), abandoning it if the context ends first
-// so a caller that stops reading cannot wedge the read loop — the same
-// blocking-with-context-abandon discipline as publish, and for the same
-// reason: b.events is the engine-internal buffered channel, not the
-// consumer-facing one (that one is non-blocking-drop-and-log, in the twilio
-// package).
+// publishEvent hands ev to Events(), abandoning it only if the context ends
+// first — the same blocking-with-context-abandon discipline as publish.
+//
+// Note what that does and does not buy. It bounds the wedge by the call's
+// lifetime rather than preventing it: until ctx ends, a full b.events parks
+// this loop, and this loop is the one driving the MediaSink. b.events is NOT
+// engine-internal — Events() exports it, and telephony/realtime is public API
+// a consumer may drive directly — so "the caller drains it" is a real
+// obligation on that consumer, documented on Events. What is engine-internal
+// is the twilio package's drain of it, which is where the non-blocking
+// drop-and-log lives; a consumer going through telephony/twilio never sees
+// this channel and inherits no obligation.
 func (b *Bridge) publishEvent(ctx context.Context, ev ServerEvent) {
 	select {
 	case b.events <- ev:
