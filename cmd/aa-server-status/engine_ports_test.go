@@ -337,3 +337,101 @@ func TestPollReady_PortVerdictStillRendersAfterWarmUpTimesOut(t *testing.T) {
 		t.Fatalf("pollReady took %s to report a never-binding port — expected materially less than the 5s ready timeout testSupervisor declares", elapsed)
 	}
 }
+
+// TestPollReady_PortVerdictStillRendersAfterWarmUpFastRejects pins a second,
+// structurally distinct way into the same early-return at engine.go:738-740
+// as the sibling TestPollReady_PortVerdictStillRendersAfterWarmUpTimesOut.
+// That sibling pins the *slow* warm-up failure — POST /warm answering 500,
+// which internal/health's warm loop retries until the ready-timeout budget
+// is exhausted. A stage-7 adversary round proved by mutation that this only
+// pins the slow path: a plausible scoped fix — fall through to the port
+// check only once the remaining budget is exhausted, otherwise return the
+// warm-up error as before — makes that test pass while leaving a second
+// path through the same early return broken.
+//
+// The second path is fast rejection. isWarmRequestRejected
+// (internal/health/health.go:360-366) treats a plain 4xx — anything except
+// 408 and 429 — as "the server understood and refused, not pending", so
+// health.Warm returns immediately, in ~1-2ms, with no retry and no budget
+// exhaustion. A budget-gated fix keys off the ready-timeout deadline, which
+// a fast rejection never approaches, so it would still return this error
+// straight through the early return and never reach pollPortsReady.
+// Pinning both paths is the only way to close the early-return gap for
+// real, rather than for whichever failure mode happens to get exercised.
+//
+// Mirrors the sibling exactly but for the fixture's /warm handler: it
+// answers 404 (a plain 4xx, not 408/429) instead of 500, so
+// isWarmRequestRejected reports true and health.Warm returns on its first
+// probe instead of retrying. Health is left undeclared for the same reason
+// the sibling states: TestPollReady_HealthNeverProbedIfWarmFails
+// (warm_order_test.go) already pins that a failing warm-up means health is
+// never probed, so declaring one here would add a second possible source
+// for the error without changing what actually happens.
+//
+// slopstop:test contract
+func TestPollReady_PortVerdictStillRendersAfterWarmUpFastRejects(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	host, warmPort := recordingServer(t, &order, &mu, map[string]int{"POST /warm": http.StatusNotFound})
+
+	missing := freeTestPort(t)
+
+	// A real, running process that binds no ports at all. pollPortsReady
+	// walks its process tree via the real internal/observe package and
+	// finds nothing listening — exactly the observation a server that
+	// declared a port it never bound would produce.
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting harmless subprocess: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	proc := &lifecycle.Process{Cmd: cmd, LogPath: "port-verdict-warmup-fastreject.log"}
+
+	sup := testSupervisor(t)
+	sup.ReadyTimeout = config.Duration{Duration: 150 * time.Millisecond}
+	sup.PollInterval = config.Duration{Duration: 20 * time.Millisecond}
+	eng := NewEngine(config.Config{Supervisor: sup}, nil, nil)
+
+	s := config.Server{
+		Name:    "svc",
+		Type:    config.TypeExec,
+		Enabled: true,
+		Host:    host,
+		Listens: []int{missing},
+		// Warm.Port is set explicitly rather than left to default from
+		// s.Port, so s.Port stays 0 and does not itself become a declared
+		// port (lifecycle.DeclaredPorts treats a nonzero s.Port as
+		// declared) — mirroring how the sibling test keeps Health.Port
+		// separate from s.Listens.
+		Warm: config.Warm{Method: "POST", Path: "/warm", Port: warmPort},
+		// No Health: see the doc comment above for why this is what makes
+		// the failure unambiguously warm-up's.
+	}
+
+	start := time.Now()
+	err := eng.pollReady(s, proc)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected pollReady to fail: the declared port never bound and warm-up was rejected")
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(missing)) {
+		t.Fatalf("expected the error to name the missing port %d even though warm-up rejected immediately, got: %v", missing, err)
+	}
+
+	// Tight on purpose, unlike the sibling's 8x: this path exhausts no
+	// budget at all. isWarmRequestRejected fires on the first probe, so
+	// health.Warm returns in ~1-2ms rather than retrying until
+	// ready_timeout elapses, and pollPortsReady then runs exactly one
+	// lsof-backed port probe. The observed cost is therefore one immediate
+	// rejection plus one port probe — nothing here waits out
+	// sup.ReadyTimeout (150ms). 2*sup.ReadyTimeout (300ms) is generous
+	// headroom over that, while still being materially tighter than the
+	// sibling's 8x (1.2s): a fixer who "solves" the fast-reject case by
+	// making it wait out the budget like the slow one — e.g. gating the
+	// early return on the deadline instead of on the error itself — blows
+	// through this bound even though it would still pass the sibling's.
+	if elapsed > 2*sup.ReadyTimeout.Duration {
+		t.Fatalf("pollReady took %s to report a never-binding port after an immediate warm-up rejection — expected well under the 150ms ready timeout testSupervisor declares here, not a wait for it to elapse", elapsed)
+	}
+}
