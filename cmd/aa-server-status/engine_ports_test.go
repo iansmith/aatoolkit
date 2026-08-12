@@ -248,3 +248,92 @@ func TestPollReady_PortVerdictStillRendersAfterHealthTimesOut(t *testing.T) {
 		t.Fatalf("pollReady took %s to report a never-binding port — expected materially less than the 5s default ready timeout", elapsed)
 	}
 }
+
+// TestPollReady_PortVerdictStillRendersAfterWarmUpTimesOut pins the sibling
+// defect to the one pinned above, at pollReady's other early-return branch:
+// the warm-up stage (engine.go:738-740) returns immediately on its own
+// error, so the port-check stage that would name a missing declared port
+// never runs. A stage-7 adversary round proved by mutation that this branch
+// carries the structurally identical bug and was untested; the ticket owner
+// has ruled it in scope.
+//
+// This test pins the ordering deterministically instead of racing
+// contention, exactly as the sibling test does: warm-up is made to fail on
+// *every* probe (not merely slow to succeed), and the process
+// pollPortsReady inspects is a real, harmless subprocess that never binds
+// any port — so "the declared port never appeared" is guaranteed, not
+// timing-dependent. The only thing timing governs is how long the warm-up
+// stage's own configured ready_timeout takes to elapse.
+//
+// Health is deliberately left undeclared, which is what makes the failure
+// unambiguously the warm-up stage's: TestPollReady_HealthNeverProbedIfWarmFails
+// (warm_order_test.go) pins that a failing warm-up means health is never
+// probed at all, so declaring a health check here would add a second
+// possible source for the error without changing what actually happens.
+// With no health declared, the only way pollReady can return an error here
+// is warm-up failing.
+//
+// slopstop:test contract
+func TestPollReady_PortVerdictStillRendersAfterWarmUpTimesOut(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	host, warmPort := recordingServer(t, &order, &mu, map[string]int{"POST /warm": http.StatusInternalServerError})
+
+	missing := freeTestPort(t)
+
+	// A real, running process that binds no ports at all. pollPortsReady
+	// walks its process tree via the real internal/observe package and
+	// finds nothing listening — exactly the observation a server that
+	// declared a port it never bound would produce.
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting harmless subprocess: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	proc := &lifecycle.Process{Cmd: cmd, LogPath: "port-verdict-warmup.log"}
+
+	sup := testSupervisor(t)
+	sup.ReadyTimeout = config.Duration{Duration: 150 * time.Millisecond}
+	sup.PollInterval = config.Duration{Duration: 20 * time.Millisecond}
+	eng := NewEngine(config.Config{Supervisor: sup}, nil, nil)
+
+	s := config.Server{
+		Name:    "svc",
+		Type:    config.TypeExec,
+		Enabled: true,
+		Host:    host,
+		Listens: []int{missing},
+		// Warm.Port is set explicitly rather than left to default from
+		// s.Port, so s.Port stays 0 and does not itself become a declared
+		// port (lifecycle.DeclaredPorts treats a nonzero s.Port as
+		// declared) — mirroring how the sibling test keeps Health.Port
+		// separate from s.Listens.
+		Warm: config.Warm{Method: "POST", Path: "/warm", Port: warmPort},
+		// No Health: see the doc comment above for why this is what makes
+		// the failure unambiguously warm-up's.
+	}
+
+	start := time.Now()
+	err := eng.pollReady(s, proc)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected pollReady to fail: the declared port never bound and warm-up never succeeded")
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(missing)) {
+		t.Fatalf("expected the error to name the missing port %d even though warm-up timed out first, got: %v", missing, err)
+	}
+
+	// Bounded per the ticket's DoD, scaled to the configured ready_timeout
+	// rather than a hardcoded absolute. sup.ReadyTimeout is 150ms here, so
+	// the bound is 8*150ms = 1.2s. The sibling health-stage test's observed
+	// cost under CPU contention is ~0.3s (one warm-up budget plus one
+	// lsof-backed port probe), so 1.2s is roughly 4x that observed headroom
+	// while staying materially less than the 5s ready timeout
+	// testSupervisor declares (engine_test.go:43) — not "the 5s default",
+	// which is config.DefaultReadyTimeout (15s, config/types.go:32) and is
+	// out of scope for this ticket.
+	if elapsed > 8*sup.ReadyTimeout.Duration {
+		t.Fatalf("pollReady took %s to report a never-binding port — expected materially less than the 5s ready timeout testSupervisor declares", elapsed)
+	}
+}
