@@ -419,19 +419,26 @@ func TestPollReady_PortVerdictStillRendersAfterWarmUpFastRejects(t *testing.T) {
 		t.Fatalf("expected the error to name the missing port %d even though warm-up rejected immediately, got: %v", missing, err)
 	}
 
-	// Tight on purpose, unlike the sibling's 8x: this path exhausts no
-	// budget at all. isWarmRequestRejected fires on the first probe, so
-	// health.Warm returns in ~1-2ms rather than retrying until
-	// ready_timeout elapses, and pollPortsReady then runs exactly one
-	// lsof-backed port probe. The observed cost is therefore one immediate
-	// rejection plus one port probe — nothing here waits out
-	// sup.ReadyTimeout (150ms). 2*sup.ReadyTimeout (300ms) is generous
-	// headroom over that, while still being materially tighter than the
-	// sibling's 8x (1.2s): a fixer who "solves" the fast-reject case by
-	// making it wait out the budget like the slow one — e.g. gating the
-	// early return on the deadline instead of on the error itself — blows
-	// through this bound even though it would still pass the sibling's.
-	if elapsed > 2*sup.ReadyTimeout.Duration {
-		t.Fatalf("pollReady took %s to report a never-binding port after an immediate warm-up rejection — expected well under the 150ms ready timeout testSupervisor declares here, not a wait for it to elapse", elapsed)
+	// Matches the sibling's 8x, not the tighter bound this test used to
+	// carry. That original bound assumed this path "exhausts no budget at
+	// all" because isWarmRequestRejected fires on the first probe and
+	// health.Warm returns in ~1-2ms — true for the warm-up leg, but the
+	// premise stopped there. The pattern-consistent fix for the
+	// early-return gap (extending pollReady's existing
+	// e.pollPortsReady(s, pid, time.Until(deadline)) call to both early
+	// returns) still runs the *same* pollPortsReady this path always ran,
+	// which guarantees one unconditional probe "whatever the budget
+	// arithmetic says" (see pollPortsReady's own comment) and, on darwin,
+	// pays the same ~100ms lsof-backed process-tree probe every port check
+	// pays. A stage-7 adversary round proved the old 2x (300ms) bound too
+	// tight by mutation under exactly that fix: 0.26s measured across 8
+	// idle runs — already 87% of the bound with no contention — then a
+	// FAIL at 313.75ms under induced full-suite load. 8x (1.2s at this
+	// test's 150ms ReadyTimeout) absorbs that overshoot with real margin
+	// and remains well under the 5s ready timeout testSupervisor declares,
+	// while still failing a fixer who "solves" fast-reject by waiting out
+	// the full deadline before attempting the port check.
+	if elapsed > 8*sup.ReadyTimeout.Duration {
+		t.Fatalf("pollReady took %s to report a never-binding port after an immediate warm-up rejection — expected well under 8x the 150ms ready timeout testSupervisor declares here (the warm-up leg is fast, but the port-check leg pays the same lsof probe cost every port check pays), not a wait for the budget to elapse", elapsed)
 	}
 }
