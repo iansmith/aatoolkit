@@ -3,6 +3,7 @@ package realtime
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -195,6 +196,126 @@ func TestBridgeEvents_PreservesArrivalOrder(t *testing.T) {
 	for i := range ids {
 		if got[i] != ids[i] {
 			t.Fatalf("Events() must yield events in arrival order: got %v, want %v", got, ids)
+		}
+	}
+}
+
+// --- pinning tests: stage-9 mutation-check --implemented ------------------------
+//
+// The pinning pass mutates the REAL implementation and asks what the suite
+// notices. Three production behaviours survived every mutation. The two below
+// close the two that can be pinned through the public API.
+
+// TestBridgeEvents_ClosedWhenRunReturns pins `defer close(b.events)`.
+//
+// Removing that defer leaks the twilio-side deliverServerEvents goroutine on
+// EVERY call — its `for ev := range src` never returns. The differential
+// goroutine test cannot see it: the leak fires identically with and without a
+// consumer, so both arms grow equally and the difference stays zero. That is
+// precisely the shape a differential measurement is blind to, and it left the
+// ticket's own "no engine goroutine outlives a call" item unguarded against
+// the one bug most likely to break it.
+//
+// Transcripts() has had this guarantee since before the ticket ("The channel
+// is closed when Run returns"); Events() now states it and this enforces it.
+//
+// slopstop:test contract
+func TestBridgeEvents_ClosedWhenRunReturns(t *testing.T) {
+	be := newFakeBackend(t)
+	be.toSend = []any{ServerEvent{Type: EventSpeechStopped}}
+	ctx := testCtx(t)
+
+	c, err := Dial(ctx, be.url())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+
+	b := NewBridge(c, &recordingSink{})
+	runDone := make(chan struct{})
+	go func() { _ = b.Run(ctx); close(runDone) }()
+
+	// End the call the way a backend going away ends it.
+	time.Sleep(100 * time.Millisecond)
+	_ = c.Close()
+
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run never returned after the connection closed")
+	}
+
+	// Drain whatever is buffered; the channel must then be closed.
+	for {
+		select {
+		case _, ok := <-b.Events():
+			if !ok {
+				return // closed, as required
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Events() was never closed after Run returned — a consumer ranging " +
+				"over it is stranded, which leaks a goroutine on every call")
+		}
+	}
+}
+
+// TestBridgeEvents_BufferFullBlocksRatherThanDrops pins publishEvent's
+// blocking-with-context-abandon discipline.
+//
+// Swapping it for non-blocking-drop was unobserved, because b.events is
+// buffered 16 and no other test ever fills it. The two disciplines are
+// deliberately different and the difference is load-bearing: the engine-
+// internal channel must not silently lose events, while the consumer-facing
+// one in the twilio package drops by design. Conflating them would lose
+// events with nothing reporting it.
+//
+// Sending well past the buffer with no reader, then draining, distinguishes
+// them: blocking delivers all of them, dropping does not.
+//
+// slopstop:test contract
+func TestBridgeEvents_BufferFullBlocksRatherThanDrops(t *testing.T) {
+	const n = 40 // comfortably past b.events' 16-slot buffer
+
+	be := newFakeBackend(t)
+	for i := 0; i < n; i++ {
+		be.toSend = append(be.toSend, json.RawMessage(
+			fmt.Sprintf(`{"type":%q,"item_id":"e%d"}`, EventSpeechStopped, i)))
+	}
+	ctx := testCtx(t)
+
+	c, err := Dial(ctx, be.url())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	b := NewBridge(c, &recordingSink{})
+	go func() { _ = b.Run(ctx) }()
+
+	// Do not read yet: let the buffer fill so the publish path meets a full
+	// channel. This is the state the two disciplines disagree about.
+	time.Sleep(300 * time.Millisecond)
+
+	var got []string
+	for len(got) < n {
+		select {
+		case ev, ok := <-b.Events():
+			if !ok {
+				t.Fatalf("Events() closed after %d of %d", len(got), n)
+			}
+			var raw map[string]string
+			if err := json.Unmarshal(ev.Raw, &raw); err != nil {
+				t.Fatalf("Raw did not decode as the original frame: %v", err)
+			}
+			got = append(got, raw["item_id"])
+		case <-time.After(3 * time.Second):
+			t.Fatalf("received %d of %d events — a full buffer must block the publish "+
+				"until the reader catches up, never drop silently. got=%v", len(got), n, got)
+		}
+	}
+
+	for i := 0; i < n; i++ {
+		if want := fmt.Sprintf("e%d", i); got[i] != want {
+			t.Fatalf("event %d = %q, want %q (full-buffer handling must not reorder either)", i, got[i], want)
 		}
 	}
 }
