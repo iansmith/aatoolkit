@@ -66,9 +66,9 @@ func (b *Bridge) Forward(ctx context.Context, payload string) error {
 // and transcripts are published on Transcripts. Every event, of every type, is
 // also offered to Events, whose delivery never blocks this loop: a caller that
 // stops draining loses events rather than stalling the call; see Events. It
-// always returns a non-nil error
-// describing why it stopped — a backend that goes away is a fact the caller
-// must see, never a silent return.
+// always returns a non-nil error describing why it stopped — a backend that
+// goes away is a fact the caller must see, never a silent return.
+//
 // A second concurrent Run is refused rather than allowed to proceed: two
 // readers on one connection is undefined, and the loser would panic closing an
 // already-closed channel on the way out — both Transcripts and Events are
@@ -127,7 +127,10 @@ func (b *Bridge) Transcripts() <-chan Transcript {
 // not model (see the default: branch in Run above) — the same coverage Activity
 // documents, carried as data rather than a signal. Events are published in
 // arrival order, before the event is dispatched into Run's switch, so a
-// modelled event reaches both Events() and its existing destination.
+// modelled event that is not dropped reaches both Events() and its existing
+// destination. Dropping is one-sided: it costs the event its place here and
+// never its place in the switch, so a dropped transcript event still reaches
+// Transcripts and a dropped audio delta still reaches the MediaSink.
 //
 // Delivery never blocks Run. A caller that stops draining loses events rather
 // than stalling the call: once the 16-event buffer is full the publish drops,

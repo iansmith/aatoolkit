@@ -183,8 +183,13 @@ func WithTranscriptChanFor(fn func(start Frame) chan<- Transcript) RealtimeOptio
 // handed a spurious zero value.
 //
 // Delivery is non-blocking. When ch is full the event is DROPPED and the drop
-// is logged, for the same reason WithTranscriptChan drops: a slow consumer
-// must never be able to stall the read loop that also drives carrier audio.
+// is logged — but not for WithTranscriptChan's reason, and the difference is
+// worth stating. That one drops because Bridge.publish parks the backend read
+// loop when nobody reads, and that loop also drives carrier audio.
+// Bridge.publishEvent already drops rather than parking, so a blocking send
+// here could not stall that loop; what it would do instead is stop draining
+// Bridge.Events() and leave this engine goroutine parked past the end of the
+// call — a bounded loss turned into a total one, plus a leak.
 func WithServerEventChan(ch chan<- ServerEvent) RealtimeOption {
 	return WithServerEventChanFor(func(Frame) chan<- ServerEvent { return ch })
 }
@@ -278,22 +283,29 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	backendDone := make(chan error, 1)
 	go func() { backendDone <- bridge.Run(runCtx) }()
 
-	// Start the server-event drain FIRST, ahead of the transcript one. Order
-	// matters here and is not cosmetic: both destinations are resolved by
+	// Drain transcripts FIRST, ahead of the server-event drain, so a full
+	// channel can never wedge the read loop. The channel closes when Run
+	// returns, which ends this goroutine.
+	//
+	// The order is load-bearing, and the axis is what each source does when its
+	// buffer fills — not how fast it fills. Both destinations are resolved by
 	// consumer code on this goroutine (WithTranscriptChanFor and
-	// WithServerEventChanFor exist to let a consumer route per call), so
-	// whichever is resolved first delays the drain spawned after it by however
-	// long that consumer takes. bridge.Events() is fed for EVERY backend event,
-	// so its 16-slot buffer fills in roughly 320 ms of audio deltas, after which
-	// the Bridge starts DROPPING events (it never parks the read loop). Draining
-	// promptly is therefore what keeps events from being lost, not what keeps
-	// audio flowing. Transcripts have no such urgency — they arrive per
-	// utterance, not per 20 ms frame — so they are the safe one to make wait.
-	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event")
-
-	// Drain transcripts so a full channel can never wedge the read loop. The
-	// channel closes when Run returns, which ends this goroutine.
+	// WithServerEventChanFor exist to let a consumer route per call) and a go
+	// statement evaluates its arguments before it spawns, so whichever is
+	// resolved first delays the drain spawned after it by however long that
+	// consumer takes. Bridge.publish PARKS Run's read loop once its 16-slot
+	// buffer fills, and that loop is also what drives the MediaSink: a
+	// transcript drain that starts late costs the caller AUDIO, for the rest of
+	// the call. Bridge.publishEvent drops instead of parking, so an events drain
+	// that starts late costs EVENTS and nothing else. Events fill their buffer
+	// far faster — one audio delta per 20 ms frame, so roughly 320 ms — but
+	// losing events is the cheaper outcome, and it is the one this order picks
+	// to risk. Measured, with a serverEventChanFor that sleeps 3 s: resolved
+	// first, no media frame reaches the carrier for 3 s; resolved second, audio
+	// flows immediately and events drop instead.
 	go deliver(bridge.Transcripts(), cfg.transcriptChan(start), "transcript")
+
+	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event")
 
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
@@ -376,8 +388,8 @@ func (g *idleGuard) stop() {
 // transcripts and server events — because the discipline is the same one, and
 // two copies of it would be two places for a fix to have to land.
 //
-// what names the payload in the drop log ("transcript", "server event"), which
-// is the only thing that differs between the two.
+// The what parameter names the payload in the drop log ("transcript", "server
+// event"), which is the only thing that differs between the two.
 //
 // src is fed from Bridge.Run's read loop, which also drives audio to the
 // carrier. The two sources differ in what they do when nobody reads: publish
