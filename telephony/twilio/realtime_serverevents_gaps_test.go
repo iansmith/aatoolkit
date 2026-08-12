@@ -76,7 +76,19 @@ func TestServerEventChan_ReceivesModelledEventsToo(t *testing.T) {
 	))
 	waitBackendReady(t, be, h)
 
+	// All four modelled types, not one representative. Round 3 proved that
+	// checking only the transcript delta left three types unpinned: excluding
+	// audio-delta and speech-started from the publish passed the whole suite.
+	want := []string{
+		"response.output_audio.delta",
+		"input_audio_buffer.speech_started",
+		"conversation.item.input_audio_transcription.delta",
+		"conversation.item.input_audio_transcription.completed",
+	}
+	be.emitOnce(t, map[string]string{"type": want[0], "delta": carrierPayloadB64()})
+	be.emitOnce(t, map[string]string{"type": want[1]})
 	emitTranscript(t, be, "hello", false)
+	emitTranscript(t, be, "hello there", true)
 
 	// The existing destination still sees it.
 	select {
@@ -88,19 +100,25 @@ func TestServerEventChan_ReceivesModelledEventsToo(t *testing.T) {
 		t.Fatal("the modelled event never reached the transcript channel")
 	}
 
-	// And so does the server-event channel.
-	const want = "conversation.item.input_audio_transcription.delta"
-	select {
-	case ev := <-sech:
-		if ev.Type != want {
-			t.Fatalf("server-event channel delivered type %q, want %q", ev.Type, want)
+	// And so does the server-event channel, for every modelled type.
+	var got []string
+	for len(got) < len(want) {
+		select {
+		case ev := <-sech:
+			if len(ev.Raw) == 0 {
+				t.Fatalf("a modelled event must carry Raw too, like any other event (type %q)", ev.Type)
+			}
+			got = append(got, ev.Type)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("a MODELLED event never reached the server-event channel: got %v, want %v. "+
+				"Behavior 2 feeds it for EVERY event Run reads, not only unmodelled ones and "+
+				"not only one representative modelled type", got, want)
 		}
-		if len(ev.Raw) == 0 {
-			t.Fatal("a modelled event must carry Raw too, like any other event")
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("server-event channel delivered %v, want %v", got, want)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("a MODELLED event never reached the server-event channel; behavior 2 "+
-			"feeds it for EVERY event Run reads, not only unmodelled ones (want %q)", want)
 	}
 }
 

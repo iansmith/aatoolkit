@@ -26,10 +26,22 @@ import (
 // case that implementation fails: a modelled event must reach BOTH its existing
 // destination and Events(), because "every" means every.
 //
+// Round 3 widened this from one modelled type to all four. Checking only
+// EventTranscriptDelta left three types unpinned, and it was not a theoretical
+// hole: excluding {EventAudioDelta, EventSpeechStarted} from the publish, or
+// excluding EventTranscriptDone alone, passed the entire 17-test suite. "Every"
+// means each of the four cases Run's switch handles, not one representative.
+//
 // slopstop:test contract
 func TestBridgeEvents_ReceivesModelledEventsToo(t *testing.T) {
+	delta := frameB64()
 	be := newFakeBackend(t)
-	be.toSend = []any{ServerEvent{Type: EventTranscriptDelta, Transcript: "hello"}}
+	be.toSend = []any{
+		ServerEvent{Type: EventAudioDelta, Delta: delta},
+		ServerEvent{Type: EventSpeechStarted},
+		ServerEvent{Type: EventTranscriptDelta, Transcript: "hello"},
+		ServerEvent{Type: EventTranscriptDone, Transcript: "hello there"},
+	}
 	ctx := testCtx(t)
 
 	c, err := Dial(ctx, be.url())
@@ -54,20 +66,33 @@ func TestBridgeEvents_ReceivesModelledEventsToo(t *testing.T) {
 		t.Fatal("the modelled event never reached Transcripts()")
 	}
 
-	// And the new channel, because behavior 2 says EVERY event Run reads.
-	// Dial consumes session.created before returning, so the transcript delta
-	// is the first event Run observes and the first Events() can carry.
-	select {
-	case ev, ok := <-b.Events():
-		if !ok {
-			t.Fatal("Events() closed before delivering the modelled event")
+	// And the new channel, for EVERY modelled type — behavior 2 says Events()
+	// is fed for every event Run reads. Dial consumes session.created before
+	// returning, so these four are the first four events Run observes.
+	want := []string{
+		EventAudioDelta,
+		EventSpeechStarted,
+		EventTranscriptDelta,
+		EventTranscriptDone,
+	}
+	var got []string
+	for len(got) < len(want) {
+		select {
+		case ev, ok := <-b.Events():
+			if !ok {
+				t.Fatalf("Events() closed after %d of %d modelled events (%v)", len(got), len(want), got)
+			}
+			got = append(got, ev.Type)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("a MODELLED event never reached Events(): got %v, want %v. Behavior 2 "+
+				"feeds Events() for EVERY event Run reads, not only the ones its switch "+
+				"drops into default:, and not only one representative modelled type", got, want)
 		}
-		if ev.Type != EventTranscriptDelta {
-			t.Fatalf("Events() delivered type %q, want %q", ev.Type, EventTranscriptDelta)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Events() delivered %v, want %v", got, want)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("a MODELLED event never reached Events(); behavior 2 says Events() is fed " +
-			"for EVERY event Run reads, not only the ones its switch drops into default:")
 	}
 }
 
