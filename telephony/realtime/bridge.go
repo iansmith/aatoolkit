@@ -3,6 +3,7 @@ package realtime
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync/atomic"
 )
 
@@ -36,8 +37,11 @@ type Bridge struct {
 	sink        MediaSink
 	transcripts chan Transcript
 	events      chan ServerEvent
-	running     atomic.Bool
-	activity    chan struct{}
+	// eventsDropped counts events dropped because Events() was not being
+	// drained. Only Run touches it, on one goroutine, so it needs no lock.
+	eventsDropped int
+	running       atomic.Bool
+	activity      chan struct{}
 }
 
 // NewBridge wires a client to a carrier media sink.
@@ -85,7 +89,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 			return fmt.Errorf("realtime: read loop ended: %w", err)
 		}
 		b.signalActivity()
-		b.publishEvent(ctx, ev)
+		b.publishEvent(ev)
 
 		switch ev.Type {
 		case EventAudioDelta:
@@ -124,14 +128,12 @@ func (b *Bridge) Transcripts() <-chan Transcript {
 // arrival order, before the event is dispatched into Run's switch, so a
 // modelled event reaches both Events() and its existing destination.
 //
-// A CALLER THAT STARTS Run MUST DRAIN THIS CHANNEL. Unlike Activity, which
-// coalesces and never blocks, the publish behind Events blocks once the
-// 16-event buffer is full and only abandons the event when ctx ends — see
-// publishEvent. Because every event is published, including one audio delta
-// per 20 ms frame, an undrained Events parks Run's read loop after roughly
-// 320 ms, and that loop is also what drives the MediaSink: audio to the caller
-// stops, silently, with Run neither returning nor erroring. The channel is
-// closed when Run returns.
+// Delivery never blocks Run. A caller that stops draining loses events rather
+// than stalling the call: once the 16-event buffer is full the publish drops,
+// and logs each drop. That is deliberate — every event is published, including
+// one audio delta per 20 ms frame, and Run's read loop is also what drives the
+// MediaSink, so a blocking publish would silence audio within ~320 ms of a
+// consumer looking away. The channel is closed when Run returns.
 func (b *Bridge) Events() <-chan ServerEvent {
 	return b.events
 }
@@ -170,21 +172,28 @@ func (b *Bridge) publish(ctx context.Context, tr Transcript) {
 	}
 }
 
-// publishEvent hands ev to Events(), abandoning it only if the context ends
-// first — the same blocking-with-context-abandon discipline as publish.
+// publishEvent hands ev to Events() without ever blocking Run's read loop.
 //
-// Note what that does and does not buy. It bounds the wedge by the call's
-// lifetime rather than preventing it: until ctx ends, a full b.events parks
-// this loop, and this loop is the one driving the MediaSink. b.events is NOT
-// engine-internal — Events() exports it, and telephony/realtime is public API
-// a consumer may drive directly — so "the caller drains it" is a real
-// obligation on that consumer, documented on Events. What is engine-internal
-// is the twilio package's drain of it, which is where the non-blocking
-// drop-and-log lives; a consumer going through telephony/twilio never sees
-// this channel and inherits no obligation.
-func (b *Bridge) publishEvent(ctx context.Context, ev ServerEvent) {
+// Non-blocking-with-drop, matching signalActivity rather than publish, and the
+// difference between the two is the point. Events carries EVERY event Run
+// reads, including one audio delta per 20 ms frame, so a consumer that looks
+// away fills the 16-slot buffer in roughly 320 ms. Blocking there parks the
+// loop that also drives the MediaSink, and audio to the caller stops silently
+// with Run neither returning nor erroring. Measured before this was changed:
+// 40 audio deltas with Events() undrained delivered 16 of 40 media frames.
+//
+// publish keeps the blocking discipline for Transcripts, and correctly so:
+// transcripts arrive at conversation rate and each one carries meaning that is
+// lost if dropped. An event nobody is reading loses nothing that was being
+// read, so the trade runs the other way here.
+//
+// Only Run calls this, on one goroutine.
+func (b *Bridge) publishEvent(ev ServerEvent) {
 	select {
 	case b.events <- ev:
-	case <-ctx.Done():
+	default:
+		b.eventsDropped++
+		log.Printf("realtime: server event dropped, consumer is behind (%d dropped on this call)",
+			b.eventsDropped)
 	}
 }

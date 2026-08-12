@@ -3,7 +3,6 @@ package realtime
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 )
@@ -258,27 +257,37 @@ func TestBridgeEvents_ClosedWhenRunReturns(t *testing.T) {
 	}
 }
 
-// TestBridgeEvents_BufferFullBlocksRatherThanDrops pins publishEvent's
-// blocking-with-context-abandon discipline.
+// TestBridgeEvents_UndrainedEventsDoNotStallTheSink pins the Bridge-layer
+// delivery discipline, and it REPLACES an earlier test of this orchestrator's
+// that pinned the opposite.
 //
-// Swapping it for non-blocking-drop was unobserved, because b.events is
-// buffered 16 and no other test ever fills it. The two disciplines are
-// deliberately different and the difference is load-bearing: the engine-
-// internal channel must not silently lose events, while the consumer-facing
-// one in the twilio package drops by design. Conflating them would lose
-// events with nothing reporting it.
+// The stage-9 pinning pass found publishEvent's discipline unpinned and I
+// pinned it as blocking-with-context-abandon, reasoning from publish and
+// Transcripts. That was the wrong precedent. Both stage-10b checkers then
+// proved the consequence independently, with the same measurement: 40 audio
+// deltas with Events() undrained delivered 40 of 40 media frames at base and
+// 16 of 40 on the branch. b.events is exported through Events(), Run's loop is
+// also what drives the MediaSink, and every event is published — including one
+// audio delta per 20 ms frame — so blocking there silences a live call within
+// ~320 ms of a consumer looking away, with Run neither returning nor erroring.
 //
-// Sending well past the buffer with no reader, then draining, distinguishes
-// them: blocking delivers all of them, dropping does not.
+// The right precedent is signalActivity, the engine's other every-event
+// mechanism, which is non-blocking by explicit design: "Run's read loop can
+// never stall waiting on a consumer that is not currently receiving." It is
+// also what observable behavior 4 says in its own words — "delivery is
+// non-blocking: when the consumer is behind, events are dropped and each drop
+// is logged" — with no layer qualifier.
+//
+// This is the checkers' own probe, promoted to a test.
 //
 // slopstop:test contract
-func TestBridgeEvents_BufferFullBlocksRatherThanDrops(t *testing.T) {
+func TestBridgeEvents_UndrainedEventsDoNotStallTheSink(t *testing.T) {
 	const n = 40 // comfortably past b.events' 16-slot buffer
 
+	delta := frameB64()
 	be := newFakeBackend(t)
 	for i := 0; i < n; i++ {
-		be.toSend = append(be.toSend, json.RawMessage(
-			fmt.Sprintf(`{"type":%q,"item_id":"e%d"}`, EventSpeechStopped, i)))
+		be.toSend = append(be.toSend, ServerEvent{Type: EventAudioDelta, Delta: delta})
 	}
 	ctx := testCtx(t)
 
@@ -288,34 +297,23 @@ func TestBridgeEvents_BufferFullBlocksRatherThanDrops(t *testing.T) {
 	}
 	defer c.Close()
 
-	b := NewBridge(c, &recordingSink{})
+	sink := &recordingSink{}
+	b := NewBridge(c, sink)
 	go func() { _ = b.Run(ctx) }()
 
-	// Do not read yet: let the buffer fill so the publish path meets a full
-	// channel. This is the state the two disciplines disagree about.
-	time.Sleep(300 * time.Millisecond)
-
-	var got []string
-	for len(got) < n {
-		select {
-		case ev, ok := <-b.Events():
-			if !ok {
-				t.Fatalf("Events() closed after %d of %d", len(got), n)
-			}
-			var raw map[string]string
-			if err := json.Unmarshal(ev.Raw, &raw); err != nil {
-				t.Fatalf("Raw did not decode as the original frame: %v", err)
-			}
-			got = append(got, raw["item_id"])
-		case <-time.After(3 * time.Second):
-			t.Fatalf("received %d of %d events — a full buffer must block the publish "+
-				"until the reader catches up, never drop silently. got=%v", len(got), n, got)
+	// Events() is deliberately NEVER read. Every media frame must still reach
+	// the sink: an undrained events channel may lose events, but it must never
+	// park the read loop that carries audio.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if media, _ := sink.snapshot(); len(media) == n {
+			return
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	for i := 0; i < n; i++ {
-		if want := fmt.Sprintf("e%d", i); got[i] != want {
-			t.Fatalf("event %d = %q, want %q (full-buffer handling must not reorder either)", i, got[i], want)
-		}
-	}
+	media, _ := sink.snapshot()
+	t.Fatalf("sink received %d of %d media frames with Events() undrained — an undrained "+
+		"events channel must drop, never park Run's read loop, because that loop is also "+
+		"what drives the MediaSink", len(media), n)
 }
