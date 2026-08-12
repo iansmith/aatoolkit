@@ -285,9 +285,10 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// whichever is resolved first delays the drain spawned after it by however
 	// long that consumer takes. bridge.Events() is fed for EVERY backend event,
 	// so its 16-slot buffer fills in roughly 320 ms of audio deltas, after which
-	// Run parks on the publish and carrier audio stops. Transcripts have no such
-	// urgency — they arrive per utterance, not per 20 ms frame — so they are the
-	// safe one to make wait.
+	// the Bridge starts DROPPING events (it never parks the read loop). Draining
+	// promptly is therefore what keeps events from being lost, not what keeps
+	// audio flowing. Transcripts have no such urgency — they arrive per
+	// utterance, not per 20 ms frame — so they are the safe one to make wait.
 	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event")
 
 	// Drain transcripts so a full channel can never wedge the read loop. The
@@ -378,9 +379,11 @@ func (g *idleGuard) stop() {
 // what names the payload in the drop log ("transcript", "server event"), which
 // is the only thing that differs between the two.
 //
-// src is fed from Bridge.Run's read loop, which parks when nobody is reading
-// and which also drives audio to the carrier — so a consumer that fell behind
-// would break the caller's audio. Hence the non-blocking send and the drop.
+// src is fed from Bridge.Run's read loop, which also drives audio to the
+// carrier. The two sources differ in what they do when nobody reads: publish
+// parks for transcripts, publishEvent drops for events. Either way this drain
+// must never add a second place to block, hence the non-blocking send and the
+// drop.
 //
 // The goroutine running this blocks only on src, which Run closes, and on a
 // select that always has a default. It therefore exits on every call ending, no

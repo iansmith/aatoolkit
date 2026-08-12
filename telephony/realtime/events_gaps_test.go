@@ -3,6 +3,8 @@ package realtime
 import (
 	"bytes"
 	"encoding/json"
+	"log"
+	"sync"
 	"testing"
 	"time"
 )
@@ -207,7 +209,7 @@ func TestBridgeEvents_PreservesArrivalOrder(t *testing.T) {
 
 // TestBridgeEvents_ClosedWhenRunReturns pins `defer close(b.events)`.
 //
-// Removing that defer leaks the twilio-side deliverServerEvents goroutine on
+// Removing that defer leaks the twilio-side deliver goroutine on
 // EVERY call — its `for ev := range src` never returns. The differential
 // goroutine test cannot see it: the leak fires identically with and without a
 // consumer, so both arms grow equally and the difference stays zero. That is
@@ -316,4 +318,86 @@ func TestBridgeEvents_UndrainedEventsDoNotStallTheSink(t *testing.T) {
 	t.Fatalf("sink received %d of %d media frames with Events() undrained — an undrained "+
 		"events channel must drop, never park Run's read loop, because that loop is also "+
 		"what drives the MediaSink", len(media), n)
+}
+
+// syncLogBuffer is a log sink safe to read while another goroutine writes to
+// it. Run's read loop does the dropping and the logging; the test reads. A
+// bare bytes.Buffer here would be a data race under -race, which is the same
+// defect the twilio-layer drop-log test had to be repaired for.
+type syncLogBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncLogBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncLogBuffer) Bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.b.Bytes()...)
+}
+
+// TestBridgeEvents_DropIsLogged pins the other half of publishEvent.
+//
+// The SALVAGE repair made delivery non-blocking-with-drop and logged each drop,
+// and only the drop half was pinned: removing the log call left both packages
+// green. The twilio-layer drop test cannot cover this — measured, the Bridge
+// drop path never fires through telephony/twilio at all (199 drops at the
+// twilio layer, 0 at the Bridge layer), because that layer drains promptly. So
+// only a test driving realtime.Bridge directly can observe it.
+//
+// Observable behavior 4 asks for both halves in one sentence: "delivery is
+// non-blocking: when the consumer is behind, events are dropped and each drop
+// is logged."
+//
+// slopstop:test contract
+func TestBridgeEvents_DropIsLogged(t *testing.T) {
+	var buf syncLogBuffer
+	origOutput, origFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	const n = 40 // comfortably past b.events' 16-slot buffer
+	delta := frameB64()
+	be := newFakeBackend(t)
+	for i := 0; i < n; i++ {
+		be.toSend = append(be.toSend, ServerEvent{Type: EventAudioDelta, Delta: delta})
+	}
+	ctx := testCtx(t)
+
+	c, err := Dial(ctx, be.url())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	sink := &recordingSink{}
+	b := NewBridge(c, sink)
+	go func() { _ = b.Run(ctx) }()
+
+	// Events() is never read, so everything past the buffer must be dropped.
+	// Wait on the sink rather than the clock: once all n frames have shipped,
+	// every event has been through publishEvent.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if media, _ := sink.snapshot(); len(media) == n {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if media, _ := sink.snapshot(); len(media) != n {
+		t.Fatalf("sink received %d of %d media frames; the drop path was never exercised", len(media), n)
+	}
+
+	if !bytes.Contains(buf.Bytes(), []byte("dropped")) {
+		t.Fatalf("a dropped server event must be logged, not silent; log output: %q", buf.Bytes())
+	}
 }

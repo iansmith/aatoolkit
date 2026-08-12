@@ -64,8 +64,9 @@ func (b *Bridge) Forward(ctx context.Context, payload string) error {
 // Run reads server events until the connection ends or ctx is cancelled,
 // driving the sink: audio deltas become Media, speech starts become Clear,
 // and transcripts are published on Transcripts. Every event, of every type, is
-// also published on Events — which the caller must drain, or this loop parks
-// and the sink goes quiet; see Events. It always returns a non-nil error
+// also offered to Events, whose delivery never blocks this loop: a caller that
+// stops draining loses events rather than stalling the call; see Events. It
+// always returns a non-nil error
 // describing why it stopped — a backend that goes away is a fact the caller
 // must see, never a silent return.
 // A second concurrent Run is refused rather than allowed to proceed: two
