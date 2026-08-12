@@ -2,7 +2,7 @@
 description: Bootstrap a GitHub repo for the slopstop ticket workflow. Creates status labels, writes .project-conf.toml. Invoke as /slopstop-gh-init (or /slopstop-gh-init). Idempotent — safe to re-run.
 ---
 
-<!-- GENERATED from slopstop 39b92d3 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 6429b7d by install-for-project.sh — do not edit.
      Edit skills/gh-init/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-gh-init
@@ -241,7 +241,8 @@ git -C "$ROOT" check-ignore -q .slopstop/  || echo '.slopstop/'  >> "$ROOT/.giti
 ```
 
 Both must be ignored **in the same run that creates them** — an un-ignored `.slopstop/`
-gets swept into the first PR by `:pr`'s `git add -A`. Creating the directory is what turns
+sits there untracked, and the first staging that is not path-specific sweeps it in.
+Creating the directory is what turns
 tier-2 resolution on, so the gitignore entry and the directory must land together; that is
 why activation belongs to the seeding paths (`:gh-init`, `:design`) rather than to a config
 key a user might add without ignoring anything.

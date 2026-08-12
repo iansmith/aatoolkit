@@ -3,7 +3,7 @@ description: The single lifecycle entry point — take one or more tickets and d
 disable-model-invocation: true
 ---
 
-<!-- GENERATED from slopstop 39b92d3 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 6429b7d by install-for-project.sh — do not edit.
      Edit skills/run/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-run
@@ -73,6 +73,9 @@ tickets yourself — authoring is `:tickets`' work.
 tracking dir intact, keep every other ticket running, and report the whole stopped set at
 the end with what each needs. A stalled autonomous run is the failure mode this default
 exists to avoid.
+
+Stopping needs no span. **A wait does** — see *Human waits — bracket every one* below, which
+owns that rule.
 
 ### Mechanical gates never soften, in either mode
 
@@ -167,7 +170,7 @@ Per ticket, in order. **W** = a worker launch (one `Agent()` per `worker-launch.
 
 | # | stage | kind | record | notes |
 |---|---|---|---|---|
-| 1 | `intake` | I | **note** | fetch the ticket, its five sections and its **DoD**; set `$REFACTOR` / `$BACKFILL` (below); **parse `Blocked by:`** (see Scheduling); seed `$TRACKING_DIR/<TICKET>/` with `task_plan.md` + `findings.md` and open `run.jsonl` |
+| 1 | `intake` | I | **note** | fetch the ticket, its five sections and its **DoD**; set `$REFACTOR` / `$BACKFILL` (below) and record it as a **`mode` field** on the note — `normal`/`refactor`/`backfill`, alongside the prose, because stage 10a's basis branches on it and prose is not readable; **parse `Blocked by:`** (see Scheduling); seed `$TRACKING_DIR/<TICKET>/` with `task_plan.md` + `findings.md` and open `run.jsonl` |
 | 2 | `investigate` | W | **span** | returns findings + the **predicted file map**. Run for all N tickets before anything else — see Scheduling |
 | 3 | `branch` | I | **note** | label/state → in progress; create the ticket's **worktree and branch** — see `## Worktrees` below. `<type>` per `.claude/skills/slopstop-run/references/branch-type.md`. Record `$WT` = the worktree path and `$BASE` = the branch point sha. **You never `git switch` the main worktree**, at this stage or any other. The stage keeps the `stage` value `branch` — it is a record key, and renaming it would break invariant 6 and orphan every run.jsonl already on disk |
 | 4 | `red-tests` | W | **span** | returns test files, node-ids, `--command`, stub paths, observed failure output. `--backfill` when `$BACKFILL` — then it confirms **green**. Not launched when `$REFACTOR` |
@@ -178,12 +181,12 @@ Per ticket, in order. **W** = a worker launch (one `Agent()` per `worker-launch.
 | 8a | `tamper` | I | **span** | **mechanical, yours, before any checker is spawned**: the tamper diff against `$FROZEN` and the file-map violation check against `$OWN`. A FAIL stops the ticket here — no worker is bought. Under `$BACKFILL` the trigger is unchanged and the **resolution** is a mutation re-run, not a judgment — see below |
 | 9 | `gates` | W×3, then W×1–3 | **span** | `slop-check`, `vacuity-check`, `complexity-check` — launch together, they are independent **because all three are read-only**. That is the reason, and it does not generalise: 10b's two workers mutate production and must be serialized. **Then the pinning pass** — `mutation-check --implemented` against `$OWN`'s production diff, looping to a cap of 3, one span per round. It runs *after* the three, never beside them: it mutates, and a mutating worker never shares a tree. **After `implement`, deliberately**: the adversary's false-negative vector at stage 7 cannot see tests written later, and `vacuity-check` here is what covers them (BILL-343). W×2 when `$REFACTOR` or `$BACKFILL` |
 | 10 | `review` | W | **span** | loop until `REVIEW CLEAN`, cap 5 rounds |
-| 10a | `size` | I | **note** | once the diff exists: `git diff --numstat "$BASE"..HEAD`, then record **one entry per file** (path, added, removed, kind) plus the aggregates, the `test_globs` you classified by, and the provisional `tier` computed from **production counts**. **Nothing reads it** — it is the data that will later decide what is safe to skip |
+| 10a | `size` | I | **note** | once the diff exists: `git diff --numstat "$BASE"..HEAD`, then record **one entry per file** (path, added, removed, kind) plus the aggregates, the `test_globs` you classified by, and the provisional `tier` — an **enum**, computed from the counts the ticket's **mode** makes the deliverable (`run-jsonl.md` owns the table; backfill counts tests, not the production side its mode freezes to zero). **Nothing reads it** — it is the data that will later decide what is safe to skip, and `derive.py --check` validates its shape |
 | 10b | `handoff` | W×2 | **span** | a **fresh** requirements adversary and code reviewer at the tier above, **launched SERIALLY — never in parallel** (both mutate production to prove findings and contaminate each other otherwise; PLTF-2562), fed artifacts only — never the agent's comments or the PR description. Applied fixes are committed before the round closes, then re-verified on the new tip. Produces a blessing bound to the **branch tip SHA**. **W×1 for an invariant ticket**: requirements adversary only under `$BACKFILL`, code reviewer only under `$REFACTOR` — see `handoff-verification.md` |
 | 11 | `pr` | I | **span** | commit, push to `$PR_REMOTE`, open the PR against `$OWNER/$REPO` |
 | 12 | `bot-read` | I | **note** | read existing bot comments **once**. Never poll |
 | 13 | `merge` | I | **span** | serial across tickets; `gh pr merge --merge --delete-branch` |
-| 14 | `close` | I | **span** | score the DoD, advance the ticket state / swap labels, write the DoD confirmation into `task_plan.md` |
+| 14 | `close` | I | **span** | score the DoD, advance the ticket state / swap labels, write the DoD confirmation into `task_plan.md`, then **derive** — `tools/metrics/derive.py`, recorded as a note, never able to fail the run (step 4a) |
 | 15 | `archive` | W+I | **span** | launch the `archive` worker (one comment per tracking file), close the log, then `mv $TRACKING_DIR/<TICKET> $ARCHIVE_DIR/<TICKET>` |
 
 Stage 4 has two legitimate empty outcomes: `PHASE 0: none — prose-only change` and
@@ -1467,11 +1470,38 @@ Serial across tickets, and all of it inline.
 4. **Write the DoD-confirmation into `task_plan.md`** — per-item verdicts and their
    evidence — so it is a file in the tracking dir like everything else. Do not push it
    yourself; step 5's worker pushes the whole directory.
+4a. **Derive the compute record**, before step 5 pushes the directory:
+
+   ```bash
+   python3 <slopstop>/tools/metrics/derive.py "$TICKET" --repo "$REPO_ROOT"
+   ```
+
+   Then record the outcome as a `close`-stage **note** — the launch count on success, the
+   reason on failure. This writes `run-derived.jsonl` beside `run.jsonl`: per-launch model,
+   effort, bounds, and the four token fields plus `active_seconds`. It must run **here**,
+   not in `:archive` and not by hand later, for one reason — **`run.jsonl` survives and the
+   transcripts do not.** Swept across the fleet on 2026-08-12: of 15 tickets carrying a
+   `run.jsonl`, 9 were still derivable and **3 had already lost their transcripts
+   permanently** (`PLTF-2564`, `PLTF-2566`, `AATK-85`) — wall clock intact, compute gone.
+   Close is the last moment the harness record is certainly still on disk.
+
+   **A derive failure never fails the run.** No transcripts, an unreadable path, a
+   traceback — all are a note and the close proceeds. The ticket's work is finished by the
+   time this runs, and a measurement step that can stop a completed run is a worse defect
+   than the missing measurement. Treat any non-zero exit as `DERIVE FAILED: <reason>` and
+   carry on.
+
+   **Re-entering close is safe and expected.** A resume, or the documented re-score path
+   below, runs this twice; the deriver leaves an existing `run-derived.jsonl` alone and
+   exits 0. Do not pass `--redo` here — that replaces the file, and the close stage is never
+   the thing that should decide a previous derivation was wrong.
+
 5. **Launch the `archive` worker** (`--ticket --dir --system` + backend coords). It posts
-   one comment per tracking file — task plan, findings, `run.jsonl`, any adversary rounds —
-   so the local record survives where the ticket lives. Bracket the span like any other
-   launch. Best-effort: `ARCHIVE PARTIAL` or `BLOCKED` is reported and never rolls back a
-   merge, and a re-run converges because the worker edits comments it already posted.
+   one comment per tracking file — task plan, findings, `run.jsonl`, `run-derived.jsonl`,
+   any adversary rounds — so the local record survives where the ticket lives. Bracket the
+   span like any other launch. Best-effort: `ARCHIVE PARTIAL` or `BLOCKED` is reported and
+   never rolls back a merge, and a re-run converges because the worker edits comments it
+   already posted.
 6. Close the `archive` span, then append `run_closed`. **In that order** — the worker read
    `run.jsonl` before either line existed, so the pushed copy omits them by construction and
    says so in its own comment. Do not try to make the two copies match.
@@ -1491,6 +1521,32 @@ confirmed — write the `waiting_for_user` `started` line **in the step that ask
 You are the thing doing the blocking, so you are the only thing that can record it. This is
 the whole mechanism separating machine time from a weekend, and a stamp deferred to
 "afterwards" is a stamp that never happens.
+
+**The wait that actually happens is not an `--interactive` ask, which is why this lapses.**
+That flag is specified but not built, so the two waits that occur most often — a mechanical
+gate FAIL awaiting a waiver, and a checker escalation the tier-above agents refuse to decide
+— surface on the *autonomous* path, outside the mode table entirely, with nothing in the
+step that asks to prompt a span. The list above reads as an interactive-mode list; it is not.
+
+Measured, because this is not a hypothetical discipline: AATK-81 waited three times that way
+and bracketed none — 4h39m on a tamper waiver, 2h01m on a salvage escalation, 8m on a
+surviving finding. 63% of a 10h49m run, invisible in its own timing log and silently
+inflating whichever stage preceded it. Across the fleet on 2026-08-12 it is roughly even:
+PLTF-2562, SOP-262, AATK-76 and GAST-8 bracket their waits; PLTF-2563, PLTF-2565, SOP-261
+and AATK-81 record none and carry 5h48m, 14m, 1h08m and 6h52m unaccounted. **Inconsistent is
+worse than never** — at read time a run that waited and did not say so is indistinguishable
+from one that never waited.
+
+`tools/metrics/derive.py --check` now names every unbracketed gap over 120s with its bounds
+and the stage before it, sums the residue, and reports a run with big gaps and zero waits as
+**unmeasured, not measured-zero**. So this fails where somebody sees it rather than inflating
+a stage duration in silence.
+
+**Bracketing a wait does not shorten it, and is not licence to skip one.** The mechanical
+gates above keep no permissive setting. AATK-81's waiver was the owner's, taken on evidence
+the run could not have produced — its own log records that the autonomous path correctly
+stopped and could not have cleared it. Recording a wait is what makes it measurable, which is
+the prerequisite for arguing it was avoidable, not the argument.
 
 ## Resuming
 
