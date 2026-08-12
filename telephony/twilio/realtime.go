@@ -65,12 +65,21 @@ type realtimeConfig struct {
 	instructionsFor func(start Frame) string
 
 	transcriptChanFor func(start Frame) chan<- Transcript
+
+	// serverEventChanFor mirrors transcriptChanFor: resolved per call rather
+	// than stored as a plain channel, for the same reason.
+	serverEventChanFor func(start Frame) chan<- ServerEvent
 }
 
 // Transcript is one transcription result from the backend, re-exported so a
 // consumer does not have to import telephony/realtime to name the type its
 // channel carries.
 type Transcript = realtime.Transcript
+
+// ServerEvent is one backend server event, re-exported so a consumer does not
+// have to import telephony/realtime to name the type its channel carries. It
+// mirrors Transcript's re-export.
+type ServerEvent = realtime.ServerEvent
 
 // transcriptChan resolves the destination for one call, or nil when the
 // consumer asked for none.
@@ -79,6 +88,15 @@ func (c realtimeConfig) transcriptChan(start Frame) chan<- Transcript {
 		return nil
 	}
 	return c.transcriptChanFor(start)
+}
+
+// serverEventChan resolves the destination for one call, or nil when the
+// consumer asked for none. Mirrors transcriptChan.
+func (c realtimeConfig) serverEventChan(start Frame) chan<- ServerEvent {
+	if c.serverEventChanFor == nil {
+		return nil
+	}
+	return c.serverEventChanFor(start)
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -126,8 +144,11 @@ func WithInstructions(text string) RealtimeOption {
 // NEVER closes it, so it may be reused across calls and a reader is never handed
 // a spurious zero value.
 //
-// Delivery is non-blocking. When ch is full the transcript is DROPPED and the
-// drop is logged. That is deliberate rather than a limitation: Bridge.publish
+// Delivery is non-blocking. When ch is full the transcript is DROPPED. Every
+// drop is counted and the count is logged at the bounded rate realtime.LogDrop
+// defines — the first drop of a call and periodically after it, each line
+// carrying the running total. That is deliberate rather than a limitation:
+// Bridge.publish
 // parks the backend read loop when nobody reads, and that loop also drives audio
 // to the carrier, so waiting on a slow consumer would break the call. A late
 // transcript is worth less than unbroken audio.
@@ -152,6 +173,38 @@ func WithTranscriptChan(ch chan<- Transcript) RealtimeOption {
 // discards, exactly as with no option at all.
 func WithTranscriptChanFor(fn func(start Frame) chan<- Transcript) RealtimeOption {
 	return func(c *realtimeConfig) { c.transcriptChanFor = fn }
+}
+
+// WithServerEventChan delivers every backend server event to ch, mirroring
+// WithTranscriptChan — including event types this engine does not model into
+// a transcript or a media/clear call, carried with Raw set to the whole frame
+// as it arrived. Without it those events are observed only by Bridge.Activity
+// and otherwise dropped, which is what happens before this existed.
+//
+// The consumer owns ch: its buffer, its reader, and its lifetime. The engine
+// NEVER closes it, so it may be reused across calls and a reader is never
+// handed a spurious zero value.
+//
+// Delivery is non-blocking. When ch is full the event is DROPPED, counted, and
+// the count logged at realtime.LogDrop's bounded rate as above — but not for
+// WithTranscriptChan's reason, and the difference is
+// worth stating. That one drops because Bridge.publish parks the backend read
+// loop when nobody reads, and that loop also drives carrier audio.
+// Bridge.publishEvent already drops rather than parking, so a blocking send
+// here could not stall that loop; what it would do instead is stop draining
+// Bridge.Events() and leave this engine goroutine parked past the end of the
+// call — a bounded loss turned into a total one, plus a leak.
+func WithServerEventChan(ch chan<- ServerEvent) RealtimeOption {
+	return WithServerEventChanFor(func(Frame) chan<- ServerEvent { return ch })
+}
+
+// WithServerEventChanFor resolves the destination when the call arrives, from
+// the start frame — so a consumer can route calls to different channels.
+// Mirrors WithTranscriptChanFor.
+//
+// A nil function, or one returning nil, means no consumer.
+func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOption {
+	return func(c *realtimeConfig) { c.serverEventChanFor = fn }
 }
 
 // WithInstructionsFor resolves the session persona when the call arrives, from
@@ -234,9 +287,29 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	backendDone := make(chan error, 1)
 	go func() { backendDone <- bridge.Run(runCtx) }()
 
-	// Drain transcripts so a full channel can never wedge the read loop. The
-	// channel closes when Run returns, which ends this goroutine.
-	go deliverTranscripts(bridge.Transcripts(), cfg.transcriptChan(start))
+	// Drain transcripts FIRST, ahead of the server-event drain, so a full
+	// channel can never wedge the read loop. The channel closes when Run
+	// returns, which ends this goroutine.
+	//
+	// The order is load-bearing, and the axis is what each source does when its
+	// buffer fills — not how fast it fills. Both destinations are resolved by
+	// consumer code on this goroutine (WithTranscriptChanFor and
+	// WithServerEventChanFor exist to let a consumer route per call) and a go
+	// statement evaluates its arguments before it spawns, so whichever is
+	// resolved first delays the drain spawned after it by however long that
+	// consumer takes. Bridge.publish PARKS Run's read loop once its 16-slot
+	// buffer fills, and that loop is also what drives the MediaSink: a
+	// transcript drain that starts late costs the caller AUDIO, for the rest of
+	// the call. Bridge.publishEvent drops instead of parking, so an events drain
+	// that starts late costs EVENTS and nothing else. Events fill their buffer
+	// far faster — one audio delta per 20 ms frame, so roughly 320 ms — but
+	// losing events is the cheaper outcome, and it is the one this order picks
+	// to risk. Measured, with a serverEventChanFor that sleeps 3 s: resolved
+	// first, no media frame reaches the carrier for 3 s; resolved second, audio
+	// flows immediately and events drop instead.
+	go deliver(bridge.Transcripts(), cfg.transcriptChan(start), "transcript")
+
+	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event")
 
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
@@ -313,22 +386,28 @@ func (g *idleGuard) stop() {
 	}
 }
 
-// deliverTranscripts drains src, forwarding each result to out if a consumer
-// asked for one. It never blocks and it never runs consumer code, which is the
-// whole design.
+// deliver drains src, forwarding each value to out if a consumer asked for
+// one. It never blocks and it never runs consumer code, which is the whole
+// design. One function serves both consumer-facing channels on this path —
+// transcripts and server events — because the discipline is the same one, and
+// two copies of it would be two places for a fix to have to land.
 //
-// src is fed by Bridge.publish, which parks Run's read loop when nobody is
-// reading, and that loop also drives audio to the carrier — so a consumer that
-// fell behind would break the caller's audio. Hence the non-blocking send and
-// the drop.
+// The what parameter names the payload in the drop log ("transcript", "server
+// event"), which is the only thing that differs between the two.
+//
+// src is fed from Bridge.Run's read loop, which also drives audio to the
+// carrier. The two sources differ in what they do when nobody reads: publish
+// parks for transcripts, publishEvent drops for events. Either way this drain
+// must never add a second place to block, hence the non-blocking send and the
+// drop.
 //
 // The goroutine running this blocks only on src, which Run closes, and on a
 // select that always has a default. It therefore exits on every call ending, no
 // matter what the consumer does or fails to do.
 //
-// With no consumer this is the bare drain it replaced, byte for byte in
-// behaviour.
-func deliverTranscripts(src <-chan realtime.Transcript, out chan<- Transcript) {
+// With no consumer this is a bare drain: byte for byte the behaviour of a call
+// supplying no channel option at all.
+func deliver[T any](src <-chan T, out chan<- T, what string) {
 	if out == nil {
 		for range src {
 		}
@@ -336,15 +415,19 @@ func deliverTranscripts(src <-chan realtime.Transcript, out chan<- Transcript) {
 	}
 
 	var dropped int
-	for tr := range src {
+	for v := range src {
 		select {
-		case out <- tr:
+		case out <- v:
 		default:
 			// The consumer is behind. Drop, and say so: a silently lossy seam is
 			// worse than a lossy one, because the consumer cannot tell an absent
-			// transcript from an unspoken word.
+			// value from one that never happened. Rate-bounded for the reason
+			// realtime.LogDrop documents — every drop is counted and every line
+			// carries the running total, so nothing is silent in aggregate.
 			dropped++
-			log.Printf("twilio: realtime: transcript dropped, consumer is behind (%d dropped on this call)", dropped)
+			if realtime.LogDrop(dropped) {
+				log.Printf("twilio: realtime: %s dropped, consumer is behind (%d dropped on this call)", what, dropped)
+			}
 		}
 	}
 	// out is deliberately NOT closed: the engine did not create it, the consumer

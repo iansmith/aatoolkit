@@ -3,6 +3,7 @@ package realtime
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync/atomic"
 )
 
@@ -35,8 +36,12 @@ type Bridge struct {
 	client      *Client
 	sink        MediaSink
 	transcripts chan Transcript
-	running     atomic.Bool
-	activity    chan struct{}
+	events      chan ServerEvent
+	// eventsDropped counts events dropped because Events() was not being
+	// drained. Only Run touches it, on one goroutine, so it needs no lock.
+	eventsDropped int
+	running       atomic.Bool
+	activity      chan struct{}
 }
 
 // NewBridge wires a client to a carrier media sink.
@@ -45,6 +50,7 @@ func NewBridge(c *Client, sink MediaSink) *Bridge {
 		client:      c,
 		sink:        sink,
 		transcripts: make(chan Transcript, 16),
+		events:      make(chan ServerEvent, 16),
 		activity:    make(chan struct{}, 1),
 	}
 }
@@ -57,17 +63,26 @@ func (b *Bridge) Forward(ctx context.Context, payload string) error {
 
 // Run reads server events until the connection ends or ctx is cancelled,
 // driving the sink: audio deltas become Media, speech starts become Clear,
-// and transcripts are published on Transcripts. It always returns a non-nil
-// error describing why it stopped — a backend that goes away is a fact the
-// caller must see, never a silent return.
+// and transcripts are published on Transcripts. Every event, of every type, is
+// also offered to Events, whose delivery never blocks this loop: a caller that
+// stops draining loses events rather than stalling the call; see Events. It
+// always returns a non-nil error describing why it stopped — a backend that
+// goes away is a fact the caller must see, never a silent return.
+//
 // A second concurrent Run is refused rather than allowed to proceed: two
 // readers on one connection is undefined, and the loser would panic closing an
-// already-closed transcript channel on the way out.
+// already-closed channel on the way out — both Transcripts and Events are
+// closed here, so there are now two ways for that to go wrong and one guard
+// covering both.
 func (b *Bridge) Run(ctx context.Context) error {
 	if !b.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("realtime: Run already in progress")
 	}
 	defer close(b.transcripts)
+	// Guarded by the same CAS as the transcripts close above: the loser
+	// returns before either defer is registered, so this can never be a
+	// second close racing the first — see the doc comment above Run.
+	defer close(b.events)
 
 	for {
 		ev, err := b.client.Read(ctx)
@@ -75,6 +90,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 			return fmt.Errorf("realtime: read loop ended: %w", err)
 		}
 		b.signalActivity()
+		b.publishEvent(ev)
 
 		switch ev.Type {
 		case EventAudioDelta:
@@ -105,6 +121,28 @@ func (b *Bridge) Run(ctx context.Context) error {
 // closed when Run returns.
 func (b *Bridge) Transcripts() <-chan Transcript {
 	return b.transcripts
+}
+
+// Events yields every server event Run reads, including ones its switch does
+// not model (see the default: branch in Run above) — the same coverage Activity
+// documents, carried as data rather than a signal. Events are published in
+// arrival order, before the event is dispatched into Run's switch, so a
+// modelled event that is not dropped reaches both Events() and its existing
+// destination. Dropping is one-sided: it costs the event its place here and
+// never its place in the switch, so a dropped transcript event still reaches
+// Transcripts and a dropped audio delta still reaches the MediaSink.
+//
+// Delivery never blocks Run. A caller that stops draining loses events rather
+// than stalling the call: once the 16-event buffer is full the publish drops.
+// Every drop is counted, and the count is logged at a bounded rate — the first
+// drop of a call and every dropLogEvery-th after it, each line carrying the
+// running total, so no loss is invisible and none of it is logged per drop at
+// audio rate. That is deliberate — every event is published, including
+// one audio delta per 20 ms frame, and Run's read loop is also what drives the
+// MediaSink, so a blocking publish would silence audio within ~320 ms of a
+// consumer looking away. The channel is closed when Run returns.
+func (b *Bridge) Events() <-chan ServerEvent {
+	return b.events
 }
 
 // Activity signals once per successful backend read, before that event is
@@ -138,5 +176,53 @@ func (b *Bridge) publish(ctx context.Context, tr Transcript) {
 	select {
 	case b.transcripts <- tr:
 	case <-ctx.Done():
+	}
+}
+
+// dropLogEvery bounds how often a drop is logged. Every drop is COUNTED and
+// every line carries the running total, so nothing is silent in aggregate —
+// but a line per drop is not survivable here.
+//
+// Events carries one audio delta per 20 ms frame, and Events() is new, so every
+// existing direct Bridge consumer is undrained by construction: after the first
+// 16 events, every event is a drop. Unbounded, that is ~50 lines/second and
+// roughly 15,000 for a five-minute call. Worse than the volume, log.Printf takes
+// a mutex and writes synchronously on Run's goroutine — the one driving the
+// MediaSink — so a slow or blocked stderr stalls audio, which is precisely the
+// failure mode the non-blocking publish was introduced to remove.
+const dropLogEvery = 100
+
+// LogDrop reports whether the nth drop of a call should be logged: the first
+// one always, then every dropLogEvery-th. Exported so the twilio drain applies
+// one policy rather than a second copy of it (universal §5).
+func LogDrop(n int) bool {
+	return n == 1 || n%dropLogEvery == 0
+}
+
+// publishEvent hands ev to Events() without ever blocking Run's read loop.
+//
+// Non-blocking-with-drop, matching signalActivity rather than publish, and the
+// difference between the two is the point. Events carries EVERY event Run
+// reads, including one audio delta per 20 ms frame, so a consumer that looks
+// away fills the 16-slot buffer in roughly 320 ms. Blocking there parks the
+// loop that also drives the MediaSink, and audio to the caller stops silently
+// with Run neither returning nor erroring. Measured before this was changed:
+// 40 audio deltas with Events() undrained delivered 16 of 40 media frames.
+//
+// publish keeps the blocking discipline for Transcripts, and correctly so:
+// transcripts arrive at conversation rate and each one carries meaning that is
+// lost if dropped. An event nobody is reading loses nothing that was being
+// read, so the trade runs the other way here.
+//
+// Only Run calls this, on one goroutine.
+func (b *Bridge) publishEvent(ev ServerEvent) {
+	select {
+	case b.events <- ev:
+	default:
+		b.eventsDropped++
+		if LogDrop(b.eventsDropped) {
+			log.Printf("realtime: server event dropped, consumer is behind (%d dropped on this call)",
+				b.eventsDropped)
+		}
 	}
 }

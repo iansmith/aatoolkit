@@ -92,6 +92,15 @@ func (c *Client) Read(ctx context.Context) (ServerEvent, error) {
 	if err := json.Unmarshal(data, &ev); err != nil {
 		return ServerEvent{}, fmt.Errorf("realtime: decoding server event: %w", err)
 	}
+	// Raw must be the verbatim wire bytes, not a re-marshal of ev: a re-marshal
+	// would re-order keys and drop fields this package does not model.
+	//
+	// The copy is insurance, not a fix for a live aliasing bug: websocket.Conn.Read
+	// returns a freshly allocated slice per message (io.ReadAll on the frame
+	// reader), so data is not a shared buffer today. It is one alloc per event on
+	// a path that already allocates one, and it means Raw survives any future
+	// pooling on the transport rather than turning into a silent corruption.
+	ev.Raw = append([]byte(nil), data...)
 	return ev, nil
 }
 
