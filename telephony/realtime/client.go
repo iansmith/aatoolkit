@@ -78,6 +78,21 @@ func (c *Client) AppendAudio(ctx context.Context, payload string) error {
 	return c.send(ctx, audioAppend{Type: EventAudioAppend, Audio: payload})
 }
 
+// Send writes one consumer-supplied client event to the backend, verbatim.
+// This package does not model, validate, or interpret event — the consumer
+// owns its own protocol correctness (session.update, conversation.item.create,
+// response.create, function-call output, or anything else the backend
+// accepts).
+//
+// AATK-82 PHASE 0 STUB: routes through send() unchanged, exactly what
+// AppendAudio already does. This is known-wrong on two axes the
+// implementation must fix: send()'s json.Marshal re-escapes HTML characters
+// in a json.RawMessage instead of writing it byte-for-byte, and nothing here
+// yet serialises this call against a concurrent AppendAudio.
+func (c *Client) Send(ctx context.Context, event json.RawMessage) error {
+	return c.send(ctx, event)
+}
+
 // Read returns the next server event. Events whose type this package does not
 // model decode with their Type set and the rest zero — Read never fails on an
 // unrecognised type, because the protocol is larger than the subset used here

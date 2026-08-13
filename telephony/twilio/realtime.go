@@ -2,6 +2,7 @@ package twilio
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -69,6 +70,12 @@ type realtimeConfig struct {
 	// serverEventChanFor mirrors transcriptChanFor: resolved per call rather
 	// than stored as a plain channel, for the same reason.
 	serverEventChanFor func(start Frame) chan<- ServerEvent
+
+	// clientEventChanFor mirrors serverEventChanFor, direction reversed: the
+	// consumer writes, the engine reads. Resolved per call for the same
+	// reason as the others — NewStreamHandler binds its options once and
+	// reuses them for every call it serves.
+	clientEventChanFor func(start Frame) <-chan json.RawMessage
 }
 
 // Transcript is one transcription result from the backend, re-exported so a
@@ -97,6 +104,15 @@ func (c realtimeConfig) serverEventChan(start Frame) chan<- ServerEvent {
 		return nil
 	}
 	return c.serverEventChanFor(start)
+}
+
+// clientEventChan resolves the source for one call, or nil when the consumer
+// supplied none. Mirrors serverEventChan, direction reversed.
+func (c realtimeConfig) clientEventChan(start Frame) <-chan json.RawMessage {
+	if c.clientEventChanFor == nil {
+		return nil
+	}
+	return c.clientEventChanFor(start)
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -205,6 +221,44 @@ func WithServerEventChan(ch chan<- ServerEvent) RealtimeOption {
 // A nil function, or one returning nil, means no consumer.
 func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOption {
 	return func(c *realtimeConfig) { c.serverEventChanFor = fn }
+}
+
+// WithClientEventChan lets a consumer send its own events to the backend for
+// the whole life of one call: ch is read, and every value read from it is
+// forwarded to the backend via realtime.Client.Send, byte-for-byte, exactly
+// as the consumer supplied it. This package does not model, validate, or
+// interpret what a consumer puts on ch — a session.update, a
+// conversation.item.create, a response.create, function-call output, or
+// anything else the backend's protocol accepts.
+//
+// The arrows reverse here relative to WithTranscriptChan and
+// WithServerEventChan: the consumer writes, the engine reads. The engine
+// never blocks waiting for a value, survives ch never being written to for
+// the whole call, and never requires ch to be closed — a consumer that never
+// sends is exactly today's behavior, byte-for-byte. The read lives in the
+// same select loop HandleStreamRealtime already runs, so no goroutine is ever
+// spawned to service ch and none can outlive the call.
+//
+// A value read from ch does NOT reset the idle timer armed by
+// WithIdleTimeout: only backend activity does. A consumer that sends steadily
+// against a backend that has gone silent must not mask that silence.
+//
+// A send that fails is logged and does not end the call; the call still ends
+// only for the reasons it already ends for (the backend going away, the
+// carrier hanging up, or the idle timeout firing).
+func WithClientEventChan(ch <-chan json.RawMessage) RealtimeOption {
+	return WithClientEventChanFor(func(Frame) <-chan json.RawMessage { return ch })
+}
+
+// WithClientEventChanFor resolves the source when the call arrives, from the
+// start frame — so a consumer can route different calls to different
+// channels. Mirrors WithServerEventChanFor, direction reversed.
+//
+// A nil function, or one returning nil, means no consumer: the engine never
+// reads anything beyond what it already reads, exactly as with no option at
+// all.
+func WithClientEventChanFor(fn func(start Frame) <-chan json.RawMessage) RealtimeOption {
+	return func(c *realtimeConfig) { c.clientEventChanFor = fn }
 }
 
 // WithInstructionsFor resolves the session persona when the call arrives, from
