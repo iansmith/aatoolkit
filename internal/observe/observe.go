@@ -290,11 +290,21 @@ const (
 // partial output it captured, and returns a nil error. That is the swallow
 // both ConnectionsPidHook and this host-wide call share: a failed lsof
 // invocation can surface as "succeeded, zero rows," indistinguishable in
-// isolation from a genuinely idle scan. holdsListen closes that hole
-// directly (see its doc comment): a host-wide `tcp` scan returning zero
+// isolation from a genuinely idle scan. holdsListen detects that hole by
+// its signature (see its doc comment): a host-wide `tcp` scan returning zero
 // rows on a live machine is never legitimate (measured: 195 rows on an idle
 // host), so an empty h.conns is itself treated as the signature of the
-// swallow rather than as "confirmed nothing is listening host-wide." The
+// swallow rather than as "confirmed nothing is listening host-wide."
+//
+// What that does NOT cover, stated plainly: the same fall-through can also
+// return PARTIAL output as a clean success. A host-wide scan truncated
+// short of this pid's row yields a non-empty h.conns with the pid absent,
+// which reads as corroborationEmpty and re-admits AATK-87 for that cycle.
+// The zero-row signature is the only shape of the swallow this can
+// recognise; a partial one is indistinguishable from a real negative with
+// the signals darwin exposes here. The residual is narrower than the
+// original bug (it needs the truncation to land on one specific row rather
+// than merely to happen) and it is not closed. The
 // two lsof invocations are still correlated under host contention (a
 // starved host makes both slow or flaky together), but the corroboration no
 // longer needs them to be independent to be informative — it recognizes the
@@ -353,10 +363,16 @@ func (h *hostCorroboration) holdsListen(pid int32) corroborationResult {
 //   - corroborationHolds: the per-pid read was wrong — the corroborating read
 //     shows this pid actually holding a LISTEN socket. Recorded as Degraded
 //     rather than silently dropped, same reasoning as treeListenSet's
-//     per-process read error case. The occupancy is real (this process
-//     really does hold something) but which port(s) is unconfirmed, so
-//     nothing is added to Holders — a Holder entry claims confident, specific
-//     occupancy this observation cannot back up.
+//     per-process read error case. Nothing is added to Holders even though
+//     the corroborating rows do carry the ports (gopsutil's darwin
+//     parseNetLine fills Laddr for every row, so h.listening names them):
+//     the reason is not that the ports are unknown but that this scan is not
+//     trustworthy enough to promote into a confident Holder. It came from
+//     the same lsof primitive that just produced a provably wrong answer for
+//     this very pid, and the swallow documented on hostCorroboration can
+//     hand back partial output as a clean success — enough to refute
+//     "confirmed empty", not enough to assert a specific occupancy Classify
+//     would then treat as exhaustive.
 //   - corroborationFailed: the corroborating call itself failed. That must
 //     not collapse into "found nothing" — doing so would just reproduce
 //     AATK-87 one layer downstream, trusting an unconfirmed empty read as

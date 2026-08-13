@@ -123,18 +123,33 @@ var redStates = map[ServerState]bool{
 
 // anomalyDetailStates are the STATE values for which a non-empty
 // AnomalyDetail is actually rendered in the parenthetical. STRAY/BLOCKED are
-// the ticket's original two; StatePartial and StateUp were added for
-// AATK-87 F2/F3, where statusForLocked now sets AnomalyDetail on an owned
-// server whose observation this cycle was unconfirmed — either because
-// nothing could be confirmed at all (renders as StatePartial) or because a
-// declared port is confirmed but some other tree member's read was
-// ambiguous (state stays StateUp). A state not in this list still ignores
+// the ticket's original two; StatePartial, StateUp and StateExtraListener
+// were added for AATK-87 F2/F3, which are exactly the three states
+// statusForLocked's owned-server branch can pair an AnomalyDetail with:
+// nothing could be confirmed at all (classifyOwned renders StatePartial), a
+// declared port is confirmed while another tree member's read was ambiguous
+// (StateUp), or that same ambiguity coexists with a genuine stray port
+// (StateExtraListener). A state not in this list still ignores
 // AnomalyDetail even if one happens to be set.
 var anomalyDetailStates = map[ServerState]bool{
-	StateStray:   true,
-	StateBlocked: true,
-	StatePartial: true,
-	StateUp:      true,
+	StateStray:         true,
+	StateBlocked:       true,
+	StatePartial:       true,
+	StateUp:            true,
+	StateExtraListener: true,
+}
+
+// withAnomalyDetail appends s.AnomalyDetail to text as a parenthetical when
+// the detail is non-empty and s.State is one the allow-list renders it for.
+// Both of formatStateCell's return paths that can carry a detail go through
+// here, so the allow-list is consulted in exactly one place — the
+// owned-disabled path used to return before reaching it, silently dropping
+// the AATK-87 F2 warning for a server started imperatively via `<name> up`.
+func withAnomalyDetail(s ServerStatus, text string) string {
+	if s.AnomalyDetail != "" && anomalyDetailStates[s.State] {
+		return fmt.Sprintf("%s (%s)", text, s.AnomalyDetail)
+	}
+	return text
 }
 
 // colorForState returns the ANSI code for a plain (non-overridden) state's
@@ -163,23 +178,26 @@ func colorForState(state ServerState) string {
 //  2. Owned-disabled — only when State is up AND the server is declared
 //     disabled AND we're the ones who started it (`<name> up`): yellow
 //     "up (disabled)", never red STRAY (STRAY is reserved for foreign
-//     processes in the same up-while-disabled situation).
+//     processes in the same up-while-disabled situation). It still carries
+//     any AnomalyDetail: this path is reachable with the AATK-87 F2 detail
+//     set (classifyOwned returns StateUp, then statusForLocked sets
+//     OwnedDisabled on the very next line), and swallowing the warning
+//     there would report an unconfirmed observation as a confident verdict
+//     for exactly the imperatively-started servers.
 //  3. Per-state color table (colorForState) — up green; down/disabled dim;
 //     the anomaly states red, with AnomalyDetail appended in parens for
-//     STRAY/BLOCKED and (AATK-87 F2/F3) for an owned server's UP/partial
-//     state when this cycle's observation couldn't be fully confirmed.
+//     STRAY/BLOCKED and (AATK-87 F2/F3) for an owned server's
+//     up/partial/extra-listener state when this cycle's observation
+//     couldn't be fully confirmed.
 func formatStateCell(s ServerStatus) string {
 	if s.Stale {
 		return colorize(ansiYellow, "stale")
 	}
 	if s.State == StateUp && !s.Enabled && s.OwnedDisabled {
-		return colorize(ansiYellow, "up (disabled)")
+		return colorize(ansiYellow, withAnomalyDetail(s, "up (disabled)"))
 	}
 
-	text := string(s.State)
-	if s.AnomalyDetail != "" && anomalyDetailStates[s.State] {
-		text = fmt.Sprintf("%s (%s)", text, s.AnomalyDetail)
-	}
+	text := withAnomalyDetail(s, string(s.State))
 
 	if color := colorForState(s.State); color != "" {
 		return colorize(color, text)

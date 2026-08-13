@@ -193,7 +193,16 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 			// declared listener, so its absence from class.Stray is not
 			// confirmation there isn't one. Flag it instead of rendering a
 			// confident, anomaly-free state.
-			status.AnomalyDetail = "a tree member's listen-set is unconfirmed — an undeclared listener cannot be ruled out"
+			//
+			// The wording stays generic because class.Degraded has three
+			// sources, and only two of them are listen-set failures: a
+			// member's CmdlineSlice() can fail while its ports were read
+			// fine and kept in Holders (see TreeObservation.Degraded), and
+			// for that source claiming the listen-set is unconfirmed — or
+			// that a stray cannot be ruled out — would be false in both
+			// halves and send an operator hunting a listener the walk had
+			// already excluded.
+			status.AnomalyDetail = "a tree member could not be fully observed — treat this reading as incomplete"
 		}
 		if status.State == StateUp && !s.Enabled {
 			// We started this disabled server ourselves via imperative
@@ -268,18 +277,25 @@ func observeOwnedTree(pid int32) (obs observe.TreeObservation, unconfirmedRoot b
 // (internal/observe's Degraded, carried into class.Degraded; see
 // treeListenSet's hostCorroboration).
 //
-// The len(class.Actual) == 0 term is defensive redundancy, not the live guard,
-// and this comment previously claimed the opposite. The only caller is
-// statusForLocked's `case len(class.Actual) == 0 && !unconfirmedObservation:`,
-// which already establishes that same condition, so the term here cannot
-// change the result at that call site: stage 9's mutation-check removed it and
-// all nine of the suite's node-ids stayed green — an equivalent mutant, which
-// no test can kill by construction rather than for want of coverage. It is
-// kept because this predicate should state its own precondition, and because a
-// second caller added without the outer guard would otherwise downgrade a
-// tracked tree whose declared ports are fully confirmed but which carries an
-// unrelated Degraded member (e.g. a sibling's cmdline read blipped). Anyone
-// adding that caller should delete this note, not the term.
+// The len(class.Actual) == 0 term is load-bearing. statusForLocked consults
+// this predicate at two places, not one:
+//
+//   - `case len(class.Actual) == 0 && !unconfirmedObservation:`, where the
+//     term is indeed redundant because the case already establishes it; and
+//   - the inner `case unconfirmedObservation:` under `case isOurs:`, where it
+//     is not. That inner switch is also reached with class.Actual NON-empty,
+//     and the term is the only thing separating F3 (nothing about this cycle
+//     was confirmed) from F2 (the declared ports are confirmed, some other
+//     tree member is not) — two branches that render different AnomalyDetail
+//     text.
+//
+// Dropping the term therefore makes the F2 scenario report F3's message:
+// removing it and re-running that shape rendered "observation unconfirmed
+// this cycle …" in place of the tree-member text. The suite does not catch
+// that, because TestStatusForLocked_UnrelatedTreeMemberDegraded_KeepsRealClassification
+// asserts only that AnomalyDetail is non-empty and never inspects its text.
+// That is a coverage gap, not an equivalence — a mutant surviving here means
+// the assertion is too weak, not that the term is inert.
 func isUnconfirmedObservation(isOurs bool, class observe.Result, unconfirmedRoot bool) bool {
 	return isOurs && len(class.Actual) == 0 && (unconfirmedRoot || len(class.Degraded) > 0)
 }
@@ -959,7 +975,15 @@ func (e *RealEngine) pollPortsReady(s config.Server, pid int32, budget time.Dura
 		// round-trip; a TreeListenSet probe is far more expensive — on darwin
 		// gopsutil has no connections-by-pid syscall and shells out to `lsof`
 		// once per process in the tree, measured at ~100ms for a single-process
-		// tree and scaling with it. At the interval health uses, a server that
+		// tree and scaling with it. AATK-87 roughly doubles that for the shape
+		// this loop actually sees: while a server is still binding, every tree
+		// member's per-pid read comes back empty, and internal/observe then
+		// fires one host-wide `lsof -i tcp` corroboration per walk — measured
+		// at ~197ms per probe against a live non-listening single process,
+		// versus ~101ms with the corroboration stubbed out. The loop stays
+		// inside its wall-clock budget either way; the cost is paid in fewer
+		// probes per ready_timeout, so bind detection lags by up to one extra
+		// probe interval. At the interval health uses, a server that
 		// is slow to bind would otherwise fork subprocesses back-to-back for
 		// the whole ready_timeout. Backing off by the observed cost adapts to
 		// the real tree size instead of guessing at a second constant.

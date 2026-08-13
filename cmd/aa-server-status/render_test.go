@@ -165,12 +165,55 @@ func TestFormatStateCell_UpWithUnconfirmedTreeMemberDetailRenders(t *testing.T) 
 	// stays StateUp (its own declared ports are confirmed) when some other
 	// tree member's read was ambiguous — render.go must surface that too,
 	// even though StateUp is otherwise the plain green happy path.
-	got := formatStateCell(ServerStatus{State: StateUp, Enabled: true, AnomalyDetail: "a tree member's listen-set is unconfirmed — an undeclared listener cannot be ruled out"})
-	if !strings.Contains(got, "a tree member's listen-set is unconfirmed") {
+	got := formatStateCell(ServerStatus{State: StateUp, Enabled: true, AnomalyDetail: "a tree member could not be fully observed — treat this reading as incomplete"})
+	if !strings.Contains(got, "a tree member could not be fully observed") {
 		t.Fatalf("expected the unconfirmed-tree-member detail to render for up state, got %q", got)
 	}
 	if !strings.Contains(got, ansiGreen) {
 		t.Fatalf("expected up state to still render green even with an anomaly detail, got %q", got)
+	}
+}
+
+// AATK-87 review round: the owned-disabled path in formatStateCell returned
+// before the AnomalyDetail append, so a server started imperatively via
+// `<name> up` swallowed the F2 warning entirely — an unconfirmed observation
+// rendered as a plain, confident "up (disabled)". That path is reachable with
+// the detail set: classifyOwned returns StateUp and statusForLocked sets
+// OwnedDisabled on the next line.
+func TestFormatStateCell_OwnedDisabledStillCarriesAnomalyDetail(t *testing.T) {
+	got := formatStateCell(ServerStatus{
+		State:         StateUp,
+		Enabled:       false,
+		OwnedDisabled: true,
+		AnomalyDetail: "a tree member could not be fully observed — treat this reading as incomplete",
+	})
+	if !strings.Contains(got, "a tree member could not be fully observed") {
+		t.Fatalf("expected an owned-disabled server to still surface its anomaly detail, got %q", got)
+	}
+	if !strings.Contains(got, "up (disabled)") {
+		t.Fatalf("expected the owned-disabled text to survive, got %q", got)
+	}
+	if !strings.Contains(got, ansiYellow) {
+		t.Fatalf("expected owned-disabled to stay yellow, got %q", got)
+	}
+}
+
+// AATK-87 review round: statusForLocked's F2 branch sets AnomalyDetail
+// whatever classifyOwned returned, and classifyOwned returns
+// StateExtraListener when the owned tree holds a genuine stray port. That
+// state was missing from render.go's anomalyDetailStates, so the detail was
+// set and then silently dropped.
+func TestFormatStateCell_ExtraListenerCarriesAnomalyDetail(t *testing.T) {
+	got := formatStateCell(ServerStatus{
+		State:         StateExtraListener,
+		Enabled:       true,
+		AnomalyDetail: "a tree member could not be fully observed — treat this reading as incomplete",
+	})
+	if !strings.Contains(got, "a tree member could not be fully observed") {
+		t.Fatalf("expected extra-listener to surface its anomaly detail, got %q", got)
+	}
+	if !strings.Contains(got, ansiRed) {
+		t.Fatalf("expected extra-listener to stay red, got %q", got)
 	}
 }
 
