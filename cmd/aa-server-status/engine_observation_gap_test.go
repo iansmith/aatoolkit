@@ -132,16 +132,23 @@ func TestStatusForLocked_TrackedButGenuinelyDeadChild_StillReportsDown(t *testin
 	if len(statuses) != 1 || statuses[0].State != StateDown {
 		t.Fatalf("expected a tracked child whose process has genuinely exited to still report down, got %+v", statuses)
 	}
+}
 
-	// AATK-87 vacuity repair (stage 9): the assertion above holds at base
-	// too — a process that was launched, killed, and reaped reports down
-	// whether or not this ticket's corroboration logic exists — so on its
-	// own this function pins nothing against base. This second,
-	// INDEPENDENT scenario is the missing positive half: a separate, LIVE
-	// tracked child whose per-pid read comes back empty (the
-	// unconfirmed-empty shape AATK-87 exists to fix) must NOT be rendered
-	// down, and its PID must still be reported. At base, this exact shape
-	// renders State: down, PID: 0 — precisely the defect this ticket fixes.
+// AATK-87 F5: this used to be appended to
+// TestStatusForLocked_TrackedButGenuinelyDeadChild_StillReportsDown, whose
+// own t.Fatalf on the dead-child assertion would mask this second, unrelated
+// scenario if it ever failed, and whose name no longer described half the
+// body. Split out as its own test with its own name.
+//
+// AATK-87 vacuity repair (stage 9): the dead-child assertion holds at base
+// too — a process that was launched, killed, and reaped reports down
+// whether or not this ticket's corroboration logic exists — so on its own
+// that scenario pinned nothing against base. This is the missing positive
+// half: a separate, LIVE tracked child whose per-pid read comes back empty
+// (the unconfirmed-empty shape AATK-87 exists to fix) must NOT be rendered
+// down, and its PID must still be reported. At base, this exact shape
+// renders State: down, PID: 0 — precisely the defect this ticket fixes.
+func TestStatusForLocked_ForcedUnconfirmedEmptyRead_KeepsTrackedPIDAndNotDown(t *testing.T) {
 	port2 := freeTestPort(t)
 	f2 := spawnForeignListener(t, port2)
 
