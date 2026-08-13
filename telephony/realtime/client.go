@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	neturl "net/url"
 
 	"github.com/coder/websocket"
@@ -29,7 +30,11 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 	}
 
 	// The handshake response never needs closing — coder/websocket owns it.
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	var dialOpts *websocket.DialOptions
+	if cfg.httpClient != nil {
+		dialOpts = &websocket.DialOptions{HTTPClient: cfg.httpClient}
+	}
+	conn, _, err := websocket.Dial(ctx, url, dialOpts)
 	if err != nil {
 		// redactUserinfo keeps credentials out of logs: a ws:// URL may carry
 		// user:password, and this error is the one thing guaranteed to be logged.
@@ -62,6 +67,7 @@ type DialOption func(*dialConfig)
 
 type dialConfig struct {
 	instructions string
+	httpClient   *http.Client
 }
 
 // WithInstructions sets the session persona the backend is told to adopt. The
@@ -70,6 +76,15 @@ type dialConfig struct {
 // message. Empty omits the field rather than sending "".
 func WithInstructions(s string) DialOption {
 	return func(c *dialConfig) { c.instructions = s }
+}
+
+// WithHTTPClient overrides the HTTP client used for the WebSocket dial's
+// handshake, giving control over the underlying transport (for example, to
+// inject a fault on the connection in a test). Nil (the default) uses
+// coder/websocket's own default transport — production callers should not
+// need this option.
+func WithHTTPClient(hc *http.Client) DialOption {
+	return func(c *dialConfig) { c.httpClient = hc }
 }
 
 // AppendAudio forwards one carrier frame's payload to the backend. payload is

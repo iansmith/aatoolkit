@@ -17,6 +17,10 @@ import (
 // line for as long as the carrier tolerates it.
 const realtimeDialTimeout = 10 * time.Second
 
+// dialRealtime is a seam so tests can substitute a custom dial (e.g. to
+// inject a transport-level fault). Production code never overrides it.
+var dialRealtime = realtime.Dial
+
 // NewStreamHandler selects the transport for a call.
 //
 // realtimeURL == "" is the default and returns DefaultHandleStream unchanged:
@@ -326,7 +330,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	dialCtx, cancelDial := context.WithTimeout(ctx, realtimeDialTimeout)
 	defer cancelDial()
 
-	client, err := realtime.Dial(dialCtx, url, realtime.WithInstructions(cfg.instructions(start)))
+	client, err := dialRealtime(dialCtx, url, realtime.WithInstructions(cfg.instructions(start)))
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)
 		return err

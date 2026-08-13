@@ -1,13 +1,19 @@
 package twilio
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony/realtime"
 )
 
 // Client-event-channel tests for the realtime path (AATK-82, "Let a consumer
@@ -65,6 +71,45 @@ func waitForClientEvent(t *testing.T, be *fakeRealtimeBackend, id int, d time.Du
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+// --- write-only fault injection --------------------------------------------
+
+// faultyConn wraps a net.Conn so a test can fail its Write calls on demand
+// while Read keeps working normally. A whole-connection close (graceful or
+// abrupt) cannot isolate the write path from the read path deterministically
+// on loopback — both sides observe the teardown within microseconds of each
+// other (measured directly: adversary round 1, AATK-82) — so this is the only
+// way to exercise "a send fails but the call keeps running" without racing a
+// connection teardown.
+type faultyConn struct {
+	net.Conn
+	failWrites *atomic.Bool
+}
+
+func (f *faultyConn) Write(p []byte) (int, error) {
+	if f.failWrites.Load() {
+		return 0, fmt.Errorf("realtime: injected write failure (test)")
+	}
+	return f.Conn.Write(p)
+}
+
+// faultyHTTPClient returns an *http.Client whose dialed connections can have
+// their Write calls failed on demand via the returned *atomic.Bool, and
+// otherwise behave exactly like a normal connection.
+func faultyHTTPClient() (*http.Client, *atomic.Bool) {
+	var failWrites atomic.Bool
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				return &faultyConn{Conn: c, failWrites: &failWrites}, nil
+			},
+		},
+	}, &failWrites
 }
 
 // --- headline: byte-for-byte delivery ---------------------------------
@@ -322,12 +367,18 @@ func TestClientEventChan_NoEngineGoroutineOutlivesTheCall(t *testing.T) {
 
 // TestClientEventChan_SendFailureIsLoggedNotFatal pins the DoD item "A send
 // failing does not end the call silently — it is logged, and the call ends
-// only for the reasons it already ends for." The backend is dropped mid-call
-// (the same fixture TestRealtime_BackendDropMidCallEndsCallWithError uses)
-// while the consumer keeps offering events, so at least one Send is attempted
-// against the now-dead connection; the call must still end with a non-nil
-// error (the pre-existing backend-gone path), and the failed send must be
-// logged rather than silently swallowed.
+// only for the reasons it already ends for."
+//
+// Adversary round 1 found the original version of this test could never
+// actually observe a Send failure: closing the backend (gracefully or
+// abruptly) kills the READ side microseconds before the consumer's send loop
+// could run even once, so the call always ended via the pre-existing
+// backend-gone path with no Send ever attempted — the test passed or failed
+// for a reason unrelated to what it claimed to pin. This version fails ONLY
+// the write path via a fault-injecting net.Conn (faultyConn, above), so the
+// read side — and hence backendDone — stays alive throughout: the call must
+// keep running, log the failed send, and only end later for a legitimate
+// reason (a carrier stop frame) — never because the send failed.
 //
 // slopstop:test contract
 func TestClientEventChan_SendFailureIsLoggedNotFatal(t *testing.T) {
@@ -341,33 +392,40 @@ func TestClientEventChan_SendFailureIsLoggedNotFatal(t *testing.T) {
 		log.SetFlags(origFlags)
 	}()
 
+	hc, failWrites := faultyHTTPClient()
+	origDial := dialRealtime
+	dialRealtime = func(ctx context.Context, url string, opts ...realtime.DialOption) (*realtime.Client, error) {
+		return origDial(ctx, url, append(opts, realtime.WithHTTPClient(hc))...)
+	}
+	defer func() { dialRealtime = origDial }()
+
 	ch := make(chan json.RawMessage, 1)
 	be := newFakeRealtimeBackend(t)
 	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
 	waitBackendReady(t, be, h)
 
-	be.closeNow() // the backend goes away mid-call
+	failWrites.Store(true)
 
-	// Keep offering consumer events for a while so a Send is attempted
-	// against the now-dead connection before the read-side failure ends the
-	// call.
-	deadline := time.Now().Add(2 * time.Second)
-	id := 40
-	for time.Now().Before(deadline) {
-		select {
-		case ch <- clientEventRaw(id):
-			id++
-		default:
+	ch <- clientEventRaw(41)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if strings.Contains(strings.ToLower(buf.String()), "send") {
+			break
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-deadline:
+			t.Fatal("a failed consumer send must be logged; no log line containing \"send\" appeared within 2s")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 
-	if err := h.waitDone(5 * time.Second); err == nil {
-		t.Fatal("a dropped backend must still end the call with a non-nil error")
-	}
+	assertStillRunning(t, h, "a send failure must not end the call by itself")
 
-	if !strings.Contains(strings.ToLower(buf.String()), "send") {
-		t.Fatalf("a failed consumer send must be logged rather than swallowed; log output: %q", buf.String())
+	failWrites.Store(false)
+	h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
+	if err := h.waitDone(5 * time.Second); err != nil {
+		t.Fatalf("the call must still end cleanly on a stop frame after an earlier send failure: %v", err)
 	}
 }
 
