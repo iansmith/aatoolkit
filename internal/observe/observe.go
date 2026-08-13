@@ -277,17 +277,32 @@ const (
 // ConnectionsPidHook (gopsnet.ConnectionsPid) calls, differing only in the
 // pid argument, which downstream becomes lsof's `-p <pid>` flag versus no
 // pid filter at all — so both ultimately shell out through gopsutil's
-// common.CallLsofWithContext. What corroboration buys is two separate
-// `lsof` process invocations, not two draws on shared in-process state:
-// under host contention the two calls are correlated (a starved host is
-// likely to make both slow or flaky together), not independent, and a
-// disagreement between them is still informative even though they share a
-// failure mode. This is also the only signal darwin exposes here — every
-// gopsutil net-enumeration path on darwin converges on the same lsof
-// primitive — so it is corroboration-by-a-second-real-observation, not
-// corroboration-by-an-unrelated-mechanism, and that is deliberate rather
-// than a compromise: writing a native darwin socket enumerator is out of
-// scope for this ticket.
+// common.CallLsofWithContext. That shared primitive is exactly why routing
+// a corroboration through it without more would NOT satisfy DoD item 7: it
+// would be a second draw on the very primitive that just failed, not a
+// check on it. What makes this corroboration real is that it does not
+// assume the two calls fail independently — it detects their shared
+// failure mode instead. common.CallLsofWithContext returns a non-nil error
+// only for exec.ErrNotFound (lsof missing) or an "exit status 1" paired
+// with empty stdout (a legitimate empty result); for every other failure —
+// a transient lsof error, a truncated pipe, anything else — it does not
+// return inside the error branch at all. It falls through, parses whatever
+// partial output it captured, and returns a nil error. That is the swallow
+// both ConnectionsPidHook and this host-wide call share: a failed lsof
+// invocation can surface as "succeeded, zero rows," indistinguishable in
+// isolation from a genuinely idle scan. holdsListen closes that hole
+// directly (see its doc comment): a host-wide `tcp` scan returning zero
+// rows on a live machine is never legitimate (measured: 195 rows on an idle
+// host), so an empty h.conns is itself treated as the signature of the
+// swallow rather than as "confirmed nothing is listening host-wide." The
+// two lsof invocations are still correlated under host contention (a
+// starved host makes both slow or flaky together), but the corroboration no
+// longer needs them to be independent to be informative — it recognizes the
+// specific shape their shared failure mode produces and refuses to trust
+// it. This is also the only signal darwin exposes here — every gopsutil
+// net-enumeration path on darwin converges on the same lsof primitive — so
+// writing a native darwin socket enumerator remains out of scope for this
+// ticket.
 type hostCorroboration struct {
 	fetched bool
 	conns   []gopsnet.ConnectionStat
@@ -296,13 +311,24 @@ type hostCorroboration struct {
 
 // holdsListen reports, for pid, whether a host-wide TCP scan (fetched once
 // and cached for the lifetime of this hostCorroboration) shows it holding a
-// LISTEN socket.
+// LISTEN socket. An empty scan (h.conns has zero rows) is treated the same
+// as a fetch error — corroborationFailed — because on any live host a
+// genuine `lsof -i tcp` essentially never returns zero rows (measured: 195
+// rows on an idle host). A zero-row result is the signature of the
+// swallowed lsof failure documented on hostCorroboration, not a legitimate
+// host-wide "nothing is listening" finding, so it must not be read as
+// confirmation that the ambiguous per-pid read really found nothing.
+// Treating it as failed keeps the direction conservative: it leaves the pid
+// unconfirmed (Degraded) rather than confidently declaring it empty.
 func (h *hostCorroboration) holdsListen(pid int32) corroborationResult {
 	if !h.fetched {
 		h.conns, h.err = gopsnet.Connections("tcp")
 		h.fetched = true
 	}
 	if h.err != nil {
+		return corroborationFailed
+	}
+	if len(h.conns) == 0 {
 		return corroborationFailed
 	}
 	for _, c := range h.conns {
