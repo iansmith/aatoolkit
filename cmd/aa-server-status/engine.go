@@ -240,11 +240,20 @@ func observeOwnedTree(pid int32) (obs observe.TreeObservation, unconfirmedRoot b
 // existence-check failed transiently (unconfirmedRoot) or a per-process read
 // came back ambiguous and corroboration could not rule out real occupancy
 // (internal/observe's Degraded, carried into class.Degraded; see
-// treeListenSet's hostCorroboration). The len(class.Actual) == 0 gate is not
-// optional here: without it, a tracked tree with a confirmed, fully-populated
-// Actual set but an unrelated Degraded member (e.g. a sibling's cmdline read
-// blipped) would be downgraded from its real classification even though
-// nothing about its declared ports is actually in question.
+// treeListenSet's hostCorroboration).
+//
+// The len(class.Actual) == 0 term is defensive redundancy, not the live guard,
+// and this comment previously claimed the opposite. The only caller is
+// statusForLocked's `case len(class.Actual) == 0 && !unconfirmedObservation:`,
+// which already establishes that same condition, so the term here cannot
+// change the result at that call site: stage 9's mutation-check removed it and
+// all nine of the suite's node-ids stayed green — an equivalent mutant, which
+// no test can kill by construction rather than for want of coverage. It is
+// kept because this predicate should state its own precondition, and because a
+// second caller added without the outer guard would otherwise downgrade a
+// tracked tree whose declared ports are fully confirmed but which carries an
+// unrelated Degraded member (e.g. a sibling's cmdline read blipped). Anyone
+// adding that caller should delete this note, not the term.
 func isUnconfirmedObservation(isOurs bool, class observe.Result, unconfirmedRoot bool) bool {
 	return isOurs && len(class.Actual) == 0 && (unconfirmedRoot || len(class.Degraded) > 0)
 }
