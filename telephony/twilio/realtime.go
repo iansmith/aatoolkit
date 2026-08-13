@@ -247,9 +247,12 @@ func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOpt
 // WithIdleTimeout: only backend activity does. A consumer that sends steadily
 // against a backend that has gone silent must not mask that silence.
 //
-// A send that fails is logged and does not end the call; the call still ends
-// only for the reasons it already ends for (the backend going away, the
-// carrier hanging up, or the idle timeout firing).
+// A send that fails is logged, and the call ends with a non-nil error — the
+// same ending path as the backend going away. This transport's underlying
+// writer poisons itself after one write error (every subsequent write to
+// that connection fails forever), so a failed send here is never transient;
+// continuing the call would mean running it against a permanently dead
+// backend link.
 func WithClientEventChan(ch <-chan json.RawMessage) RealtimeOption {
 	return WithClientEventChanFor(func(Frame) <-chan json.RawMessage { return ch })
 }
@@ -375,10 +378,19 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	idle := newIdleGuard(cfg.idleTimeout)
 	defer idle.stop()
 
+	// Resolved once, before the loop, mirroring how transcriptChan/
+	// serverEventChan are resolved once via cfg.transcriptChan(start) /
+	// cfg.serverEventChan(start) above rather than per-iteration. nil (no
+	// option, or the resolver returned nil) means the select case below
+	// simply never fires — a nil channel blocks forever in a select, which is
+	// exactly "never blocks waiting, survives never being written to".
+	clientEventCh := cfg.clientEventChan(start)
+
 	// One goroutine, one select: bridge.Activity() resets the guard without any
 	// Reset call crossing a goroutine boundary, which is what keeps this
-	// race-free under -race. Only backendDone, carrierDone, or the guard firing
-	// ends the loop; an activity signal just re-arms and loops again.
+	// race-free under -race. Only backendDone, carrierDone, the guard firing,
+	// or a client-event send failure ends the loop; an activity signal or a
+	// forwarded client event just re-arms/loops again.
 	for {
 		select {
 		case err := <-backendDone:
@@ -390,6 +402,21 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 			return fmt.Errorf("twilio: realtime: idle timeout: no backend activity for %s", cfg.idleTimeout)
 		case <-bridge.Activity():
 			idle.reset()
+		case ev, ok := <-clientEventCh:
+			if !ok {
+				// The consumer closed its channel: nil it out so this case
+				// never fires again, rather than busy-looping on a closed
+				// channel that is always ready to receive its zero value.
+				clientEventCh = nil
+				continue
+			}
+			// Deliberately NOT idle.reset(): a consumer event is not backend
+			// activity, and a chatty consumer against a silent backend must
+			// not mask that silence.
+			if err := client.Send(ctx, ev); err != nil {
+				log.Printf("twilio: realtime: client event send failed: %v", err)
+				return err
+			}
 		}
 	}
 }

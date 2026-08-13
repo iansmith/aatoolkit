@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	neturl "net/url"
+	"sync"
 
 	"github.com/coder/websocket"
 )
@@ -16,6 +17,15 @@ import (
 // whether a dropped backend should end the call or be retried.
 type Client struct {
 	conn *websocket.Conn
+
+	// writeMu serialises every client-originated write (AppendAudio, Send, the
+	// Dial handshake) through one chokepoint. coder/websocket's own Conn
+	// already guarantees safe concurrent Write calls per its documented
+	// contract (conn.go, backed by write.go's writeFrameMu), so this mutex is
+	// defensive redundancy against a future library change, not something
+	// load-bearing today — kept anyway because relying solely on a
+	// dependency's internal locking is fragile.
+	writeMu sync.Mutex
 }
 
 // Dial connects to url, sends the session.update handshake, and waits for the
@@ -99,13 +109,12 @@ func (c *Client) AppendAudio(ctx context.Context, payload string) error {
 // response.create, function-call output, or anything else the backend
 // accepts).
 //
-// AATK-82 PHASE 0 STUB: routes through send() unchanged, exactly what
-// AppendAudio already does. This is known-wrong on two axes the
-// implementation must fix: send()'s json.Marshal re-escapes HTML characters
-// in a json.RawMessage instead of writing it byte-for-byte, and nothing here
-// yet serialises this call against a concurrent AppendAudio.
+// event's bytes go on the wire exactly as supplied: unlike send(), this does
+// NOT go through json.Marshal, which would re-escape '<', '>', '&' and
+// recompact whitespace on a json.RawMessage. It goes through the same write
+// chokepoint as AppendAudio, so the two are safe to call concurrently.
 func (c *Client) Send(ctx context.Context, event json.RawMessage) error {
-	return c.send(ctx, event)
+	return c.write(ctx, event)
 }
 
 // Read returns the next server event. Events whose type this package does not
@@ -161,5 +170,14 @@ func (c *Client) send(ctx context.Context, v any) error {
 	if err != nil {
 		return fmt.Errorf("realtime: marshal client event: %w", err)
 	}
+	return c.write(ctx, b)
+}
+
+// write is the single chokepoint every client-originated write funnels
+// through: the Dial handshake, AppendAudio (via send), and Send. Serialising
+// here means AppendAudio and Send are safe to call concurrently.
+func (c *Client) write(ctx context.Context, b []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	return c.conn.Write(ctx, websocket.MessageText, b)
 }
