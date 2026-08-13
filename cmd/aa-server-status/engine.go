@@ -292,7 +292,7 @@ func observeOwnedTree(pid int32) (obs observe.TreeObservation, unconfirmedRoot b
 // Dropping the term therefore makes the F2 scenario report F3's message:
 // removing it and re-running that shape rendered "observation unconfirmed
 // this cycle …" in place of the tree-member text. The suite does not catch
-// that, because TestStatusForLocked_UnrelatedTreeMemberDegraded_KeepsRealClassification
+// that, because TestStatusForLocked_UnrelatedTreeMemberDegraded_KeepsConfirmedStateFlagsUncertainty
 // asserts only that AnomalyDetail is non-empty and never inspects its text.
 // That is a coverage gap, not an equivalence — a mutant surviving here means
 // the assertion is too weak, not that the term is inert.
