@@ -322,7 +322,7 @@ func TestStatusForLocked_ForcedNonNotRunningRootError_NotRenderedDownKeepsTracke
 // declared set fully confirmed (no Missing, and no Stray either, since the
 // child's undeclared port vanishes with it) while the child itself is the
 // Degraded member.
-func TestStatusForLocked_UnrelatedTreeMemberDegraded_KeepsRealClassification(t *testing.T) {
+func TestStatusForLocked_UnrelatedTreeMemberDegraded_KeepsConfirmedStateFlagsUncertainty(t *testing.T) {
 	port := freeTestPort(t)
 	childPort := freeTestPort(t)
 	f := spawnForeignListenerWithChild(t, port, childPort)
