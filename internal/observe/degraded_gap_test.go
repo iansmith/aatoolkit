@@ -74,3 +74,50 @@ func TestTreeListenSet_ForcedEmptyReadOnChildOnly_DegradesChildKeepsRootHolder(t
 		t.Errorf("Holders still contains the child port %d after its forced empty read — an unconfirmed read must not also claim confident occupancy", childPort)
 	}
 }
+
+// slopstop:test contract
+func TestTreeListenSet_HostWideCorroborationFails_DegradesRatherThanConfirmsEmpty(t *testing.T) {
+	port := freePort(t)
+	sl := spawnListener(t, port, 0)
+
+	// Prove the port really is held, through the real unmocked call, before
+	// lying about it below — so the forced reads provably contradict
+	// reality rather than coincidentally matching it.
+	obs := waitForListenSet(t, observe.TreeListenSet, sl.pid, port, 5*time.Second)
+	if _, ok := obs.Holders[port]; !ok {
+		t.Fatalf("precondition: port %d not observed listening; Holders = %v", port, obs.Holders)
+	}
+
+	origPid := observe.ConnectionsPidHook
+	observe.ConnectionsPidHook = func(kind string, pid int32) ([]gopsnet.ConnectionStat, error) {
+		if pid == sl.pid {
+			return nil, nil // succeeded, found nothing — the ambiguous AATK-87 per-pid shape
+		}
+		return origPid(kind, pid)
+	}
+	t.Cleanup(func() { observe.ConnectionsPidHook = origPid })
+
+	origConns := observe.ConnectionsHook
+	observe.ConnectionsHook = func(kind string) ([]gopsnet.ConnectionStat, error) {
+		return nil, nil // the corroborating host-wide scan swallows its own failure too
+	}
+	t.Cleanup(func() { observe.ConnectionsHook = origConns })
+
+	got, err := observe.TreeListenSet(sl.pid)
+	if err != nil {
+		t.Fatalf("TreeListenSet: %v", err)
+	}
+
+	degraded := false
+	for _, pid := range got.Degraded {
+		if pid == sl.pid {
+			degraded = true
+		}
+	}
+	if !degraded {
+		t.Fatalf("Degraded = %v, want it to contain pid %d — when the corroborating host-wide scan itself returns the ambiguous zero-row shape, the per-pid empty read must not be promoted to confirmed-empty", got.Degraded, sl.pid)
+	}
+	if _, ok := got.Holders[port]; ok {
+		t.Errorf("Holders still contains port %d after the corroborating scan itself failed — an unconfirmed read must not be promoted to confident occupancy", port)
+	}
+}

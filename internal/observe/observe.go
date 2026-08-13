@@ -249,6 +249,16 @@ var ConnectionsPidHook = gopsnet.ConnectionsPid
 // reassigns it must restore the original via t.Cleanup.
 var NewProcessHook = process.NewProcess
 
+// ConnectionsHook is the seam hostTCPScan calls through for the host-wide
+// `tcp` scan holdsListen and SystemListenSet share. It defaults to the real
+// gopsutil call; production code must never reassign it. Tests substitute it
+// to force corroborationFailed deterministically — both the h.err != nil
+// path (the hook returns an error) and the len(h.conns) == 0 path (the hook
+// returns (nil, nil), modeling the documented lsof swallow) — neither of
+// which any existing test can currently provoke. A test that reassigns it
+// must restore the original via t.Cleanup.
+var ConnectionsHook = gopsnet.Connections
+
 // corroborationResult is holdsListen's verdict for one pid.
 type corroborationResult int
 
@@ -409,7 +419,7 @@ func listeningPorts(proc *process.Process) ([]int, error) {
 // holdsListen's doc comment for why — so both are returned rather than only
 // the filtered one.
 func hostTCPScan() (conns []gopsnet.ConnectionStat, listening []gopsnet.ConnectionStat, err error) {
-	conns, err = gopsnet.Connections("tcp")
+	conns, err = ConnectionsHook("tcp")
 	if err != nil {
 		return nil, nil, err
 	}
