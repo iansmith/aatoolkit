@@ -159,28 +159,8 @@ func treeListenSet(rootPID int32, ours bool) (TreeObservation, error) {
 			// trusting this as "confirmed to hold no ports", corroborate
 			// with a second, real observation — see hostCorroboration's doc
 			// comment for exactly what that buys and does not buy.
-			switch corrob.holdsListen(proc.Pid) {
-			case corroborationHolds:
-				// The per-pid read was wrong: the corroborating read shows
-				// this pid actually holding a LISTEN socket. Recorded as
-				// Degraded rather than silently dropped — same reasoning as
-				// the error case above. The occupancy is real (this
-				// process really does hold something) but which port(s) is
-				// unconfirmed, so nothing is added to Holders — a Holder
-				// entry claims confident, specific occupancy this
-				// observation cannot back up.
+			if corrob.ambiguousEmptyReadIsDegraded(proc.Pid) {
 				obs.Degraded = append(obs.Degraded, proc.Pid)
-			case corroborationFailed:
-				// The corroborating call itself failed. That must not
-				// collapse into "found nothing" — doing so would just
-				// reproduce AATK-87 one layer downstream, trusting an
-				// unconfirmed empty read as confirmed because the second
-				// opinion couldn't be reached either. Treat the process as
-				// unconfirmed (Degraded), not as confirmed-empty.
-				obs.Degraded = append(obs.Degraded, proc.Pid)
-			case corroborationEmpty:
-				// The corroborating read agrees: this pid genuinely holds
-				// no LISTEN socket. Confirmed-empty — no Degraded entry.
 			}
 			continue
 		}
@@ -331,6 +311,30 @@ func (h *hostCorroboration) holdsListen(pid int32) corroborationResult {
 		}
 	}
 	return corroborationEmpty
+}
+
+// ambiguousEmptyReadIsDegraded reports whether a per-pid read that came back
+// successful-but-empty for pid should be recorded as Degraded, per a
+// corroborating host-wide scan (see holdsListen). Only an agreeing
+// corroborationEmpty clears the read as confirmed-empty; the other two
+// verdicts both leave the observation unconfirmed:
+//
+//   - corroborationHolds: the per-pid read was wrong — the corroborating read
+//     shows this pid actually holding a LISTEN socket. Recorded as Degraded
+//     rather than silently dropped, same reasoning as treeListenSet's
+//     per-process read error case. The occupancy is real (this process
+//     really does hold something) but which port(s) is unconfirmed, so
+//     nothing is added to Holders — a Holder entry claims confident, specific
+//     occupancy this observation cannot back up.
+//   - corroborationFailed: the corroborating call itself failed. That must
+//     not collapse into "found nothing" — doing so would just reproduce
+//     AATK-87 one layer downstream, trusting an unconfirmed empty read as
+//     confirmed because the second opinion couldn't be reached either. Treat
+//     the process as unconfirmed (Degraded), not as confirmed-empty.
+//   - corroborationEmpty: the corroborating read agrees — this pid genuinely
+//     holds no LISTEN socket. Confirmed-empty, not Degraded.
+func (h *hostCorroboration) ambiguousEmptyReadIsDegraded(pid int32) bool {
+	return h.holdsListen(pid) != corroborationEmpty
 }
 
 // listeningPorts returns the local TCP ports proc is listening on.
