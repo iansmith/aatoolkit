@@ -132,6 +132,70 @@ func TestStatusForLocked_TrackedButGenuinelyDeadChild_StillReportsDown(t *testin
 	if len(statuses) != 1 || statuses[0].State != StateDown {
 		t.Fatalf("expected a tracked child whose process has genuinely exited to still report down, got %+v", statuses)
 	}
+
+	// AATK-87 vacuity repair (stage 9): the assertion above holds at base
+	// too — a process that was launched, killed, and reaped reports down
+	// whether or not this ticket's corroboration logic exists — so on its
+	// own this function pins nothing against base. This second,
+	// INDEPENDENT scenario is the missing positive half: a separate, LIVE
+	// tracked child whose per-pid read comes back empty (the
+	// unconfirmed-empty shape AATK-87 exists to fix) must NOT be rendered
+	// down, and its PID must still be reported. At base, this exact shape
+	// renders State: down, PID: 0 — precisely the defect this ticket fixes.
+	port2 := freeTestPort(t)
+	f2 := spawnForeignListener(t, port2)
+
+	cfg2 := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers: []config.Server{{
+			Name:    "svc",
+			Type:    config.TypeExec,
+			Enabled: true,
+			Host:    "127.0.0.1",
+			Port:    port2,
+		}},
+	}
+	eng2 := NewEngine(cfg2, nil, nil)
+	eng2.procs["svc"] = &lifecycle.Process{Cmd: f2.cmd, LogPath: "live-child-forced-empty.log"}
+
+	// Prove the real observation genuinely sees the port before lying about
+	// it, so the forced read is provably wrong rather than coincidentally
+	// right.
+	deadline2 := time.Now().Add(3 * time.Second)
+	var sawPort2 bool
+	for time.Now().Before(deadline2) {
+		obs, err := observe.TreeListenSet(f2.pid)
+		if err == nil {
+			if _, ok := obs.Holders[port2]; ok {
+				sawPort2 = true
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !sawPort2 {
+		t.Fatalf("precondition: pid %d never observed listening on port %d", f2.pid, port2)
+	}
+
+	orig2 := observe.ConnectionsPidHook
+	observe.ConnectionsPidHook = func(kind string, pid int32) ([]gopsnet.ConnectionStat, error) {
+		if pid == f2.pid {
+			return nil, nil // succeeded, found nothing — the AATK-87 shape
+		}
+		return orig2(kind, pid)
+	}
+	t.Cleanup(func() { observe.ConnectionsPidHook = orig2 })
+
+	statuses2 := eng2.Status()
+	if len(statuses2) != 1 {
+		t.Fatalf("expected exactly one status, got %+v", statuses2)
+	}
+	if statuses2[0].State == StateDown {
+		t.Fatalf("expected a tracked LIVE child NOT to be rendered down after its per-pid read came back empty, got %+v", statuses2)
+	}
+	if statuses2[0].PID == 0 {
+		t.Fatalf("expected the tracked live child's PID to still be reported after an unconfirmed empty read, got %+v", statuses2)
+	}
 }
 
 // AATK-87 V2 DoD item 5, the main deliverable of this Phase 0 round: "A
@@ -300,5 +364,29 @@ func TestStatusForLocked_UnrelatedTreeMemberDegraded_KeepsRealClassification(t *
 	}
 	if statuses[0].PID != int(f.pid) {
 		t.Fatalf("expected the tracked root pid %d to be reported, got %+v", f.pid, statuses)
+	}
+
+	// AATK-87 vacuity repair (stage 9): the assertions above hold at base
+	// too — at base, treeListenSet's `len(ports) == 0 { continue }` arm
+	// records nothing for an ambiguous empty read, so the corroboration
+	// mechanism this test claims to be non-interfering WITH never gets a
+	// chance to fire, and nothing above proves it did. Close that gap
+	// directly: under the SAME forced-empty hook, call TreeListenSet again
+	// and assert the child's pid actually shows up in
+	// TreeObservation.Degraded. At base this is red (Degraded stays empty);
+	// at HEAD the corroboration path records it.
+	treeObs, err := observe.TreeListenSet(f.pid)
+	if err != nil {
+		t.Fatalf("observe.TreeListenSet: %v", err)
+	}
+	var degradedFound bool
+	for _, pid := range treeObs.Degraded {
+		if pid == childPID {
+			degradedFound = true
+			break
+		}
+	}
+	if !degradedFound {
+		t.Fatalf("expected child pid %d to appear in TreeObservation.Degraded under a forced-empty per-pid read, got Degraded=%v", childPID, treeObs.Degraded)
 	}
 }
