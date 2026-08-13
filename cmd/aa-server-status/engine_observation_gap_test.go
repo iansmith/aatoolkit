@@ -17,10 +17,12 @@ package main
 // unreportable as down.
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	gopsnet "github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/process"
 
 	"github.com/iansmith/aatoolkit/config"
 	"github.com/iansmith/aatoolkit/internal/lifecycle"
@@ -129,5 +131,96 @@ func TestStatusForLocked_TrackedButGenuinelyDeadChild_StillReportsDown(t *testin
 	statuses := eng.Status()
 	if len(statuses) != 1 || statuses[0].State != StateDown {
 		t.Fatalf("expected a tracked child whose process has genuinely exited to still report down, got %+v", statuses)
+	}
+}
+
+// AATK-87 V2 DoD item 5, the main deliverable of this Phase 0 round: "A
+// tracked child whose TreeListenSet call returns an error that does NOT
+// wrap process.ErrorProcessNotRunning is not rendered down, and its PID is
+// reported — pinned by a test that forces exactly that error through the
+// sanctioned root-process seam." Forced via observe.NewProcessHook (added
+// for this ticket, mirroring observe.ConnectionsPidHook's shape and
+// t.Cleanup discipline exactly) against a genuinely live, tracked root — NOT
+// a bogus (<=0 or never-alive) PID, which the ticket's own file map singles
+// out as producing the same error class against a process that was never
+// alive, proving nothing about a live tracked child (the load-bearing
+// qualifier the V1 attempt's stage-7 adversary round caught one hop over
+// from here).
+//
+// This test does not decide where errors.Is(err, process.ErrorProcessNotRunning)
+// ends up living (inline in engine.go vs. a predicate exported from
+// internal/observe) or whether a new ServerState is introduced — both are
+// design forks the ticket leaves to implement. It only asserts the
+// statusForLocked-level outcome the ticket states: not down, and the PID
+// still reported — following TestStatusForLocked_ForcedUnconfirmedEmptyRead_NotRenderedDown's
+// own precedent of asserting State != StateDown rather than a specific
+// replacement state.
+//
+// slopstop:test contract
+func TestStatusForLocked_ForcedNonNotRunningRootError_NotRenderedDownKeepsTrackedPID(t *testing.T) {
+	port := freeTestPort(t)
+	f := spawnForeignListener(t, port) // real, alive, genuinely bound to `port`
+
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers: []config.Server{{
+			Name:    "svc",
+			Type:    config.TypeExec,
+			Enabled: true,
+			Host:    "127.0.0.1",
+			Port:    port,
+		}},
+	}
+	eng := NewEngine(cfg, nil, nil)
+	eng.procs["svc"] = &lifecycle.Process{Cmd: f.cmd, LogPath: "forced-transient-root-error.log"}
+
+	// Prove the real observation genuinely sees the port before forcing the
+	// root-resolution error below, so the forced failure provably
+	// contradicts a real, live, tracked child rather than coincidentally
+	// matching a dead one.
+	deadline := time.Now().Add(3 * time.Second)
+	var sawPort bool
+	for time.Now().Before(deadline) {
+		obs, err := observe.TreeListenSet(f.pid)
+		if err == nil {
+			if _, ok := obs.Holders[port]; ok {
+				sawPort = true
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !sawPort {
+		t.Fatalf("precondition: pid %d never observed listening on port %d", f.pid, port)
+	}
+
+	forcedErr := errors.New("AATK-87 DoD item 5: forced transient existence-check failure, neither ESRCH nor EPERM")
+	orig := observe.NewProcessHook
+	observe.NewProcessHook = func(pid int32) (*process.Process, error) {
+		if pid == f.pid {
+			return nil, forcedErr
+		}
+		return orig(pid)
+	}
+	t.Cleanup(func() { observe.NewProcessHook = orig })
+
+	// Confirm the forced seam actually produces, at TreeListenSet's own
+	// (TreeObservation, error) boundary, an error that does NOT wrap
+	// process.ErrorProcessNotRunning — so a failure below is attributable to
+	// statusForLocked's handling of that error, not to a misconfigured seam
+	// or a coincidentally-ErrorProcessNotRunning-shaped forced error.
+	if _, err := observe.TreeListenSet(f.pid); err == nil || errors.Is(err, process.ErrorProcessNotRunning) {
+		t.Fatalf("precondition: forced seam did not produce a non-ErrorProcessNotRunning error from TreeListenSet, got %v", err)
+	}
+
+	statuses := eng.Status()
+	if len(statuses) != 1 {
+		t.Fatalf("expected exactly one status, got %+v", statuses)
+	}
+	if statuses[0].State == StateDown {
+		t.Fatalf("expected a tracked live child NOT to be rendered down after a forced transient (non-ErrorProcessNotRunning) root-resolution error, got %+v", statuses)
+	}
+	if statuses[0].PID == 0 {
+		t.Fatalf("expected the tracked live child's PID to still be reported after a forced transient root-resolution error, got %+v", statuses)
 	}
 }

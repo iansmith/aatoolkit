@@ -108,7 +108,7 @@ func TreeListenSet(rootPID int32) (TreeObservation, error) {
 // behavior) or leaves them unmarked (the plain ListenSet behavior — callers
 // classify ownership themselves).
 func treeListenSet(rootPID int32, ours bool) (TreeObservation, error) {
-	root, err := process.NewProcess(rootPID)
+	root, err := NewProcessHook(rootPID)
 	if err != nil {
 		return TreeObservation{}, fmt.Errorf("observe: root pid %d: %w", rootPID, err)
 	}
@@ -199,6 +199,25 @@ func collectTreeProcesses(root *process.Process) ([]*process.Process, error) {
 // none — so tests that need it substitute this hook instead. A test that
 // reassigns it must restore the original via t.Cleanup.
 var ConnectionsPidHook = gopsnet.ConnectionsPid
+
+// NewProcessHook is the seam treeListenSet calls through to resolve the root
+// PID before walking its tree. It defaults to the real gopsutil call;
+// production code must never reassign it. Tests — both in this package and
+// in cmd/aa-server-status, which calls TreeListenSet directly — substitute
+// it to force a root-process existence-check failure that is deterministic
+// and, critically, distinguishable from "confirmed gone" (AATK-87): on
+// darwin, process.NewProcess's PidExistsWithContext signals the PID with 0
+// and switches on errno — ESRCH confirms gone (wrapped as
+// process.ErrorProcessNotRunning by NewProcessWithContext), EPERM confirms
+// alive (no error at all), and any other errno falls through to (false,
+// err) — a transient observation failure that is neither. Producing that
+// third case against a genuinely live, tracked root requires this seam: a
+// bogus (<=0, or never-alive) PID also yields a non-ErrorProcessNotRunning
+// error from the real unhooked call, but against a process that was never
+// alive, which proves nothing about a live tracked child — the exact
+// uninformative substitute this ticket's file map rules out. A test that
+// reassigns it must restore the original via t.Cleanup.
+var NewProcessHook = process.NewProcess
 
 // listeningPorts returns the local TCP ports proc is listening on.
 func listeningPorts(proc *process.Process) ([]int, error) {
