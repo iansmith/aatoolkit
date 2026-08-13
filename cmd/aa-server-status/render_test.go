@@ -133,13 +133,44 @@ func TestFormatStateCell_UpRendersGreenNoParens(t *testing.T) {
 
 // --- adversary gap tests (Step 0f) ---
 
-func TestFormatStateCell_AnomalyDetailIgnoredForNonStrayNonBlockedStates(t *testing.T) {
-	// AnomalyDetail is only meaningful alongside STRAY/BLOCKED per the
-	// ticket's examples — a stray AnomalyDetail value set on some other
-	// state (e.g. by a future caller bug) must not leak into the display.
-	got := formatStateCell(ServerStatus{State: StatePartial, AnomalyDetail: "pid 1234, foreign"})
+func TestFormatStateCell_AnomalyDetailIgnoredOutsideAllowList(t *testing.T) {
+	// AnomalyDetail is only rendered for the states in render.go's
+	// anomalyDetailStates allow-list (STRAY/BLOCKED, plus StatePartial and
+	// StateUp as of AATK-87 F2/F3, for an owned server's unconfirmed
+	// observation) — a stray AnomalyDetail value set on some other state
+	// (e.g. by a future caller bug) must not leak into the display.
+	// StateDown is a representative state outside that list.
+	got := formatStateCell(ServerStatus{State: StateDown, AnomalyDetail: "pid 1234, foreign"})
 	if strings.Contains(got, "pid 1234") {
-		t.Fatalf("expected AnomalyDetail to be ignored for partial state, got %q", got)
+		t.Fatalf("expected AnomalyDetail to be ignored for down state, got %q", got)
+	}
+}
+
+func TestFormatStateCell_PartialWithUnconfirmedDetailRenders(t *testing.T) {
+	// AATK-87 F3: statusForLocked sets AnomalyDetail on an owned server's
+	// StatePartial when the observation this cycle could not be confirmed —
+	// render.go must actually surface it, not silently drop it the way it
+	// used to for every non-STRAY/BLOCKED state.
+	got := formatStateCell(ServerStatus{State: StatePartial, AnomalyDetail: "observation unconfirmed this cycle — reported ports may not reflect reality"})
+	if !strings.Contains(got, "observation unconfirmed") {
+		t.Fatalf("expected the unconfirmed-observation detail to render for partial state, got %q", got)
+	}
+	if !strings.Contains(got, ansiRed) {
+		t.Fatalf("expected partial state to still render red, got %q", got)
+	}
+}
+
+func TestFormatStateCell_UpWithUnconfirmedTreeMemberDetailRenders(t *testing.T) {
+	// AATK-87 F2: statusForLocked sets AnomalyDetail on an owned server that
+	// stays StateUp (its own declared ports are confirmed) when some other
+	// tree member's read was ambiguous — render.go must surface that too,
+	// even though StateUp is otherwise the plain green happy path.
+	got := formatStateCell(ServerStatus{State: StateUp, Enabled: true, AnomalyDetail: "a tree member's listen-set is unconfirmed — an undeclared listener cannot be ruled out"})
+	if !strings.Contains(got, "a tree member's listen-set is unconfirmed") {
+		t.Fatalf("expected the unconfirmed-tree-member detail to render for up state, got %q", got)
+	}
+	if !strings.Contains(got, ansiGreen) {
+		t.Fatalf("expected up state to still render green even with an anomaly detail, got %q", got)
 	}
 }
 

@@ -169,6 +169,32 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 	case isOurs:
 		status.PID = int(pid)
 		status.State = classifyOwned(s, class)
+		switch {
+		case unconfirmedObservation:
+			// AATK-87 F3: this branch was reached only because
+			// unconfirmedObservation suppressed the StateDown case above —
+			// class.Actual is empty and nothing about this cycle's read was
+			// confirmed. classifyOwned still renders StatePartial here
+			// (every declared port shows not-listening), which is a
+			// confident-looking verdict built from a read that could not be
+			// confirmed. Say so, rather than let it render as a plain,
+			// unqualified partial.
+			status.AnomalyDetail = "observation unconfirmed this cycle — reported ports may not reflect reality"
+		case len(class.Degraded) > 0:
+			// AATK-87 F2: class.Actual is non-empty here (unconfirmedObservation
+			// requires it to be empty), so the declared ports this server
+			// actually cares about are genuinely confirmed listening — the
+			// State above is trustworthy. But some OTHER member of this
+			// same process tree came back with an ambiguous read that
+			// corroboration could not resolve either way (class.Degraded).
+			// That member could be holding an undeclared (stray) port we
+			// simply didn't see this cycle — internal/observe's forced-empty
+			// read erases a real stray exactly as it would erase a real
+			// declared listener, so its absence from class.Stray is not
+			// confirmation there isn't one. Flag it instead of rendering a
+			// confident, anomaly-free state.
+			status.AnomalyDetail = "a tree member's listen-set is unconfirmed — an undeclared listener cannot be ruled out"
+		}
 		if status.State == StateUp && !s.Enabled {
 			// We started this disabled server ourselves via imperative
 			// `<name> up` — render.go's formatStateCell renders this as

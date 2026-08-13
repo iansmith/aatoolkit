@@ -121,6 +121,22 @@ var redStates = map[ServerState]bool{
 	StateBlocked:         true, // inferred from anomaly pattern, not in ticket's explicit color list
 }
 
+// anomalyDetailStates are the STATE values for which a non-empty
+// AnomalyDetail is actually rendered in the parenthetical. STRAY/BLOCKED are
+// the ticket's original two; StatePartial and StateUp were added for
+// AATK-87 F2/F3, where statusForLocked now sets AnomalyDetail on an owned
+// server whose observation this cycle was unconfirmed — either because
+// nothing could be confirmed at all (renders as StatePartial) or because a
+// declared port is confirmed but some other tree member's read was
+// ambiguous (state stays StateUp). A state not in this list still ignores
+// AnomalyDetail even if one happens to be set.
+var anomalyDetailStates = map[ServerState]bool{
+	StateStray:   true,
+	StateBlocked: true,
+	StatePartial: true,
+	StateUp:      true,
+}
+
 // colorForState returns the ANSI code for a plain (non-overridden) state's
 // color, or "" if State isn't one of the five colored classifications (e.g.
 // the stub engine's "unknown" placeholder, which is passed through
@@ -150,7 +166,8 @@ func colorForState(state ServerState) string {
 //     processes in the same up-while-disabled situation).
 //  3. Per-state color table (colorForState) — up green; down/disabled dim;
 //     the anomaly states red, with AnomalyDetail appended in parens for
-//     STRAY/BLOCKED; unrecognized states pass through uncolored.
+//     STRAY/BLOCKED and (AATK-87 F2/F3) for an owned server's UP/partial
+//     state when this cycle's observation couldn't be fully confirmed.
 func formatStateCell(s ServerStatus) string {
 	if s.Stale {
 		return colorize(ansiYellow, "stale")
@@ -160,7 +177,7 @@ func formatStateCell(s ServerStatus) string {
 	}
 
 	text := string(s.State)
-	if s.AnomalyDetail != "" && (s.State == StateStray || s.State == StateBlocked) {
+	if s.AnomalyDetail != "" && anomalyDetailStates[s.State] {
 		text = fmt.Sprintf("%s (%s)", text, s.AnomalyDetail)
 	}
 

@@ -354,16 +354,30 @@ func TestStatusForLocked_UnrelatedTreeMemberDegraded_KeepsRealClassification(t *
 	if len(statuses) != 1 {
 		t.Fatalf("expected exactly one status, got %+v", statuses)
 	}
-	// The declared port is genuinely confirmed listening, so the server's real
-	// classification must survive untouched. StateUp specifically — not merely
-	// "not down": an unconfirmed-observation branch would also render
-	// not-down with a PID, so a weaker assertion would not catch the defect
-	// this test exists for.
+	// AATK-87 F2 correction: StateUp is NOT "the real classification" here —
+	// the child genuinely holds an undeclared port, so the truthful
+	// classification (had its read not been forced empty) would be
+	// StrayPort/StateExtraListener. The forced-empty read on the child
+	// ERASES that stray from class.Stray exactly as it would erase a real
+	// declared listener, so it is genuinely unseen this cycle, not
+	// confirmed absent. StateUp is still the right STATE to render — the
+	// declared port really is confirmed listening, and asserting
+	// StateExtraListener here would report an anomaly nobody actually
+	// observed — but it must not render as an unqualified, anomaly-free
+	// green: AnomalyDetail must be set (checked below) whenever an unrelated
+	// tree member is Degraded, precisely so a stray that got hidden by an
+	// ambiguous read still surfaces as "can't be ruled out" instead of
+	// silently vanishing. StateUp specifically — not merely "not down": an
+	// unconfirmed-observation branch would also render not-down with a PID,
+	// so a weaker assertion would not catch the defect this test exists for.
 	if statuses[0].State != StateUp {
 		t.Fatalf("expected a server whose declared port is confirmed listening to stay %q despite an unrelated tree member being Degraded, got %+v", StateUp, statuses)
 	}
 	if statuses[0].PID != int(f.pid) {
 		t.Fatalf("expected the tracked root pid %d to be reported, got %+v", f.pid, statuses)
+	}
+	if statuses[0].AnomalyDetail == "" {
+		t.Fatalf("expected AnomalyDetail to be set — a stray on the Degraded child cannot be ruled out even though the declared port stays confirmed, got %+v", statuses)
 	}
 
 	// AATK-87 vacuity repair (stage 9): the assertions above hold at base
