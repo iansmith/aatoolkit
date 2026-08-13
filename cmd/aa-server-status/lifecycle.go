@@ -65,9 +65,12 @@ type ServerStatus struct {
 	// probe — placeholder until that ticket lands). When true it overrides
 	// every other STATE rendering with a plain yellow "STALE".
 	Stale bool
-	// AnomalyDetail is the parenthetical detail text for STRAY/BLOCKED
-	// states, e.g. "pid 9999, foreign" or "pid 7777 — not ours". Ignored
-	// for any other State.
+	// AnomalyDetail is the parenthetical detail text rendered alongside the
+	// STATE cell, e.g. "pid 9999, foreign" or "pid 7777 — not ours". Always
+	// meaningful for STRAY/BLOCKED; also set (AATK-87 F2/F3) on an owned
+	// server's partial or up state when this cycle's observation could not
+	// be fully confirmed — see statusForLocked. Ignored for any State not
+	// in render.go's formatStateCell allow-list.
 	AnomalyDetail string
 }
 

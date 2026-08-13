@@ -148,11 +148,9 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 	}
 
 	var obs observe.TreeObservation
+	var unconfirmedRoot bool
 	if isOurs {
-		treeObs, err := observe.TreeListenSet(pid)
-		if err == nil {
-			obs = treeObs
-		}
+		obs, unconfirmedRoot = observeOwnedTree(pid)
 	} else {
 		obs = hostObservationFor(declared)
 	}
@@ -161,13 +159,51 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 
 	status.Ports = renderPorts(declared, class)
 
+	unconfirmedObservation := isUnconfirmedObservation(isOurs, class, unconfirmedRoot)
+
 	switch {
-	case len(class.Actual) == 0:
-		// Nothing listening at all for this server's declared ports.
+	case len(class.Actual) == 0 && !unconfirmedObservation:
+		// Nothing listening at all for this server's declared ports, and
+		// nothing about that read was left unconfirmed.
 		status.State = StateDown
 	case isOurs:
 		status.PID = int(pid)
 		status.State = classifyOwned(s, class)
+		switch {
+		case unconfirmedObservation:
+			// AATK-87 F3: this branch was reached only because
+			// unconfirmedObservation suppressed the StateDown case above —
+			// class.Actual is empty and nothing about this cycle's read was
+			// confirmed. classifyOwned still renders StatePartial here
+			// (every declared port shows not-listening), which is a
+			// confident-looking verdict built from a read that could not be
+			// confirmed. Say so, rather than let it render as a plain,
+			// unqualified partial.
+			status.AnomalyDetail = "observation unconfirmed this cycle — reported ports may not reflect reality"
+		case len(class.Degraded) > 0:
+			// AATK-87 F2: class.Actual is non-empty here (unconfirmedObservation
+			// requires it to be empty), so the declared ports this server
+			// actually cares about are genuinely confirmed listening — the
+			// State above is trustworthy. But some OTHER member of this
+			// same process tree came back with an ambiguous read that
+			// corroboration could not resolve either way (class.Degraded).
+			// That member could be holding an undeclared (stray) port we
+			// simply didn't see this cycle — internal/observe's forced-empty
+			// read erases a real stray exactly as it would erase a real
+			// declared listener, so its absence from class.Stray is not
+			// confirmation there isn't one. Flag it instead of rendering a
+			// confident, anomaly-free state.
+			//
+			// The wording stays generic because class.Degraded has three
+			// sources, and only two of them are listen-set failures: a
+			// member's CmdlineSlice() can fail while its ports were read
+			// fine and kept in Holders (see TreeObservation.Degraded), and
+			// for that source claiming the listen-set is unconfirmed — or
+			// that a stray cannot be ruled out — would be false in both
+			// halves and send an operator hunting a listener the walk had
+			// already excluded.
+			status.AnomalyDetail = "a tree member could not be fully observed — treat this reading as incomplete"
+		}
 		if status.State == StateUp && !s.Enabled {
 			// We started this disabled server ourselves via imperative
 			// `<name> up` — render.go's formatStateCell renders this as
@@ -204,6 +240,64 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 	}
 
 	return status
+}
+
+// observeOwnedTree resolves the listen-set observation for a live, owned
+// child (isOurs == true in statusForLocked), consulting TreeListenSet's own
+// error return to distinguish a confirmed-gone root from a merely
+// unconfirmed one. The returned bool — unconfirmedRoot — is set when
+// TreeListenSet's error return could not confirm the root is gone (AATK-87
+// Observable behavior 3): the returned observation stays zero-valued exactly
+// as the discarded-error code used to leave it, but unlike a confirmed-gone
+// root, that zero value must not be read as "down" by the caller.
+func observeOwnedTree(pid int32) (obs observe.TreeObservation, unconfirmedRoot bool) {
+	treeObs, err := observe.TreeListenSet(pid)
+	switch {
+	case err == nil:
+		obs = treeObs
+	case observe.IsRootProcessGone(err):
+		// Confirmed gone: obs stays zero-valued, and the
+		// len(class.Actual) == 0 arm below renders State: down, exactly
+		// the pre-AATK-87 behavior for this case (Observable behavior 3,
+		// first bullet).
+	default:
+		// Neither confirmed alive nor confirmed gone — a transient
+		// existence-check failure (e.g. an errno that is neither ESRCH
+		// nor EPERM). obs stays zero-valued, but this is an unconfirmed
+		// observation, not a confirmed-down one.
+		unconfirmedRoot = true
+	}
+	return obs, unconfirmedRoot
+}
+
+// isUnconfirmedObservation reports whether we hold a live child (isOurs) but
+// could not confirm its listen-set this cycle — either the root's own
+// existence-check failed transiently (unconfirmedRoot) or a per-process read
+// came back ambiguous and corroboration could not rule out real occupancy
+// (internal/observe's Degraded, carried into class.Degraded; see
+// treeListenSet's hostCorroboration).
+//
+// The len(class.Actual) == 0 term is load-bearing. statusForLocked consults
+// this predicate at two places, not one:
+//
+//   - `case len(class.Actual) == 0 && !unconfirmedObservation:`, where the
+//     term is indeed redundant because the case already establishes it; and
+//   - the inner `case unconfirmedObservation:` under `case isOurs:`, where it
+//     is not. That inner switch is also reached with class.Actual NON-empty,
+//     and the term is the only thing separating F3 (nothing about this cycle
+//     was confirmed) from F2 (the declared ports are confirmed, some other
+//     tree member is not) — two branches that render different AnomalyDetail
+//     text.
+//
+// Dropping the term therefore makes the F2 scenario report F3's message:
+// removing it and re-running that shape rendered "observation unconfirmed
+// this cycle …" in place of the tree-member text. The suite does not catch
+// that, because TestStatusForLocked_UnrelatedTreeMemberDegraded_KeepsConfirmedStateFlagsUncertainty
+// asserts only that AnomalyDetail is non-empty and never inspects its text.
+// That is a coverage gap, not an equivalence — a mutant surviving here means
+// the assertion is too weak, not that the term is inert.
+func isUnconfirmedObservation(isOurs bool, class observe.Result, unconfirmedRoot bool) bool {
+	return isOurs && len(class.Actual) == 0 && (unconfirmedRoot || len(class.Degraded) > 0)
 }
 
 // classifyOwned determines the STATE for a server we hold a live child for
@@ -881,7 +975,15 @@ func (e *RealEngine) pollPortsReady(s config.Server, pid int32, budget time.Dura
 		// round-trip; a TreeListenSet probe is far more expensive — on darwin
 		// gopsutil has no connections-by-pid syscall and shells out to `lsof`
 		// once per process in the tree, measured at ~100ms for a single-process
-		// tree and scaling with it. At the interval health uses, a server that
+		// tree and scaling with it. AATK-87 roughly doubles that for the shape
+		// this loop actually sees: while a server is still binding, every tree
+		// member's per-pid read comes back empty, and internal/observe then
+		// fires one host-wide `lsof -i tcp` corroboration per walk — measured
+		// at ~197ms per probe against a live non-listening single process,
+		// versus ~101ms with the corroboration stubbed out. The loop stays
+		// inside its wall-clock budget either way; the cost is paid in fewer
+		// probes per ready_timeout, so bind detection lags by up to one extra
+		// probe interval. At the interval health uses, a server that
 		// is slow to bind would otherwise fork subprocesses back-to-back for
 		// the whole ready_timeout. Backing off by the observed cost adapts to
 		// the real tree size instead of guessing at a second constant.
