@@ -224,3 +224,81 @@ func TestStatusForLocked_ForcedNonNotRunningRootError_NotRenderedDownKeepsTracke
 		t.Fatalf("expected the tracked live child's PID to still be reported after a forced transient root-resolution error, got %+v", statuses)
 	}
 }
+
+// slopstop:test non-interference — paired with TestStatusForLocked_ForcedUnconfirmedEmptyRead_KeepsTrackedPID
+// and TestStatusForLocked_ForcedNonNotRunningRootError_NotRenderedDownKeepsTrackedPID
+// (both contract). Those demand that an UNCONFIRMED observation stop the
+// child being rendered down; this demands the fix not pay for that by keying
+// on `len(class.Degraded) > 0` alone. Guards: "A server genuinely holding no
+// declared ports is still reported `down` — the fix must not make a real down
+// state unreachable." (ticket Observable behaviors §4), applied in the
+// opposite direction — a server whose declared ports are all genuinely
+// confirmed must keep its real classification even when some unrelated tree
+// member is Degraded.
+//
+// AATK-87 stage-7 round-1 finding 2 [major, test-adequacy]: nothing covered
+// `class.Actual` non-empty AND `class.Degraded` non-empty at the same time,
+// and that combination is reachable in today's code — internal/observe
+// appends to Degraded when a member's CmdlineSlice() fails while KEEPING its
+// port in Holders. An implementer who writes
+// `case isOurs && len(class.Degraded) > 0:` without also gating on
+// `len(class.Actual) == 0` passes every other test in this suite and silently
+// downgrades a healthy uvicorn-style tree whose worker's identity read
+// blipped.
+//
+// The shape is built without a CmdlineSlice seam: the child holds a port the
+// server never declared, so forcing only the child's read empty leaves the
+// declared set fully confirmed (no Missing, and no Stray either, since the
+// child's undeclared port vanishes with it) while the child itself is the
+// Degraded member.
+func TestStatusForLocked_UnrelatedTreeMemberDegraded_KeepsRealClassification(t *testing.T) {
+	port := freeTestPort(t)
+	childPort := freeTestPort(t)
+	f := spawnForeignListenerWithChild(t, port, childPort)
+
+	// Prove the tree is real on both ports through the unmocked call, and
+	// learn the child's pid from the observation rather than guessing it.
+	childPID := waitForTreePort(t, f.pid, childPort, 5*time.Second)
+	if childPID == 0 || childPID == f.pid {
+		t.Fatalf("precondition: expected child port %d to be held by a distinct child pid, got %d (root is %d)", childPort, childPID, f.pid)
+	}
+	_ = waitForTreePort(t, f.pid, port, 5*time.Second)
+
+	cfg := config.Config{
+		Supervisor: testSupervisor(t),
+		Servers: []config.Server{{
+			Name:    "svc",
+			Type:    config.TypeExec,
+			Enabled: true,
+			Host:    "127.0.0.1",
+			Port:    port, // childPort is deliberately NOT declared
+		}},
+	}
+	eng := NewEngine(cfg, nil, nil)
+	eng.procs["svc"] = &lifecycle.Process{Cmd: f.cmd, LogPath: "unrelated-degraded.log"}
+
+	orig := observe.ConnectionsPidHook
+	observe.ConnectionsPidHook = func(kind string, pid int32) ([]gopsnet.ConnectionStat, error) {
+		if pid == childPID {
+			return nil, nil // succeeded, found nothing — unconfirmed, for the CHILD only
+		}
+		return orig(kind, pid)
+	}
+	t.Cleanup(func() { observe.ConnectionsPidHook = orig })
+
+	statuses := eng.Status()
+	if len(statuses) != 1 {
+		t.Fatalf("expected exactly one status, got %+v", statuses)
+	}
+	// The declared port is genuinely confirmed listening, so the server's real
+	// classification must survive untouched. StateUp specifically — not merely
+	// "not down": an unconfirmed-observation branch would also render
+	// not-down with a PID, so a weaker assertion would not catch the defect
+	// this test exists for.
+	if statuses[0].State != StateUp {
+		t.Fatalf("expected a server whose declared port is confirmed listening to stay %q despite an unrelated tree member being Degraded, got %+v", StateUp, statuses)
+	}
+	if statuses[0].PID != int(f.pid) {
+		t.Fatalf("expected the tracked root pid %d to be reported, got %+v", f.pid, statuses)
+	}
+}

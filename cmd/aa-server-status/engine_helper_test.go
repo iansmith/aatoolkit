@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/iansmith/aatoolkit/internal/observe"
 )
 
 // buildTdlistenerOnce compiles the internal/lifecycle testdata/tdlistener
@@ -163,4 +165,75 @@ func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool) *foreignP
 
 	t.Cleanup(f.forceKill)
 	return f
+}
+
+// spawnForeignListenerWithChild is spawnForeignListener plus the fixture's
+// -child-port flag, producing a real two-level process tree (parent plus a
+// child listening on its own port) — the shape internal/observe's package doc
+// names as the primary case (a uvicorn parent plus its workers). Added for
+// AATK-87: the engine-level tests need a tree in which one member holds a
+// port the server never declared, which is the only way to construct a
+// "declared set fully confirmed, yet some tree member is Degraded"
+// observation without a seam over CmdlineSlice.
+//
+// The parent's "ready" line does not guarantee the child has bound yet, so
+// callers that need the child's port must poll for it (see
+// waitForTreePort below).
+func spawnForeignListenerWithChild(t *testing.T, port, childPort int) *foreignProc {
+	t.Helper()
+	bin := tdlistenerBinary(t)
+
+	cmd := exec.Command(bin, "-port", strconv.Itoa(port), "-child-port", strconv.Itoa(childPort))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stderr = os.Stderr
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start foreign listener with child: %v", err)
+	}
+
+	f := &foreignProc{cmd: cmd, pid: int32(cmd.Process.Pid)}
+
+	done := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			if scanner.Text() == "ready" {
+				close(done)
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("foreign listener pid %d never signaled ready", f.pid)
+	}
+
+	t.Cleanup(f.forceKill)
+	return f
+}
+
+// waitForTreePort polls the real, unmocked TreeListenSet until wantPort shows
+// up under rootPID, and returns the pid holding it. It exists so a test can
+// prove a tree member genuinely holds a port before substituting a seam to
+// lie about it — otherwise a forced empty read might merely coincide with
+// reality instead of provably contradicting it.
+func waitForTreePort(t *testing.T, rootPID int32, wantPort int, timeout time.Duration) int32 {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		obs, err := observe.TreeListenSet(rootPID)
+		if err == nil {
+			if h, ok := obs.Holders[wantPort]; ok {
+				return h.Identity.PID
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("port %d never observed listening under root pid %d within %s", wantPort, rootPID, timeout)
+	return 0
 }
