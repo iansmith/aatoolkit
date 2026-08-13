@@ -10,9 +10,24 @@ reorganization exists to delete.
 Agent(subagent_type: "slopstop-effort-<resolved effort>",   # general-purpose if it does not resolve
       model: <resolved: stage → tier → model>,
       isolation: "worktree",                                # every ticket worker; see next section
+      description: "<what this launch is> <TICKET>",        # the ticket key is REQUIRED — see below
       prompt: "Invoke Skill({skill: \"slopstop-<worker>\", args: \"<args>\"}) and follow it
                exactly. Return its report verbatim as your result.")
 ```
+
+**Every `description` ends with the ticket key, without exception** — `"Review round 2
+SOP-286"`, not `"Review round 2"`. It is the only thing that attributes a launch to a ticket.
+`run.jsonl` is per-ticket and segregates itself; the harness transcript does not and cannot —
+one session's `subagents/` directory holds every ticket that session drove, and the harness has
+never heard of a ticket. Measured on a live fleet repo 2026-08-12: one session, 23 launches, 16
+SOP-286 and 6 SOP-288 interleaved, plus one with no key at all.
+
+`derive.py`'s `attribute()` falls back to carrying the last key seen forward in time order,
+which is nearly always right when tickets run serially and a coin flip when they interleave —
+so an unkeyed label is a launch charged to whichever ticket was named most recently. That is
+also the whole prerequisite for running tickets concurrently: with the key present attribution
+is an exact match, and the scheduler's disjoint-file-map concurrency costs the measurement
+record nothing.
 
 That is the whole mechanism. No headless `claude -p`. No router env vars. No bespoke
 per-worker prompt templates — **the worker skill is the prompt**; a template that restates it
@@ -36,8 +51,8 @@ puts the agent in a fresh worktree of this repository before its first tool call
 there — the pin is what the harness enforces, and it is not something the agent can talk its
 way out of.
 
-The branch is the part the orchestrator arranges, and it differs for the **first** worker of a
-ticket and every one after it:
+The branch is the part the orchestrator arranges, and it differs three ways: the **first**
+worker of a ticket, every one after it, and a **read-only** worker that takes no branch at all:
 
 ```text
 # FIRST worker of a ticket — it renames the branch it was given
@@ -64,7 +79,42 @@ Agent(subagent_type: "slopstop-effort-<resolved>", model: <resolved>, isolation:
                .claude/worktrees/ and the branch is <type>/<TICKET>.
                … same guard, same skill invocation, same commit step, same trailing
                WORKTREE:/BRANCH:/COMMIT: lines.")
+
+# READ-ONLY worker — takes no branch, so any number may run at once
+Agent(subagent_type: "slopstop-effort-<resolved>", model: <resolved>, isolation: "worktree",
+      prompt: "First run `git switch --detach <TIP-SHA>`.
+               Then run `pwd` and `git rev-parse HEAD`, and confirm pwd is under
+               .claude/worktrees/ and HEAD is exactly <TIP-SHA>.
+               If either is wrong, STOP: return
+               `<WORKER> BLOCKED: not at the ticket tip in a worktree — <pwd>, <HEAD>`
+               and do NOT invoke the skill.
+               Only then invoke Skill({skill: \"slopstop-<worker>\", args: \"…\"}) and
+               follow it exactly.
+               You are detached and produce nothing: do not commit.
+               Return the skill's report verbatim, then end with three lines:
+               `WORKTREE: <pwd>`, `BRANCH: detached at <TIP-SHA>`,
+               `COMMIT: none — read-only gate`.")
 ```
+
+**A branch can be checked out in exactly one worktree, so same-branch workers serialize
+regardless of what they intend to do.** This is why the third brief exists. `:run`'s stage 9
+launches three gates at once; on the LATER brief exactly one wins the `git switch` and the
+other two die on `fatal: '<branch>' is already used by worktree at …` and return `BLOCKED`
+(BILL-597, live on AATK-87). Read-only-ness is not what makes workers safe to run together —
+it is what makes them safe to run **detached**, which is a different property and the one that
+actually buys the parallelism.
+
+**Use it only for a worker that produces nothing by contract** — `slop-check`,
+`vacuity-check`, `complexity-check`. A worker that makes something needs the branch, because
+the branch is the handoff (below).
+
+**The guard gets stronger here, not weaker.** A branch-name check accepts whatever the branch
+points at *now*; the tip-sha check pins the exact commit the orchestrator measured. `--base`
+and `--frozen` are already threaded as shas for the same reason.
+
+**`--ignore-other-worktrees` is the wrong answer.** It also restores the parallelism, by
+letting two worktrees sit on one branch ref — which weakens the guard instead of fixing the
+caller. Named here so it is not re-derived.
 
 **The commit is not bookkeeping — it is the handoff.** A worker's worktree is removed when the
 worker finishes, so anything uncommitted at that moment is gone. The branch is the only thing
@@ -82,6 +132,13 @@ A worker reporting `COMMIT: <sha>` on a branch that did not move is reporting so
 did not happen; a clean `status` on a branch that did not move means the stage genuinely
 produced nothing. **Trust the two commands, not the report** — this is the same rule as the
 `pwd` guard, applied at the other end of the worker's life.
+
+**A READ-ONLY worker is exempt from the handoff, by contract — but not from the check.** It is
+detached, holds no branch and commits nothing, so `COMMIT: none — read-only gate` is the
+expected report and a branch that did not move is the correct outcome rather than a missing
+handoff. Still run `git -C <worktreePath> status --porcelain`, and invert what a dirty result
+means: for a normal worker it is work about to be destroyed, and for a gate it is a worker that
+wrote when its contract says it cannot. That is a stop either way, for opposite reasons.
 
 **A worktree that still holds uncommitted work is not removed. That is a stop.** Removing it
 destroys the stage's output, and continuing without it hands the next worker a branch missing
@@ -195,7 +252,7 @@ file-map violation check against `$OWN` and by 10b's adversary. Prose is genuine
 control at the moment of writing, which is exactly why it must be in the brief rather than
 assumed.
 
-### A `BLOCKED` from the worktree guard is terminal for that ticket
+### A `BLOCKED` from the worktree guard is terminal — unless the `pwd` shows containment held
 
 The orchestrator **stops the ticket**. It does not relaunch the worker with the containment
 contract as prose, it does not substitute an absolute path for the pin, and it does not charge
@@ -213,6 +270,40 @@ that stage 8a's file-map check against `$OWN` would catch an escaped write after
 does not. 8a catches writes outside the ticket's **file map**; a worker writing an in-map file
 into the **main checkout** is in-map and passes clean. 8a is a scope control, not a containment
 control, and it has never been the latter.
+
+**Two causes fire this guard, and only one of them is terminal.** The rule above is written for
+the first:
+
+- **Containment failed** — the pin did not work and the worker is not where it must be. The
+  orchestrator has no way to know what it touched. Terminal, exactly as above.
+- **The orchestrator asked for something impossible** — the pin worked, the worker *is*
+  contained, and it cannot proceed because the *launch* was wrong: two workers scheduled onto
+  one branch, a tip sha that is not on the branch, an argument naming a path the worktree does
+  not have. Nothing escaped. Correcting the launch and relaunching disables nothing — the guard
+  is unchanged and the next attempt must pass the identical check.
+
+**The test is mechanical, and it has to be, or this becomes the exit BILL-559 already took.**
+The worker's `BLOCKED` report names where it actually was: every brief prints `<pwd>` alongside
+`<branch>` or `<HEAD>`. Read the `pwd`.
+
+- `pwd` **under `.claude/worktrees/`** — the worker was contained and the caller was wrong. Fix
+  the launch, relaunch with the guard untouched, and **do not charge it as an attempt**.
+- `pwd` **anywhere else, or missing from the report** — containment failed, or the report is not
+  evidence of anything. Terminal.
+
+There is no third branch and no judgement in between. A worker's explanation of why its
+situation is fine is not a `pwd`.
+
+**What this never licenses.** Relaxing the guard, reaching for `--ignore-other-worktrees`,
+passing the containment contract as prose instead of the pin, or recording a deviation and
+continuing. It changes the orchestrator's *response* to a fired guard, never the check itself —
+a relaunch that alters the guard is the BILL-559 failure wearing a different hat.
+
+The live instance is BILL-597: stage 9 launched three gates onto one ticket branch, two lost the
+`git switch` and returned `BLOCKED` from inside their own worktrees. Both reported a `pwd` under
+`.claude/worktrees/`, so both were caller errors, and killing the ticket over either would have
+spent a ticket on a scheduling bug while containment was working exactly as designed. That
+launch shape is fixed; the class it belongs to is not.
 
 **`--add-dir` grants are the orchestrator's to make.** Where a worker legitimately needs a
 path outside its worktree, grant it explicitly. The prior art is direct about the alternative:
