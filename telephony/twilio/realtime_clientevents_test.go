@@ -76,12 +76,24 @@ func waitForClientEvent(t *testing.T, be *fakeRealtimeBackend, id int, d time.Du
 // --- write-only fault injection --------------------------------------------
 
 // faultyConn wraps a net.Conn so a test can fail its Write calls on demand
-// while Read keeps working normally. A whole-connection close (graceful or
+// while Read keeps working normally, PROVIDED the connection stays otherwise
+// idle from the backend's perspective. A whole-connection close (graceful or
 // abrupt) cannot isolate the write path from the read path deterministically
 // on loopback — both sides observe the teardown within microseconds of each
 // other (measured directly: adversary round 1, AATK-82) — so this is the only
 // way to exercise "a send fails but the call keeps running" without racing a
 // connection teardown.
+//
+// Scope caveat (adversary round 2, AATK-82): coder/websocket answers an
+// incoming WebSocket ping with a pong FROM INSIDE Read, and that pong is
+// itself a Write — so a ping arriving while failWrites is armed would fail
+// the auto-pong, and per coder/websocket's contract ("on any error from any
+// method, the connection is closed") that kills the connection outright,
+// reproducing round 1's exact defect (the read side dying before the
+// intended fault is observed). Nothing in this suite currently sends a ping
+// during a fault window, so this holds today; it would need reworking (e.g.
+// scoping the fault to only the consumer-event write) if a test ever adds
+// ping/pong traffic during a failWrites-armed window.
 type faultyConn struct {
 	net.Conn
 	failWrites *atomic.Bool
@@ -410,12 +422,12 @@ func TestClientEventChan_SendFailureIsLoggedNotFatal(t *testing.T) {
 
 	deadline := time.After(2 * time.Second)
 	for {
-		if strings.Contains(strings.ToLower(buf.String()), "send") {
+		if strings.Contains(buf.String(), "injected write failure") {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatal("a failed consumer send must be logged; no log line containing \"send\" appeared within 2s")
+			t.Fatal("a failed consumer send must be logged; no log line containing \"injected write failure\" appeared within 2s")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
