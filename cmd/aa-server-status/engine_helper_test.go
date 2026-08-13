@@ -110,7 +110,7 @@ func (f *foreignProc) forceKill() {
 // of any RealEngine instance, and waits for it to report readiness.
 func spawnForeignListener(t *testing.T, port int) *foreignProc {
 	t.Helper()
-	return spawnForeignListenerOpts(t, port, false)
+	return spawnForeignListenerOpts(t, port, false, 0)
 }
 
 // spawnForeignListenerIgnoringTerm is spawnForeignListener with the fixture's
@@ -122,16 +122,31 @@ func spawnForeignListener(t *testing.T, port int) *foreignProc {
 // already-dead group.
 func spawnForeignListenerIgnoringTerm(t *testing.T, port int) *foreignProc {
 	t.Helper()
-	return spawnForeignListenerOpts(t, port, true)
+	return spawnForeignListenerOpts(t, port, true, 0)
 }
 
-func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool) *foreignProc {
+// spawnForeignListenerOpts is the one spawn implementation the wrappers above
+// share. childPort, when non-zero, passes the fixture's -child-port flag,
+// producing a real two-level process tree (parent plus a child listening on
+// its own port) — the shape internal/observe's package doc names as the
+// primary case (a uvicorn parent plus its workers). Added for AATK-87, whose
+// engine-level tests need a tree in which one member holds a port the server
+// never declared; that is the only way to construct a "declared set fully
+// confirmed, yet some tree member is Degraded" observation without a seam
+// over CmdlineSlice.
+//
+// The parent's "ready" line does not guarantee the child has bound yet, so
+// callers needing the child's port must poll for it — see waitForTreePort.
+func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool, childPort int) *foreignProc {
 	t.Helper()
 	bin := tdlistenerBinary(t)
 
 	args := []string{"-port", strconv.Itoa(port)}
 	if ignoreTerm {
 		args = append(args, "-ignore-term")
+	}
+	if childPort != 0 {
+		args = append(args, "-child-port", strconv.Itoa(childPort))
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -168,53 +183,13 @@ func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool) *foreignP
 }
 
 // spawnForeignListenerWithChild is spawnForeignListener plus the fixture's
-// -child-port flag, producing a real two-level process tree (parent plus a
-// child listening on its own port) — the shape internal/observe's package doc
-// names as the primary case (a uvicorn parent plus its workers). Added for
-// AATK-87: the engine-level tests need a tree in which one member holds a
-// port the server never declared, which is the only way to construct a
-// "declared set fully confirmed, yet some tree member is Degraded"
-// observation without a seam over CmdlineSlice.
-//
-// The parent's "ready" line does not guarantee the child has bound yet, so
-// callers that need the child's port must poll for it (see
-// waitForTreePort below).
+// -child-port flag. A thin wrapper over spawnForeignListenerOpts, mirroring
+// how internal/observe/helper_test.go's spawnListener wraps spawnListenerTree
+// — the tree case is a parameter on the one spawn implementation, never a
+// second copy of it.
 func spawnForeignListenerWithChild(t *testing.T, port, childPort int) *foreignProc {
 	t.Helper()
-	bin := tdlistenerBinary(t)
-
-	cmd := exec.Command(bin, "-port", strconv.Itoa(port), "-child-port", strconv.Itoa(childPort))
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stderr = os.Stderr
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("StdoutPipe: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start foreign listener with child: %v", err)
-	}
-
-	f := &foreignProc{cmd: cmd, pid: int32(cmd.Process.Pid)}
-
-	done := make(chan struct{})
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			if scanner.Text() == "ready" {
-				close(done)
-				return
-			}
-		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("foreign listener pid %d never signaled ready", f.pid)
-	}
-
-	t.Cleanup(f.forceKill)
-	return f
+	return spawnForeignListenerOpts(t, port, false, childPort)
 }
 
 // waitForTreePort polls the real, unmocked TreeListenSet until wantPort shows
