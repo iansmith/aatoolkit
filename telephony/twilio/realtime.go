@@ -403,22 +403,37 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 		case <-bridge.Activity():
 			idle.reset()
 		case ev, ok := <-clientEventCh:
-			if !ok {
-				// The consumer closed its channel: nil it out so this case
-				// never fires again, rather than busy-looping on a closed
-				// channel that is always ready to receive its zero value.
-				clientEventCh = nil
-				continue
-			}
-			// Deliberately NOT idle.reset(): a consumer event is not backend
-			// activity, and a chatty consumer against a silent backend must
-			// not mask that silence.
-			if err := client.Send(ctx, ev); err != nil {
-				log.Printf("twilio: realtime: client event send failed: %v", err)
+			var err error
+			clientEventCh, err = handleClientEvent(ctx, client, clientEventCh, ev, ok)
+			if err != nil {
 				return err
 			}
 		}
 	}
+}
+
+// handleClientEvent processes one receive from the client-event select case,
+// returning the channel HandleStreamRealtime's loop should keep selecting on
+// next (nil once the consumer has closed it) and any error that should end
+// the call. Extracted from the select loop itself, mirroring deliver's role
+// for the transcript/server-event drains above — a named unit for one
+// select case's branching, not the whole loop's.
+//
+// Deliberately does NOT call idle.reset(): a consumer event is not backend
+// activity, and a chatty consumer against a silent backend must not mask
+// that silence.
+func handleClientEvent(ctx context.Context, client *realtime.Client, ch <-chan json.RawMessage, ev json.RawMessage, ok bool) (<-chan json.RawMessage, error) {
+	if !ok {
+		// The consumer closed its channel: return nil so the caller's select
+		// case never fires again, rather than busy-looping on a closed
+		// channel that is always ready to receive its zero value.
+		return nil, nil
+	}
+	if err := client.Send(ctx, ev); err != nil {
+		log.Printf("twilio: realtime: client event send failed: %v", err)
+		return ch, err
+	}
+	return ch, nil
 }
 
 // idleGuard is the idle timeout as a single object, so HandleStreamRealtime's
