@@ -304,9 +304,10 @@ const (
 // writing a native darwin socket enumerator remains out of scope for this
 // ticket.
 type hostCorroboration struct {
-	fetched bool
-	conns   []gopsnet.ConnectionStat
-	err     error
+	fetched   bool
+	conns     []gopsnet.ConnectionStat
+	listening []gopsnet.ConnectionStat
+	err       error
 }
 
 // holdsListen reports, for pid, whether a host-wide TCP scan (fetched once
@@ -319,10 +320,14 @@ type hostCorroboration struct {
 // host-wide "nothing is listening" finding, so it must not be read as
 // confirmation that the ambiguous per-pid read really found nothing.
 // Treating it as failed keeps the direction conservative: it leaves the pid
-// unconfirmed (Degraded) rather than confidently declaring it empty.
+// unconfirmed (Degraded) rather than confidently declaring it empty. The
+// zero check is against the raw scan (h.conns), not the LISTEN-filtered
+// subset (h.listening) — the invariant is "the host has some open TCP
+// sockets at all," which is the stronger, more universally true signal of
+// the two and the one the 195-row measurement backs.
 func (h *hostCorroboration) holdsListen(pid int32) corroborationResult {
 	if !h.fetched {
-		h.conns, h.err = gopsnet.Connections("tcp")
+		h.conns, h.listening, h.err = hostTCPScan()
 		h.fetched = true
 	}
 	if h.err != nil {
@@ -331,8 +336,8 @@ func (h *hostCorroboration) holdsListen(pid int32) corroborationResult {
 	if len(h.conns) == 0 {
 		return corroborationFailed
 	}
-	for _, c := range h.conns {
-		if c.Pid == pid && c.Status == "LISTEN" {
+	for _, c := range h.listening {
+		if c.Pid == pid {
 			return corroborationHolds
 		}
 	}
@@ -378,6 +383,28 @@ func listeningPorts(proc *process.Process) ([]int, error) {
 	return ports, nil
 }
 
+// hostTCPScan performs the host-wide `tcp` connection scan shared by
+// holdsListen and SystemListenSet, and applies the LISTEN-status filter both
+// of them need — extracted so the scan-and-filter logic lives in one place
+// rather than two near-identical copies (CLAUDE.md §4). It returns both the
+// raw, unfiltered scan (conns) and the LISTEN-only subset (listening):
+// SystemListenSet only needs the latter, but holdsListen's zero-row swallow
+// check (AATK-87 F1) is deliberately against the raw count — see
+// holdsListen's doc comment for why — so both are returned rather than only
+// the filtered one.
+func hostTCPScan() (conns []gopsnet.ConnectionStat, listening []gopsnet.ConnectionStat, err error) {
+	conns, err = gopsnet.Connections("tcp")
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, c := range conns {
+		if c.Status == "LISTEN" {
+			listening = append(listening, c)
+		}
+	}
+	return conns, listening, nil
+}
+
 // SystemListenSet returns every TCP port currently in LISTEN state anywhere
 // on the host, mapped to the PID holding it — a host-wide counterpart to
 // ListenSet/TreeListenSet's single-process-tree scope. Used by teardown's
@@ -387,15 +414,13 @@ func listeningPorts(proc *process.Process) ([]int, error) {
 // Like listeningPorts, this only ever counts LISTEN-state sockets — a
 // lingering TIME_WAIT entry does not hold LISTEN and is correctly excluded.
 func SystemListenSet() (map[int]int32, error) {
-	conns, err := gopsnet.Connections("tcp")
+	_, listening, err := hostTCPScan()
 	if err != nil {
 		return nil, fmt.Errorf("observe: system-wide listen scan: %w", err)
 	}
 	holders := make(map[int]int32)
-	for _, c := range conns {
-		if c.Status == "LISTEN" {
-			holders[int(c.Laddr.Port)] = c.Pid
-		}
+	for _, c := range listening {
+		holders[int(c.Laddr.Port)] = c.Pid
 	}
 	return holders, nil
 }
