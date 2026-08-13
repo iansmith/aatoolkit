@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -275,33 +276,67 @@ func TestClientEventChan_ConsumerEventDoesNotResetIdleTimer(t *testing.T) {
 
 // --- closed consumer channel -----------------------------------------------
 
-// TestClientEventChan_ClosedChannelDoesNotCrashOrBusyLoop covers the
-// investigation's flagged risk: the DoD says the engine never REQUIRES the
-// channel to be closed, but does not forbid a consumer closing it. A closed
-// channel yields a zero value with ok==false immediately and repeatedly, so
-// an unguarded read in the select loop would busy-loop rather than block.
-//
-// The positive delivery check proves the channel was genuinely wired before
-// it closes; the call remaining healthy and still delivering audio
-// afterward is the property under test.
-//
-// slopstop:test non-interference — paired: asserts the consumer's one event reaches the backend before closing the channel and checking the call keeps working normally afterward
-func TestClientEventChan_ClosedChannelDoesNotCrashOrBusyLoop(t *testing.T) {
-	ch := make(chan json.RawMessage, 1)
+// TestClientEventChan_ClosedChannelDoesNotBusyLoop guards against exactly
+// the bug its predecessor's liveness-only assertions could not catch: round
+// 3's adversary mutation-proved that an unguarded `case v :=
+// <-clientEventChan:` with no `ok` check spins the select loop unboundedly
+// after the consumer closes its channel, WITHOUT starving sibling select
+// cases at all — Go's asynchronous goroutine preemption (since 1.14) keeps
+// them scheduled on time regardless (measured: 2.7M spins in 200ms, a
+// sibling ticker still fired all 40 times on schedule). So no liveness or
+// scheduling-based assertion can ever catch this; only actual CPU
+// consumption can. This measures process CPU time (getrusage) over a fixed
+// window with a closed consumer channel, against the same window with no
+// client-event option supplied at all — a differential measurement, exactly
+// like TestClientEventChan_NoEngineGoroutineOutlivesTheCall's approach to
+// the same class of "measure it, don't infer it from liveness" problem —
+// with generous headroom: a genuine busy loop burns an entire CPU core
+// continuously, orders of magnitude more than idle call machinery.
+func TestClientEventChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("getrusage is not available on windows")
+	}
 
-	be := newFakeRealtimeBackend(t)
-	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
-	waitBackendReady(t, be, h)
-	seen := h.countMediaFrames(t)
+	const window = 300 * time.Millisecond
 
-	ch <- clientEventRaw(30)
-	waitForClientEvent(t, be, 30, 5*time.Second)
+	measure := func(withClosedChan bool) time.Duration {
+		be := newFakeRealtimeBackend(t)
+		var h *realtimeHarness
+		if withClosedChan {
+			ch := make(chan json.RawMessage)
+			close(ch)
+			h = newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+		} else {
+			h = newRealtimeHarness(t, be.url())
+		}
+		waitBackendReady(t, be, h)
 
-	close(ch)
+		var before, after syscall.Rusage
+		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &before); err != nil {
+			t.Fatalf("getrusage: %v", err)
+		}
+		time.Sleep(window)
+		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &after); err != nil {
+			t.Fatalf("getrusage: %v", err)
+		}
 
-	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": carrierPayloadB64()})
-	waitFor(t, 5*time.Second, func() bool { return seen() > 0 })
-	assertStillRunning(t, h, "a closed consumer channel must not crash or stall the call")
+		h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
+		h.waitDone(5 * time.Second)
+
+		userDelta := time.Duration(after.Utime.Sec-before.Utime.Sec)*time.Second +
+			time.Duration(after.Utime.Usec-before.Utime.Usec)*time.Microsecond
+		sysDelta := time.Duration(after.Stime.Sec-before.Stime.Sec)*time.Second +
+			time.Duration(after.Stime.Usec-before.Stime.Usec)*time.Microsecond
+		return userDelta + sysDelta
+	}
+
+	baseline := measure(false)
+	withClosed := measure(true)
+
+	if withClosed > baseline+50*time.Millisecond {
+		t.Fatalf("a closed consumer channel must not busy-loop: baseline CPU %v, with-closed-channel CPU %v (over a %v wall-clock window)",
+			baseline, withClosed, window)
+	}
 }
 
 // --- no goroutine leak -------------------------------------------------
@@ -375,25 +410,23 @@ func TestClientEventChan_NoEngineGoroutineOutlivesTheCall(t *testing.T) {
 	}
 }
 
-// --- send failure is logged, not fatal --------------------------------
+// --- send failure is fatal, but logged first ---------------------------
 
-// TestClientEventChan_SendFailureIsLoggedNotFatal pins the DoD item "A send
-// failing does not end the call silently — it is logged, and the call ends
-// only for the reasons it already ends for."
-//
-// Adversary round 1 found the original version of this test could never
-// actually observe a Send failure: closing the backend (gracefully or
-// abruptly) kills the READ side microseconds before the consumer's send loop
-// could run even once, so the call always ended via the pre-existing
-// backend-gone path with no Send ever attempted — the test passed or failed
-// for a reason unrelated to what it claimed to pin. This version fails ONLY
-// the write path via a fault-injecting net.Conn (faultyConn, above), so the
-// read side — and hence backendDone — stays alive throughout: the call must
-// keep running, log the failed send, and only end later for a legitimate
-// reason (a carrier stop frame) — never because the send failed.
+// TestClientEventChan_SendFailureEndsCallWithLoggedError pins the AMENDED
+// DoD item "A send failing does not end the call silently — it is logged,
+// and the call ends only for the reasons it already ends for." Round 3's
+// adversary found coder/websocket's underlying bufio.Writer poisons itself
+// permanently after the first write error — every subsequent write returns
+// the same error forever, even once the fault clears — so a write failure
+// here is never transient. The ticket owner decided (round 3): a write
+// failure is treated as a fatal connection error, exactly like the existing
+// backend-gone path (TestRealtime_BackendDropMidCallEndsCallWithError) — it
+// is logged (never silently swallowed) and the call ends with a non-nil,
+// attributable error, rather than continuing against a connection whose
+// write half is dead forever.
 //
 // slopstop:test contract
-func TestClientEventChan_SendFailureIsLoggedNotFatal(t *testing.T) {
+func TestClientEventChan_SendFailureEndsCallWithLoggedError(t *testing.T) {
 	var buf syncBuffer
 	origOutput := log.Writer()
 	origFlags := log.Flags()
@@ -417,27 +450,14 @@ func TestClientEventChan_SendFailureIsLoggedNotFatal(t *testing.T) {
 	waitBackendReady(t, be, h)
 
 	failWrites.Store(true)
-
 	ch <- clientEventRaw(41)
 
-	deadline := time.After(2 * time.Second)
-	for {
-		if strings.Contains(buf.String(), "injected write failure") {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("a failed consumer send must be logged; no log line containing \"injected write failure\" appeared within 2s")
-		case <-time.After(10 * time.Millisecond):
-		}
+	if err := h.waitDone(5 * time.Second); err == nil {
+		t.Fatal("a send failure must end the call with a non-nil error, not leave it running")
 	}
 
-	assertStillRunning(t, h, "a send failure must not end the call by itself")
-
-	failWrites.Store(false)
-	h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
-	if err := h.waitDone(5 * time.Second); err != nil {
-		t.Fatalf("the call must still end cleanly on a stop frame after an earlier send failure: %v", err)
+	if !strings.Contains(buf.String(), "injected write failure") {
+		t.Fatalf("a failed consumer send must be logged before the call ends; log output: %q", buf.String())
 	}
 }
 
