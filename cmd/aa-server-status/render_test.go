@@ -135,14 +135,27 @@ func TestFormatStateCell_UpRendersGreenNoParens(t *testing.T) {
 
 func TestFormatStateCell_AnomalyDetailIgnoredOutsideAllowList(t *testing.T) {
 	// AnomalyDetail is only rendered for the states in render.go's
-	// anomalyDetailStates allow-list (STRAY/BLOCKED, plus StatePartial and
-	// StateUp as of AATK-87 F2/F3, for an owned server's unconfirmed
-	// observation) — a stray AnomalyDetail value set on some other state
-	// (e.g. by a future caller bug) must not leak into the display.
-	// StateDown is a representative state outside that list.
-	got := formatStateCell(ServerStatus{State: StateDown, AnomalyDetail: "pid 1234, foreign"})
-	if strings.Contains(got, "pid 1234") {
-		t.Fatalf("expected AnomalyDetail to be ignored for down state, got %q", got)
+	// anomalyDetailStates allow-list (StateStray, StateBlocked,
+	// StatePartial, StateUp as of AATK-87 F2/F3, and StateExtraListener) —
+	// a stray AnomalyDetail value set on some other state (e.g. by a future
+	// caller bug) must not leak into the display. Of the full ServerState
+	// enum, three states are genuinely outside that allow-list: StateDown
+	// and StateDisabled (a server that isn't running has nothing to
+	// qualify with an observation caveat), and StateForeignConflict (no
+	// current production code path sets AnomalyDetail on it — it isn't
+	// even assigned anywhere in engine.go yet — but the allow-list omits it
+	// deliberately, so a future caller that starts populating it must not
+	// find the detail silently rendered by accident). Table-driven over all
+	// three so growing the allow-list again can't silently narrow this
+	// regression guard back down to whichever single state happened to be
+	// checked.
+	for _, state := range []ServerState{StateDown, StateDisabled, StateForeignConflict} {
+		t.Run(string(state), func(t *testing.T) {
+			got := formatStateCell(ServerStatus{State: state, AnomalyDetail: "pid 1234, foreign"})
+			if strings.Contains(got, "pid 1234") {
+				t.Fatalf("expected AnomalyDetail to be ignored for state %q, got %q", state, got)
+			}
+		})
 	}
 }
 
