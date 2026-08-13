@@ -292,6 +292,8 @@ func TestClientEventChan_ConsumerEventDoesNotResetIdleTimer(t *testing.T) {
 // the same class of "measure it, don't infer it from liveness" problem —
 // with generous headroom: a genuine busy loop burns an entire CPU core
 // continuously, orders of magnitude more than idle call machinery.
+//
+// slopstop:test regression — guards: "a closed consumer channel must not busy-loop / consume unbounded CPU"
 func TestClientEventChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("getrusage is not available on windows")
