@@ -148,10 +148,28 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 	}
 
 	var obs observe.TreeObservation
+	// unconfirmedRoot is set when TreeListenSet's own error return could not
+	// confirm the root is gone (AATK-87 Observable behavior 3): obs stays
+	// zero-valued exactly as the discarded-error code used to leave it, but
+	// unlike a confirmed-gone root, that zero value must not be read as
+	// "down" below.
+	var unconfirmedRoot bool
 	if isOurs {
 		treeObs, err := observe.TreeListenSet(pid)
-		if err == nil {
+		switch {
+		case err == nil:
 			obs = treeObs
+		case observe.IsRootProcessGone(err):
+			// Confirmed gone: obs stays zero-valued, and the
+			// len(class.Actual) == 0 arm below renders State: down, exactly
+			// the pre-AATK-87 behavior for this case (Observable behavior 3,
+			// first bullet).
+		default:
+			// Neither confirmed alive nor confirmed gone — a transient
+			// existence-check failure (e.g. an errno that is neither ESRCH
+			// nor EPERM). obs stays zero-valued, but this is an unconfirmed
+			// observation, not a confirmed-down one.
+			unconfirmedRoot = true
 		}
 	} else {
 		obs = hostObservationFor(declared)
@@ -161,9 +179,23 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 
 	status.Ports = renderPorts(declared, class)
 
+	// unconfirmedObservation is true when we hold a live child (isOurs) but
+	// could not confirm its listen-set this cycle — either the root's own
+	// existence-check failed transiently (unconfirmedRoot) or a per-process
+	// read came back ambiguous and corroboration could not rule out real
+	// occupancy (internal/observe's Degraded, carried into class.Degraded;
+	// see treeListenSet's hostCorroboration). The len(class.Actual) == 0
+	// gate is not optional here: without it, a tracked tree with a
+	// confirmed, fully-populated Actual set but an unrelated Degraded member
+	// (e.g. a sibling's cmdline read blipped) would be downgraded from its
+	// real classification even though nothing about its declared ports is
+	// actually in question.
+	unconfirmedObservation := isOurs && len(class.Actual) == 0 && (unconfirmedRoot || len(class.Degraded) > 0)
+
 	switch {
-	case len(class.Actual) == 0:
-		// Nothing listening at all for this server's declared ports.
+	case len(class.Actual) == 0 && !unconfirmedObservation:
+		// Nothing listening at all for this server's declared ports, and
+		// nothing about that read was left unconfirmed.
 		status.State = StateDown
 	case isOurs:
 		status.PID = int(pid)

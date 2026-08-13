@@ -15,6 +15,7 @@
 package observe
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 
@@ -102,6 +103,24 @@ func TreeListenSet(rootPID int32) (TreeObservation, error) {
 	return treeListenSet(rootPID, true)
 }
 
+// IsRootProcessGone reports whether err — as returned by TreeListenSet or
+// ListenSet — reflects the root process being confirmed gone, as opposed to
+// a transient failure to determine its state either way (AATK-87 Observable
+// behavior 3). The only source of a non-nil error from treeListenSet is
+// NewProcessHook's root-resolution call (process.NewProcess in production);
+// on darwin its existence check signals the pid with 0 and switches on
+// errno — ESRCH confirms gone (wrapped here as
+// process.ErrorProcessNotRunning), EPERM confirms alive (no error at all),
+// and any other errno falls through to a plain error that is neither. This
+// keeps that distinction reachable through the existing %w-wrapped error
+// without any change to TreeListenSet's or ListenSet's signature, and keeps
+// the gopsutil coupling needed to express it inside this package — the only
+// one that already imports gopsutil — rather than adding that import edge
+// to a caller.
+func IsRootProcessGone(err error) bool {
+	return errors.Is(err, process.ErrorProcessNotRunning)
+}
+
 // treeListenSet walks the process tree rooted at rootPID, collecting every
 // listening TCP port across the root and all descendants. ours marks every
 // Holder in the result as belonging to that tree (the TreeListenSet
@@ -119,6 +138,7 @@ func treeListenSet(rootPID int32, ours bool) (TreeObservation, error) {
 	}
 
 	obs := TreeObservation{Holders: make(map[int]Holder)}
+	var corrob hostCorroboration
 	for _, proc := range procs {
 		ports, err := listeningPorts(proc)
 		if err != nil {
@@ -132,6 +152,36 @@ func treeListenSet(rootPID int32, ours bool) (TreeObservation, error) {
 			continue
 		}
 		if len(ports) == 0 {
+			// AATK-87: a successful-but-empty per-pid read is ambiguous on
+			// darwin — ConnectionsPidHook shells out to lsof and can
+			// swallow an internal failure, returning (nil, nil) exactly as
+			// it would for a process confirmed to hold no ports. Before
+			// trusting this as "confirmed to hold no ports", corroborate
+			// with a second, real observation — see hostCorroboration's doc
+			// comment for exactly what that buys and does not buy.
+			switch corrob.holdsListen(proc.Pid) {
+			case corroborationHolds:
+				// The per-pid read was wrong: the corroborating read shows
+				// this pid actually holding a LISTEN socket. Recorded as
+				// Degraded rather than silently dropped — same reasoning as
+				// the error case above. The occupancy is real (this
+				// process really does hold something) but which port(s) is
+				// unconfirmed, so nothing is added to Holders — a Holder
+				// entry claims confident, specific occupancy this
+				// observation cannot back up.
+				obs.Degraded = append(obs.Degraded, proc.Pid)
+			case corroborationFailed:
+				// The corroborating call itself failed. That must not
+				// collapse into "found nothing" — doing so would just
+				// reproduce AATK-87 one layer downstream, trusting an
+				// unconfirmed empty read as confirmed because the second
+				// opinion couldn't be reached either. Treat the process as
+				// unconfirmed (Degraded), not as confirmed-empty.
+				obs.Degraded = append(obs.Degraded, proc.Pid)
+			case corroborationEmpty:
+				// The corroborating read agrees: this pid genuinely holds
+				// no LISTEN socket. Confirmed-empty — no Degraded entry.
+			}
 			continue
 		}
 		// The process IS listening on ports — that occupancy is real and
@@ -218,6 +268,70 @@ var ConnectionsPidHook = gopsnet.ConnectionsPid
 // uninformative substitute this ticket's file map rules out. A test that
 // reassigns it must restore the original via t.Cleanup.
 var NewProcessHook = process.NewProcess
+
+// corroborationResult is holdsListen's verdict for one pid.
+type corroborationResult int
+
+const (
+	// corroborationEmpty: the corroborating read agrees the pid holds no
+	// LISTEN socket — the original empty read is confirmed, not just
+	// unrefuted.
+	corroborationEmpty corroborationResult = iota
+	// corroborationHolds: the corroborating read shows the pid DOES hold a
+	// LISTEN socket — the original empty read was wrong.
+	corroborationHolds
+	// corroborationFailed: the corroborating read itself could not be
+	// obtained — neither confirmed nor refuted.
+	corroborationFailed
+)
+
+// hostCorroboration lazily fetches one host-wide TCP connection scan (real,
+// unhooked — see below) and answers "does this pid hold a LISTEN socket"
+// against it, reusing the single fetch across every ambiguous per-pid read
+// in one treeListenSet walk rather than re-scanning per pid. The zero value
+// is ready to use.
+//
+// DoD item 7 (AATK-87): this is NOT an independent second signal, and this
+// package does not claim it is. gopsnet.Connections("tcp") resolves to
+// ConnectionsPidWithContext(ctx, "tcp", 0) — the very same function
+// ConnectionsPidHook (gopsnet.ConnectionsPid) calls, differing only in the
+// pid argument, which downstream becomes lsof's `-p <pid>` flag versus no
+// pid filter at all — so both ultimately shell out through gopsutil's
+// common.CallLsofWithContext. What corroboration buys is two separate
+// `lsof` process invocations, not two draws on shared in-process state:
+// under host contention the two calls are correlated (a starved host is
+// likely to make both slow or flaky together), not independent, and a
+// disagreement between them is still informative even though they share a
+// failure mode. This is also the only signal darwin exposes here — every
+// gopsutil net-enumeration path on darwin converges on the same lsof
+// primitive — so it is corroboration-by-a-second-real-observation, not
+// corroboration-by-an-unrelated-mechanism, and that is deliberate rather
+// than a compromise: writing a native darwin socket enumerator is out of
+// scope for this ticket.
+type hostCorroboration struct {
+	fetched bool
+	conns   []gopsnet.ConnectionStat
+	err     error
+}
+
+// holdsListen reports, for pid, whether a host-wide TCP scan (fetched once
+// and cached for the lifetime of this hostCorroboration) shows it holding a
+// LISTEN socket.
+func (h *hostCorroboration) holdsListen(pid int32) corroborationResult {
+	if !h.fetched {
+		h.conns, h.err = gopsnet.Connections("tcp")
+		h.fetched = true
+	}
+	if h.err != nil {
+		return corroborationFailed
+	}
+	for _, c := range h.conns {
+		if c.Pid == pid && c.Status == "LISTEN" {
+			return corroborationHolds
+		}
+	}
+	return corroborationEmpty
+}
 
 // listeningPorts returns the local TCP ports proc is listening on.
 func listeningPorts(proc *process.Process) ([]int, error) {
