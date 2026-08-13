@@ -186,9 +186,23 @@ func collectTreeProcesses(root *process.Process) ([]*process.Process, error) {
 	return order, nil
 }
 
+// ConnectionsPidHook is the seam listeningPorts calls through to gather a
+// single process's TCP connections. It defaults to the real gopsutil call;
+// production code must never reassign it. Tests — both in this package and
+// in cmd/aa-server-status, which calls TreeListenSet directly — substitute
+// it to force "the call succeeded but returned no rows" deterministically
+// (AATK-87): on darwin, gopsnet.ConnectionsPid shells out to lsof and can
+// swallow an internal failure, returning (nil, nil) exactly as it would for
+// a process confirmed to hold no ports. A live subprocess alone cannot
+// produce that "succeeded but is wrong" shape on demand — a real listener
+// genuinely returns its ports, a real non-listener genuinely returns
+// none — so tests that need it substitute this hook instead. A test that
+// reassigns it must restore the original via t.Cleanup.
+var ConnectionsPidHook = gopsnet.ConnectionsPid
+
 // listeningPorts returns the local TCP ports proc is listening on.
 func listeningPorts(proc *process.Process) ([]int, error) {
-	conns, err := gopsnet.ConnectionsPid("tcp", proc.Pid)
+	conns, err := ConnectionsPidHook("tcp", proc.Pid)
 	if err != nil {
 		return nil, err
 	}
