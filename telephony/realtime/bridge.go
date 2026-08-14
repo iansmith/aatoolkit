@@ -135,14 +135,14 @@ func (b *Bridge) Transcripts() <-chan Transcript {
 	return b.transcripts
 }
 
-// Events yields every server event Run reads, including ones its switch does
-// not model (see the default: branch in Run above) — the same coverage Activity
-// documents, carried as data rather than a signal. Events are published in
-// arrival order, before the event is dispatched into Run's switch, so a
-// modelled event that is not dropped reaches both Events() and its existing
-// destination. Dropping is one-sided: it costs the event its place here and
-// never its place in the switch, so a dropped transcript event still reaches
-// Transcripts and a dropped audio delta still reaches the MediaSink.
+// Events yields every server event Run reads, including ones dispatch's switch
+// does not model (see the default: branch in dispatch above) — the same coverage
+// Activity documents, carried as data rather than a signal. Events are published
+// in arrival order, before the event reaches dispatch's switch, so a modelled
+// event that is not dropped reaches both Events() and its existing destination.
+// Dropping is one-sided: it costs the event its place here and never its place
+// in dispatch's switch, so a dropped transcript event still reaches Transcripts
+// and a dropped audio delta still reaches the MediaSink.
 //
 // Delivery never blocks Run. A caller that stops draining loses events rather
 // than stalling the call: once the 16-event buffer is full the publish drops.
@@ -159,8 +159,8 @@ func (b *Bridge) Events() <-chan ServerEvent {
 
 // Activity signals once per successful backend read, before that event is
 // dispatched to any sink or the transcript channel — so it covers every event
-// type Run observes, including ones its switch does not model and drops into
-// default:. A caller wanting a liveness bound on the backend (as opposed to
+// type Run observes, including ones dispatch's switch does not model and drops
+// into default:. A caller wanting a liveness bound on the backend (as opposed to
 // specific event types) should watch this rather than the sink or
 // Transcripts, both of which only see a subset.
 //
