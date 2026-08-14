@@ -64,7 +64,7 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 	}
 	c := &Client{conn: conn, writeSem: make(chan struct{}, 1)}
 
-	if err := c.send(ctx, newSessionUpdate(cfg.instructions)); err != nil {
+	if err := c.send(ctx, newSessionUpdate(cfg.instructions, cfg.voice)); err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("realtime: sending %s: %w", EventSessionUpdate, err)
 	}
@@ -89,6 +89,7 @@ type DialOption func(*dialConfig)
 
 type dialConfig struct {
 	instructions string
+	voice        string
 	httpClient   *http.Client
 }
 
@@ -98,6 +99,16 @@ type dialConfig struct {
 // message. Empty omits the field rather than sending "".
 func WithInstructions(s string) DialOption {
 	return func(c *dialConfig) { c.instructions = s }
+}
+
+// WithVoice sets the backend's output voice for the session. The protocol's
+// session object defines this field on the output side of the audio spec; a
+// backend that supports multiple voices reads it and answers in the named
+// one. This package does not validate or normalize the name — the backend
+// owns which names it accepts, so whatever is supplied here reaches the wire
+// unmodified. Empty omits the field rather than sending "".
+func WithVoice(name string) DialOption {
+	return func(c *dialConfig) { c.voice = name }
 }
 
 // WithHTTPClient overrides the HTTP client used for the WebSocket dial's

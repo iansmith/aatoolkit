@@ -39,6 +39,11 @@ type audioFormat struct {
 
 type audioChannel struct {
 	Format audioFormat `json:"format"`
+	// Voice is only ever set on the OUTPUT channel — see newSessionUpdate.
+	// omitempty on purpose, mirroring sessionSpec.Instructions: a caller who
+	// supplies no voice must produce the handshake this engine sent before
+	// the field existed, not a near-equivalent carrying "".
+	Voice string `json:"voice,omitempty"`
 }
 
 type sessionAudio struct {
@@ -87,14 +92,23 @@ type ServerEvent struct {
 // which is the silent half-configuration this constructor exists to prevent.
 //
 // instructions is the session persona. Empty omits the field entirely.
-func newSessionUpdate(instructions string) sessionUpdate {
-	g711 := audioChannel{Format: audioFormat{Type: FormatG711ULaw}}
+//
+// voice is the backend's OUTPUT voice only — the protocol has no notion of
+// an input voice, and the two directions are built as separate audioChannel
+// values below (rather than one shared literal assigned to both) precisely
+// so setting voice can never leak onto the input channel. Empty omits the
+// field entirely, same as instructions.
+func newSessionUpdate(instructions, voice string) sessionUpdate {
+	format := audioFormat{Type: FormatG711ULaw}
 	return sessionUpdate{
 		Type: EventSessionUpdate,
 		Session: sessionSpec{
 			Type:         "realtime",
 			Instructions: instructions,
-			Audio:        sessionAudio{Input: g711, Output: g711},
+			Audio: sessionAudio{
+				Input:  audioChannel{Format: format},
+				Output: audioChannel{Format: format, Voice: voice},
+			},
 		},
 	}
 }
