@@ -2,6 +2,7 @@ package twilio
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -15,6 +16,35 @@ import (
 // accepts nor refuses would otherwise hold the call open with silence on the
 // line for as long as the carrier tolerates it.
 const realtimeDialTimeout = 10 * time.Second
+
+// realtimeClientEventSendTimeout bounds one consumer-event write to the
+// backend, for the same reason realtimeDialTimeout bounds the handshake: a
+// backend that neither accepts nor refuses would otherwise hold the call open
+// indefinitely.
+//
+// It matters more here than anywhere else on this path, and the reason is
+// which goroutine does the writing. Carrier audio is written from
+// pumpCarrierToBridge's goroutine, so a write that parks there still leaves
+// HandleStreamRealtime's select loop free to observe backendDone,
+// carrierDone, and the idle timer — the call still ends. A consumer event is
+// written from that select loop ITSELF, so a write that parks there parks the
+// loop, and every one of those endings stops being observed: a backend that
+// has stopped reading its socket (buffers fill, the write blocks) is exactly
+// the case WithIdleTimeout exists to catch, and it is exactly the case that
+// would prevent the timer from ever being selected on. Measured before this
+// bound existed: with a 200 ms idle timeout and a write that blocks, the call
+// was still hung 3 s later.
+//
+// Generous by orders of magnitude for what it bounds — a client event is one
+// small frame, which a backend that is reading at all accepts in
+// microseconds. Exceeding it means the write half is wedged, and the call
+// then ends the same way any other failed send does: logged, with a non-nil
+// error.
+const realtimeClientEventSendTimeout = 5 * time.Second
+
+// dialRealtime is a seam so tests can substitute a custom dial (e.g. to
+// inject a transport-level fault). Production code never overrides it.
+var dialRealtime = realtime.Dial
 
 // NewStreamHandler selects the transport for a call.
 //
@@ -69,6 +99,12 @@ type realtimeConfig struct {
 	// serverEventChanFor mirrors transcriptChanFor: resolved per call rather
 	// than stored as a plain channel, for the same reason.
 	serverEventChanFor func(start Frame) chan<- ServerEvent
+
+	// clientEventChanFor mirrors serverEventChanFor, direction reversed: the
+	// consumer writes, the engine reads. Resolved per call for the same
+	// reason as the others — NewStreamHandler binds its options once and
+	// reuses them for every call it serves.
+	clientEventChanFor func(start Frame) <-chan json.RawMessage
 }
 
 // Transcript is one transcription result from the backend, re-exported so a
@@ -97,6 +133,15 @@ func (c realtimeConfig) serverEventChan(start Frame) chan<- ServerEvent {
 		return nil
 	}
 	return c.serverEventChanFor(start)
+}
+
+// clientEventChan resolves the source for one call, or nil when the consumer
+// supplied none. Mirrors serverEventChan, direction reversed.
+func (c realtimeConfig) clientEventChan(start Frame) <-chan json.RawMessage {
+	if c.clientEventChanFor == nil {
+		return nil
+	}
+	return c.clientEventChanFor(start)
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -207,6 +252,74 @@ func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOpt
 	return func(c *realtimeConfig) { c.serverEventChanFor = fn }
 }
 
+// WithClientEventChan lets a consumer send its own events to the backend for
+// the whole life of one call: ch is read, and every value read from it is
+// forwarded to the backend via realtime.Client.Send, byte-for-byte, exactly
+// as the consumer supplied it. This package does not model, validate, or
+// interpret what a consumer puts on ch — a session.update, a
+// conversation.item.create, a response.create, function-call output, or
+// anything else the backend's protocol accepts.
+//
+// The arrows reverse here relative to WithTranscriptChan and
+// WithServerEventChan: the consumer writes, the engine reads. The engine
+// never blocks waiting for a value, survives ch never being written to for
+// the whole call, and never requires ch to be closed — a consumer that never
+// sends is exactly today's behavior, byte-for-byte. The read lives in the
+// same select loop HandleStreamRealtime already runs, so no goroutine is ever
+// spawned to service ch and none can outlive the call.
+//
+// That leak-freedom is the ENGINE's, not the consumer's, and the distinction
+// is another consequence of the reversal. Once the call ends nothing reads ch
+// again — the select loop is gone, and the engine never drains what it does
+// not own — so a consumer parked in a send on an unbuffered or full ch stays
+// parked forever: one leaked goroutine per call that ended while it was
+// sending. Buffer ch, or select the send against a done signal the consumer
+// closes when its own call returns. The engine cannot raise that signal,
+// precisely because ch is the consumer's.
+//
+// ONE ch SERVES ONE CALL AT A TIME, and that is the consequence of the
+// reversal that bites. On the engine-writes options a single ch shared by
+// concurrent calls fans IN, and is safe; here it fans OUT, and a channel
+// value goes to exactly ONE receiver. Two calls running concurrently off the
+// same ch therefore SPLIT the stream between them at random: an event the
+// consumer meant for one call is forwarded to the other call's backend, and
+// nothing reports it. Reuse across SEQUENTIAL calls is fine — the engine
+// never closes ch. For calls that can overlap, which is precisely what
+// NewStreamHandler serves (it binds this option once and reuses it for every
+// call), use WithClientEventChanFor and give each call its own channel.
+//
+// A value read from ch does NOT reset the idle timer armed by
+// WithIdleTimeout: only backend activity does. A consumer that sends steadily
+// against a backend that has gone silent must not mask that silence.
+//
+// A send that fails is logged, and the call ends with a non-nil error — the
+// same ending path as the backend going away. This transport's underlying
+// writer poisons itself after one write error (every subsequent write to
+// that connection fails forever), so a failed send here is never transient;
+// continuing the call would mean running it against a permanently dead
+// backend link.
+//
+// A send that never completes is bounded rather than waited on: the write is
+// given realtimeClientEventSendTimeout, and a backend that has stopped
+// reading its socket ends the call on that bound instead of wedging it. The
+// forwarding read shares HandleStreamRealtime's select loop with every other
+// way the call can end, so an unbounded write here would silence the idle
+// timer and the carrier hangup along with itself.
+func WithClientEventChan(ch <-chan json.RawMessage) RealtimeOption {
+	return WithClientEventChanFor(func(Frame) <-chan json.RawMessage { return ch })
+}
+
+// WithClientEventChanFor resolves the source when the call arrives, from the
+// start frame — so a consumer can route different calls to different
+// channels. Mirrors WithServerEventChanFor, direction reversed.
+//
+// A nil function, or one returning nil, means no consumer: the engine never
+// reads anything beyond what it already reads, exactly as with no option at
+// all.
+func WithClientEventChanFor(fn func(start Frame) <-chan json.RawMessage) RealtimeOption {
+	return func(c *realtimeConfig) { c.clientEventChanFor = fn }
+}
+
 // WithInstructionsFor resolves the session persona when the call arrives, from
 // the start frame — which carries the caller identity, so a consumer can vary
 // the persona per caller.
@@ -272,7 +385,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	dialCtx, cancelDial := context.WithTimeout(ctx, realtimeDialTimeout)
 	defer cancelDial()
 
-	client, err := realtime.Dial(dialCtx, url, realtime.WithInstructions(cfg.instructions(start)))
+	client, err := dialRealtime(dialCtx, url, realtime.WithInstructions(cfg.instructions(start)))
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)
 		return err
@@ -314,13 +427,34 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
 
+	// Resolved once, before the loop, mirroring how transcriptChan/
+	// serverEventChan are resolved once via cfg.transcriptChan(start) /
+	// cfg.serverEventChan(start) above rather than per-iteration. nil (no
+	// option, or the resolver returned nil) means the select case below
+	// simply never fires — a nil channel blocks forever in a select, which is
+	// exactly "never blocks waiting, survives never being written to".
+	//
+	// It resolves BEFORE the idle guard is armed, and that order is
+	// load-bearing for the same reason the drain order above is: this line
+	// runs CONSUMER code on this goroutine, and a consumer resolver is free to
+	// be slow (the transcript/server-event resolvers are measured at 3 s in
+	// the comment above). Armed first, the guard would spend its whole first
+	// window inside the resolver and fire the instant the loop is entered — on
+	// a backend that had been streaming the entire time. Measured, with a
+	// 500 ms idle timeout and a resolver sleeping 1.2 s: 6 of 10 calls ended
+	// with "idle timeout" against a continuously active backend, the coin flip
+	// being whether the select picked the stale timer or the pending
+	// bridge.Activity() signal that would have reset it.
+	clientEventCh := cfg.clientEventChan(start)
+
 	idle := newIdleGuard(cfg.idleTimeout)
 	defer idle.stop()
 
 	// One goroutine, one select: bridge.Activity() resets the guard without any
 	// Reset call crossing a goroutine boundary, which is what keeps this
-	// race-free under -race. Only backendDone, carrierDone, or the guard firing
-	// ends the loop; an activity signal just re-arms and loops again.
+	// race-free under -race. Only backendDone, carrierDone, the guard firing,
+	// or a client-event send failure ends the loop; an activity signal or a
+	// forwarded client event just re-arms/loops again.
 	for {
 		select {
 		case err := <-backendDone:
@@ -332,12 +466,52 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 			return fmt.Errorf("twilio: realtime: idle timeout: no backend activity for %s", cfg.idleTimeout)
 		case <-bridge.Activity():
 			idle.reset()
+		case ev, ok := <-clientEventCh:
+			var err error
+			clientEventCh, err = handleClientEvent(ctx, client, clientEventCh, ev, ok)
+			if err != nil {
+				return err
+			}
 		}
 	}
 }
 
+// handleClientEvent processes one receive from the client-event select case,
+// returning the channel HandleStreamRealtime's loop should keep selecting on
+// next (nil once the consumer has closed it) and any error that should end
+// the call. Extracted from the select loop itself, mirroring deliver's role
+// for the transcript/server-event drains above — a named unit for one
+// select case's branching, not the whole loop's.
+//
+// Deliberately does NOT call idle.reset(): a consumer event is not backend
+// activity, and a chatty consumer against a silent backend must not mask
+// that silence.
+func handleClientEvent(ctx context.Context, client *realtime.Client, ch <-chan json.RawMessage, ev json.RawMessage, ok bool) (<-chan json.RawMessage, error) {
+	if !ok {
+		// The consumer closed its channel: return nil so the caller's select
+		// case never fires again, rather than busy-looping on a closed
+		// channel that is always ready to receive its zero value.
+		return nil, nil
+	}
+	// Bounded, because this runs on HandleStreamRealtime's select loop: an
+	// unbounded write that parks here parks every other way the call can end.
+	// See realtimeClientEventSendTimeout.
+	sendCtx, cancelSend := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
+	defer cancelSend()
+	if err := client.Send(sendCtx, ev); err != nil {
+		log.Printf("twilio: realtime: client event send failed: %v", err)
+		// Wrapped, not returned bare: the transport's write error is the same
+		// string whether it came from forwarding carrier audio or from
+		// forwarding a consumer event, so an unwrapped return would leave the
+		// caller unable to tell the two apart from the error alone. The idle
+		// timeout names itself on the way out for the same reason.
+		return ch, fmt.Errorf("twilio: realtime: client event send: %w", err)
+	}
+	return ch, nil
+}
+
 // idleGuard is the idle timeout as a single object, so HandleStreamRealtime's
-// loop reads as four things that can end or extend a call rather than as timer
+// loop reads as five things that can end or extend a call rather than as timer
 // bookkeeping. A zero duration produces a guard that never fires: fired()
 // returns a nil channel, which blocks forever in a select, so the loop reduces
 // to the original two-case shape — unbounded, exactly today's behavior.

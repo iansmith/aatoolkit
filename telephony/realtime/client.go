@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	neturl "net/url"
 
 	"github.com/coder/websocket"
@@ -15,6 +16,28 @@ import (
 // whether a dropped backend should end the call or be retried.
 type Client struct {
 	conn *websocket.Conn
+
+	// writeSem serialises every client-originated write (AppendAudio, Send, the
+	// Dial handshake) through one chokepoint. coder/websocket's own Conn
+	// already guarantees safe concurrent Write calls per its documented
+	// contract (conn.go, backed by write.go's writeFrameMu), so this is
+	// defensive redundancy against a future library change rather than
+	// something load-bearing today — kept anyway because relying solely on a
+	// dependency's internal locking is fragile.
+	//
+	// A one-slot channel rather than a sync.Mutex, and THAT part is
+	// load-bearing: acquisition has to honour ctx. Callers do NOT all carry a
+	// deadline, and that asymmetry is the whole hazard — a consumer event is
+	// written under a bounded context, while carrier audio is written on the
+	// call's own context, which has none. coder/websocket's own write locks
+	// are context-aware for exactly that reason (conn.go's mu.lock selects on
+	// ctx.Done()). sync.Mutex.Lock cannot be cancelled, so a plain mutex here
+	// would put an UNBOUNDED wait in front of a bounded write and silently
+	// void the caller's deadline — measured: with the carrier pump parked in
+	// conn.Write on the unbounded call context, a consumer Send carrying a 5 s
+	// deadline was still blocked 9 s later, wedging the select loop that
+	// observes every way a call can end.
+	writeSem chan struct{}
 }
 
 // Dial connects to url, sends the session.update handshake, and waits for the
@@ -29,13 +52,17 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 	}
 
 	// The handshake response never needs closing — coder/websocket owns it.
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	var dialOpts *websocket.DialOptions
+	if cfg.httpClient != nil {
+		dialOpts = &websocket.DialOptions{HTTPClient: cfg.httpClient}
+	}
+	conn, _, err := websocket.Dial(ctx, url, dialOpts)
 	if err != nil {
 		// redactUserinfo keeps credentials out of logs: a ws:// URL may carry
 		// user:password, and this error is the one thing guaranteed to be logged.
 		return nil, fmt.Errorf("realtime: dial %s: %w", redactUserinfo(url), err)
 	}
-	c := &Client{conn: conn}
+	c := &Client{conn: conn, writeSem: make(chan struct{}, 1)}
 
 	if err := c.send(ctx, newSessionUpdate(cfg.instructions)); err != nil {
 		conn.CloseNow()
@@ -62,6 +89,7 @@ type DialOption func(*dialConfig)
 
 type dialConfig struct {
 	instructions string
+	httpClient   *http.Client
 }
 
 // WithInstructions sets the session persona the backend is told to adopt. The
@@ -72,10 +100,38 @@ func WithInstructions(s string) DialOption {
 	return func(c *dialConfig) { c.instructions = s }
 }
 
+// WithHTTPClient overrides the HTTP client used for the WebSocket dial's
+// handshake, giving control over the underlying transport.
+//
+// This option exists FOR TESTING ONLY — specifically, to inject a
+// transport-level fault (e.g. a connection whose Write calls can be made to
+// fail on demand while Read keeps working) so a test can drive send-failure
+// handling deterministically. Nil (the default) uses coder/websocket's own
+// default transport. Production callers should never need this option; if
+// you find yourself reaching for it outside a test, that is a sign this
+// package needs a different seam.
+func WithHTTPClient(hc *http.Client) DialOption {
+	return func(c *dialConfig) { c.httpClient = hc }
+}
+
 // AppendAudio forwards one carrier frame's payload to the backend. payload is
 // base64 G.711 and is placed on the wire unchanged.
 func (c *Client) AppendAudio(ctx context.Context, payload string) error {
 	return c.send(ctx, audioAppend{Type: EventAudioAppend, Audio: payload})
+}
+
+// Send writes one consumer-supplied client event to the backend, verbatim.
+// This package does not model, validate, or interpret event — the consumer
+// owns its own protocol correctness (session.update, conversation.item.create,
+// response.create, function-call output, or anything else the backend
+// accepts).
+//
+// event's bytes go on the wire exactly as supplied: unlike send(), this does
+// NOT go through json.Marshal, which would re-escape '<', '>', '&' and
+// recompact whitespace on a json.RawMessage. It goes through the same write
+// chokepoint as AppendAudio, so the two are safe to call concurrently.
+func (c *Client) Send(ctx context.Context, event json.RawMessage) error {
+	return c.write(ctx, event)
 }
 
 // Read returns the next server event. Events whose type this package does not
@@ -131,5 +187,22 @@ func (c *Client) send(ctx context.Context, v any) error {
 	if err != nil {
 		return fmt.Errorf("realtime: marshal client event: %w", err)
 	}
+	return c.write(ctx, b)
+}
+
+// write is the single chokepoint every client-originated write funnels
+// through: the Dial handshake, AppendAudio (via send), and Send. Serialising
+// here means AppendAudio and Send are safe to call concurrently.
+//
+// The wait for the slot is taken under ctx, so a caller's deadline covers the
+// whole write — the queueing behind a slower writer as well as the write
+// itself. See writeSem for why that is not optional.
+func (c *Client) write(ctx context.Context, b []byte) error {
+	select {
+	case c.writeSem <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("realtime: awaiting write slot: %w", ctx.Err())
+	}
+	defer func() { <-c.writeSem }()
 	return c.conn.Write(ctx, websocket.MessageText, b)
 }
