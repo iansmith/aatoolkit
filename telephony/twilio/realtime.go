@@ -94,11 +94,12 @@ type realtimeConfig struct {
 	// call is resolved when the call arrives, on both entry points.
 	instructionsFor func(start Frame) string
 
-	// voice is the AATK-83 stub: WithVoice below stores into it, but nothing
-	// yet reads it back out to the dial call. Scaffolding only, so the
-	// contract tests in realtime_voice_test.go fail at their assertion
-	// rather than at compile — the implementer wires this the rest of the
-	// way to the handshake.
+	// voice is the constant case, like instructionsFor's non-"For" sibling
+	// WithInstructions: a plain string rather than a per-call resolver.
+	// AATK-74 fenced out the rest of the session object because a general
+	// passthrough invites a consumer to reconfigure turn-taking; voice does
+	// not touch turn-taking, so it alone is exposed, and with no stated need
+	// to vary it per call there is no WithVoiceFor to go with it.
 	voice string
 
 	transcriptChanFor func(start Frame) chan<- Transcript
@@ -188,11 +189,18 @@ func WithInstructions(text string) RealtimeOption {
 	return WithInstructionsFor(func(Frame) string { return text })
 }
 
-// WithVoice sets the backend's output voice for the session.
+// WithVoice sets the backend's output voice for every call this option is
+// applied to. AATK-74 fenced out the rest of the session object because a
+// general passthrough invites a consumer to reconfigure turn-taking, which
+// this engine has opinions about; voice does not touch turn-taking, so this
+// one field is exposed while the rest of the fence stays up.
 //
-// AATK-83 stub: this stores the value onto realtimeConfig.voice but nothing
-// yet forwards it to the handshake, so it is reachable and compiles without
-// yet changing what goes on the wire — that wiring is Phase 1's job.
+// This engine does not validate, trim, or case-fold name — the backend owns
+// which names it accepts, so whatever is supplied here reaches the wire
+// unmodified.
+//
+// Empty omits the field entirely, which is byte-for-byte the handshake a
+// caller supplying no option gets.
 func WithVoice(name string) RealtimeOption {
 	return func(c *realtimeConfig) { c.voice = name }
 }
@@ -401,7 +409,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	dialCtx, cancelDial := context.WithTimeout(ctx, realtimeDialTimeout)
 	defer cancelDial()
 
-	client, err := dialRealtime(dialCtx, url, realtime.WithInstructions(cfg.instructions(start)))
+	client, err := dialRealtime(dialCtx, url, realtime.WithInstructions(cfg.instructions(start)), realtime.WithVoice(cfg.voice))
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)
 		return err
