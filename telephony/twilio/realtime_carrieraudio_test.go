@@ -492,10 +492,18 @@ func TestCarrierAudioChan_ClearRecordMatchesTheCarrierWire(t *testing.T) {
 // synchronous select/default that deliver already uses — satisfies every other
 // test in this file yet can scramble record order under scheduling
 // non-determinism. Asserting the consumer's whole sequence against
-// captureCarrierWire's recording of the same call is what rules that out, and
-// it pins the "byte-identical to what shipped" half at the same time: the
+// captureCarrierWire's recording of the same call is what detects that, and it
+// pins the "byte-identical to what shipped" half at the same time: the
 // comparison is against the carrier's own bytes, not against what this test
 // intended to send.
+//
+// The assertion detects out-of-order delivery once it occurs; it does not
+// force it to occur. Probed in adversary round 2: a per-record-goroutine
+// implementation passed this 10/10 under the test's natural event cadence,
+// which does not interleave the goroutines, and failed 5/5 once a 20ms delay
+// was injected into the Media path. So this is a real guard against scrambling
+// under production timing skew, not a proof that no such implementation can
+// pass under a light cadence.
 //
 // slopstop:test contract
 func TestCarrierAudioChan_RecordsArriveInOrder(t *testing.T) {
@@ -533,6 +541,109 @@ func TestCarrierAudioChan_RecordsArriveInOrder(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("consumer received only %d of %d records; delivery must be ordered and complete",
 				i, len(want))
+		}
+	}
+}
+
+// TestCarrierAudioChan_ClearsDoNotComeFromTheServerEventStream closes round 1's
+// finding 1, which round 2 proved TestCarrierAudioChan_ClearRecordMatchesTheCarrierWire
+// does NOT close. That test compares the consumer's clear record against the
+// carrier's own wire record — and both a sink-sourced and an Events()-sourced
+// implementation produce byte-identical values (Clear:true, Payload:"") for one
+// unhurried speech_started, because the divergence it was reaching for (Events()'s
+// 16-slot buffer dropping the event) never triggers when nothing is driving volume.
+// Round 2 wired the Events()-sourced implementation and watched that test pass 5/5
+// under -race. A value comparison cannot pin where a value came from.
+//
+// This can, and it does not depend on buffer pressure or on timing. bridge.Events()
+// is ONE channel, and a value sent on a channel is received by exactly ONE receiver.
+// HandleStreamRealtime already runs `deliver(bridge.Events(), cfg.serverEventChan(start), …)`
+// unconditionally, so an implementation that reads Events() to source its clears must
+// either steal from that drain — splitting the stream, so each consumer sees roughly
+// half — or replace it, so the server-event consumer sees nothing at all. Both are
+// visible here, and neither is a race: with N events the chance a splitting
+// implementation lets both channels see all N is (1/2)^N.
+//
+// A correct implementation passes trivially. carrierMediaSink.Clear is called once
+// per speech-started event by Run's dispatch, independently of publishEvent, so the
+// two streams are fed from two places and neither can starve the other. That
+// independence is the actual contract behind "the observed payload is asserted
+// against the bytes the carrier actually received" — the record must come from the
+// sink, not from a parallel view of the same events that drops under load.
+//
+// What this was measured to catch, and what it was measured NOT to catch — stated
+// because the round-2 finding against the previous attempt was precisely an
+// overclaiming comment. Three implementations were wired and run against it:
+//
+//   - sink-sourced (correct)                          -> PASSES
+//   - a SECOND Events() consumer beside the existing
+//     drain (the natural way to "read Events() for
+//     clears", since deliver already exists)          -> FAILS 5/5, and the counts
+//     show the split: 3/3, 3/3, 2/4, 5/1 of 6
+//   - the observer REPLACING the drain                -> fails by construction; the
+//     server-event channel receives nothing
+//
+// It does NOT catch a fourth shape: one merged consumer that both feeds the
+// server-event channel and emits clears, stealing nothing. Measured — it passes.
+// That variant diverges from correct behaviour only when Events()'s 16-slot buffer
+// overflows, and nothing in this suite reaches that, because whatever drains
+// Events() does so with a non-blocking send and never falls behind. Closing it
+// would need a test that can force publishEvent to drop, which no test here can.
+// The gap is named rather than papered over.
+//
+// slopstop:test non-interference — paired: the positive half is that all N clears
+// reach the consumer's carrier-audio channel (an inert or unwired option fails here
+// first, so the negative half cannot pass vacuously); the negative half is that
+// installing WithCarrierAudioChan costs WithServerEventChan none of its events
+func TestCarrierAudioChan_ClearsDoNotComeFromTheServerEventStream(t *testing.T) {
+	const clears = 6
+
+	audio := make(chan CarrierAudio, 64)
+	events := make(chan ServerEvent, 64)
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
+		WithCarrierAudioChan(audio),
+		WithServerEventChan(events),
+	))
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	for i := 0; i < clears; i++ {
+		be.emitOnce(t, map[string]string{"type": "input_audio_buffer.speech_started"})
+	}
+
+	// The carrier itself must have received every clear: the sink is driven once
+	// per speech-started event whatever any observer does. If this fails, the
+	// disagreement below would be about the engine, not about the observer.
+	waitFor(t, 5*time.Second, func() bool {
+		n := 0
+		for _, r := range wire() {
+			if r.clear {
+				n++
+			}
+		}
+		return n >= clears
+	})
+
+	gotAudio, gotEvents := 0, 0
+	deadline := time.After(5 * time.Second)
+	for gotAudio < clears || gotEvents < clears {
+		select {
+		case rec := <-audio:
+			if rec.Clear {
+				gotAudio++
+			}
+		case ev := <-events:
+			if ev.Type == "input_audio_buffer.speech_started" {
+				gotEvents++
+			}
+		case <-deadline:
+			t.Fatalf("the carrier received %d clears; the consumer's carrier-audio channel got %d of %d "+
+				"and the server-event channel got %d of %d. Both must see all %d: a clear record sourced "+
+				"from bridge.Events() rather than from carrierMediaSink.Clear would take these events away "+
+				"from the server-event drain, since each value on that channel reaches exactly one receiver",
+				clears, gotAudio, clears, gotEvents, clears, clears)
 		}
 	}
 }
