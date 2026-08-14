@@ -645,14 +645,36 @@ func (g *idleGuard) stop() {
 	}
 }
 
+// sendOrDrop attempts a non-blocking send of v to out, and on a full channel
+// increments *dropped and logs at LogDrop's bounded rate. One definition for
+// the drop-and-log idiom deliver's stream drain and carrierMediaSink's inline
+// delivery both need: the log line and the counting policy were identical
+// between the two hand-copies this replaces, so a fix to either now lands
+// once (CLAUDE.md #4/#5 — dedupe, one definition per value).
+//
+// The what parameter names the payload in the drop log ("transcript", "server
+// event", "carrier audio").
+func sendOrDrop[T any](out chan<- T, v T, dropped *int, what string) {
+	select {
+	case out <- v:
+	default:
+		// The consumer is behind. Drop, and say so: a silently lossy seam is
+		// worse than a lossy one, because the consumer cannot tell an absent
+		// value from one that never happened. Rate-bounded for the reason
+		// realtime.LogDrop documents — every drop is counted and every line
+		// carries the running total, so nothing is silent in aggregate.
+		*dropped++
+		if realtime.LogDrop(*dropped) {
+			log.Printf("twilio: realtime: %s dropped, consumer is behind (%d dropped on this call)", what, *dropped)
+		}
+	}
+}
+
 // deliver drains src, forwarding each value to out if a consumer asked for
 // one. It never blocks and it never runs consumer code, which is the whole
 // design. One function serves both consumer-facing channels on this path —
 // transcripts and server events — because the discipline is the same one, and
 // two copies of it would be two places for a fix to have to land.
-//
-// The what parameter names the payload in the drop log ("transcript", "server
-// event"), which is the only thing that differs between the two.
 //
 // src is fed from Bridge.Run's read loop, which also drives audio to the
 // carrier. The two sources differ in what they do when nobody reads: publish
@@ -675,19 +697,7 @@ func deliver[T any](src <-chan T, out chan<- T, what string) {
 
 	var dropped int
 	for v := range src {
-		select {
-		case out <- v:
-		default:
-			// The consumer is behind. Drop, and say so: a silently lossy seam is
-			// worse than a lossy one, because the consumer cannot tell an absent
-			// value from one that never happened. Rate-bounded for the reason
-			// realtime.LogDrop documents — every drop is counted and every line
-			// carries the running total, so nothing is silent in aggregate.
-			dropped++
-			if realtime.LogDrop(dropped) {
-				log.Printf("twilio: realtime: %s dropped, consumer is behind (%d dropped on this call)", what, dropped)
-			}
-		}
+		sendOrDrop(out, v, &dropped, what)
 	}
 	// out is deliberately NOT closed: the engine did not create it, the consumer
 	// may reuse it across calls, and closing a channel you do not own hands its
@@ -778,26 +788,16 @@ func (s *carrierMediaSink) Clear(ctx context.Context) error {
 	return nil
 }
 
-// deliverCarrierAudio hands rec to carrierAudioCh without ever blocking —
-// the same drop-and-log idiom deliver uses, borrowed rather than reused.
-// deliver drains a source channel from a goroutine it spawns; there is no
-// source channel here, because rec originates inline inside Media/Clear on
-// Bridge.Run's own read-loop goroutine. Inventing a source channel to route
-// through deliver would reintroduce a per-call goroutine to drain it — the
-// leak this ticket's non-blocking, inline design exists to avoid.
+// deliverCarrierAudio hands rec to carrierAudioCh without ever blocking, via
+// the same sendOrDrop idiom deliver's stream drain uses. deliver drains a
+// source channel from a goroutine it spawns; there is no source channel here,
+// because rec originates inline inside Media/Clear on Bridge.Run's own
+// read-loop goroutine. Inventing a source channel to route through deliver
+// would reintroduce a per-call goroutine to drain it — the leak this ticket's
+// non-blocking, inline design exists to avoid.
 func (s *carrierMediaSink) deliverCarrierAudio(rec CarrierAudio) {
 	if s.carrierAudioCh == nil {
 		return
 	}
-	select {
-	case s.carrierAudioCh <- rec:
-	default:
-		// The consumer is behind. Drop, and say so, at the same bounded rate
-		// deliver uses for transcripts and server events (realtime.LogDrop) —
-		// one drop-rate policy, shared.
-		s.carrierAudioDropped++
-		if realtime.LogDrop(s.carrierAudioDropped) {
-			log.Printf("twilio: realtime: carrier audio dropped, consumer is behind (%d dropped on this call)", s.carrierAudioDropped)
-		}
-	}
+	sendOrDrop(s.carrierAudioCh, rec, &s.carrierAudioDropped, "carrier audio")
 }
