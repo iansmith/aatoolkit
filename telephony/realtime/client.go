@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	neturl "net/url"
-	"sync"
 
 	"github.com/coder/websocket"
 )
@@ -18,14 +17,25 @@ import (
 type Client struct {
 	conn *websocket.Conn
 
-	// writeMu serialises every client-originated write (AppendAudio, Send, the
+	// writeSem serialises every client-originated write (AppendAudio, Send, the
 	// Dial handshake) through one chokepoint. coder/websocket's own Conn
 	// already guarantees safe concurrent Write calls per its documented
-	// contract (conn.go, backed by write.go's writeFrameMu), so this mutex is
-	// defensive redundancy against a future library change, not something
-	// load-bearing today — kept anyway because relying solely on a
+	// contract (conn.go, backed by write.go's writeFrameMu), so this is
+	// defensive redundancy against a future library change rather than
+	// something load-bearing today — kept anyway because relying solely on a
 	// dependency's internal locking is fragile.
-	writeMu sync.Mutex
+	//
+	// A one-slot channel rather than a sync.Mutex, and THAT part is
+	// load-bearing: acquisition has to honour ctx. Every caller bounds its
+	// write with a context, and coder/websocket's own write locks are
+	// context-aware for exactly that reason (conn.go's mu.lock selects on
+	// ctx.Done()). sync.Mutex.Lock cannot be cancelled, so a plain mutex here
+	// would put an UNBOUNDED wait in front of a bounded write and silently
+	// void the caller's deadline — measured: with the carrier pump parked in
+	// conn.Write on the unbounded call context, a consumer Send carrying a 5 s
+	// deadline was still blocked 9 s later, wedging the select loop that
+	// observes every way a call can end.
+	writeSem chan struct{}
 }
 
 // Dial connects to url, sends the session.update handshake, and waits for the
@@ -50,7 +60,7 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 		// user:password, and this error is the one thing guaranteed to be logged.
 		return nil, fmt.Errorf("realtime: dial %s: %w", redactUserinfo(url), err)
 	}
-	c := &Client{conn: conn}
+	c := &Client{conn: conn, writeSem: make(chan struct{}, 1)}
 
 	if err := c.send(ctx, newSessionUpdate(cfg.instructions)); err != nil {
 		conn.CloseNow()
@@ -181,8 +191,16 @@ func (c *Client) send(ctx context.Context, v any) error {
 // write is the single chokepoint every client-originated write funnels
 // through: the Dial handshake, AppendAudio (via send), and Send. Serialising
 // here means AppendAudio and Send are safe to call concurrently.
+//
+// The wait for the slot is taken under ctx, so a caller's deadline covers the
+// whole write — the queueing behind a slower writer as well as the write
+// itself. See writeSem for why that is not optional.
 func (c *Client) write(ctx context.Context, b []byte) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	select {
+	case c.writeSem <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("realtime: awaiting write slot: %w", ctx.Err())
+	}
+	defer func() { <-c.writeSem }()
 	return c.conn.Write(ctx, websocket.MessageText, b)
 }
