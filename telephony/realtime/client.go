@@ -26,9 +26,11 @@ type Client struct {
 	// dependency's internal locking is fragile.
 	//
 	// A one-slot channel rather than a sync.Mutex, and THAT part is
-	// load-bearing: acquisition has to honour ctx. Every caller bounds its
-	// write with a context, and coder/websocket's own write locks are
-	// context-aware for exactly that reason (conn.go's mu.lock selects on
+	// load-bearing: acquisition has to honour ctx. Callers do NOT all carry a
+	// deadline, and that asymmetry is the whole hazard — a consumer event is
+	// written under a bounded context, while carrier audio is written on the
+	// call's own context, which has none. coder/websocket's own write locks
+	// are context-aware for exactly that reason (conn.go's mu.lock selects on
 	// ctx.Done()). sync.Mutex.Lock cannot be cancelled, so a plain mutex here
 	// would put an UNBOUNDED wait in front of a bounded write and silently
 	// void the caller's deadline — measured: with the carrier pump parked in
