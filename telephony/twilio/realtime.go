@@ -94,6 +94,13 @@ type realtimeConfig struct {
 	// call is resolved when the call arrives, on both entry points.
 	instructionsFor func(start Frame) string
 
+	// voice is the AATK-83 stub: WithVoice below stores into it, but nothing
+	// yet reads it back out to the dial call. Scaffolding only, so the
+	// contract tests in realtime_voice_test.go fail at their assertion
+	// rather than at compile — the implementer wires this the rest of the
+	// way to the handshake.
+	voice string
+
 	transcriptChanFor func(start Frame) chan<- Transcript
 
 	// serverEventChanFor mirrors transcriptChanFor: resolved per call rather
@@ -179,6 +186,15 @@ func WithIdleTimeout(d time.Duration) RealtimeOption {
 // handshake a caller supplying no option gets.
 func WithInstructions(text string) RealtimeOption {
 	return WithInstructionsFor(func(Frame) string { return text })
+}
+
+// WithVoice sets the backend's output voice for the session.
+//
+// AATK-83 stub: this stores the value onto realtimeConfig.voice but nothing
+// yet forwards it to the handshake, so it is reachable and compiles without
+// yet changing what goes on the wire — that wiring is Phase 1's job.
+func WithVoice(name string) RealtimeOption {
+	return func(c *realtimeConfig) { c.voice = name }
 }
 
 // WithTranscriptChan delivers each transcript the backend produces, partial and
