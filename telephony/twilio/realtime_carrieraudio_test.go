@@ -423,3 +423,116 @@ func TestCarrierAudioChan_AbsentOptionIsTodaysBehaviour(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return seen() > 0 })
 	assertStillRunning(t, h, "no WithCarrierAudioChan option must leave the call exactly as it was")
 }
+
+// --- gap tests from adversary round 1 --------------------------------------
+
+// TestCarrierAudioChan_ClearRecordMatchesTheCarrierWire closes round 1's
+// [major] finding against TestCarrierAudioChan_ConsumerReceivesClearRecord:
+// that test checks only that *something* with Clear==true arrived, never
+// cross-checking it against the carrier, unlike its Media sibling three tests
+// above. captureCarrierWire decodes EventClear precisely so this comparison
+// can be made, and the Clear test never calls it.
+//
+// The two are not interchangeable. As written, the existing test passes just
+// as well against an implementation that derives the Clear record from the raw
+// speech_started server event — piggybacking on bridge.Events() — instead of
+// from carrierMediaSink.Clear. Events() delivery drops once its 16-slot buffer
+// fills (telephony/realtime/bridge.go, "once the 16-event buffer is full the
+// publish drops"), while Bridge.Run calls sink.Clear regardless: "Dropping is
+// one-sided... a dropped audio delta still reaches the MediaSink". An
+// Events()-sourced implementation would therefore under-report Clears under
+// load — recording what was intended rather than what shipped, which is the
+// exact failure the ticket's test expectations exist to prevent.
+//
+// The existing Clear test is frozen by the Phase 0 commit and is deliberately
+// NOT edited; this adds the missing cross-check beside it as a pure addition.
+//
+// slopstop:test contract
+func TestCarrierAudioChan_ClearRecordMatchesTheCarrierWire(t *testing.T) {
+	ch := make(chan CarrierAudio, testChanBuffer)
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithCarrierAudioChan(ch)))
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	be.emitOnce(t, map[string]string{"type": "input_audio_buffer.speech_started"})
+
+	waitFor(t, 5*time.Second, func() bool { return len(wire()) > 0 })
+	got := wire()
+	if !got[0].clear {
+		t.Fatalf("test setup: the carrier must have received a clear first, got %+v", got[0])
+	}
+
+	select {
+	case rec := <-ch:
+		if rec.Clear != got[0].clear {
+			t.Fatalf("the consumer's record must be the clear the carrier actually received: got %+v, carrier saw %+v",
+				rec, got[0])
+		}
+		if rec.Payload != got[0].payload {
+			t.Fatalf("a clear on the wire carries no payload; consumer got %q, carrier saw %q",
+				rec.Payload, got[0].payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumer never received a clear record")
+	}
+}
+
+// TestCarrierAudioChan_RecordsArriveInOrder closes round 1's [blocker]
+// finding: no test in this file drains more than one record from a single
+// running call, so the DoD's own word in bullet 1 — "Every Media payload the
+// engine sends to the carrier reaches the consumer's channel, IN ORDER,
+// byte-identical to what shipped" — is pinned by nothing. No test produces
+// both a Media and a Clear within one call either, so their relative order is
+// unpinned too.
+//
+// An implementation delivering each record from its own goroutine — a
+// plausible reading of "non-blocking" that avoids literal blocking without the
+// synchronous select/default that deliver already uses — satisfies every other
+// test in this file yet can scramble record order under scheduling
+// non-determinism. Asserting the consumer's whole sequence against
+// captureCarrierWire's recording of the same call is what rules that out, and
+// it pins the "byte-identical to what shipped" half at the same time: the
+// comparison is against the carrier's own bytes, not against what this test
+// intended to send.
+//
+// slopstop:test contract
+func TestCarrierAudioChan_RecordsArriveInOrder(t *testing.T) {
+	ch := make(chan CarrierAudio, testChanBuffer)
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithCarrierAudioChan(ch)))
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	first, second := distinctCarrierPayload(0xA1), distinctCarrierPayload(0xB2)
+
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": first})
+	be.emitOnce(t, map[string]string{"type": "input_audio_buffer.speech_started"})
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": second})
+
+	want := []carrierWireRecord{{payload: first}, {clear: true}, {payload: second}}
+
+	waitFor(t, 5*time.Second, func() bool { return len(wire()) >= len(want) })
+	got := wire()
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("test setup: the carrier must receive media/clear/media in that order; wire[%d] = %+v, want %+v",
+				i, got[i], w)
+		}
+	}
+
+	for i, w := range want {
+		select {
+		case rec := <-ch:
+			if rec.Clear != w.clear || rec.Payload != w.payload {
+				t.Fatalf("record %d: consumer received %+v, want {Payload:%q Clear:%v} — the carrier's own message %d",
+					i, rec, w.payload, w.clear, i)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("consumer received only %d of %d records; delivery must be ordered and complete",
+				i, len(want))
+		}
+	}
+}
