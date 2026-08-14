@@ -90,6 +90,7 @@ type DialOption func(*dialConfig)
 type dialConfig struct {
 	instructions string
 	voice        string
+	tools        json.RawMessage
 	httpClient   *http.Client
 }
 
@@ -109,6 +110,23 @@ func WithInstructions(s string) DialOption {
 // unmodified. Empty omits the field rather than sending "".
 func WithVoice(name string) DialOption {
 	return func(c *dialConfig) { c.voice = name }
+}
+
+// WithTools declares the consumer's tool definitions for this session
+// (AATK-85). This package models nothing about what a tool is — the
+// consumer owns tool schemas entirely — so tools is carried as
+// json.RawMessage rather than a typed struct: a typed struct would
+// re-encode the consumer's bytes on the way to the wire (reordering keys,
+// dropping unknown fields, re-escaping '<', '>', '&'), and the declared
+// tools must reach the backend unmodified. Nil (the default) omits the
+// field entirely, producing the handshake this package sent before tools
+// existed.
+//
+// PHASE 0 STUB: this option is not yet wired into Dial's handshake — see
+// TestDial_HandshakeCarriesDeclaredToolsUnmodified (tools_test.go), which is
+// red against this stub for exactly that reason.
+func WithTools(tools json.RawMessage) DialOption {
+	return func(c *dialConfig) { c.tools = tools }
 }
 
 // WithHTTPClient overrides the HTTP client used for the WebSocket dial's
