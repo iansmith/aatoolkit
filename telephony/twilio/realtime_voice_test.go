@@ -111,6 +111,36 @@ func TestSessionUpdate_VoiceAppearsOnlyOnOutputChannel(t *testing.T) {
 	}
 }
 
+// slopstop:test contract
+//
+// Adversary round 1 gap test. The three tests above supply "marin" and
+// "alloy", and both are fixed points of the two most plausible ways a voice
+// could arrive altered: case-folding and whitespace-trimming. Proven by live
+// mutation against a wired implementation — Voice:
+// strings.ToLower(strings.TrimSpace(voice)) in newSessionUpdate left every one
+// of them green. The DoD's word is "unmodified", so a transform that survives
+// the whole suite is a hole in the contract, not a nitpick.
+//
+// This literal is a fixed point of neither transform: it carries interior and
+// surrounding whitespace AND mixed case, so ToLower, TrimSpace, or both
+// together each break the match. Deliberately not a plausible voice name —
+// validating the name is explicitly out of scope for this ticket ("the backend
+// owns which names it accepts"), which is precisely what obliges the engine to
+// forward whatever it is handed, byte for byte.
+func TestSessionUpdate_VoicePreservesCaseAndWhitespace(t *testing.T) {
+	const want = "  Marin Verse  "
+
+	be := newFakeRealtimeBackend(t)
+	newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithVoice(want)))
+
+	waitHandshakes(t, be, 1, 5*time.Second)
+
+	got := be.handshake(0)
+	if !strings.Contains(got, `"voice":"`+want+`"`) {
+		t.Fatalf("handshake must carry the supplied voice unmodified — neither case-folded nor trimmed\n want %q\n  got %s", want, got)
+	}
+}
+
 // slopstop:test regression — guards: "Unset, or empty, omits the field entirely — the handshake is byte-identical to one with no option."
 func TestSessionUpdate_WithNoVoiceIsByteIdenticalToToday(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
