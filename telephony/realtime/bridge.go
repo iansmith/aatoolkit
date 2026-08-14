@@ -92,29 +92,41 @@ func (b *Bridge) Run(ctx context.Context) error {
 		b.signalActivity()
 		b.publishEvent(ev)
 
-		switch ev.Type {
-		case EventAudioDelta:
-			// Verbatim: the delta is already base64 G.711, which is what the
-			// carrier wants. Decoding to re-encode would spend CPU per frame
-			// reproducing the input.
-			if err := b.sink.Media(ctx, ev.Delta); err != nil {
-				return fmt.Errorf("realtime: media sink: %w", err)
-			}
-		case EventSpeechStarted:
-			// One clear per event. Collapsing repeats would be a behavior
-			// change, not an optimisation.
-			if err := b.sink.Clear(ctx); err != nil {
-				return fmt.Errorf("realtime: clear sink: %w", err)
-			}
-		case EventTranscriptDelta:
-			b.publish(ctx, Transcript{Text: ev.Transcript})
-		case EventTranscriptDone:
-			b.publish(ctx, Transcript{Text: ev.Transcript, Final: true})
-		default:
-			// Unmodelled event type: ignored, and the loop continues. The
-			// protocol is larger than the subset this package reads.
+		if err := b.dispatch(ctx, ev); err != nil {
+			return err
 		}
 	}
+}
+
+// dispatch drives the sink and transcript channel for one server event —
+// exactly the work Run's switch used to do inline, moved out to keep Run's
+// own complexity under the reject threshold. Only Run calls this, on Run's
+// own goroutine, after signalActivity and publishEvent have already run for
+// ev.
+func (b *Bridge) dispatch(ctx context.Context, ev ServerEvent) error {
+	switch ev.Type {
+	case EventAudioDelta:
+		// Verbatim: the delta is already base64 G.711, which is what the
+		// carrier wants. Decoding to re-encode would spend CPU per frame
+		// reproducing the input.
+		if err := b.sink.Media(ctx, ev.Delta); err != nil {
+			return fmt.Errorf("realtime: media sink: %w", err)
+		}
+	case EventSpeechStarted:
+		// One clear per event. Collapsing repeats would be a behavior
+		// change, not an optimisation.
+		if err := b.sink.Clear(ctx); err != nil {
+			return fmt.Errorf("realtime: clear sink: %w", err)
+		}
+	case EventTranscriptDelta:
+		b.publish(ctx, Transcript{Text: ev.Transcript})
+	case EventTranscriptDone:
+		b.publish(ctx, Transcript{Text: ev.Transcript, Final: true})
+	default:
+		// Unmodelled event type: ignored, and the loop continues. The
+		// protocol is larger than the subset this package reads.
+	}
+	return nil
 }
 
 // Transcripts yields transcription results in arrival order. The channel is
@@ -123,14 +135,14 @@ func (b *Bridge) Transcripts() <-chan Transcript {
 	return b.transcripts
 }
 
-// Events yields every server event Run reads, including ones its switch does
-// not model (see the default: branch in Run above) — the same coverage Activity
-// documents, carried as data rather than a signal. Events are published in
-// arrival order, before the event is dispatched into Run's switch, so a
-// modelled event that is not dropped reaches both Events() and its existing
-// destination. Dropping is one-sided: it costs the event its place here and
-// never its place in the switch, so a dropped transcript event still reaches
-// Transcripts and a dropped audio delta still reaches the MediaSink.
+// Events yields every server event Run reads, including ones dispatch's switch
+// does not model (see the default: branch in dispatch above) — the same coverage
+// Activity documents, carried as data rather than a signal. Events are published
+// in arrival order, before the event reaches dispatch's switch, so a modelled
+// event that is not dropped reaches both Events() and its existing destination.
+// Dropping is one-sided: it costs the event its place here and never its place
+// in dispatch's switch, so a dropped transcript event still reaches Transcripts
+// and a dropped audio delta still reaches the MediaSink.
 //
 // Delivery never blocks Run. A caller that stops draining loses events rather
 // than stalling the call: once the 16-event buffer is full the publish drops.
@@ -147,8 +159,8 @@ func (b *Bridge) Events() <-chan ServerEvent {
 
 // Activity signals once per successful backend read, before that event is
 // dispatched to any sink or the transcript channel — so it covers every event
-// type Run observes, including ones its switch does not model and drops into
-// default:. A caller wanting a liveness bound on the backend (as opposed to
+// type Run observes, including ones dispatch's switch does not model and drops
+// into default:. A caller wanting a liveness bound on the backend (as opposed to
 // specific event types) should watch this rather than the sink or
 // Transcripts, both of which only see a subset.
 //
