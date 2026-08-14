@@ -2,9 +2,13 @@ package twilio
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // TestCarrierAudioChan_AbsentOptionNeverLogsADrop closes a gap found by the
@@ -54,5 +58,64 @@ func TestCarrierAudioChan_AbsentOptionNeverLogsADrop(t *testing.T) {
 
 	if bytes.Contains(buf.Bytes(), []byte("carrier audio dropped")) {
 		t.Fatalf("no WithCarrierAudioChan option must never log a carrier-audio drop; log output: %q", buf.String())
+	}
+}
+
+// failingWSWriter always fails Write with err, so a test can force
+// carrierMediaSink's write path to error deterministically — no real network
+// connection, no race against TCP write buffering. Package-local to this
+// file rather than added to fakeWSWriter (output_test.go): that fixture's
+// whole contract is that Write always succeeds, and every one of its callers
+// relies on that.
+type failingWSWriter struct{ err error }
+
+func (f *failingWSWriter) Write(context.Context, websocket.MessageType, []byte) error {
+	return f.err
+}
+
+// TestCarrierMediaSink_WriteFailureNeverDeliversCarrierAudio closes the M6
+// gap found by the stage-9 mutation check against telephony/twilio/realtime.go
+// (AATK-84): carrierMediaSink.Media and .Clear call deliverCarrierAudio only
+// AFTER a successful conn.Write. Mutating them to deliver the record
+// unconditionally — regardless of the write error — left the entire suite
+// green, because nothing exercised Media/Clear against a carrier write that
+// fails.
+//
+// This constructs carrierMediaSink directly rather than driving it through
+// HandleStreamRealtime and a real carrier WebSocket: carrierMediaSink.conn
+// is already typed as the unexported wsWriter interface specifically so
+// tests can fake it (see output.go's doc comment on wsWriter, and
+// output_test.go's fakeWSWriter, which does the same for
+// dataPlaneOutput/controlPlaneOutput). HandleStreamRealtime takes the carrier
+// connection as a concrete *websocket.Conn, so reaching this path through it
+// would mean forcing a real socket write to fail — racy against TCP write
+// buffering — or widening HandleStreamRealtime's public signature to accept
+// an injectable writer, which is a structural change out of scope here
+// (CLAUDE.md #4). Testing carrierMediaSink itself, in-package, needs neither.
+func TestCarrierMediaSink_WriteFailureNeverDeliversCarrierAudio(t *testing.T) {
+	writeErr := errors.New("carrier write failed")
+	ch := make(chan CarrierAudio, 1)
+	sink := &carrierMediaSink{
+		conn:           &failingWSWriter{err: writeErr},
+		streamSID:      "SSfail",
+		carrierAudioCh: ch,
+	}
+
+	if err := sink.Media(context.Background(), carrierPayloadB64()); !errors.Is(err, writeErr) {
+		t.Fatalf("Media: got err %v, want %v", err, writeErr)
+	}
+	select {
+	case rec := <-ch:
+		t.Fatalf("Media must not deliver a carrier-audio record when the carrier write failed; got %+v", rec)
+	default:
+	}
+
+	if err := sink.Clear(context.Background()); !errors.Is(err, writeErr) {
+		t.Fatalf("Clear: got err %v, want %v", err, writeErr)
+	}
+	select {
+	case rec := <-ch:
+		t.Fatalf("Clear must not deliver a carrier-audio record when the carrier write failed; got %+v", rec)
+	default:
 	}
 }
