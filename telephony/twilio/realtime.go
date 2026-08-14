@@ -427,16 +427,28 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
 
-	idle := newIdleGuard(cfg.idleTimeout)
-	defer idle.stop()
-
 	// Resolved once, before the loop, mirroring how transcriptChan/
 	// serverEventChan are resolved once via cfg.transcriptChan(start) /
 	// cfg.serverEventChan(start) above rather than per-iteration. nil (no
 	// option, or the resolver returned nil) means the select case below
 	// simply never fires — a nil channel blocks forever in a select, which is
 	// exactly "never blocks waiting, survives never being written to".
+	//
+	// It resolves BEFORE the idle guard is armed, and that order is
+	// load-bearing for the same reason the drain order above is: this line
+	// runs CONSUMER code on this goroutine, and a consumer resolver is free to
+	// be slow (the transcript/server-event resolvers are measured at 3 s in
+	// the comment above). Armed first, the guard would spend its whole first
+	// window inside the resolver and fire the instant the loop is entered — on
+	// a backend that had been streaming the entire time. Measured, with a
+	// 500 ms idle timeout and a resolver sleeping 1.2 s: 6 of 10 calls ended
+	// with "idle timeout" against a continuously active backend, the coin flip
+	// being whether the select picked the stale timer or the pending
+	// bridge.Activity() signal that would have reset it.
 	clientEventCh := cfg.clientEventChan(start)
+
+	idle := newIdleGuard(cfg.idleTimeout)
+	defer idle.stop()
 
 	// One goroutine, one select: bridge.Activity() resets the guard without any
 	// Reset call crossing a goroutine boundary, which is what keeps this
