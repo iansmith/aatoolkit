@@ -116,6 +116,24 @@ type realtimeConfig struct {
 	// reason as the others — NewStreamHandler binds its options once and
 	// reuses them for every call it serves.
 	clientEventChanFor func(start Frame) <-chan json.RawMessage
+
+	// carrierAudioChanFor mirrors serverEventChanFor: resolved per call
+	// rather than stored as a plain channel, for the same reason.
+	carrierAudioChanFor func(start Frame) chan<- CarrierAudio
+}
+
+// CarrierAudio is one record of what the engine sent to the carrier —
+// mirrors Transcript's shape (telephony/realtime/bridge.go): a payload field
+// plus a bool distinguishing the two record kinds this ticket names, rather
+// than a struct-per-kind or a separate enum.
+//
+// Clear == true means this record is a barge-in signal (carrierMediaSink.Clear)
+// and Payload is empty. Clear == false means this record is one chunk of
+// synthesized audio (carrierMediaSink.Media), carried as the same base64
+// string the carrier received — never decoded, never re-encoded.
+type CarrierAudio struct {
+	Payload string
+	Clear   bool
 }
 
 // Transcript is one transcription result from the backend, re-exported so a
@@ -153,6 +171,15 @@ func (c realtimeConfig) clientEventChan(start Frame) <-chan json.RawMessage {
 		return nil
 	}
 	return c.clientEventChanFor(start)
+}
+
+// carrierAudioChan resolves the destination for one call, or nil when the
+// consumer asked for none. Mirrors serverEventChan.
+func (c realtimeConfig) carrierAudioChan(start Frame) chan<- CarrierAudio {
+	if c.carrierAudioChanFor == nil {
+		return nil
+	}
+	return c.carrierAudioChanFor(start)
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -277,6 +304,28 @@ func WithServerEventChan(ch chan<- ServerEvent) RealtimeOption {
 // A nil function, or one returning nil, means no consumer.
 func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOption {
 	return func(c *realtimeConfig) { c.serverEventChanFor = fn }
+}
+
+// WithCarrierAudioChan delivers a record of every payload the engine sends to
+// the carrier — media and clears alike — to ch, mirroring WithServerEventChan:
+// the consumer owns ch (its buffer, its reader, its lifetime), the engine
+// NEVER closes it, and delivery is non-blocking — a full ch drops the record,
+// counted and logged, rather than parking the goroutine that also drives
+// carrier audio.
+//
+// Without this option the engine sends carrier audio exactly as it does
+// today, with no observer.
+func WithCarrierAudioChan(ch chan<- CarrierAudio) RealtimeOption {
+	return WithCarrierAudioChanFor(func(Frame) chan<- CarrierAudio { return ch })
+}
+
+// WithCarrierAudioChanFor resolves the destination when the call arrives,
+// from the start frame — so a consumer can route different calls to
+// different channels. Mirrors WithServerEventChanFor.
+//
+// A nil function, or one returning nil, means no consumer.
+func WithCarrierAudioChanFor(fn func(start Frame) chan<- CarrierAudio) RealtimeOption {
+	return func(c *realtimeConfig) { c.carrierAudioChanFor = fn }
 }
 
 // WithClientEventChan lets a consumer send its own events to the backend for
@@ -419,7 +468,16 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	}
 	defer client.Close()
 
-	bridge := realtime.NewBridge(client, &carrierMediaSink{conn: conn, streamSID: start.StreamSID})
+	// carrierAudioChan is resolved ONCE, here, before bridge.Run is spawned —
+	// not inside carrierMediaSink.Media/Clear. Those are called once per 20 ms
+	// audio frame from bridge.Run's own read-loop goroutine, and re-invoking
+	// consumer code there on every frame is exactly the hazard this file's
+	// drain-ordering comment above warns about for clientEventChan.
+	bridge := realtime.NewBridge(client, &carrierMediaSink{
+		conn:           conn,
+		streamSID:      start.StreamSID,
+		carrierAudioCh: cfg.carrierAudioChan(start),
+	})
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -587,14 +645,36 @@ func (g *idleGuard) stop() {
 	}
 }
 
+// sendOrDrop attempts a non-blocking send of v to out, and on a full channel
+// increments *dropped and logs at LogDrop's bounded rate. One definition for
+// the drop-and-log idiom deliver's stream drain and carrierMediaSink's inline
+// delivery both need: the log line and the counting policy were identical
+// between the two hand-copies this replaces, so a fix to either now lands
+// once (CLAUDE.md #4/#5 — dedupe, one definition per value).
+//
+// The what parameter names the payload in the drop log ("transcript", "server
+// event", "carrier audio").
+func sendOrDrop[T any](out chan<- T, v T, dropped *int, what string) {
+	select {
+	case out <- v:
+	default:
+		// The consumer is behind. Drop, and say so: a silently lossy seam is
+		// worse than a lossy one, because the consumer cannot tell an absent
+		// value from one that never happened. Rate-bounded for the reason
+		// realtime.LogDrop documents — every drop is counted and every line
+		// carries the running total, so nothing is silent in aggregate.
+		*dropped++
+		if realtime.LogDrop(*dropped) {
+			log.Printf("twilio: realtime: %s dropped, consumer is behind (%d dropped on this call)", what, *dropped)
+		}
+	}
+}
+
 // deliver drains src, forwarding each value to out if a consumer asked for
 // one. It never blocks and it never runs consumer code, which is the whole
 // design. One function serves both consumer-facing channels on this path —
 // transcripts and server events — because the discipline is the same one, and
 // two copies of it would be two places for a fix to have to land.
-//
-// The what parameter names the payload in the drop log ("transcript", "server
-// event"), which is the only thing that differs between the two.
 //
 // src is fed from Bridge.Run's read loop, which also drives audio to the
 // carrier. The two sources differ in what they do when nobody reads: publish
@@ -617,19 +697,7 @@ func deliver[T any](src <-chan T, out chan<- T, what string) {
 
 	var dropped int
 	for v := range src {
-		select {
-		case out <- v:
-		default:
-			// The consumer is behind. Drop, and say so: a silently lossy seam is
-			// worse than a lossy one, because the consumer cannot tell an absent
-			// value from one that never happened. Rate-bounded for the reason
-			// realtime.LogDrop documents — every drop is counted and every line
-			// carries the running total, so nothing is silent in aggregate.
-			dropped++
-			if realtime.LogDrop(dropped) {
-				log.Printf("twilio: realtime: %s dropped, consumer is behind (%d dropped on this call)", what, dropped)
-			}
-		}
+		sendOrDrop(out, v, &dropped, what)
 	}
 	// out is deliberately NOT closed: the engine did not create it, the consumer
 	// may reuse it across calls, and closing a channel you do not own hands its
@@ -676,6 +744,22 @@ func pumpCarrierToBridge(ctx context.Context, conn *websocket.Conn, bridge *real
 type carrierMediaSink struct {
 	conn      wsWriter
 	streamSID string
+
+	// carrierAudioCh is the consumer's observation channel for what this sink
+	// sends to the carrier, resolved once at construction time by
+	// HandleStreamRealtime (see the comment at the NewBridge call site) and
+	// nil when no consumer asked for one. Instrumenting Media/Clear directly,
+	// rather than deriving records from bridge.Events(), is deliberate: that
+	// event stream drops once its 16-slot buffer fills while Bridge.Run calls
+	// this sink unconditionally, so an Events()-sourced observer would
+	// silently under-report what actually shipped to the carrier.
+	carrierAudioCh chan<- CarrierAudio
+
+	// carrierAudioDropped counts records dropped because carrierAudioCh was
+	// full. No lock: Bridge.Run calls Media and Clear from a single read
+	// loop, never concurrently — the same reasoning Bridge records for its
+	// own eventsDropped.
+	carrierAudioDropped int
 }
 
 var _ realtime.MediaSink = (*carrierMediaSink)(nil)
@@ -685,7 +769,11 @@ func (s *carrierMediaSink) Media(ctx context.Context, payload string) error {
 	if err != nil {
 		return err
 	}
-	return s.conn.Write(ctx, websocket.MessageText, msg)
+	if err := s.conn.Write(ctx, websocket.MessageText, msg); err != nil {
+		return err
+	}
+	s.deliverCarrierAudio(CarrierAudio{Payload: payload})
+	return nil
 }
 
 func (s *carrierMediaSink) Clear(ctx context.Context) error {
@@ -693,5 +781,23 @@ func (s *carrierMediaSink) Clear(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.conn.Write(ctx, websocket.MessageText, msg)
+	if err := s.conn.Write(ctx, websocket.MessageText, msg); err != nil {
+		return err
+	}
+	s.deliverCarrierAudio(CarrierAudio{Clear: true})
+	return nil
+}
+
+// deliverCarrierAudio hands rec to carrierAudioCh without ever blocking, via
+// the same sendOrDrop idiom deliver's stream drain uses. deliver drains a
+// source channel from a goroutine it spawns; there is no source channel here,
+// because rec originates inline inside Media/Clear on Bridge.Run's own
+// read-loop goroutine. Inventing a source channel to route through deliver
+// would reintroduce a per-call goroutine to drain it — the leak this ticket's
+// non-blocking, inline design exists to avoid.
+func (s *carrierMediaSink) deliverCarrierAudio(rec CarrierAudio) {
+	if s.carrierAudioCh == nil {
+		return
+	}
+	sendOrDrop(s.carrierAudioCh, rec, &s.carrierAudioDropped, "carrier audio")
 }
