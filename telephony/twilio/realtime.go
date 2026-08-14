@@ -96,10 +96,13 @@ type realtimeConfig struct {
 
 	// voice is the constant case, like instructionsFor's non-"For" sibling
 	// WithInstructions: a plain string rather than a per-call resolver.
-	// AATK-74 fenced out the rest of the session object because a general
-	// passthrough invites a consumer to reconfigure turn-taking; voice does
-	// not touch turn-taking, so it alone is exposed, and with no stated need
-	// to vary it per call there is no WithVoiceFor to go with it.
+	// Before this field, Instructions was the only session field this engine
+	// exposed; a general session-config passthrough is explicitly out of
+	// scope (it would let a consumer reconfigure turn-taking, which this
+	// engine has opinions about), so voice is added as its own field rather
+	// than opening that passthrough. Voice does not touch turn-taking. With
+	// no stated need to vary it per call, there is no WithVoiceFor to go
+	// with it.
 	voice string
 
 	transcriptChanFor func(start Frame) chan<- Transcript
@@ -190,13 +193,13 @@ func WithInstructions(text string) RealtimeOption {
 }
 
 // WithVoice sets the backend's output voice for every call this option is
-// applied to. AATK-74 fenced out the rest of the session object because a
-// general passthrough invites a consumer to reconfigure turn-taking, which
-// this engine has opinions about; voice does not touch turn-taking, so this
-// one field is exposed while the rest of the fence stays up.
+// applied to. A general session-config passthrough is out of scope — it would
+// let a consumer reconfigure turn-taking, which this engine has opinions
+// about — so this adds voice as its own field rather than opening that
+// passthrough. Voice does not touch turn-taking.
 //
-// This engine does not validate, trim, or case-fold name — the backend owns
-// which names it accepts, so whatever is supplied here reaches the wire
+// This engine does not validate, trim, or case-fold the name — the backend
+// owns which names it accepts, so whatever is supplied here reaches the wire
 // unmodified.
 //
 // Empty omits the field entirely, which is byte-for-byte the handshake a
