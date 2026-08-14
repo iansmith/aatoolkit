@@ -583,13 +583,25 @@ func TestCarrierAudioChan_RecordsArriveInOrder(t *testing.T) {
 //   - the observer REPLACING the drain                -> fails by construction; the
 //     server-event channel receives nothing
 //
-// It does NOT catch a fourth shape: one merged consumer that both feeds the
-// server-event channel and emits clears, stealing nothing. Measured — it passes.
-// That variant diverges from correct behaviour only when Events()'s 16-slot buffer
-// overflows, and nothing in this suite reaches that, because whatever drains
-// Events() does so with a non-blocking send and never falls behind. Closing it
-// would need a test that can force publishEvent to drop, which no test here can.
-// The gap is named rather than papered over.
+// It does NOT catch a fourth shape: one merged consumer that REPLACES the
+// server-event drain, forwards every event onward stealing nothing, and derives
+// its records from bridge.Events(). Measured — it passes.
+//
+// That gap applies to MEDIA EXACTLY AS IT DOES TO CLEAR, and this comment named
+// only clears until adversary round 3 measured the difference: generalized to
+// derive Media from ev.Delta as well, that one implementation passes every test in
+// this file, reproducibly, under -race. So the residual gap is the whole file's,
+// not this test's alone. Recorded here because this is where a reader looks for it.
+//
+// It survives because it diverges from correct behaviour only when Events()'s
+// 16-slot buffer overflows — publishEvent drops there while dispatch calls
+// sink.Media and sink.Clear unconditionally — and nothing in this suite can reach
+// that, since whatever drains Events() does so with a non-blocking send and never
+// falls behind. Closing it needs a test that can force publishEvent to drop, which
+// no test here can. What that shape does contradict is the ticket's own file map,
+// which names "the observation points in carrierMediaSink": an implementation that
+// rebuilds a drain instead of instrumenting the sink is a conformance failure
+// against the ticket, which is a different gate's question and not this file's.
 //
 // slopstop:test non-interference — paired: the positive half is that all N clears
 // reach the consumer's carrier-audio channel (an inert or unwired option fails here
@@ -644,6 +656,105 @@ func TestCarrierAudioChan_ClearsDoNotComeFromTheServerEventStream(t *testing.T) 
 				"from bridge.Events() rather than from carrierMediaSink.Clear would take these events away "+
 				"from the server-event drain, since each value on that channel reaches exactly one receiver",
 				clears, gotAudio, clears, gotEvents, clears, clears)
+		}
+	}
+}
+
+// TestCarrierAudioChan_MediaDoesNotComeFromTheServerEventStream is the Media
+// analog of TestCarrierAudioChan_ClearsDoNotComeFromTheServerEventStream, and it
+// exists because adversary round 3 found the provenance question had been closed
+// for Clear and left open for Media — the asymmetry, not a new mechanism.
+//
+// Media is the ticket's PRIMARY behaviour: "Every Media payload the engine sends to
+// the carrier reaches the consumer's channel, in order, byte-identical to what
+// shipped." An observer sourced from bridge.Events() rather than from
+// carrierMediaSink.Media satisfies that in the quiet case and silently under-reports
+// under load, because publishEvent drops when the 16-slot buffer fills while
+// dispatch calls sink.Media regardless. That is the same defect three rounds went
+// into closing for Clear, and until this test it was unguarded on the side the DoD
+// names first.
+//
+// Same discriminator, same reason it is deterministic: bridge.Events() is one
+// channel, a value on it reaches exactly one receiver, and HandleStreamRealtime
+// already drains it unconditionally to feed the server-event option. An
+// implementation that reads Events() for media must steal from that drain or
+// replace it, and requiring BOTH channels to see all N deltas catches either.
+//
+// The residual shape this cannot catch is the one named at length on the Clear
+// test above — a merged consumer that replaces the drain and steals nothing. It is
+// the file's gap, not this test's, and it is recorded in one place rather than
+// twice (universal §5).
+//
+// slopstop:test non-interference — paired: the positive half is that all N media
+// payloads reach the consumer's carrier-audio channel, byte-identical to what the
+// carrier received (an inert or unwired option fails here first, so the negative
+// half cannot pass vacuously); the negative half is that installing
+// WithCarrierAudioChan costs WithServerEventChan none of its events
+func TestCarrierAudioChan_MediaDoesNotComeFromTheServerEventStream(t *testing.T) {
+	const deltas = 6
+
+	audio := make(chan CarrierAudio, 64)
+	events := make(chan ServerEvent, 64)
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
+		WithCarrierAudioChan(audio),
+		WithServerEventChan(events),
+	))
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	// Distinct payloads, so a record cannot be matched to the wire by accident.
+	sent := make([]string, deltas)
+	for i := range sent {
+		sent[i] = distinctCarrierPayload(byte(0xC0 + i))
+		be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": sent[i]})
+	}
+
+	// The carrier itself must have received every payload: the sink is driven once
+	// per delta whatever any observer does. If this fails, the disagreement below
+	// would be about the engine, not about the observer.
+	waitFor(t, 5*time.Second, func() bool {
+		n := 0
+		for _, r := range wire() {
+			if !r.clear {
+				n++
+			}
+		}
+		return n >= deltas
+	})
+
+	onWire := map[string]bool{}
+	for _, r := range wire() {
+		if !r.clear {
+			onWire[r.payload] = true
+		}
+	}
+
+	gotAudio, gotEvents := 0, 0
+	deadline := time.After(5 * time.Second)
+	for gotAudio < deltas || gotEvents < deltas {
+		select {
+		case rec := <-audio:
+			if rec.Clear {
+				t.Fatalf("no clear was sent on this call; got %+v", rec)
+			}
+			// Byte-identical to what the CARRIER received, not to what this
+			// test intended to send.
+			if !onWire[rec.Payload] {
+				t.Fatalf("consumer received a payload the carrier never got: %q", rec.Payload)
+			}
+			gotAudio++
+		case ev := <-events:
+			if ev.Type == "response.output_audio.delta" {
+				gotEvents++
+			}
+		case <-deadline:
+			t.Fatalf("the carrier received %d media payloads; the consumer's carrier-audio channel got %d of %d "+
+				"and the server-event channel got %d of %d. Both must see all %d: a media record sourced from "+
+				"bridge.Events() rather than from carrierMediaSink.Media would take these events away from the "+
+				"server-event drain, since each value on that channel reaches exactly one receiver",
+				deltas, gotAudio, deltas, gotEvents, deltas, deltas)
 		}
 	}
 }
