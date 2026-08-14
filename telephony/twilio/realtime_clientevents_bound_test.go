@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -83,7 +84,15 @@ func stalledHTTPClient() (*http.Client, *atomic.Bool) {
 // timeout is that hang; a non-nil error inside the window is the bound
 // working.
 //
-// slopstop:test regression — guards: "a consumer-event write that never completes is bounded, so it cannot park HandleStreamRealtime's select loop and silence backendDone, carrierDone and the idle timer"
+// It also pins the ATTRIBUTION of that ending, which nothing else in this
+// ticket's suite does. The transport's write error reads identically whether
+// it came from forwarding carrier audio or a consumer event, so the send
+// error is wrapped with its own prefix on the way out; delete the wrap and
+// every other test in the package stays green (mutation-verified). Asserting
+// only "some error" would also let this test pass for an ending that had
+// nothing to do with the bound.
+//
+// slopstop:test regression — guards: "a consumer-event write that never completes is bounded, so it cannot park HandleStreamRealtime's select loop and silence backendDone, carrierDone and the idle timer, and the call ends with an error naming the client-event send rather than a bare transport error"
 func TestClientEventChan_SendThatNeverCompletesEndsCallOnItsBound(t *testing.T) {
 	hc, stall := stalledHTTPClient()
 	origDial := dialRealtime
@@ -102,7 +111,14 @@ func TestClientEventChan_SendThatNeverCompletesEndsCallOnItsBound(t *testing.T) 
 
 	// Generous slack over the bound itself: the assertion is that the call
 	// ends at all, not that it ends to the millisecond.
-	if err := h.waitDone(realtimeClientEventSendTimeout + 5*time.Second); err == nil {
+	err := h.waitDone(realtimeClientEventSendTimeout + 5*time.Second)
+	if err == nil {
 		t.Fatal("a consumer-event write that never completes must end the call with a non-nil error on its own bound")
+	}
+	// The ending is deterministic, not a race with backendDone: the send
+	// error is returned from inside the select case, before the loop can
+	// reach any other case.
+	if !strings.Contains(err.Error(), "twilio: realtime: client event send") {
+		t.Fatalf("the call must end naming the client-event send in its error, got: %v", err)
 	}
 }

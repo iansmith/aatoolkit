@@ -268,6 +268,15 @@ func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOpt
 // same select loop HandleStreamRealtime already runs, so no goroutine is ever
 // spawned to service ch and none can outlive the call.
 //
+// That leak-freedom is the ENGINE's, not the consumer's, and the distinction
+// is another consequence of the reversal. Once the call ends nothing reads ch
+// again — the select loop is gone, and the engine never drains what it does
+// not own — so a consumer parked in a send on an unbuffered or full ch stays
+// parked forever: one leaked goroutine per call that ended while it was
+// sending. Buffer ch, or select the send against a done signal the consumer
+// closes when its own call returns. The engine cannot raise that signal,
+// precisely because ch is the consumer's.
+//
 // ONE ch SERVES ONE CALL AT A TIME, and that is the consequence of the
 // reversal that bites. On the engine-writes options a single ch shared by
 // concurrent calls fans IN, and is safe; here it fans OUT, and a channel
