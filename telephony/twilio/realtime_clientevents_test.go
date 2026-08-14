@@ -415,8 +415,9 @@ func TestClientEventChan_NoEngineGoroutineOutlivesTheCall(t *testing.T) {
 // --- send failure is fatal, but logged first ---------------------------
 
 // TestClientEventChan_SendFailureEndsCallWithLoggedError pins the AMENDED
-// DoD item "A send failing does not end the call silently — it is logged,
-// and the call ends only for the reasons it already ends for." Round 3's
+// DoD item: "a send failing is logged, then treated as fatal — the call
+// ends with a non-nil error, exactly like the existing backend-gone path."
+// Round 3's
 // adversary found coder/websocket's underlying bufio.Writer poisons itself
 // permanently after the first write error — every subsequent write returns
 // the same error forever, even once the fault clears — so a write failure
