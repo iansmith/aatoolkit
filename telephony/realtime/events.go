@@ -8,7 +8,11 @@
 // per 20 ms frame to reproduce the input. Nothing here imports a G.711 codec.
 package realtime
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
 
 // Client event types (this package -> backend).
 const (
@@ -111,4 +115,53 @@ func newSessionUpdate(instructions, voice string) sessionUpdate {
 			},
 		},
 	}
+}
+
+// buildSessionUpdate marshals the session.update handshake and, when tools is
+// non-empty, declares it as the session object's last field (after Audio, per
+// AATK-85 — see WithTools' doc comment for why declaration order is fixed).
+//
+// tools is NOT a struct field on sessionSpec, and that is deliberate rather
+// than an oversight. encoding/json HTML-escapes '<', '>', '&' and compacts
+// insignificant whitespace whenever it marshals a value — including a
+// json.RawMessage embedded in a larger struct, because the standard encoder
+// runs compact() over every Marshaler's output before writing it, regardless
+// of field type. Measured: a Tools json.RawMessage struct field with
+// `json:"tools,omitempty"` turned `"description":"<desc>&more"` into
+// `"description":"<desc>&more"` and collapsed
+// `"type":  "function"` to `"type":"function"` — exactly the re-encoding the
+// DoD's "unmodified" forbids. The only way tools' bytes survive verbatim is
+// to never pass them through json.Marshal at all: this function marshals
+// everything else normally, then splices tools in via plain byte
+// concatenation.
+//
+// The splice point relies on one structural invariant of encoding/json: a
+// non-empty Go struct always marshals to a single top-level JSON object, so
+// its encoded bytes always end in exactly one '}' — the object's own closing
+// brace — no matter what is nested inside it. sessionUpdate's last field is
+// Session, so marshalling it produces "...<session object>}" where that
+// final '}' is sessionUpdate's own close and the '}' immediately before it is
+// sessionSpec's own close (sessionSpec's last field, Audio, is not
+// omitempty, so that close is always present at a fixed two-byte offset from
+// the end). Stripping the trailing "}}" exposes the session object's field
+// list with its closing brace removed, tools is appended as its new last
+// field, and both closing braces are appended back.
+func buildSessionUpdate(instructions, voice string, tools json.RawMessage) ([]byte, error) {
+	base, err := json.Marshal(newSessionUpdate(instructions, voice))
+	if err != nil {
+		return nil, fmt.Errorf("realtime: marshal session.update: %w", err)
+	}
+	if len(tools) == 0 {
+		return base, nil
+	}
+	if !bytes.HasSuffix(base, []byte("}}")) {
+		return nil, fmt.Errorf("realtime: session.update did not end in the expected closing braces: %s", base)
+	}
+	body := base[:len(base)-2]
+	out := make([]byte, 0, len(body)+len(`,"tools":`)+len(tools)+2)
+	out = append(out, body...)
+	out = append(out, `,"tools":`...)
+	out = append(out, tools...)
+	out = append(out, '}', '}')
+	return out, nil
 }

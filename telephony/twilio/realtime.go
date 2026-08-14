@@ -249,11 +249,6 @@ func WithVoice(name string) RealtimeOption {
 //
 // Nil (the default) omits the field entirely, byte-identical to the
 // handshake a caller supplying no option gets.
-//
-// PHASE 0 STUB: this option is not yet wired into HandleStreamRealtime's
-// dial call — see TestSessionUpdate_CarriesDeclaredToolsUnmodified and
-// TestRealtime_ToolCallRoundTripCompletesOnOneCall (realtime_tools_test.go),
-// both red against this stub for exactly that reason.
 func WithTools(tools json.RawMessage) RealtimeOption {
 	return func(c *realtimeConfig) { c.tools = tools }
 }
@@ -484,7 +479,11 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	dialCtx, cancelDial := context.WithTimeout(ctx, realtimeDialTimeout)
 	defer cancelDial()
 
-	client, err := dialRealtime(dialCtx, url, realtime.WithInstructions(cfg.instructions(start)), realtime.WithVoice(cfg.voice))
+	client, err := dialRealtime(dialCtx, url,
+		realtime.WithInstructions(cfg.instructions(start)),
+		realtime.WithVoice(cfg.voice),
+		realtime.WithTools(cfg.tools),
+	)
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)
 		return err

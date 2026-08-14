@@ -64,7 +64,16 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 	}
 	c := &Client{conn: conn, writeSem: make(chan struct{}, 1)}
 
-	if err := c.send(ctx, newSessionUpdate(cfg.instructions, cfg.voice)); err != nil {
+	// buildSessionUpdate, not c.send(newSessionUpdate(...)): cfg.tools must
+	// reach the wire unmodified, and c.send's json.Marshal path re-escapes
+	// and re-compacts a json.RawMessage field — see buildSessionUpdate's doc
+	// comment for the measured failure this avoids.
+	handshake, err := buildSessionUpdate(cfg.instructions, cfg.voice, cfg.tools)
+	if err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("realtime: building %s: %w", EventSessionUpdate, err)
+	}
+	if err := c.write(ctx, handshake); err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("realtime: sending %s: %w", EventSessionUpdate, err)
 	}
@@ -121,10 +130,6 @@ func WithVoice(name string) DialOption {
 // tools must reach the backend unmodified. Nil (the default) omits the
 // field entirely, producing the handshake this package sent before tools
 // existed.
-//
-// PHASE 0 STUB: this option is not yet wired into Dial's handshake — see
-// TestDial_HandshakeCarriesDeclaredToolsUnmodified (tools_test.go), which is
-// red against this stub for exactly that reason.
 func WithTools(tools json.RawMessage) DialOption {
 	return func(c *dialConfig) { c.tools = tools }
 }
