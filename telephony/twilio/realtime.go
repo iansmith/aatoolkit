@@ -17,6 +17,31 @@ import (
 // line for as long as the carrier tolerates it.
 const realtimeDialTimeout = 10 * time.Second
 
+// realtimeClientEventSendTimeout bounds one consumer-event write to the
+// backend, for the same reason realtimeDialTimeout bounds the handshake: a
+// backend that neither accepts nor refuses would otherwise hold the call open
+// indefinitely.
+//
+// It matters more here than anywhere else on this path, and the reason is
+// which goroutine does the writing. Carrier audio is written from
+// pumpCarrierToBridge's goroutine, so a write that parks there still leaves
+// HandleStreamRealtime's select loop free to observe backendDone,
+// carrierDone, and the idle timer — the call still ends. A consumer event is
+// written from that select loop ITSELF, so a write that parks there parks the
+// loop, and every one of those endings stops being observed: a backend that
+// has stopped reading its socket (buffers fill, the write blocks) is exactly
+// the case WithIdleTimeout exists to catch, and it is exactly the case that
+// would prevent the timer from ever being selected on. Measured before this
+// bound existed: with a 200 ms idle timeout and a write that blocks, the call
+// was still hung 3 s later.
+//
+// Generous by orders of magnitude for what it bounds — a client event is one
+// small frame, which a backend that is reading at all accepts in
+// microseconds. Exceeding it means the write half is wedged, and the call
+// then ends the same way any other failed send does: logged, with a non-nil
+// error.
+const realtimeClientEventSendTimeout = 5 * time.Second
+
 // dialRealtime is a seam so tests can substitute a custom dial (e.g. to
 // inject a transport-level fault). Production code never overrides it.
 var dialRealtime = realtime.Dial
@@ -264,6 +289,13 @@ func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOpt
 // that connection fails forever), so a failed send here is never transient;
 // continuing the call would mean running it against a permanently dead
 // backend link.
+//
+// A send that never completes is bounded rather than waited on: the write is
+// given realtimeClientEventSendTimeout, and a backend that has stopped
+// reading its socket ends the call on that bound instead of wedging it. The
+// forwarding read shares HandleStreamRealtime's select loop with every other
+// way the call can end, so an unbounded write here would silence the idle
+// timer and the carrier hangup along with itself.
 func WithClientEventChan(ch <-chan json.RawMessage) RealtimeOption {
 	return WithClientEventChanFor(func(Frame) <-chan json.RawMessage { return ch })
 }
@@ -440,7 +472,12 @@ func handleClientEvent(ctx context.Context, client *realtime.Client, ch <-chan j
 		// channel that is always ready to receive its zero value.
 		return nil, nil
 	}
-	if err := client.Send(ctx, ev); err != nil {
+	// Bounded, because this runs on HandleStreamRealtime's select loop: an
+	// unbounded write that parks here parks every other way the call can end.
+	// See realtimeClientEventSendTimeout.
+	sendCtx, cancelSend := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
+	defer cancelSend()
+	if err := client.Send(sendCtx, ev); err != nil {
 		log.Printf("twilio: realtime: client event send failed: %v", err)
 		// Wrapped, not returned bare: the transport's write error is the same
 		// string whether it came from forwarding carrier audio or from
