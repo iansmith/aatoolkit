@@ -116,6 +116,24 @@ type realtimeConfig struct {
 	// reason as the others — NewStreamHandler binds its options once and
 	// reuses them for every call it serves.
 	clientEventChanFor func(start Frame) <-chan json.RawMessage
+
+	// carrierAudioChanFor mirrors serverEventChanFor: resolved per call
+	// rather than stored as a plain channel, for the same reason.
+	carrierAudioChanFor func(start Frame) chan<- CarrierAudio
+}
+
+// CarrierAudio is one record of what the engine sent to the carrier —
+// mirrors Transcript's shape (telephony/realtime/bridge.go): a payload field
+// plus a bool distinguishing the two record kinds this ticket names, rather
+// than a struct-per-kind or a separate enum.
+//
+// Clear == true means this record is a barge-in signal (carrierMediaSink.Clear)
+// and Payload is empty. Clear == false means this record is one chunk of
+// synthesized audio (carrierMediaSink.Media), carried as the same base64
+// string the carrier received — never decoded, never re-encoded.
+type CarrierAudio struct {
+	Payload string
+	Clear   bool
 }
 
 // Transcript is one transcription result from the backend, re-exported so a
@@ -153,6 +171,15 @@ func (c realtimeConfig) clientEventChan(start Frame) <-chan json.RawMessage {
 		return nil
 	}
 	return c.clientEventChanFor(start)
+}
+
+// carrierAudioChan resolves the destination for one call, or nil when the
+// consumer asked for none. Mirrors serverEventChan.
+func (c realtimeConfig) carrierAudioChan(start Frame) chan<- CarrierAudio {
+	if c.carrierAudioChanFor == nil {
+		return nil
+	}
+	return c.carrierAudioChanFor(start)
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -277,6 +304,28 @@ func WithServerEventChan(ch chan<- ServerEvent) RealtimeOption {
 // A nil function, or one returning nil, means no consumer.
 func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOption {
 	return func(c *realtimeConfig) { c.serverEventChanFor = fn }
+}
+
+// WithCarrierAudioChan delivers a record of every payload the engine sends to
+// the carrier — media and clears alike — to ch, mirroring WithServerEventChan:
+// the consumer owns ch (its buffer, its reader, its lifetime), the engine
+// NEVER closes it, and delivery is non-blocking — a full ch drops the record,
+// counted and logged, rather than parking the goroutine that also drives
+// carrier audio.
+//
+// Without this option the engine sends carrier audio exactly as it does
+// today, with no observer.
+func WithCarrierAudioChan(ch chan<- CarrierAudio) RealtimeOption {
+	return WithCarrierAudioChanFor(func(Frame) chan<- CarrierAudio { return ch })
+}
+
+// WithCarrierAudioChanFor resolves the destination when the call arrives,
+// from the start frame — so a consumer can route different calls to
+// different channels. Mirrors WithServerEventChanFor.
+//
+// A nil function, or one returning nil, means no consumer.
+func WithCarrierAudioChanFor(fn func(start Frame) chan<- CarrierAudio) RealtimeOption {
+	return func(c *realtimeConfig) { c.carrierAudioChanFor = fn }
 }
 
 // WithClientEventChan lets a consumer send its own events to the backend for
