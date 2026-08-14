@@ -243,6 +243,17 @@ func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOpt
 // same select loop HandleStreamRealtime already runs, so no goroutine is ever
 // spawned to service ch and none can outlive the call.
 //
+// ONE ch SERVES ONE CALL AT A TIME, and that is the consequence of the
+// reversal that bites. On the engine-writes options a single ch shared by
+// concurrent calls fans IN, and is safe; here it fans OUT, and a channel
+// value goes to exactly ONE receiver. Two calls running concurrently off the
+// same ch therefore SPLIT the stream between them at random: an event the
+// consumer meant for one call is forwarded to the other call's backend, and
+// nothing reports it. Reuse across SEQUENTIAL calls is fine — the engine
+// never closes ch. For calls that can overlap, which is precisely what
+// NewStreamHandler serves (it binds this option once and reuses it for every
+// call), use WithClientEventChanFor and give each call its own channel.
+//
 // A value read from ch does NOT reset the idle timer armed by
 // WithIdleTimeout: only backend activity does. A consumer that sends steadily
 // against a backend that has gone silent must not mask that silence.
@@ -431,13 +442,18 @@ func handleClientEvent(ctx context.Context, client *realtime.Client, ch <-chan j
 	}
 	if err := client.Send(ctx, ev); err != nil {
 		log.Printf("twilio: realtime: client event send failed: %v", err)
-		return ch, err
+		// Wrapped, not returned bare: the transport's write error is the same
+		// string whether it came from forwarding carrier audio or from
+		// forwarding a consumer event, so an unwrapped return would leave the
+		// caller unable to tell the two apart from the error alone. The idle
+		// timeout names itself on the way out for the same reason.
+		return ch, fmt.Errorf("twilio: realtime: client event send: %w", err)
 	}
 	return ch, nil
 }
 
 // idleGuard is the idle timeout as a single object, so HandleStreamRealtime's
-// loop reads as four things that can end or extend a call rather than as timer
+// loop reads as five things that can end or extend a call rather than as timer
 // bookkeeping. A zero duration produces a guard that never fires: fired()
 // returns a nil channel, which blocks forever in a select, so the loop reduces
 // to the original two-case shape — unbounded, exactly today's behavior.
