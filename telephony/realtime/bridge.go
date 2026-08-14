@@ -92,29 +92,41 @@ func (b *Bridge) Run(ctx context.Context) error {
 		b.signalActivity()
 		b.publishEvent(ev)
 
-		switch ev.Type {
-		case EventAudioDelta:
-			// Verbatim: the delta is already base64 G.711, which is what the
-			// carrier wants. Decoding to re-encode would spend CPU per frame
-			// reproducing the input.
-			if err := b.sink.Media(ctx, ev.Delta); err != nil {
-				return fmt.Errorf("realtime: media sink: %w", err)
-			}
-		case EventSpeechStarted:
-			// One clear per event. Collapsing repeats would be a behavior
-			// change, not an optimisation.
-			if err := b.sink.Clear(ctx); err != nil {
-				return fmt.Errorf("realtime: clear sink: %w", err)
-			}
-		case EventTranscriptDelta:
-			b.publish(ctx, Transcript{Text: ev.Transcript})
-		case EventTranscriptDone:
-			b.publish(ctx, Transcript{Text: ev.Transcript, Final: true})
-		default:
-			// Unmodelled event type: ignored, and the loop continues. The
-			// protocol is larger than the subset this package reads.
+		if err := b.dispatch(ctx, ev); err != nil {
+			return err
 		}
 	}
+}
+
+// dispatch drives the sink and transcript channel for one server event —
+// exactly the work Run's switch used to do inline, moved out to keep Run's
+// own complexity under the reject threshold. Only Run calls this, on Run's
+// own goroutine, after signalActivity and publishEvent have already run for
+// ev.
+func (b *Bridge) dispatch(ctx context.Context, ev ServerEvent) error {
+	switch ev.Type {
+	case EventAudioDelta:
+		// Verbatim: the delta is already base64 G.711, which is what the
+		// carrier wants. Decoding to re-encode would spend CPU per frame
+		// reproducing the input.
+		if err := b.sink.Media(ctx, ev.Delta); err != nil {
+			return fmt.Errorf("realtime: media sink: %w", err)
+		}
+	case EventSpeechStarted:
+		// One clear per event. Collapsing repeats would be a behavior
+		// change, not an optimisation.
+		if err := b.sink.Clear(ctx); err != nil {
+			return fmt.Errorf("realtime: clear sink: %w", err)
+		}
+	case EventTranscriptDelta:
+		b.publish(ctx, Transcript{Text: ev.Transcript})
+	case EventTranscriptDone:
+		b.publish(ctx, Transcript{Text: ev.Transcript, Final: true})
+	default:
+		// Unmodelled event type: ignored, and the loop continues. The
+		// protocol is larger than the subset this package reads.
+	}
+	return nil
 }
 
 // Transcripts yields transcription results in arrival order. The channel is
