@@ -89,10 +89,15 @@ func WithInstructions(s string) DialOption {
 }
 
 // WithHTTPClient overrides the HTTP client used for the WebSocket dial's
-// handshake, giving control over the underlying transport (for example, to
-// inject a fault on the connection in a test). Nil (the default) uses
-// coder/websocket's own default transport — production callers should not
-// need this option.
+// handshake, giving control over the underlying transport.
+//
+// This option exists FOR TESTING ONLY — specifically, to inject a
+// transport-level fault (e.g. a connection whose Write calls can be made to
+// fail on demand while Read keeps working) so a test can drive send-failure
+// handling deterministically. Nil (the default) uses coder/websocket's own
+// default transport. Production callers should never need this option; if
+// you find yourself reaching for it outside a test, that is a sign this
+// package needs a different seam.
 func WithHTTPClient(hc *http.Client) DialOption {
 	return func(c *dialConfig) { c.httpClient = hc }
 }
