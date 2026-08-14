@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"runtime"
 	"testing"
 	"time"
 
@@ -117,5 +118,118 @@ func TestCarrierMediaSink_WriteFailureNeverDeliversCarrierAudio(t *testing.T) {
 	case rec := <-ch:
 		t.Fatalf("Clear must not deliver a carrier-audio record when the carrier write failed; got %+v", rec)
 	default:
+	}
+}
+
+// TestCarrierAudioChan_NoGoroutineOutlivesACallLeftUndrained closes the gap the
+// stage-10b requirements adversary found in the DoD item "No engine goroutine
+// outlives a call whose consumer never reads. Differential measurement, as
+// AATK-79, and mutation-checked."
+//
+// The differential measurement in the frozen
+// TestCarrierAudioChan_NoEngineGoroutineOutlivesTheCall is real and its control
+// mutation is correctly caught — an unconditionally parked goroutine shows up as
+// 15 goroutines over 5 calls against 10 with no consumer. But it is blind to the
+// one leak shape this ticket was rewritten to prevent. Its comment claims "the
+// consumer is present and permanently behind after its proof read, which is the
+// worst case"; the test does not build that. It emits exactly one record, reads
+// it, and stops the call, so the channel is EMPTY when the call ends and no send
+// is ever left outstanding. Injecting the per-record leak —
+//
+//	go func() { s.carrierAudioCh <- rec }()
+//
+// into deliverCarrierAudio leaves that test green, because with nothing pending
+// there is nothing for the spawned goroutine to block on.
+//
+// This test constructs what that comment describes: after the proof read it
+// drives further records and never drains them again, so the buffer is full and
+// subsequent sends have nowhere to go at the moment the call is stopped. Under
+// the correct implementation those sends take the non-blocking default branch
+// and are dropped, costing nothing. Under the per-record-goroutine leak each one
+// parks a goroutine that outlives the call — which is precisely the hazard the
+// ticket's "why not a wrapper" rationale exists to prevent, and the reason
+// observation is a channel rather than a synchronous MediaSink wrapper.
+//
+// The frozen test is not edited; this is a pure addition beside it.
+//
+// slopstop:test non-interference — paired: the positive half is the proof read,
+// which fails first if the option is not genuinely wired, so the goroutine
+// measurement cannot pass vacuously against an inert implementation; the
+// negative half is that a call whose consumer stopped reading, with records
+// still outstanding, costs no goroutine once it ends
+func TestCarrierAudioChan_NoGoroutineOutlivesACallLeftUndrained(t *testing.T) {
+	const calls = 5
+	// Beyond the proof read, and never drained. Buffer 1 absorbs the first;
+	// every one after it has nowhere to go at the moment the call is stopped.
+	const undrained = 6
+
+	run := func(withConsumer bool) int {
+		runtime.GC()
+		time.Sleep(50 * time.Millisecond)
+		before := runtime.NumGoroutine()
+
+		for i := 0; i < calls; i++ {
+			be := newFakeRealtimeBackend(t)
+			var opts []RealtimeOption
+			var ch chan CarrierAudio
+			if withConsumer {
+				ch = make(chan CarrierAudio, 1)
+				opts = append(opts, WithCarrierAudioChan(ch))
+			}
+			h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), opts...))
+			waitBackendReady(t, be, h)
+			seen := h.countMediaFrames(t)
+
+			if withConsumer {
+				// Positive: the channel is genuinely wired. Drain exactly once.
+				be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": carrierPayloadB64()})
+				select {
+				case <-ch:
+				case <-time.After(5 * time.Second):
+					t.Fatal("consumer never received a carrier-audio record")
+				}
+			}
+
+			// Negative: keep the engine sending while nothing drains ch again.
+			for j := 0; j < undrained; j++ {
+				be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": carrierPayloadB64()})
+			}
+			// Wait for the carrier to have received them, so the sink really ran
+			// for each one before the call is stopped — otherwise the call could
+			// end before the sends this test is measuring ever happened.
+			want := undrained
+			if withConsumer {
+				want++ // the proof-read frame reached the carrier too
+			}
+			waitFor(t, 5*time.Second, func() bool { return seen() >= want })
+
+			h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
+			_ = h.waitDone(5 * time.Second)
+		}
+
+		// Poll rather than trust one instantaneous reading: a goroutine that is
+		// exiting correctly may not have been descheduled yet.
+		deadline := time.After(3 * time.Second)
+		growth := runtime.NumGoroutine() - before
+		for {
+			select {
+			case <-deadline:
+				return growth
+			default:
+			}
+			runtime.GC()
+			time.Sleep(25 * time.Millisecond)
+			if g := runtime.NumGoroutine() - before; g < growth {
+				growth = g
+			}
+		}
+	}
+
+	withConsumer := run(true)
+	withNone := run(false)
+
+	if withConsumer > withNone {
+		t.Fatalf("a call left with %d undrained carrier-audio records must cost no goroutines once it ends: "+
+			"%d over %d calls, against %d with no consumer", undrained, withConsumer, calls, withNone)
 	}
 }
