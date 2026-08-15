@@ -351,10 +351,13 @@ func WithCarrierAudioChanFor(fn func(start Frame) chan<- CarrierAudio) RealtimeO
 // WithClientEventChan lets a consumer send its own events to the backend for
 // the whole life of one call: ch is read, and every value read from it is
 // forwarded to the backend via realtime.Client.Send, byte-for-byte, exactly
-// as the consumer supplied it. This package does not model, validate, or
-// interpret what a consumer puts on ch — a session.update, a
+// as the consumer supplied it, with one exception. This package does not
+// model, validate, or interpret what a consumer puts on ch — a
 // conversation.item.create, a response.create, function-call output, or
-// anything else the backend's protocol accepts.
+// anything else the backend's protocol accepts — except that a session.update
+// is refused: it is never forwarded, and is logged instead. It would
+// permanently rewrite the session config the handshake already established;
+// set that through this package's own options instead.
 //
 // The arrows reverse here relative to WithTranscriptChan and
 // WithServerEventChan: the consumer writes, the engine reads. The engine
@@ -594,7 +597,19 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 //
 // Deliberately does NOT call idle.reset(): a consumer event is not backend
 // activity, and a chatty consumer against a silent backend must not mask
-// that silence.
+// that silence. That includes a refused session.update: it is still a
+// consumer event, not backend activity.
+//
+// A session.update on this channel is refused rather than forwarded: it
+// would permanently rewrite the session config the handshake established,
+// which belongs to the options a consumer sets through, not to whatever it
+// puts on this channel mid-call. The refusal is an equality test on the
+// decoded "type" field, not a prefix or substring match on the raw bytes —
+// a type that merely mentions "session.update" in its payload, or that
+// starts with "session." without being equal to it, still forwards
+// byte-for-byte. When the type cannot be read at all — malformed JSON, or
+// valid JSON whose "type" is absent or not a string — the event is forwarded
+// unchanged; a parse failure never refuses and never ends the call.
 func handleClientEvent(ctx context.Context, client *realtime.Client, ch <-chan json.RawMessage, ev json.RawMessage, ok bool) (<-chan json.RawMessage, error) {
 	if !ok {
 		// The consumer closed its channel: return nil so the caller's select
@@ -602,6 +617,15 @@ func handleClientEvent(ctx context.Context, client *realtime.Client, ch <-chan j
 		// channel that is always ready to receive its zero value.
 		return nil, nil
 	}
+
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(ev, &probe) == nil && probe.Type == realtime.EventSessionUpdate {
+		log.Printf("twilio: realtime: client-event channel: refusing session.update; set session config through options")
+		return ch, nil
+	}
+
 	// Bounded, because this runs on HandleStreamRealtime's select loop: an
 	// unbounded write that parks here parks every other way the call can end.
 	// See realtimeClientEventSendTimeout.
