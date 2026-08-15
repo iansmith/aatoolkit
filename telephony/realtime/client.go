@@ -129,7 +129,8 @@ func WithVoice(name string) DialOption {
 // dropping unknown fields, re-escaping '<', '>', '&'), and the declared
 // tools must reach the backend unmodified. Nil (the default) omits the
 // field entirely, producing the handshake this package sent before tools
-// existed.
+// existed. A tools value that is not syntactically valid JSON makes Dial
+// return an error rather than sending a malformed handshake.
 func WithTools(tools json.RawMessage) DialOption {
 	return func(c *dialConfig) { c.tools = tools }
 }

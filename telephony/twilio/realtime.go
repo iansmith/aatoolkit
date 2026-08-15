@@ -248,7 +248,9 @@ func WithVoice(name string) RealtimeOption {
 // of session-config modelling generally.
 //
 // Nil (the default) omits the field entirely, byte-identical to the
-// handshake a caller supplying no option gets.
+// handshake a caller supplying no option gets. A tools value that is not
+// syntactically valid JSON makes HandleStreamRealtime return an error
+// rather than sending a malformed handshake.
 func WithTools(tools json.RawMessage) RealtimeOption {
 	return func(c *realtimeConfig) { c.tools = tools }
 }
