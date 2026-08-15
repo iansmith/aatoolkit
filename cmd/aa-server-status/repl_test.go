@@ -614,84 +614,89 @@ func TestPrintStatus_QuietDisabledServerIsHidden(t *testing.T) {
 	}
 }
 
-func TestPrintStatus_DisabledServerWithOccupiedPortIsStillShown(t *testing.T) {
-	// The case the ticket's Note protects: a disabled server whose port is
-	// quietly in use. Hiding this would trade one silent failure for another.
+// TestPrintStatus_NotQuietDisabledServersStayVisible is the set of ways a
+// server can fail to be quiet. Each row sets exactly one signal, and every one
+// of them must keep the row on screen.
+//
+// These are worth reading as a set rather than as six separate tests: the
+// suppression rule is "hide a disabled server only when nothing is observed on
+// it", so this table IS the definition of "observed". A row deleted from here
+// silently widens what gets hidden.
+func TestPrintStatus_NotQuietDisabledServersStayVisible(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		why    string
+		status ServerStatus
+	}{
+		{
+			name: "listening port",
+			why:  "the case the ticket's Note protects — a disabled server whose port is quietly in use",
+			status: ServerStatus{
+				Name: "voice-out", Type: "exec", Enabled: false, State: StateStray,
+				Ports: []PortStatus{{Port: 7788, Up: true}}, AnomalyDetail: "pid 9999, foreign",
+			},
+		},
+		{
+			name: "started by us",
+			why:  "`<name> up` on a disabled server: OwnedDisabled, rendered \"up (disabled)\"",
+			status: ServerStatus{
+				Name: "voice-out", Type: "exec", Enabled: false, State: StateUp,
+				OwnedDisabled: true, PID: 4242, Ports: []PortStatus{{Port: 7788, Up: true}},
+			},
+		},
+		{
+			name: "unexpected extra listener",
+			why:  "no declared port is up, but something is listening outside the declared set — a predicate checking only PortStatus.Up would hide this",
+			status: ServerStatus{
+				Name: "voice-out", Type: "exec", Enabled: false, State: StateExtraListener,
+				Ports: []PortStatus{{Port: 7788}, {Port: 9999, Unexpected: true}},
+			},
+		},
+		{
+			name: "stale observation",
+			why:  "\"we could not look\" is not \"we looked and it was quiet\", and only the second earns a hidden row",
+			status: ServerStatus{
+				Name: "voice-out", Type: "exec", Enabled: false, State: StateDown,
+				Stale: true, Ports: []PortStatus{{Port: 7788}},
+			},
+		},
+		{
+			name: "tracked PID",
+			why:  "running with no port up is still not quiet",
+			status: ServerStatus{
+				Name: "voice-out", Type: "exec", Enabled: false, State: StateDown, PID: 4242,
+			},
+		},
+		{
+			name: "enabled and down",
+			why:  "the filter keys on Enabled first; an enabled server that is down is the most important row in the table",
+			status: ServerStatus{
+				Name: "chat-llm", Type: "mlx", Enabled: true, State: StateDown,
+				Ports: []PortStatus{{Port: 1234}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			printStatus(&out, []ServerStatus{tc.status})
+			if !strings.Contains(out.String(), tc.status.Name) {
+				t.Fatalf("%s must stay visible — %s; got:\n%s", tc.status.Name, tc.why, out.String())
+			}
+		})
+	}
+}
+
+// The STRAY annotation is the reason the occupied-port row is kept at all, so
+// it is asserted on its own rather than folded into the table above, which only
+// checks that a row survives.
+func TestPrintStatus_KeptDisabledRowStillCarriesItsStrayAnnotation(t *testing.T) {
 	var out strings.Builder
 	printStatus(&out, []ServerStatus{{
 		Name: "voice-out", Type: "exec", Enabled: false, State: StateStray,
 		Ports: []PortStatus{{Port: 7788, Up: true}}, AnomalyDetail: "pid 9999, foreign",
 	}})
-	got := out.String()
-
-	if !strings.Contains(got, "voice-out") {
-		t.Fatalf("a disabled server with a listener on its port must stay visible, got:\n%s", got)
-	}
-	if !strings.Contains(got, "STRAY") {
-		t.Fatalf("the stray annotation is the whole point of keeping the row, got:\n%s", got)
-	}
-}
-
-func TestPrintStatus_DisabledServerWeStartedOurselvesIsStillShown(t *testing.T) {
-	// `<name> up` on a disabled server: OwnedDisabled, rendered "up (disabled)".
-	var out strings.Builder
-	printStatus(&out, []ServerStatus{{
-		Name: "voice-out", Type: "exec", Enabled: false, State: StateUp,
-		OwnedDisabled: true, PID: 4242, Ports: []PortStatus{{Port: 7788, Up: true}},
-	}})
-	if !strings.Contains(out.String(), "voice-out") {
-		t.Fatalf("a disabled server we started ourselves must stay visible, got:\n%s", out.String())
-	}
-}
-
-func TestPrintStatus_DisabledServerWithUnexpectedListenerIsStillShown(t *testing.T) {
-	// No declared port is up, but something is listening outside the declared
-	// set. A predicate that only checked PortStatus.Up would hide this.
-	var out strings.Builder
-	printStatus(&out, []ServerStatus{{
-		Name: "voice-out", Type: "exec", Enabled: false, State: StateExtraListener,
-		Ports: []PortStatus{{Port: 7788}, {Port: 9999, Unexpected: true}},
-	}})
-	if !strings.Contains(out.String(), "voice-out") {
-		t.Fatalf("an unexpected extra listener must keep a disabled row visible, got:\n%s", out.String())
-	}
-}
-
-func TestPrintStatus_StaleDisabledServerIsStillShown(t *testing.T) {
-	// Stale means the observation could not be trusted this cycle. "We could
-	// not look" is not the same as "we looked and it was quiet", and only the
-	// second earns a hidden row.
-	var out strings.Builder
-	printStatus(&out, []ServerStatus{{
-		Name: "voice-out", Type: "exec", Enabled: false, State: StateDown,
-		Stale: true, Ports: []PortStatus{{Port: 7788}},
-	}})
-	if !strings.Contains(out.String(), "voice-out") {
-		t.Fatalf("a stale disabled server must stay visible — quiet was never established, got:\n%s", out.String())
-	}
-}
-
-func TestPrintStatus_DisabledServerHoldingAPIDIsStillShown(t *testing.T) {
-	// A tracked PID with no port up: still not quiet.
-	var out strings.Builder
-	printStatus(&out, []ServerStatus{{
-		Name: "voice-out", Type: "exec", Enabled: false, State: StateDown, PID: 4242,
-	}})
-	if !strings.Contains(out.String(), "voice-out") {
-		t.Fatalf("a disabled server still holding a PID must stay visible, got:\n%s", out.String())
-	}
-}
-
-func TestPrintStatus_EnabledServerThatIsDownIsNeverHidden(t *testing.T) {
-	// The filter keys on Enabled first. An enabled server that is down is the
-	// most important row in the table and must never be suppressed.
-	var out strings.Builder
-	printStatus(&out, []ServerStatus{{
-		Name: "chat-llm", Type: "mlx", Enabled: true, State: StateDown,
-		Ports: []PortStatus{{Port: 1234}},
-	}})
-	if !strings.Contains(out.String(), "chat-llm") {
-		t.Fatalf("an enabled server that is down must always be rendered, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "STRAY") {
+		t.Fatalf("the stray annotation is the whole point of keeping the row, got:\n%s", out.String())
 	}
 }
 
