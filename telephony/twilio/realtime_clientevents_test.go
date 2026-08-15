@@ -22,9 +22,10 @@ import (
 //
 // Before this ticket the only thing a consumer could ever put on the wire to
 // the backend was carrier audio. WithClientEventChan / WithClientEventChanFor
-// open a second path — response.create, conversation.item.create, a mid-call
-// session.update, function-call output, or anything else the backend's
-// protocol accepts — without this package modelling any of it.
+// open a second path — response.create, conversation.item.create,
+// function-call output, and anything else the backend's protocol accepts —
+// without this package modelling any of it, EXCEPT session.update, which
+// AATK-93 refuses outright (see the AATK-93 section below).
 //
 // The arrows reverse relative to WithTranscriptChan and WithServerEventChan:
 // there the engine writes and the consumer reads; here the consumer writes
@@ -513,12 +514,11 @@ func TestClientEventChan_AbsentOptionIsTodaysBehaviour(t *testing.T) {
 
 // --- AATK-93: refuse session.update on the client-event channel ------------
 //
-// handleClientEvent (telephony/twilio/realtime.go:598-620) forwards every
-// client event unconditionally, including a mid-call session.update, which
-// lets a consumer permanently rewrite the session config the handshake
-// established. This ticket refuses that one type by an equality test on the
-// decoded "type" field, forwarding everything else byte-for-byte exactly as
-// today.
+// handleClientEvent (telephony/twilio/realtime.go:598-620) used to forward
+// every client event unconditionally, letting a consumer send session.update
+// and permanently rewrite the session config the handshake established. This
+// ticket refuses that one type by an equality test on the decoded "type"
+// field, forwarding everything else byte-for-byte exactly as before.
 
 // sessionUpdateRaw builds a consumer-supplied session.update event — the
 // type this ticket refuses. Mirrors clientEventRaw's shape (id, insignificant
@@ -699,6 +699,35 @@ func TestClientEventChan_TypeMentioningSessionUpdateStillReachesBackend(t *testi
 	waitForRawEvent(t, be, event, 5*time.Second)
 }
 
+// TestClientEventChan_SessionPrefixedTypeStillReachesBackend pins the DoD's
+// discriminator from the other side of TestClientEventChan_
+// TypeMentioningSessionUpdateStillReachesBackend: that test varies payload
+// CONTENT while the decoded type stays fixed at response.create, so it can
+// never see an implementation that refuses on
+// strings.HasPrefix(decodedType, "session.") instead of on equality — such an
+// implementation never touches raw bytes, so it passes every existing test in
+// this file, including all the refusal tests above. The DoD demands "an
+// equality test on the decoded type, not a prefix or substring match"; this
+// is the prefix counterpart to the existing substring discriminator, varying
+// the decoded type itself: "session.other" starts with "session." but is not
+// equal to "session.update", and must still reach the backend byte-for-byte
+// with the call still running.
+//
+// slopstop:test regression — guards: "The refusal is an equality test on the decoded type, not a prefix or substring match."
+func TestClientEventChan_SessionPrefixedTypeStillReachesBackend(t *testing.T) {
+	ch := make(chan json.RawMessage, testChanBuffer)
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+	waitBackendReady(t, be, h)
+
+	event := json.RawMessage(fmt.Sprintf(
+		`{"type":"session.other","id":%d,  "tag":"<a>&b</a>"}`, 285))
+	ch <- event
+	waitForRawEvent(t, be, event, 5*time.Second)
+
+	assertStillRunning(t, h, "a decoded type starting with \"session.\" but not equal to \"session.update\" must still reach the backend and leave the call running")
+}
+
 // TestClientEventChan_ResponseCreateReachesBackendByteForByte guards the
 // DoD's enumerated regression: "one new test sending a response.create — the
 // type this ticket accepts as the runtime residual — and asserting
@@ -818,6 +847,41 @@ func TestClientEventChan_SessionUpdateRefusedMidStreamDoesNotDisturbSurroundingE
 		}
 		if json.Unmarshal(raw, &probe) == nil && probe.Type == realtime.EventSessionUpdate {
 			t.Fatalf("a session.update written mid-stream to the client-event channel must never reach the backend, got: %s", raw)
+		}
+	}
+}
+
+// TestClientEventChanFor_SessionUpdateRefusedOnResolverPath pins the refusal
+// to the shared path both client-event constructors resolve through, not to
+// WithClientEventChan's constructor. Every AATK-93 test above uses
+// WithClientEventChan; an implementation that filters inside that
+// constructor instead of in the shared handleClientEvent would pass every
+// one of them while leaving WithClientEventChanFor's per-call resolver path
+// completely unprotected. Mirrors
+// TestClientEventChanFor_VariesPerCallThroughOneHandler's resolver setup,
+// but asserts the refusal rather than per-call channel identity.
+//
+// slopstop:test contract
+func TestClientEventChanFor_SessionUpdateRefusedOnResolverPath(t *testing.T) {
+	ch := make(chan json.RawMessage, testChanBuffer)
+
+	be := newFakeRealtimeBackend(t)
+	handler := NewStreamHandler(be.url(), WithClientEventChanFor(func(start Frame) <-chan json.RawMessage {
+		return ch
+	}))
+	h := newRealtimeHarnessWith(t, handler)
+	waitBackendReady(t, be, h)
+
+	ch <- sessionUpdateRaw(291)
+	ch <- clientEventRaw(292)
+	waitForClientEvent(t, be, 292, 5*time.Second)
+
+	for _, raw := range be.receivedEvents() {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Type == realtime.EventSessionUpdate {
+			t.Fatalf("a session.update written to a resolver-supplied client-event channel must never reach the backend, got: %s", raw)
 		}
 	}
 }
