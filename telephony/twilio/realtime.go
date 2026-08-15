@@ -364,8 +364,16 @@ func WithCarrierAudioChanFor(fn func(start Frame) chan<- CarrierAudio) RealtimeO
 // absent or not a string — is forwarded unchanged and logs nothing, exactly
 // as it did before the exception existed: a parse failure never refuses and
 // never ends the call, leaving the backend the judge of what it accepts. So
-// what is guaranteed is that no session.update the backend would act on gets
-// through, not that no bytes spelling one ever leave this process.
+// bytes spelling a session.update can still leave this process — in a form
+// the backend will reject, which is what makes leaving it the judge safe.
+//
+// Nor is the read quite the protocol's. The probe decodes "type" through
+// encoding/json, which matches field names case-insensitively where the wire
+// format does not: an event whose only such key is "Type" or "TYPE" is
+// refused as though it carried "type", and one carrying more than one is
+// judged on whichever decodes last. Read the refusal as policy against the
+// session.update a consumer sends by mistake, not as a gate against one
+// spelled to get past it.
 //
 // The arrows reverse here relative to WithTranscriptChan and
 // WithServerEventChan: the consumer writes, the engine reads. The engine
@@ -617,7 +625,10 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 // starts with "session." without being equal to it, still forwards
 // byte-for-byte. When the type cannot be read at all — malformed JSON, or
 // valid JSON whose "type" is absent or not a string — the event is forwarded
-// unchanged; a parse failure never refuses and never ends the call.
+// unchanged; a parse failure never refuses and never ends the call. "Absent"
+// here means absent to encoding/json, which matches field names
+// case-insensitively: a lone "Type" or "TYPE" is read as the type and
+// refused, though the wire format is case-sensitive.
 func handleClientEvent(ctx context.Context, client *realtime.Client, ch <-chan json.RawMessage, ev json.RawMessage, ok bool) (<-chan json.RawMessage, error) {
 	if !ok {
 		// The consumer closed its channel: return nil so the caller's select
