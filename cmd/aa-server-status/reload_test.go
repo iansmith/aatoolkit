@@ -18,6 +18,13 @@ import (
 // explicitly rather than relying on the write clock: reload detection is
 // mtime-based, so a test that depended on two writes landing in different
 // filesystem timestamps would be betting on filesystem resolution.
+//
+// The server is enabled deliberately, and must stay that way. These tests
+// observe a reload through the status table, and AATK-94 suppresses the row of
+// a disabled server that is quiet — so a disabled fixture would make the table
+// blank and the observation vacuous. Nothing here launches it (Run does not
+// auto-start, and newTestEngineWatching only loads and watches), so enabling it
+// costs nothing.
 func writeConfig(t *testing.T, path, name string, modTime time.Time) {
 	t.Helper()
 	body := `[supervisor]
@@ -26,7 +33,7 @@ log_dir = "` + filepath.Dir(path) + `/logs"
 [[server]]
 name = "` + name + `"
 type = "exec"
-enabled = false
+enabled = true
 command = "/bin/true"
 port = 19999
 

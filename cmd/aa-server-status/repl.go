@@ -180,9 +180,12 @@ func handleView(out io.Writer, engine Engine, cmd Command) {
 }
 
 func printStatus(out io.Writer, statuses []ServerStatus) {
-	rows := make([][]string, len(statuses))
-	for i, s := range statuses {
-		rows[i] = formatRow(s)
+	rows := make([][]string, 0, len(statuses))
+	for _, s := range statuses {
+		if quietDisabled(s) {
+			continue
+		}
+		rows = append(rows, formatRow(s))
 	}
 	printTable(out, rows)
 }

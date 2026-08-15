@@ -40,6 +40,44 @@ func padRight(s string, width int) string {
 	return s + strings.Repeat(" ", pad)
 }
 
+// quietDisabled reports whether s is a disabled server with nothing observed
+// on it — the only case the status table suppresses (AATK-94). A fleet that
+// has switched to speech-to-speech leaves its old servers disabled
+// permanently, and their rows are noise in every render from then on.
+//
+// The test is observed quiet, not Enabled alone, and that distinction is the
+// whole design. A disabled server whose port is quietly in use is exactly what
+// the old always-render behaviour was protecting against, and it already
+// renders as red STRAY; hiding it would trade one silent failure for another.
+// So every clause below is a way of *not* being quiet, and each has its own
+// test in repl_test.go:
+//
+//   - a declared port is listening, or something is listening outside the
+//     declared set (the STRAY and extra-listener cases);
+//   - a PID is still tracked, so something is running even with no port up;
+//   - the state is anything but the ordinary down/disabled — an anomaly is
+//     never suppressed, whatever produced it;
+//   - the observation is stale, where "we could not look" must not be read as
+//     "we looked and it was quiet".
+//
+// Callers apply this to the whole-table render only. printSingleStatus asks
+// for one row by name, which is an explicit request for that row — putting
+// this check inside formatRow instead would silently break it.
+func quietDisabled(s ServerStatus) bool {
+	if s.Enabled || s.Stale || s.PID != 0 {
+		return false
+	}
+	if s.State != StateDown && s.State != StateDisabled {
+		return false
+	}
+	for _, p := range s.Ports {
+		if p.Up || p.Unexpected {
+			return false
+		}
+	}
+	return true
+}
+
 func formatRow(s ServerStatus) []string {
 	name := s.Name
 	if len(name) > maxNameLen {
