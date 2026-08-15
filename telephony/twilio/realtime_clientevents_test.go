@@ -510,3 +510,246 @@ func TestClientEventChan_AbsentOptionIsTodaysBehaviour(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return seen() > 0 })
 	assertStillRunning(t, h, "no WithClientEventChan option must leave the call exactly as it was")
 }
+
+// --- AATK-93: refuse session.update on the client-event channel ------------
+//
+// handleClientEvent (telephony/twilio/realtime.go:598-620) forwards every
+// client event unconditionally, including a mid-call session.update, which
+// lets a consumer permanently rewrite the session config the handshake
+// established. This ticket refuses that one type by an equality test on the
+// decoded "type" field, forwarding everything else byte-for-byte exactly as
+// today.
+
+// sessionUpdateRaw builds a consumer-supplied session.update event — the
+// type this ticket refuses. Mirrors clientEventRaw's shape (id, insignificant
+// whitespace) so a leaked event would be recognizable the same way.
+func sessionUpdateRaw(id int) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(
+		`{"type":"session.update","id":%d,  "session":{"turn_detection":null}}`, id))
+}
+
+// responseCreateRaw builds a response.create client event — the
+// runtime-turn-taking type this ticket deliberately leaves reachable (see
+// Context, "Not closed, and declared out of scope by the goals themselves").
+// Carries clientEventRaw's adversarial characters (<, >, &) plus
+// insignificant whitespace so byte-for-byte delivery is distinguishable from
+// a re-marshalled approximation.
+func responseCreateRaw(id int) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(
+		`{"type":"response.create","id":%d,  "tag":"<a>&b</a>"}`, id))
+}
+
+// sessionUpdateStringPayload builds a client event whose decoded "type" is
+// NOT session.update but whose payload content mentions the literal string
+// "session.update" — the discriminator the DoD calls "the only artifact that
+// separates the correct implementation from bytes.Contains". A refusal
+// implemented as a raw-bytes substring or prefix match would wrongly refuse
+// this; an equality test on the decoded type would not.
+func sessionUpdateStringPayload(id int) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(
+		`{"type":"response.create","id":%d,  "note":"not a <session.update>&more"}`, id))
+}
+
+// waitForRawEvent waits for the backend to receive exactly this raw event,
+// byte-for-byte, failing the test if it never arrives. Generalizes
+// waitForClientEvent (which is tied to clientEventRaw's own id encoding) to
+// any raw payload, for tests whose event is not built by clientEventRaw.
+func waitForRawEvent(t *testing.T, be *fakeRealtimeBackend, want json.RawMessage, d time.Duration) {
+	t.Helper()
+	wantStr := string(want)
+	deadline := time.After(d)
+	for {
+		for _, raw := range be.receivedEvents() {
+			if string(raw) == wantStr {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("backend never received event %s verbatim", wantStr)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestClientEventChan_SessionUpdateRefusedButCallContinues is the ticket's
+// own RED-first case (DoD RED #1): a session.update written to the
+// client-event channel must never reach the backend, AND a legitimate event
+// sent afterwards must still arrive. Both clauses in one test, deliberately:
+// clause 2 alone is green at base (nothing is refused today), so it cannot
+// be the red test; clause 1 alone is red but is satisfied by a wrong
+// implementation that refuses every client event, not just session.update.
+// The conjunction excludes both. The fake backend records the handshake's
+// own session.update into b.handshakes, separately from b.received
+// (realtime_wiring_test.go:109, :132), so the handshake cannot defeat this
+// assertion.
+//
+// slopstop:test contract
+func TestClientEventChan_SessionUpdateRefusedButCallContinues(t *testing.T) {
+	ch := make(chan json.RawMessage, testChanBuffer)
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+	waitBackendReady(t, be, h)
+
+	ch <- sessionUpdateRaw(200)
+	ch <- clientEventRaw(201)
+	waitForClientEvent(t, be, 201, 5*time.Second)
+
+	for _, raw := range be.receivedEvents() {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Type == realtime.EventSessionUpdate {
+			t.Fatalf("a session.update written to the client-event channel must never reach the backend, got: %s", raw)
+		}
+	}
+}
+
+// TestClientEventChan_SessionUpdateRefusalIsLogged is the ticket's own
+// RED-first case (DoD RED #2): a refused session.update is logged with the
+// fixed phrase "twilio: realtime: client-event channel: refusing
+// session.update; set session config through options". No such line exists
+// in the tree today, so this is red at base. Uses the package's existing
+// syncBuffer capture pattern (TestClientEventChan_SendFailureEndsCallWithLoggedError,
+// above), not a new fixture.
+//
+// slopstop:test contract
+func TestClientEventChan_SessionUpdateRefusalIsLogged(t *testing.T) {
+	var buf syncBuffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	ch := make(chan json.RawMessage, testChanBuffer)
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+	waitBackendReady(t, be, h)
+
+	ch <- sessionUpdateRaw(210)
+	ch <- clientEventRaw(211)
+	waitForClientEvent(t, be, 211, 5*time.Second)
+
+	const wantPhrase = "twilio: realtime: client-event channel: refusing session.update; set session config through options"
+	if !strings.Contains(buf.String(), wantPhrase) {
+		t.Fatalf("a refused session.update must be logged with the fixed phrase %q; log output: %q", wantPhrase, buf.String())
+	}
+}
+
+// TestClientEventChan_SessionUpdateRefusalLoggedOncePerOccurrence pins DoD's
+// cardinality requirement ("one line per refusal"): two session.updates on
+// the channel produce the fixed refusal phrase exactly twice, not once per
+// call and not once total. A plain Contains assertion (as in
+// TestClientEventChan_SessionUpdateRefusalIsLogged above) is indifferent to
+// cardinality and would not catch a log-once-per-call implementation. Red at
+// base for the same reason as the log assertion: the phrase does not exist
+// in the tree today, so the count is 0, never 2.
+//
+// slopstop:test contract
+func TestClientEventChan_SessionUpdateRefusalLoggedOncePerOccurrence(t *testing.T) {
+	var buf syncBuffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	ch := make(chan json.RawMessage, testChanBuffer)
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+	waitBackendReady(t, be, h)
+
+	ch <- sessionUpdateRaw(220)
+	ch <- sessionUpdateRaw(221)
+	ch <- clientEventRaw(222)
+	waitForClientEvent(t, be, 222, 5*time.Second)
+
+	const wantPhrase = "twilio: realtime: client-event channel: refusing session.update; set session config through options"
+	if got := strings.Count(buf.String(), wantPhrase); got != 2 {
+		t.Fatalf("two refused session.update events must log the fixed phrase exactly twice, got %d occurrences; log output: %q", got, buf.String())
+	}
+}
+
+// TestClientEventChan_TypeMentioningSessionUpdateStillReachesBackend guards
+// the DoD's discriminator: "The refusal is an equality test on the decoded
+// type, not a prefix or substring match." An event whose type is NOT
+// session.update, but whose payload content contains the literal string
+// "session.update", must still reach the backend byte-for-byte — a
+// bytes.Contains or prefix-match refusal would wrongly drop it. Passes at
+// base because nothing is refused at base; must keep passing after the fix
+// because the fix probes only the decoded type field, never the raw bytes.
+//
+// slopstop:test regression — guards: "The refusal is an equality test on the decoded type, not a prefix or substring match."
+func TestClientEventChan_TypeMentioningSessionUpdateStillReachesBackend(t *testing.T) {
+	ch := make(chan json.RawMessage, testChanBuffer)
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+	waitBackendReady(t, be, h)
+
+	event := sessionUpdateStringPayload(230)
+	ch <- event
+	waitForRawEvent(t, be, event, 5*time.Second)
+}
+
+// TestClientEventChan_ResponseCreateReachesBackendByteForByte guards the
+// DoD's enumerated regression: "one new test sending a response.create — the
+// type this ticket accepts as the runtime residual — and asserting
+// byte-for-byte arrival." response.create is the runtime-turn-taking type
+// this ticket deliberately leaves reachable; see Context, "Not closed, and
+// declared out of scope by the goals themselves."
+//
+// slopstop:test regression — guards: "Every other client-event type still reaches the backend byte-for-byte"
+func TestClientEventChan_ResponseCreateReachesBackendByteForByte(t *testing.T) {
+	ch := make(chan json.RawMessage, testChanBuffer)
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+	waitBackendReady(t, be, h)
+
+	event := responseCreateRaw(240)
+	ch <- event
+	waitForRawEvent(t, be, event, 5*time.Second)
+}
+
+// TestClientEventChan_UnreadableTypeForwardedUnchanged guards DoD observable
+// behavior 3 verbatim: "An event whose type cannot be read — malformed JSON,
+// or valid JSON with no type — is forwarded unchanged, exactly as today. A
+// parse failure never refuses and never ends the call; the backend remains
+// the judge of what it accepts." Passes at base because nothing inspects
+// type at base; what pins it beyond "passes today" is the call-continues
+// assertion, which would go red under the obvious wrong implementation that
+// surfaces the unmarshal error as a non-nil return from handleClientEvent —
+// per its contract (telephony/twilio/realtime.go:580-583), a non-nil error
+// there ends the call.
+//
+// slopstop:test regression — guards: "An event whose type cannot be read — malformed JSON, or valid JSON with no type — is forwarded unchanged, exactly as today. A parse failure never refuses and never ends the call."
+func TestClientEventChan_UnreadableTypeForwardedUnchanged(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"malformed JSON", json.RawMessage(`{"type":"conversation.item.create", not valid json`)},
+		{"valid JSON no type field", json.RawMessage(`{"id":250,  "tag":"<a>&b</a>"}`)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := make(chan json.RawMessage, testChanBuffer)
+			be := newFakeRealtimeBackend(t)
+			h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+			waitBackendReady(t, be, h)
+
+			ch <- tc.raw
+			waitForRawEvent(t, be, tc.raw, 5*time.Second)
+
+			assertStillRunning(t, h, "an unparseable client event must not end the call")
+		})
+	}
+}
