@@ -105,6 +105,11 @@ type realtimeConfig struct {
 	// with it.
 	voice string
 
+	// tools mirrors voice: a plain value rather than a per-call resolver.
+	// AATK-85's behaviours ask for one declaration at handshake time, not a
+	// per-call resolver, so there is no WithToolsFor.
+	tools json.RawMessage
+
 	transcriptChanFor func(start Frame) chan<- Transcript
 
 	// serverEventChanFor mirrors transcriptChanFor: resolved per call rather
@@ -233,6 +238,21 @@ func WithInstructions(text string) RealtimeOption {
 // caller supplying no option gets.
 func WithVoice(name string) RealtimeOption {
 	return func(c *realtimeConfig) { c.voice = name }
+}
+
+// WithTools declares the consumer's tool definitions for every call this
+// option is applied to (AATK-85). This engine models nothing about what a
+// tool is, or how one is dispatched — that is entirely the consumer's — so
+// tools is carried as json.RawMessage and reaches the handshake exactly as
+// supplied, the same reasoning WithVoice's doc comment gives for staying out
+// of session-config modelling generally.
+//
+// Nil (the default) omits the field entirely, byte-identical to the
+// handshake a caller supplying no option gets. A tools value that is not
+// syntactically valid JSON makes HandleStreamRealtime return an error
+// rather than sending a malformed handshake.
+func WithTools(tools json.RawMessage) RealtimeOption {
+	return func(c *realtimeConfig) { c.tools = tools }
 }
 
 // WithTranscriptChan delivers each transcript the backend produces, partial and
@@ -461,7 +481,11 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	dialCtx, cancelDial := context.WithTimeout(ctx, realtimeDialTimeout)
 	defer cancelDial()
 
-	client, err := dialRealtime(dialCtx, url, realtime.WithInstructions(cfg.instructions(start)), realtime.WithVoice(cfg.voice))
+	client, err := dialRealtime(dialCtx, url,
+		realtime.WithInstructions(cfg.instructions(start)),
+		realtime.WithVoice(cfg.voice),
+		realtime.WithTools(cfg.tools),
+	)
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)
 		return err

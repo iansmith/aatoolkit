@@ -64,7 +64,16 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 	}
 	c := &Client{conn: conn, writeSem: make(chan struct{}, 1)}
 
-	if err := c.send(ctx, newSessionUpdate(cfg.instructions, cfg.voice)); err != nil {
+	// buildSessionUpdate, not c.send(newSessionUpdate(...)): cfg.tools must
+	// reach the wire unmodified, and c.send's json.Marshal path re-escapes
+	// and re-compacts a json.RawMessage field — see buildSessionUpdate's doc
+	// comment for the measured failure this avoids.
+	handshake, err := buildSessionUpdate(cfg.instructions, cfg.voice, cfg.tools)
+	if err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("realtime: building %s: %w", EventSessionUpdate, err)
+	}
+	if err := c.write(ctx, handshake); err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("realtime: sending %s: %w", EventSessionUpdate, err)
 	}
@@ -90,6 +99,7 @@ type DialOption func(*dialConfig)
 type dialConfig struct {
 	instructions string
 	voice        string
+	tools        json.RawMessage
 	httpClient   *http.Client
 }
 
@@ -109,6 +119,20 @@ func WithInstructions(s string) DialOption {
 // unmodified. Empty omits the field rather than sending "".
 func WithVoice(name string) DialOption {
 	return func(c *dialConfig) { c.voice = name }
+}
+
+// WithTools declares the consumer's tool definitions for this session
+// (AATK-85). This package models nothing about what a tool is — the
+// consumer owns tool schemas entirely — so tools is carried as
+// json.RawMessage rather than a typed struct: a typed struct would
+// re-encode the consumer's bytes on the way to the wire (reordering keys,
+// dropping unknown fields, re-escaping '<', '>', '&'), and the declared
+// tools must reach the backend unmodified. Nil (the default) omits the
+// field entirely, producing the handshake this package sent before tools
+// existed. A tools value that is not syntactically valid JSON makes Dial
+// return an error rather than sending a malformed handshake.
+func WithTools(tools json.RawMessage) DialOption {
+	return func(c *dialConfig) { c.tools = tools }
 }
 
 // WithHTTPClient overrides the HTTP client used for the WebSocket dial's
