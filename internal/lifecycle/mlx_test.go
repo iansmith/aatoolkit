@@ -88,6 +88,64 @@ func TestResolveMLXModelPath_PassesThroughAbsolutePaths(t *testing.T) {
 	}
 }
 
+// TestMLXArgs_AppendsServerArgs pins AATK-91: an `args = [...]` on a
+// `type = "mlx"` server reaches the mlx-serve process instead of being
+// silently discarded. The order is the contract, not an accident — the
+// built-in flags come first and the operator's args come last, so a flag
+// repeated in args wins under mlx-serve's last-one-wins parsing. That is the
+// deliberate choice AATK-91 asks to be documented: the operator can override a
+// built-in, which is the point of exposing args at all.
+func TestMLXArgs_AppendsServerArgs(t *testing.T) {
+	s := config.Server{
+		Name:  "chat-llm",
+		Type:  config.TypeMLX,
+		Host:  "127.0.0.1",
+		Port:  1235,
+		Model: "qwen2.5-14b",
+		Args:  []string{"--prefix-cache-mem", "8GB", "--kv-quant", "8"},
+	}
+
+	_, args := MLXCommand(s)
+
+	want := []string{
+		"serve", "qwen2.5-14b", "--host", "127.0.0.1", "--port", "1235",
+		"--prefix-cache-mem", "8GB", "--kv-quant", "8",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("expected args %v, got %v", want, args)
+	}
+}
+
+// TestMLXArgs_AppendsServerArgsAfterDrafter pins the order against the one
+// other flag MLXCommand appends for itself: --drafter is a built-in, so it
+// still precedes the operator's args.
+func TestMLXArgs_AppendsServerArgsAfterDrafter(t *testing.T) {
+	// Names deliberately match no real cached directory, so the pass-through
+	// branch is exercised deterministically regardless of what is downloaded
+	// on the machine running the test.
+	s := config.Server{
+		Name:    "chat-llm",
+		Type:    config.TypeMLX,
+		Host:    "127.0.0.1",
+		Port:    1234,
+		Model:   "test-org/not-a-real-cached-model-xyz",
+		Drafter: "test-org/not-a-real-cached-drafter-xyz",
+		Args:    []string{"--prefix-cache-disk", "64GB"},
+	}
+
+	_, args := MLXCommand(s)
+
+	want := []string{
+		"serve", "test-org/not-a-real-cached-model-xyz",
+		"--host", "127.0.0.1", "--port", "1234",
+		"--drafter", "test-org/not-a-real-cached-drafter-xyz",
+		"--prefix-cache-disk", "64GB",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("expected args %v, got %v", want, args)
+	}
+}
+
 func TestMLXArgs_NoAutoFlagsBeyondHostPort(t *testing.T) {
 	s := config.Server{
 		Name:  "code-llm",
