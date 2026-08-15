@@ -359,6 +359,14 @@ func WithCarrierAudioChanFor(fn func(start Frame) chan<- CarrierAudio) RealtimeO
 // permanently rewrite the session config the handshake already established;
 // set that through this package's own options instead.
 //
+// The exception is only as good as the "type" field is readable. An event
+// whose type cannot be read at all — malformed JSON, or a "type" that is
+// absent or not a string — is forwarded unchanged and logs nothing, exactly
+// as it did before the exception existed: a parse failure never refuses and
+// never ends the call, leaving the backend the judge of what it accepts. So
+// what is guaranteed is that no session.update the backend would act on gets
+// through, not that no bytes spelling one ever leave this process.
+//
 // The arrows reverse here relative to WithTranscriptChan and
 // WithServerEventChan: the consumer writes, the engine reads. The engine
 // never blocks waiting for a value, survives ch never being written to for
