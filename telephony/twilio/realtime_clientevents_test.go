@@ -753,3 +753,71 @@ func TestClientEventChan_UnreadableTypeForwardedUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// TestClientEventChan_NonStringTypeForwardedUnchanged guards the third member
+// of the "type cannot be read" partition that
+// TestClientEventChan_UnreadableTypeForwardedUnchanged does not cover: a
+// `type` field that is present and the JSON is well-formed, but whose value
+// is not a string. `{"type":123,...}` unmarshals cleanly as JSON but fails
+// with a type-mismatch error against `struct{ Type string }`, distinct from
+// both a syntax error and an absent field. "An event whose type cannot be
+// read — malformed JSON, or valid JSON with no type — is forwarded unchanged,
+// exactly as today. A parse failure never refuses and never ends the call."
+//
+// slopstop:test regression — guards: "An event whose type cannot be read — malformed JSON, or valid JSON with no type — is forwarded unchanged, exactly as today. A parse failure never refuses and never ends the call."
+func TestClientEventChan_NonStringTypeForwardedUnchanged(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"numeric type", json.RawMessage(`{"type":123,"id":260}`)},
+		{"object type", json.RawMessage(`{"type":{"nested":"object"},"id":261}`)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := make(chan json.RawMessage, testChanBuffer)
+			be := newFakeRealtimeBackend(t)
+			h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+			waitBackendReady(t, be, h)
+
+			ch <- tc.raw
+			waitForRawEvent(t, be, tc.raw, 5*time.Second)
+
+			assertStillRunning(t, h, "a client event with a non-string type must not end the call")
+		})
+	}
+}
+
+// TestClientEventChan_SessionUpdateRefusedMidStreamDoesNotDisturbSurroundingEvents
+// pins the refusal against ordering assumptions the existing refusal tests
+// don't exercise: every one of them sends the session.update FIRST. Here a
+// legitimate event A arrives, then a session.update, then a legitimate event
+// B — proving the refusal drops exactly the one offending event in the
+// middle of a stream without disturbing what arrives before or after it.
+//
+// slopstop:test contract
+func TestClientEventChan_SessionUpdateRefusedMidStreamDoesNotDisturbSurroundingEvents(t *testing.T) {
+	ch := make(chan json.RawMessage, testChanBuffer)
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithClientEventChan(ch)))
+	waitBackendReady(t, be, h)
+
+	ch <- clientEventRaw(270)
+	waitForClientEvent(t, be, 270, 5*time.Second)
+
+	ch <- sessionUpdateRaw(271)
+
+	ch <- clientEventRaw(272)
+	waitForClientEvent(t, be, 272, 5*time.Second)
+
+	for _, raw := range be.receivedEvents() {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Type == realtime.EventSessionUpdate {
+			t.Fatalf("a session.update written mid-stream to the client-event channel must never reach the backend, got: %s", raw)
+		}
+	}
+}
