@@ -583,3 +583,151 @@ func TestPrintHelp_ListsBounce(t *testing.T) {
 		t.Fatalf("expected help output to list the bounce verb, got:\n%s", out.String())
 	}
 }
+
+// AATK-94. A fleet that has switched to speech-to-speech leaves servers
+// disabled permanently, and their rows are noise in every render from then on.
+// The rows are suppressed — but only when the server is genuinely quiet.
+//
+// The ticket asked for an unconditional hide plus a one-time startup warning
+// when a disabled server's port is occupied. That was traded for this: hide on
+// *observed quiet* rather than on Enabled alone. It keeps the occupied-port
+// case on screen in every render, as the red STRAY it already renders as,
+// instead of demoting it to a startup line that scrolls away on a long-running
+// supervisor. The ticket's Note — do not drop the occupied-port case to keep
+// the change small — is honoured more strictly this way, not less.
+//
+// Everything below the first test is an edge where "quiet" must NOT hold.
+
+func TestPrintStatus_QuietDisabledServerIsHidden(t *testing.T) {
+	var out strings.Builder
+	printStatus(&out, []ServerStatus{
+		{Name: "chat-llm", Type: "mlx", Enabled: true, State: StateUp, Ports: []PortStatus{{Port: 1234, Up: true}}},
+		{Name: "voice-out", Type: "exec", Enabled: false, State: StateDown, Ports: []PortStatus{{Port: 7788}}},
+	})
+	got := out.String()
+
+	if strings.Contains(got, "voice-out") {
+		t.Fatalf("a disabled server with nothing listening must not appear in the table, got:\n%s", got)
+	}
+	if !strings.Contains(got, "chat-llm") {
+		t.Fatalf("the enabled server must still be rendered, got:\n%s", got)
+	}
+}
+
+func TestPrintStatus_DisabledServerWithOccupiedPortIsStillShown(t *testing.T) {
+	// The case the ticket's Note protects: a disabled server whose port is
+	// quietly in use. Hiding this would trade one silent failure for another.
+	var out strings.Builder
+	printStatus(&out, []ServerStatus{{
+		Name: "voice-out", Type: "exec", Enabled: false, State: StateStray,
+		Ports: []PortStatus{{Port: 7788, Up: true}}, AnomalyDetail: "pid 9999, foreign",
+	}})
+	got := out.String()
+
+	if !strings.Contains(got, "voice-out") {
+		t.Fatalf("a disabled server with a listener on its port must stay visible, got:\n%s", got)
+	}
+	if !strings.Contains(got, "STRAY") {
+		t.Fatalf("the stray annotation is the whole point of keeping the row, got:\n%s", got)
+	}
+}
+
+func TestPrintStatus_DisabledServerWeStartedOurselvesIsStillShown(t *testing.T) {
+	// `<name> up` on a disabled server: OwnedDisabled, rendered "up (disabled)".
+	var out strings.Builder
+	printStatus(&out, []ServerStatus{{
+		Name: "voice-out", Type: "exec", Enabled: false, State: StateUp,
+		OwnedDisabled: true, PID: 4242, Ports: []PortStatus{{Port: 7788, Up: true}},
+	}})
+	if !strings.Contains(out.String(), "voice-out") {
+		t.Fatalf("a disabled server we started ourselves must stay visible, got:\n%s", out.String())
+	}
+}
+
+func TestPrintStatus_DisabledServerWithUnexpectedListenerIsStillShown(t *testing.T) {
+	// No declared port is up, but something is listening outside the declared
+	// set. A predicate that only checked PortStatus.Up would hide this.
+	var out strings.Builder
+	printStatus(&out, []ServerStatus{{
+		Name: "voice-out", Type: "exec", Enabled: false, State: StateExtraListener,
+		Ports: []PortStatus{{Port: 7788}, {Port: 9999, Unexpected: true}},
+	}})
+	if !strings.Contains(out.String(), "voice-out") {
+		t.Fatalf("an unexpected extra listener must keep a disabled row visible, got:\n%s", out.String())
+	}
+}
+
+func TestPrintStatus_StaleDisabledServerIsStillShown(t *testing.T) {
+	// Stale means the observation could not be trusted this cycle. "We could
+	// not look" is not the same as "we looked and it was quiet", and only the
+	// second earns a hidden row.
+	var out strings.Builder
+	printStatus(&out, []ServerStatus{{
+		Name: "voice-out", Type: "exec", Enabled: false, State: StateDown,
+		Stale: true, Ports: []PortStatus{{Port: 7788}},
+	}})
+	if !strings.Contains(out.String(), "voice-out") {
+		t.Fatalf("a stale disabled server must stay visible — quiet was never established, got:\n%s", out.String())
+	}
+}
+
+func TestPrintStatus_DisabledServerHoldingAPIDIsStillShown(t *testing.T) {
+	// A tracked PID with no port up: still not quiet.
+	var out strings.Builder
+	printStatus(&out, []ServerStatus{{
+		Name: "voice-out", Type: "exec", Enabled: false, State: StateDown, PID: 4242,
+	}})
+	if !strings.Contains(out.String(), "voice-out") {
+		t.Fatalf("a disabled server still holding a PID must stay visible, got:\n%s", out.String())
+	}
+}
+
+func TestPrintStatus_EnabledServerThatIsDownIsNeverHidden(t *testing.T) {
+	// The filter keys on Enabled first. An enabled server that is down is the
+	// most important row in the table and must never be suppressed.
+	var out strings.Builder
+	printStatus(&out, []ServerStatus{{
+		Name: "chat-llm", Type: "mlx", Enabled: true, State: StateDown,
+		Ports: []PortStatus{{Port: 1234}},
+	}})
+	if !strings.Contains(out.String(), "chat-llm") {
+		t.Fatalf("an enabled server that is down must always be rendered, got:\n%s", out.String())
+	}
+}
+
+func TestPrintSingleStatus_ShowsAQuietDisabledServerAskedForByName(t *testing.T) {
+	// Asking for a server by name is an explicit request for that row. The
+	// filter belongs to the whole-table render, not to formatRow — putting it
+	// in formatRow would silently break this.
+	statuses := []ServerStatus{{
+		Name: "voice-out", Type: "exec", Enabled: false, State: StateDown,
+		Ports: []PortStatus{{Port: 7788}},
+	}}
+	var out strings.Builder
+	printSingleStatus(&out, statuses, "voice-out")
+	if !strings.Contains(out.String(), "voice-out") {
+		t.Fatalf("an explicit by-name query must show the row even when quiet and disabled, got:\n%s", out.String())
+	}
+}
+
+func TestPrintStatus_AllServersQuietAndDisabledLeavesHeaderOnly(t *testing.T) {
+	// The end state the ticket describes: a fleet fully switched to
+	// speech-to-speech, every legacy server disabled and quiet. The table
+	// collapses to its header rather than panicking or emitting a stray row.
+	var out strings.Builder
+	printStatus(&out, []ServerStatus{
+		{Name: "voice-in", Type: "exec", Enabled: false, State: StateDown, Ports: []PortStatus{{Port: 7787}}},
+		{Name: "voice-out", Type: "exec", Enabled: false, State: StateDown, Ports: []PortStatus{{Port: 7788}}},
+		{Name: "vad", Type: "exec", Enabled: false, State: StateDown},
+	})
+	got := out.String()
+
+	if !strings.Contains(got, "SERVER") {
+		t.Fatalf("the header must still print when every row is suppressed, got:\n%s", got)
+	}
+	for _, name := range []string{"voice-in", "voice-out", "vad"} {
+		if strings.Contains(got, name) {
+			t.Fatalf("expected %q to be suppressed, got:\n%s", name, got)
+		}
+	}
+}
