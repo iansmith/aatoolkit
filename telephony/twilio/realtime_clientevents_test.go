@@ -514,7 +514,7 @@ func TestClientEventChan_AbsentOptionIsTodaysBehaviour(t *testing.T) {
 
 // --- AATK-93: refuse session.update on the client-event channel ------------
 //
-// handleClientEvent (telephony/twilio/realtime.go:598-620) used to forward
+// handleClientEvent (telephony/twilio/realtime.go) used to forward
 // every client event unconditionally, letting a consumer send session.update
 // and permanently rewrite the session config the handshake established. This
 // ticket refuses that one type by an equality test on the decoded "type"
@@ -755,8 +755,8 @@ func TestClientEventChan_ResponseCreateReachesBackendByteForByte(t *testing.T) {
 // type at base; what pins it beyond "passes today" is the call-continues
 // assertion, which would go red under the obvious wrong implementation that
 // surfaces the unmarshal error as a non-nil return from handleClientEvent —
-// per its contract (telephony/twilio/realtime.go:580-583), a non-nil error
-// there ends the call.
+// per its contract (the select arm in HandleStreamRealtime that calls it),
+// a non-nil error there ends the call.
 //
 // slopstop:test regression — guards: "An event whose type cannot be read — malformed JSON, or valid JSON with no type — is forwarded unchanged, exactly as today. A parse failure never refuses and never ends the call."
 func TestClientEventChan_UnreadableTypeForwardedUnchanged(t *testing.T) {
@@ -891,7 +891,7 @@ func TestClientEventChanFor_SessionUpdateRefusedOnResolverPath(t *testing.T) {
 // TestClientEventChan_SessionUpdateRefusalDoesNotResetIdleTimer pins the same
 // invariant TestClientEventChan_ConsumerEventDoesNotResetIdleTimer pins for
 // an ordinary forwarded event, but for the refusal path this ticket adds.
-// handleClientEvent's doc (telephony/twilio/realtime.go:599-601) states a
+// handleClientEvent's doc (telephony/twilio/realtime.go) states a
 // pre-existing invariant: "Deliberately does NOT call idle.reset(): a
 // consumer event is not backend activity, and a chatty consumer against a
 // silent backend must not mask that silence." A refused session.update is
@@ -904,7 +904,7 @@ func TestClientEventChanFor_SessionUpdateRefusedOnResolverPath(t *testing.T) {
 // session.update is forwarded today, and forwarding already does not reset
 // the timer. Its value is proven by mutation, not by being red.
 //
-// slopstop:test contract
+// slopstop:test regression — guards: "Deliberately does NOT call idle.reset(): a consumer event is not backend activity, and a chatty consumer against a silent backend must not mask that silence." — and a refused session.update is still a consumer event.
 func TestClientEventChan_SessionUpdateRefusalDoesNotResetIdleTimer(t *testing.T) {
 	ch := make(chan json.RawMessage, 1)
 
