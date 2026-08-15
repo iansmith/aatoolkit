@@ -14,8 +14,21 @@ import (
 //	mlx-serve serve <model> --host <host> --port <port> [--drafter <path>]
 //
 // host/port are auto-appended; --drafter is appended only when s.Drafter is
-// set (Gemma-4-style assistant-checkpoint speculative decoding). No other
-// flags are added.
+// set (Gemma-4-style assistant-checkpoint speculative decoding). aatoolkit
+// adds no other flags of its own.
+//
+// s.Args is appended last, after every built-in flag. The order is the
+// contract: mlx-serve takes the last occurrence of a repeated flag, so an
+// operator can override a built-in by naming it again in args. That is
+// deliberate — args exists so the fleet config can reach mlx-serve knobs this
+// package does not model (--prefix-cache-mem, --prefix-cache-disk,
+// --kv-quant), and a precedence that let the built-ins win would make it
+// unable to correct them.
+//
+// The one hazard that buys: --host/--port are derived from s.Host/s.Port and
+// feed the supervisor's own port observation, so an args entry contradicting
+// them would break port observation rather than merely being ignored. Nothing
+// rejects that today; see AATK-91.
 //
 // Confirmed against a real mlx-serve 26.7.8 install: passing --model as a
 // short "org/repo" name together with any --drafter value (short name or
@@ -45,6 +58,7 @@ func MLXCommand(s config.Server) (command string, args []string) {
 	if drafter != "" {
 		args = append(args, "--drafter", drafter)
 	}
+	args = append(args, s.Args...)
 	return "mlx-serve", args
 }
 
