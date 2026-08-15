@@ -119,7 +119,8 @@ func newSessionUpdate(instructions, voice string) sessionUpdate {
 
 // buildSessionUpdate marshals the session.update handshake and, when tools is
 // non-empty, declares it as the session object's last field (after Audio, per
-// AATK-85 — see WithTools' doc comment for why declaration order is fixed).
+// AATK-85 — see the splice-point discussion below for why declaration order
+// is fixed).
 //
 // tools is NOT a struct field on sessionSpec, and that is deliberate rather
 // than an oversight. encoding/json HTML-escapes '<', '>', '&' and compacts
@@ -153,6 +154,17 @@ func buildSessionUpdate(instructions, voice string, tools json.RawMessage) ([]by
 	}
 	if len(tools) == 0 {
 		return base, nil
+	}
+	// Reject a malformed tools value here rather than splicing it in blind:
+	// the byte concatenation below has no parser of its own, so a caller
+	// mistake (a truncated fragment, an unbalanced bracket) would otherwise
+	// produce an invalid handshake that is never reported as such — it would
+	// just be written to the wire, and the failure would surface later and
+	// unclearly, as a dial that never receives session.created. This checks
+	// only that tools is syntactically valid JSON; what it contains stays
+	// entirely the caller's concern, per WithTools' doc comment.
+	if !json.Valid(tools) {
+		return nil, fmt.Errorf("realtime: declared tools is not valid JSON: %s", tools)
 	}
 	if !bytes.HasSuffix(base, []byte("}}")) {
 		return nil, fmt.Errorf("realtime: session.update did not end in the expected closing braces: %s", base)

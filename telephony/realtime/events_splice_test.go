@@ -81,3 +81,15 @@ func TestBuildSessionUpdate_EmptyNonNilToolsOmitsTheField(t *testing.T) {
 		t.Fatalf("an empty (non-nil) tools value must omit the field entirely, got %s", out)
 	}
 }
+
+// TestBuildSessionUpdate_MalformedToolsIsRejected pins that a syntactically
+// invalid tools value is reported as an error rather than spliced in blind.
+// The splice below is plain byte concatenation with no parser of its own, so
+// without this check a truncated or unbalanced fragment would silently
+// produce an invalid handshake instead of a local, actionable error.
+func TestBuildSessionUpdate_MalformedToolsIsRejected(t *testing.T) {
+	_, err := buildSessionUpdate("", "", json.RawMessage(`[{"type":"function"`))
+	if err == nil {
+		t.Fatal("buildSessionUpdate must reject syntactically invalid tools JSON, got nil error")
+	}
+}
