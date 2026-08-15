@@ -821,3 +821,64 @@ func TestClientEventChan_SessionUpdateRefusedMidStreamDoesNotDisturbSurroundingE
 		}
 	}
 }
+
+// --- AATK-93: refusal does not reset the idle timer ------------------------
+
+// TestClientEventChan_SessionUpdateRefusalDoesNotResetIdleTimer pins the same
+// invariant TestClientEventChan_ConsumerEventDoesNotResetIdleTimer pins for
+// an ordinary forwarded event, but for the refusal path this ticket adds.
+// handleClientEvent's doc (telephony/twilio/realtime.go:599-601) states a
+// pre-existing invariant: "Deliberately does NOT call idle.reset(): a
+// consumer event is not backend activity, and a chatty consumer against a
+// silent backend must not mask that silence." A refused session.update is
+// still a consumer event, not backend activity, and must not reset the idle
+// timer either — proven by mutation (adversary round 2): resetting the idle
+// timer only on the refused branch left all 17 tests green, because the
+// generic test above never sends a session.update and so cannot see it.
+//
+// At base this test passes trivially: nothing is refused yet, every
+// session.update is forwarded today, and forwarding already does not reset
+// the timer. Its value is proven by mutation, not by being red.
+//
+// slopstop:test contract
+func TestClientEventChan_SessionUpdateRefusalDoesNotResetIdleTimer(t *testing.T) {
+	ch := make(chan json.RawMessage, 1)
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
+		WithClientEventChan(ch),
+		WithIdleTimeout(idleGapTimeout),
+	))
+	waitBackendReady(t, be, h)
+
+	// Keep the consumer sending a steady stream of session.update events —
+	// each of which the implementation refuses — while the backend stays
+	// silent. The call must still end on the idle timer.
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		ticker := time.NewTicker(idleGapTimeout / 10)
+		defer ticker.Stop()
+		id := 280
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				select {
+				case ch <- sessionUpdateRaw(id):
+				default:
+				}
+				id++
+			}
+		}
+	}()
+
+	err := h.waitDone(idleGapTimeout + 2*time.Second)
+	if err == nil {
+		t.Fatal("a silent backend must still end the call even while the consumer sends a steady stream of refused session.update events")
+	}
+	if !strings.Contains(err.Error(), "idle timeout") {
+		t.Fatalf("error must name the idle timeout, got: %v", err)
+	}
+}
