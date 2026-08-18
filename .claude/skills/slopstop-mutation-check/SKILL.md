@@ -2,7 +2,7 @@
 description: Verify that a set of freshly-written tests is pinned to the behavior it names — that a failing test is red for the RIGHT reason, or, under --backfill, that a passing test goes red when the behavior it claims to cover is broken. Returns a per-test verdict with evidence plus one overall PASS / FAIL / PINNED / NOT PINNED.
 ---
 
-<!-- GENERATED from slopstop a23c52c by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop b198ac6 by install-for-project.sh — do not edit.
      Edit skills/mutation-check/ in the slopstop repo and re-run. (universal §5) -->
 
 # Mutation check — prove the result is meaningful
@@ -90,6 +90,14 @@ is not directly returnable — say so in the evidence and rely on Probes B and C
 Never skip it silently.
 
 ## Step 4 — Probe B: the vacuity probe (would it fail against anything?)
+
+**This is the one sanctioned test edit in the process, and it is deliberate.** Step 3 above and
+`worker-launch.md`'s mutation protocol both say *never the test*. That rule governs **proving a
+finding**, where mutating an assertion would only prove the assertion runs rather than that it
+is right. This probe asks the opposite question, and no edit to production code can answer it.
+The exception is named in `worker-launch.md` so the two documents give one answer. The same
+discipline applies either way: Step 6 restores this edit exactly as it restores Steps 3 and 5,
+and at stage 9 the file you are editing is frozen, so a failed restore is a tamper hard-stop.
 
 Change the test's **expected** value to a different, equally arbitrary value and re-run.
 The reported actual value must stay the same and the reported expected value must track

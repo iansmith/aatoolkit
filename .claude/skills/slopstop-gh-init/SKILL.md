@@ -2,7 +2,7 @@
 description: Bootstrap a GitHub repo for the slopstop ticket workflow. Creates status labels, writes .project-conf.toml. Invoke as /slopstop-gh-init (or /slopstop-gh-init). Idempotent — safe to re-run.
 ---
 
-<!-- GENERATED from slopstop a23c52c by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop b198ac6 by install-for-project.sh — do not edit.
      Edit skills/gh-init/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-gh-init
@@ -18,9 +18,10 @@ Safe to re-run — all actions are idempotent.
 
 ## Autonomous mode
 
-When `.project-conf.toml` will have (or already has) `[autonomous] enabled = true`, this skill runs
-unmodified. There are no interactive prompts that would block an autonomous session. Provide
-`--workflow` and `--prefix` flags to skip the two interactive questions.
+This skill has no interactive prompts that would block an autonomous session. Provide
+`--workflow` and `--prefix` to skip the two interactive questions. There is no configuration to
+set: the `[autonomous]` table was deleted 2026-08-06, and autonomy is now a `--interactive` flag
+on `/slopstop-run` that this skill does not take.
 
 ## Arguments
 
@@ -223,7 +224,7 @@ file is one developer's overrides and must never be. A project that ignores the 
 file instead — because it is shared with someone whose settings differ — has the split
 backwards, and this is the entry that fixes it.
 
-**If file exists and passed Step 6 checks:** read the existing content, replace or add `[status_labels]` section while preserving all other sections (`[exp]`, `[autonomous]`, etc.), and rewrite. Use the same atomic write pattern.
+**If file exists and passed Step 6 checks:** read the existing content, replace or add `[status_labels]` section while preserving all other sections (`[workflow]`, `[tiers]`, `[complexity]`, etc.), and rewrite. Use the same atomic write pattern.
 
 ## Step 8b — Seed scratch/ and .slopstop/ (idempotent)
 

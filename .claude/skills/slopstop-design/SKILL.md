@@ -3,7 +3,7 @@ description: Stage 1 of the slopstop process — grill the user to shared unders
 disable-model-invocation: true
 ---
 
-<!-- GENERATED from slopstop a23c52c by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop b198ac6 by install-for-project.sh — do not edit.
      Edit skills/design/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-design
@@ -37,7 +37,10 @@ you launch reads config.
 Read `.project-conf.toml` from cwd; if absent, fall back to the main worktree at
 `dirname "$(git rev-parse --git-common-dir)"`. Extract `system`, `$PREFIX` (`prefix`),
 `[stage_tiers]`, `[tiers]` (defaults: huge=`fable`, large=`opus`, medium=`sonnet`,
-small=`haiku`) and `[design] spec` (default: unset — see **Resolving the spec**). Stop with
+small=`haiku`), `[design] spec` (default: unset — see **Resolving the spec**),
+`[design] autonomous` (default: `false` — see **Autonomous mode**), and
+`$PUBLISH_ARTIFACTS` ← `[workflow].publish_artifacts` (default: `false` — see **Step 5**).
+Stop with
 a clear error if `prefix` is absent or doesn't match `^[A-Za-z][A-Za-z0-9]*$`. Missing
 config file: stop with
 `"No .project-conf.toml in cwd or main worktree. Run /slopstop-gh-init or create the file manually with system + key."`
@@ -52,15 +55,31 @@ sentence on what is being designed, then proceed.
 run. Every decision in the PRD is classified against the resolved spec (Step 3), and the
 ticket-tree adversary's check F re-reads it. Pass it once per document.
 
+`--autonomous` — forces autonomous mode on for this run regardless of `[design]
+autonomous`. There is no flag to force it *off* against a config default of `true`; if a
+project sets that default, running interactively for one topic means passing neither flag
+nor waiting for one — config default already covers the common case, and the rare
+exception can `sed` the config for one invocation same as any other override.
+
+### Autonomous mode
+
+`$AUTONOMOUS` = `--autonomous` given on this invocation, **or** `[design] autonomous =
+true`, either sets it. Governs two things, both stated where they apply rather than here:
+resolving the spec (rule 3, immediately below) and the grill (Step 2). **Never governs the
+tier gate** (Step 1) — see that step for why.
+
 ### Resolving the spec
 
 In order; the first that yields anything wins:
 
 1. every `--spec <path>` given on this invocation (all of them),
 2. `[design] spec` in `.project-conf.toml` (a string or an array of strings),
-3. a conventional path — `SPEC.md`, then `docs/spec*.md`. **Propose it and ask**; never
-   adopt one silently. A wrong spec is worse than none, because every downstream
-   classification then cites the wrong document.
+3. a conventional path — `SPEC.md`, then `docs/spec*.md`. Under `$AUTONOMOUS` **adopt it**
+   if it resolves; otherwise **propose it and ask** — never adopt one silently. A wrong
+   spec is worse than none, because every downstream classification then cites the wrong
+   document, which is exactly why `$AUTONOMOUS` only skips the *ask*, never the *existence
+   check* two lines below: a conventional path that resolves to nothing still means
+   "nothing resolves", not a fabricated adoption.
 
 For each resolved path: confirm it exists (a declared spec that is missing is a hard stop,
 not a warning) and compute its `sha256`. Record both in the PRD header, one line each —
@@ -100,8 +119,17 @@ state files for one run is a §5 violation waiting to drift.
 Append with `>>`, one JSON object per line, every line carrying `at`:
 
 ```bash
-printf '%s\n' "{\"stage\":\"grill\",\"event\":\"started\",\"at\":\"$(date -u +%FT%TZ)\"}" >> "$RUNLOG"
+# a span opening — event is "span", the phase is carried by `state`
+printf '%s\n' "{\"event\":\"span\",\"stage\":\"grill\",\"state\":\"started\",\"at\":\"$(date -u +%FT%TZ)\"}" >> "$RUNLOG"
+# a point-in-time fact — event is "note", and a note never carries `state`
+printf '%s\n' "{\"event\":\"note\",\"stage\":\"tier_gate\",\"at\":\"$(date -u +%FT%TZ)\",\"result\":\"…\"}" >> "$RUNLOG"
 ```
+
+**`event` is `span` or `note`; a span carries `state` (`started` / `finished` / `failed`).**
+This example previously showed the flatter `event: started|finished|note` form, which
+`run-jsonl.md` records as replaced on 2026-08-06 — a session copying it emitted lines that
+disagreed with the schema every validator and `derive.py` reads. The reference owns the
+shape; this is only a reminder of it.
 
 Open the log with a `note` recording topic, session model, resolved tier, and the resolved
 spec paths with their hashes.
@@ -115,9 +143,9 @@ never as a separate thing to remember. The sites:
 | site | `result` field |
 |---|---|
 | empty-`$ARGUMENTS` topic question | `topic` |
-| conventional-spec adoption prompt (resolution rule 3) | `spec_confirm` |
-| tier-gate cannot-determine confirmation (Step 1) | `tier_confirm` |
-| **each grill question** (Step 2) | `grill Q<n>` |
+| conventional-spec adoption prompt (resolution rule 3) | `spec_confirm` — skipped under `$AUTONOMOUS` when a path resolves |
+| tier-gate cannot-determine confirmation (Step 1) | `tier_confirm` — **never skipped**, `$AUTONOMOUS` or not |
+| **each grill question with no recommended answer** | `grill Q<n>` — under `$AUTONOMOUS`, a question WITH a recommendation is resolved without a bracket at all; see Step 2 |
 
 Also bracket your own substantive phases so they are measurable: `grill`, `classify`,
 `prd`, `charter`. Those are run-level spans — omit `ticket`.
@@ -155,18 +183,33 @@ e.g. `claude-fable-5`):
 
 Do not soften this to a warning. A wrong-tier PRD looks right and poisons every gate below it.
 
+**`$AUTONOMOUS` never reaches this step.** Whether the running session's model matches the
+configured tier is a fact this session can or cannot verify about itself — not a design
+decision with a recommendation to fall back on. "Cannot determine" asks every time,
+autonomous mode or not; there is nothing to be autonomous about here, only something to
+verify or fail to verify.
+
 ## Step 2 — Grill to shared understanding
 
 Open the `grill` span, then invoke the vendored grill inline against the topic —
-`Skill({skill: "slopstop-grill", args: $ARGUMENTS})`. (Desktop-installed sessions name it
-`slopstop-grill`. One question at a time, recommended answers, explore the codebase
-instead of asking where possible.)
+`Skill({skill: "slopstop-grill", args: ($AUTONOMOUS ? "--autonomous " : "") + $ARGUMENTS})`.
+(Desktop-installed sessions name it `slopstop-grill`.) `grill/SKILL.md` owns the actual
+autonomous behavior — the `--autonomous ` prefix is the entire handoff, since grill has no
+access to `.project-conf.toml` and resolves nothing itself.
 
-**Bracket every question.** As part of asking, append the `waiting_for_user` `started`
-with `result: "grill Q<n>"`; as part of reading the reply, append the `finished`. Twenty
-questions leave twenty pairs — the only thing separating thinking time from a weekend away.
+**Bracket every question the grill actually asks.** As part of asking, append the
+`waiting_for_user` `started` with `result: "grill Q<n>"`; as part of reading the reply,
+append the `finished`. Twenty questions leave twenty pairs — the only thing separating
+thinking time from a weekend away.
 
-The grill ends when no unresolved branches remain; close the `grill` span. Its summary is
+**Under `$AUTONOMOUS`, a question the grill resolves from its own recommendation is not
+one it "asks".** No span, because no wait happened — bracketing one would misreport an
+autonomous pick as human thinking time, the same fabricated-timing failure `run-jsonl.md`
+polices for durations (never print a negative) applied here to spans instead. Only a
+question the grill states has no recommended answer gets bracketed and actually waited on.
+
+The grill ends when no unresolved branches remain; close the `grill` span. Its summary —
+every decision tagged `AUTO` or `HUMAN` (`grill/SKILL.md`'s "Recording a decision") — is
 the raw material for Step 3.
 
 ## Step 3 — Classify every decision against the spec
@@ -191,6 +234,20 @@ text does not distinguish your reading from a plausible alternative, the decisio
 that support each other are internally consistent and jointly unfounded — cite the source,
 or classify as `UNDERDETERMINED`. Close the span with the counts as its `result`.
 
+**A standard-mode run can carry `AUTO` decisions.** The grill resolves a branch by exploring
+the codebase rather than asking whenever it can, and those are tagged `AUTO` in either mode
+because nobody was asked (`grill/SKILL.md`, "Recording a decision"). Do not assume a
+non-autonomous run is all `HUMAN`; count the tags.
+
+**Carry the grill's `AUTO`/`HUMAN` tag through, alongside the class above — they are
+independent axes.** `SPEC`/`DERIVED`/`UNDERDETERMINED` says whether the *source* settles
+the decision; `AUTO`/`HUMAN` says whether a *human* ever saw the pick. A decision can land
+anywhere in the resulting grid. Report `UNDERDETERMINED` + `AUTO` — no spec grounding and
+no human review — as a **named subset**, not folded into the general `UNDERDETERMINED`
+count: nothing grounds that decision and nobody checked it, which is the weakest possible
+basis anything in this PRD can rest on, and the uniform count would bury it among
+decisions a human at least considered.
+
 > **Stamp each span from the clock, at the moment.** `date -u +%FT%TZ` when the work
 > starts, and again when it ends — never several stamps reconstructed at the end of the
 > stage. The first real run of this skill wrote `classify`-finished, `prd`-started,
@@ -210,19 +267,49 @@ Both files go in `scratch/runs/$RUN_ID/`, each written inside its own span (`prd
   without access to this conversation — the PRD is the only thing crossing the boundary. It
   carries a mandatory `## Underdetermined decisions` section listing every decision in that
   class with its alternatives; when behaviour later turns out wrong, that section is the
-  first place to look — the list of choices that could have gone the other way.
+  first place to look — the list of choices that could have gone the other way. **Mark
+  each entry `AUTO` or `HUMAN`**; the `UNDERDETERMINED` + `AUTO` entries are where a review
+  belongs first, since neither the spec nor a person ever weighed in on them.
 - **`charter.md`** — the broad-stroke rules the implementation must respect for THIS
   feature ("all Twilio calls through one gateway module", "no schema migrations in this
   run"). Rules only — no design detail; that's the PRD's job. The charter complements the
   project's standing rules; it never overrides them.
 
-Neither file is ever committed. **Nothing posts them to the umbrella ticket any more** — the procedure that did, `skills/document/references/document-archive-artifacts.md`, was deleted with `:document` in `32ecb23` and has no successor. `:archive` posts a *single ticket's* tracking directory to *that* ticket; it never sees the run dir. So both files live only in `scratch/runs/<run-id>/` until it is cleaned at G-final. Treat that as a known gap, recorded by BILL-537 — not as a promise this skill can rely on.
+Neither file is ever committed. **Nothing posts them to the umbrella ticket** — the procedure that did, `skills/document/references/document-archive-artifacts.md`, was deleted with `:document` in `32ecb23` and has no successor. `:archive` posts a *single ticket's* tracking directory to *that* ticket; it never sees the run dir. So both files live only in `scratch/runs/<run-id>/`, which nothing ever cleans — the known gap recorded by BILL-537. (This used to say "until it is cleaned at G-final". G-final is a v3 design gate that was never built, so the sentence promised a lifecycle the run dir does not have.)
+
+**`[workflow].publish_artifacts` narrows that gap, and only when a project opts in.** With `$PUBLISH_ARTIFACTS` true, Step 5 publishes both files as private claude.ai pages before it stops. It is not a substitute for the ticket-posting that was lost — it preserves the documents, not their attachment to a ticket — and with the key `false`, which is the default, the gap above is exactly as it was.
 
 ## Step 5 — Gate G-design: report and stop
 
 **Validate `run.jsonl` before reporting any number** — every `started` closed, every line
 parsing, every line carrying `at`. On failure, name the unclosed spans and report **no
 timing at all**; a broken record must not produce a plausible-looking summary.
+
+### Publish the PRD and charter — only when `$PUBLISH_ARTIFACTS` is true
+
+Skip this whole subsection when the key is absent or `false`, which is the default. Nothing is
+published, no note is written, and the report block below gains no line.
+
+When it is `true`: publish `prd.md` and `charter.md` as two separate private artifacts, **after
+Step 4 has written both files and before the stop below.** Both, or neither — a run that failed
+to write the charter publishes nothing, since half a design is worse than a path to a directory.
+
+Write each URL to `run.jsonl` as an artifact note, using the shape
+`.claude/skills/slopstop-run/references/run-jsonl.md` defines — `artifact.kind` of `prd` and `charter`
+respectively, and **no `ticket` field**: `:design`'s work is run-level, not per-ticket. Do not
+invent a second note shape for this; there is one definition and it is that file's.
+
+Then add **one line per artifact** to the report block, leaving its existing lines alone:
+
+```
+Artifacts: PRD     https://claude.ai/public/artifacts/…
+           Charter https://claude.ai/public/artifacts/…
+```
+
+**If publication cannot happen while the key is `true`, say so** — `Artifacts: publication
+unavailable — files remain at scratch/runs/$RUN_ID/`. Naming only the path is not enough: the
+block already prints both paths two lines above, so a path-only line repeats what is on screen
+and tells the reader nothing went wrong. Key-on-but-failed must never look like key-off.
 
 Then append the closing note — `{"event":"note","stage":"run_closed",…}` — and present
 (report unattributed time; never redistribute it):
@@ -232,7 +319,9 @@ G-design — design complete for run $RUN_ID
 
 Spec:     <path> (sha256 <short>) | none — greenfield
 PRD:      scratch/runs/$RUN_ID/prd.md      (<n> decisions — <n> SPEC, <n> DERIVED, <n> UNDERDETERMINED; <n> deferrals)
+          (<n> AUTO, <n> HUMAN; <n> of the UNDERDETERMINED set are also AUTO) — omit this line only when the AUTO count is zero, which is the case where it says nothing
 Charter:  scratch/runs/$RUN_ID/charter.md  (<n> rules)
+Artifacts: <one line per published artifact — omitted entirely when publish_artifacts is off>
 Timing:   <wall> wall · <human idle> waiting on you · <active> active · <unattributed> unattributed
 Plugin:   /plugin install slopstop@slopstop   (load the slopstop plugin in the next session)
 

@@ -1,8 +1,8 @@
 ---
-description: Implement a ticket's plan until its failing phase-0 tests pass — writes source code only, never touches the tests, and returns the changes made, before/after test results, and any findings it is reporting rather than fixing.
+description: Implement a ticket's plan until its failing phase-0 tests pass — writes source code, may add tests but never weakens, retargets or removes one, and returns the changes made, before/after test results, and any findings it is reporting rather than fixing.
 ---
 
-<!-- GENERATED from slopstop a23c52c by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop b198ac6 by install-for-project.sh — do not edit.
      Edit skills/implement/ in the slopstop repo and re-run. (universal §5) -->
 
 # Implement the plan until the red tests are green
