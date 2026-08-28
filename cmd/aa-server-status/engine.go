@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -147,12 +148,28 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 		State:   StateDown,
 	}
 
+	// A detached server is observed by HOST ports, never by process tree,
+	// even though we launched it and e.procs still holds its entry.
+	//
+	// Its launcher exits by design -- `docker compose up -d` starts a
+	// container and returns -- and nothing removes a dead entry from e.procs
+	// (see engine_observation_gap_test.go, where that is deliberate). So
+	// isOurs stays true for a PID that is gone, and observing that PID's tree
+	// yields nothing: the server rendered DOWN while its container was
+	// listening and serving. The launcher's PID stops meaning anything the
+	// moment it returns; the ports are the only evidence there is.
+	//
+	// This gate is why the s.Detached arm in the switch below is reachable at
+	// all. Without it every detached server the supervisor started took the
+	// isOurs path and was classified as an owned tree.
+	observeByHost := s.Detached || !isOurs
+
 	var obs observe.TreeObservation
 	var unconfirmedRoot bool
-	if isOurs {
-		obs, unconfirmedRoot = observeOwnedTree(pid)
-	} else {
+	if observeByHost {
 		obs = hostObservationFor(declared)
+	} else {
+		obs, unconfirmedRoot = observeOwnedTree(pid)
 	}
 
 	class := observe.Classify(declared, obs)
@@ -166,7 +183,7 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 		// Nothing listening at all for this server's declared ports, and
 		// nothing about that read was left unconfirmed.
 		status.State = StateDown
-	case isOurs:
+	case isOurs && !s.Detached:
 		status.PID = int(pid)
 		status.State = classifyOwned(s, class)
 		switch {
@@ -211,6 +228,11 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 			// a foreign process occupying a disabled server's slot).
 			status.OwnedDisabled = true
 		}
+	case s.Detached && class.Classification == observe.CandidateUp:
+		// Detached server: the launched process exited after starting an
+		// external service (e.g. docker compose up -d). All declared ports
+		// are listening on the host — that's healthy for this server type.
+		status.State = StateUp
 	case len(class.ForeignHolders) > 0:
 		// Ports are up, but we don't hold this process — either a stray
 		// (disabled server someone/something started) or a foreign
@@ -956,10 +978,19 @@ func (e *RealEngine) pollPortsReady(s config.Server, pid int32, budget time.Dura
 		// server is never failed on a non-positive remainder alone. PollReady
 		// makes the same guarantee, for the same reason.
 		probeStart := time.Now()
-		obs, obsErr = observe.TreeListenSet(pid)
+		if s.Detached {
+			obs = hostObservationFor(declared)
+			obsErr = nil
+		} else {
+			obs, obsErr = observe.TreeListenSet(pid)
+		}
 		if obsErr == nil {
 			class = observe.Classify(declared, obs)
-			if class.Classification == observe.CandidateUp && len(class.ForeignHolders) == 0 {
+			if s.Detached {
+				if class.Classification == observe.CandidateUp {
+					return nil
+				}
+			} else if class.Classification == observe.CandidateUp && len(class.ForeignHolders) == 0 {
 				return nil
 			}
 		}
@@ -1203,6 +1234,12 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 	_, isOurs := e.livePIDLocked(name)
 	e.mu.Unlock()
 	if !isOurs {
+		if s.Detached {
+			if err := e.teardownDetached(s); err != nil {
+				return verbOutcome{Name: name, Err: err}
+			}
+			return verbOutcome{Name: name}
+		}
 		// Imperative down on a server we don't hold — nothing registered
 		// to tear down via our handle; fall back to a foreign-style kill
 		// by observed PID if it's actually running (e.g. imperative
@@ -1227,12 +1264,16 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 
 // teardownOne runs lifecycle.Teardown against our registered live child for
 // s, using the server's resolved grace period and declared ports/health.
+// For detached servers, it runs the teardown command instead of signaling a PID.
 func (e *RealEngine) teardownOne(s config.Server) error {
 	e.mu.Lock()
 	pid, isOurs := e.livePIDLocked(s.Name)
 	e.mu.Unlock()
 	if !isOurs {
 		return nil
+	}
+	if s.Detached {
+		return e.teardownDetached(s)
 	}
 	return e.teardownPID(s, pid)
 }
@@ -1247,6 +1288,47 @@ func (e *RealEngine) teardownPID(s config.Server, pid int32) error {
 	grace := lifecycle.ResolveGracePeriod(s, e.config().Supervisor)
 	_, err := lifecycle.Teardown(context.Background(), target, grace)
 	return err
+}
+
+// teardownDetached runs the server's teardown command (command + teardown_args)
+// and waits for the declared ports to be free. Used for detached servers like
+// docker compose, where the launched process has already exited and the
+// external service must be stopped by its own control command.
+func (e *RealEngine) teardownDetached(s config.Server) error {
+	cmd := exec.Command(s.Command, s.TeardownArgs...)
+	if s.Dir != "" {
+		cmd.Dir = s.Dir
+	}
+	cmd.Env = os.Environ()
+	for k, v := range s.Env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("teardown %q: %s %v: %w\n%s", s.Name, s.Command, s.TeardownArgs, err, out)
+	}
+
+	ports := lifecycle.DeclaredPorts(s)
+	grace := lifecycle.ResolveGracePeriod(s, e.config().Supervisor)
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		holders, err := observe.SystemListenSet()
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		allFree := true
+		for _, port := range ports {
+			if _, held := holders[port]; held {
+				allFree = false
+				break
+			}
+		}
+		if allFree {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("teardown %q: port(s) %v still listening after teardown command", s.Name, ports)
 }
 
 // killForeignOrOwned tears down a stray by PID: if it's a PID we happen to

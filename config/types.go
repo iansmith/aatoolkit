@@ -360,6 +360,15 @@ type Server struct {
 	Command string   `toml:"command"`
 	Args    []string `toml:"args"`
 
+	// Detached marks a server whose launched process is expected to exit
+	// after starting an external service (e.g. docker compose up -d). The
+	// supervisor skips PID-tree port observation and instead verifies that
+	// the declared ports are listening on the host, regardless of which
+	// process holds them. Teardown re-runs the command with TeardownArgs
+	// instead of signaling a PID.
+	Detached     bool     `toml:"detached"`
+	TeardownArgs []string `toml:"teardown_args"`
+
 	Health Health `toml:"health"`
 
 	// Warm is an optional request fired once after launch and before the
