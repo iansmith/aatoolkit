@@ -211,6 +211,19 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	// that audio has (approximately) finished playing.
 	var bytesSinceMark int
 
+	// markWindowStart is when the current mark window opened -- the last mark,
+	// or the start of the call. The echo delay is the audio received in the
+	// window MINUS the time that window has already taken, because audio that
+	// arrived paced at real time has already played by the time it is all in.
+	// Without this term the estimate is the raw byte duration, which for a
+	// long stream is wrong by the whole length of the stream.
+	markWindowStart := time.Now()
+
+	// serverSpoke records whether the server has sent any audio yet. It gates
+	// the earcon: the tone means "your microphone is live", and playing it on
+	// top of a server that is already talking steps on the server's own words.
+	var serverSpoke bool
+
 	// conn.Read blocks, so it cannot be select'd against directly. Pumping it
 	// through its own goroutine into readCh lets the loop below select
 	// between earconCh and the next inbound message — otherwise a signal sent
@@ -231,7 +244,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		}
 	}()
 
-	return dialReadLoop(readCtx, earconCh, readCh, player, conn, streamSID, &bytesSinceMark, cfg.noEchoMarks, cancelMic, micErrCh)
+	return dialReadLoop(readCtx, earconCh, readCh, player, conn, streamSID, &bytesSinceMark, &markWindowStart, &serverSpoke, cfg.noEchoMarks, cancelMic, micErrCh)
 }
 
 // readResult is one conn.Read outcome, pumped through readCh by dial's reader
@@ -241,16 +254,38 @@ type readResult struct {
 	err error
 }
 
-// tryPlayEarcon plays one already-pending earcon signal, if any, without
-// blocking. Reports whether it did.
-func tryPlayEarcon(earconCh chan struct{}, player *lazyPlayer) bool {
+// tryPlayEarcon consumes one already-pending earcon signal, if any, without
+// blocking, and plays the tone unless the server is speaking. Reports whether
+// it consumed a signal -- which it does either way, so a suppressed tone is
+// dropped rather than deferred to a moment that is no more appropriate.
+func tryPlayEarcon(earconCh chan struct{}, player *lazyPlayer, serverSpoke *bool) bool {
 	select {
 	case <-earconCh:
-		playEarcon(player)
+		playEarconUnlessServerSpoke(player, serverSpoke)
 		return true
 	default:
 		return false
 	}
+}
+
+// playEarconUnlessServerSpoke is the one place the suppression rule lives.
+//
+// The earcon means "your microphone is being captured". Against a server that
+// is waiting for the caller that is useful; against one that opens by playing
+// something -- a recorded introduction, a greeting -- it is a beep on top of
+// the words telling the caller what to do. Observed: an operator heard the
+// tone land a second into a hundred-second introduction, which is both the
+// wrong moment and the wrong message.
+//
+// Suppressed, not deferred. There is no later moment at which the tone becomes
+// the right thing to play: by then capture has been live for a while, and the
+// server's own audio is what tells the caller it is their turn.
+func playEarconUnlessServerSpoke(player *lazyPlayer, serverSpoke *bool) {
+	if serverSpoke != nil && *serverSpoke {
+		log.Printf("twilio-cli: %s warm tone suppressed -- the server is speaking", frameSourceLabel)
+		return
+	}
+	playEarcon(player)
 }
 
 // finishCallEnded is the shared teardown for every "call ended" exit:
@@ -265,11 +300,11 @@ func tryPlayEarcon(earconCh chan struct{}, player *lazyPlayer) bool {
 // opposed to our own readCtx cancellation) can close independently of
 // mic-warmup timing, so a pending signal can otherwise still be sitting
 // unsent at the moment call-ended is first detected.
-func finishCallEnded(cause error, cancelMic context.CancelFunc, micErrCh <-chan error, earconCh chan struct{}, player *lazyPlayer) error {
+func finishCallEnded(cause error, cancelMic context.CancelFunc, micErrCh <-chan error, earconCh chan struct{}, player *lazyPlayer, serverSpoke *bool) error {
 	log.Printf("twilio-cli: call ended: %s", callEndReason(cause))
 	cancelMic() // unblock goroutine before we wait for its result
 	err := <-micErrCh
-	tryPlayEarcon(earconCh, player)
+	tryPlayEarcon(earconCh, player, serverSpoke)
 	return err // propagate hard mic failures to the caller
 }
 
@@ -277,7 +312,7 @@ func finishCallEnded(cause error, cancelMic context.CancelFunc, micErrCh <-chan 
 // by the mic goroutine and dispatches decoded frames until the call ends,
 // then runs finishCallEnded to unwind the mic goroutine and report its
 // result to the caller.
-func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan readResult, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error) error {
+func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan readResult, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, markWindowStart *time.Time, serverSpoke *bool, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error) error {
 	for {
 		// Give a pending earcon signal priority over call-ended detection: the
 		// mic goroutine always sends on earconCh (if at all) strictly before
@@ -285,15 +320,16 @@ func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan r
 		// once the select below picks between them pseudo-randomly. Draining
 		// earconCh first, in its own non-blocking check, makes that ordering
 		// deterministic instead of a coin flip that can drop the tone.
-		if tryPlayEarcon(earconCh, player) {
+		if tryPlayEarcon(earconCh, player, serverSpoke) {
 			continue
 		}
 
 		select {
 		case <-earconCh:
 			// Mic goroutine signaled an earcon tone. Play it from the read loop's
-			// goroutine context (the only context that owns lazyPlayer).
-			playEarcon(player)
+			// goroutine context (the only context that owns lazyPlayer), and only
+			// if the server is not already speaking -- see tryPlayEarcon.
+			playEarconUnlessServerSpoke(player, serverSpoke)
 			continue
 
 		case <-readCtx.Done():
@@ -301,10 +337,10 @@ func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan r
 			// the ctx.Done() teardown goroutine sent stop and cancelled readCtx
 			// itself) before it could deliver a final result on readCh. Treat
 			// this exactly like a call-ended read error.
-			return finishCallEnded(context.Canceled, cancelMic, micErrCh, earconCh, player)
+			return finishCallEnded(context.Canceled, cancelMic, micErrCh, earconCh, player, serverSpoke)
 
 		case r := <-readCh:
-			if err, done := dialHandleReadResult(r, player, conn, streamSID, bytesSinceMark, noEchoMarks, cancelMic, micErrCh, earconCh); done {
+			if err, done := dialHandleReadResult(r, player, conn, streamSID, bytesSinceMark, markWindowStart, serverSpoke, noEchoMarks, cancelMic, micErrCh, earconCh); done {
 				return err
 			}
 		}
@@ -316,10 +352,10 @@ func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan r
 // call-ended close, the latter already run through finishCallEnded) — in
 // which case err is dialReadLoop's return value; otherwise the loop
 // continues and err is always nil.
-func dialHandleReadResult(r readResult, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error, earconCh chan struct{}) (err error, done bool) {
+func dialHandleReadResult(r readResult, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, markWindowStart *time.Time, serverSpoke *bool, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error, earconCh chan struct{}) (err error, done bool) {
 	if r.err != nil {
 		if isCallEnded(r.err) {
-			return finishCallEnded(r.err, cancelMic, micErrCh, earconCh, player), true
+			return finishCallEnded(r.err, cancelMic, micErrCh, earconCh, player, serverSpoke), true
 		}
 		return fmt.Errorf("read: %w", r.err), true
 	}
@@ -336,7 +372,7 @@ func dialHandleReadResult(r readResult, player *lazyPlayer, conn *websocket.Conn
 	if f.Event != twilio.EventMedia {
 		logCtlFrame("<-", r.msg)
 	}
-	handleFrame(f, player, conn, streamSID, bytesSinceMark, noEchoMarks)
+	handleFrame(f, player, conn, streamSID, bytesSinceMark, markWindowStart, serverSpoke, noEchoMarks)
 	return nil, false
 }
 
@@ -388,6 +424,33 @@ func callEndReason(err error) string {
 	default:
 		return err.Error()
 	}
+}
+
+// markEchoDelay is how much longer the audio received in a mark window still
+// needs in order to finish playing.
+//
+// A mark says "tell me when everything before this has played". The naive
+// answer is the playout duration of the bytes received since the last mark --
+// and that was the answer here, and it was wrong by the length of the stream.
+// Audio does not arrive instantaneously: a server pacing its send at real time
+// delivers a hundred seconds of audio over a hundred seconds, by the end of
+// which all but the last moment of it has ALREADY played. Charging the full
+// hundred seconds again put the echo a hundred seconds late.
+//
+// Measured: a server playing a 100 s introduction and then waiting 3.5 s for
+// the echo timed out every single time, and read the timeout as the caller's
+// player having gone missing.
+//
+// Subtracting elapsed makes the estimate what it claims to be: audio received
+// minus audio already played. It floors at zero -- a window that took longer
+// than its own audio has nothing left queued -- and it stays an estimate,
+// since twilio-cli cannot see inside ffplay.
+func markEchoDelay(bytesSinceMark int, elapsed time.Duration) time.Duration {
+	remaining := mulawPlayoutDuration(bytesSinceMark) - elapsed
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // mulawPlayoutDuration is how long n bytes of μ-law audio take to play out:
@@ -449,12 +512,13 @@ func logCtlFrame(dir string, raw []byte) {
 	log.Printf("twilio-cli: %s %s", dir, raw)
 }
 
-func handleFrame(f twilio.Frame, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, noEchoMarks bool) {
+func handleFrame(f twilio.Frame, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, markWindowStart *time.Time, serverSpoke *bool, noEchoMarks bool) {
 	switch f.Event {
 	case twilio.EventMedia:
 		// Stream media audio into the single player for continuous playback.
 		player.play(f.Payload)
 		*bytesSinceMark += len(f.Payload)
+		*serverSpoke = true
 
 	case twilio.EventMark:
 		// twilio-cli has no way to observe when its playback (piped to
@@ -463,10 +527,12 @@ func handleFrame(f twilio.Frame, player *lazyPlayer, conn *websocket.Conn, strea
 		// mu-law audio (8 kHz, 1 byte/sample) received since the last
 		// mark, and echoes the mark back after that estimated delay
 		// (charter R17: approximate, not exact, playout-complete signal).
-		delay := mulawPlayoutDuration(*bytesSinceMark)
-		log.Printf("twilio-cli: <- mark %q after %d bytes of audio (~%s playout)",
-			f.MarkName, *bytesSinceMark, delay.Round(time.Millisecond))
+		delay := markEchoDelay(*bytesSinceMark, time.Since(*markWindowStart))
+		log.Printf("twilio-cli: <- mark %q after %d bytes of audio over %s (echo in ~%s)",
+			f.MarkName, *bytesSinceMark, time.Since(*markWindowStart).Round(time.Millisecond),
+			delay.Round(time.Millisecond))
 		*bytesSinceMark = 0
+		*markWindowStart = time.Now()
 		if noEchoMarks {
 			log.Printf("twilio-cli: -- mark %q echo suppressed (--no-echo-marks)", f.MarkName)
 			return

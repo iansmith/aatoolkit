@@ -115,14 +115,20 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 	sink := &recordingSink{}
 	player := testPlayer(sink)
 	var bytesSinceMark int
+	windowStart := time.Now()
+	var serverSpoke bool
 
 	out := captureLog(t, func() {
 		for i := 0; i < frames; i++ {
 			// conn is nil: a media frame must never touch the connection.
 			handleFrame(twilio.Frame{Event: twilio.EventMedia, Payload: mkFrame(0x7f)},
-				player, nil, "MZtest", &bytesSinceMark, true)
+				player, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
 		}
 	})
+
+	if !serverSpoke {
+		t.Error("serverSpoke stayed false after 50 media frames — the earcon gate reads this")
+	}
 
 	if out != "" {
 		t.Errorf("media frames produced log output; want silence:\n%s", out)
@@ -140,10 +146,14 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 	player := testPlayer(&recordingSink{})
 	bytesSinceMark := sampleRateHz // exactly 1s of μ-law audio
+	// A window that opened just now, so essentially none of that second has
+	// played yet and the whole of it is still outstanding.
+	windowStart := time.Now()
+	var serverSpoke bool
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
-			player, nil, "MZtest", &bytesSinceMark, true) // noEchoMarks: no conn needed
+			player, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true) // noEchoMarks: no conn needed
 	})
 
 	for _, want := range []string{`mark "farewell"`, "8000 bytes", "1s"} {
@@ -161,10 +171,12 @@ func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 func TestHandleFrame_NoEchoMarksIsLoud(t *testing.T) {
 	player := testPlayer(&recordingSink{})
 	var bytesSinceMark int
+	windowStart := time.Now()
+	var serverSpoke bool
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
-			player, nil, "MZtest", &bytesSinceMark, true)
+			player, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
 	})
 
 	if !strings.Contains(out, "suppressed") {
@@ -214,13 +226,79 @@ func TestHandleFrame_OtherControlEventsAreLogged(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			player := testPlayer(&recordingSink{})
 			var bytesSinceMark int
+			windowStart := time.Now()
+			var serverSpoke bool
 
 			out := captureLog(t, func() {
-				handleFrame(twilio.Frame{Event: tc.event}, player, nil, "MZtest", &bytesSinceMark, true)
+				handleFrame(twilio.Frame{Event: tc.event}, player, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
 			})
 
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("%s frame: log missing %q:\n%s", tc.event, tc.want, out)
+			}
+		})
+	}
+}
+
+// TestMarkEchoDelay_SubtractsTimeAlreadySpent pins the arithmetic behind the
+// mark echo.
+//
+// The delay used to be the raw playout duration of the bytes received since
+// the last mark, which double-counts: audio streamed at real time has already
+// played by the time the last of it arrives. Against a server that plays a
+// 100-second introduction and then waits for the echo, that put the echo 100
+// seconds late and the server timed out on every call.
+func TestMarkEchoDelay_SubtractsTimeAlreadySpent(t *testing.T) {
+	oneSecond := sampleRateHz // bytes: 1 byte/sample at 8 kHz
+
+	cases := []struct {
+		name    string
+		bytes   int
+		elapsed time.Duration
+		want    time.Duration
+	}{
+		{
+			name:    "burst: nothing has played yet, the whole clip is queued",
+			bytes:   oneSecond,
+			elapsed: 0,
+			want:    time.Second,
+		},
+		{
+			name:    "half real time: half of it is still queued",
+			bytes:   oneSecond,
+			elapsed: 500 * time.Millisecond,
+			want:    500 * time.Millisecond,
+		},
+		{
+			name:    "paced at real time: nothing is queued, echo immediately",
+			bytes:   oneSecond,
+			elapsed: time.Second,
+			want:    0,
+		},
+		{
+			name:    "slower than real time: still zero, never negative",
+			bytes:   oneSecond,
+			elapsed: 100 * time.Second,
+			want:    0,
+		},
+		{
+			name:    "the live case: 100s of audio delivered over 100s",
+			bytes:   100 * oneSecond,
+			elapsed: 100 * time.Second,
+			want:    0,
+		},
+		{
+			name:    "no audio at all",
+			bytes:   0,
+			elapsed: 0,
+			want:    0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := markEchoDelay(tc.bytes, tc.elapsed); got != tc.want {
+				t.Errorf("markEchoDelay(%d bytes, %s) = %s, want %s", tc.bytes, tc.elapsed, got, tc.want)
 			}
 		})
 	}

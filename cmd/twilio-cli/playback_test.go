@@ -4,30 +4,49 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 
 	"github.com/iansmith/aatoolkit/telephony"
+	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
 // recordingSink is an in-memory io.WriteCloser standing in for ffplay's stdin.
 // It records everything written (in order) and counts Close calls, so tests can
 // assert that frames form one continuous stream through a single sink.
 type recordingSink struct {
+	// mu guards buf for the one test that reads it while dial() is still
+	// running (TestEarcon_SuppressedWhileTheServerIsSpeaking, whose fake mic
+	// waits for the server's audio to arrive). Every other test reads the
+	// fields directly after dial has returned, where there is no second
+	// goroutine and no lock is needed.
+	mu       sync.Mutex
 	buf      bytes.Buffer
 	writes   int
 	closes   int
 	writeErr error
 }
 
+// len is the concurrency-safe read of how many bytes have been written.
+func (s *recordingSink) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Len()
+}
+
 func (s *recordingSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.writes++
 	if s.writeErr != nil {
 		return 0, s.writeErr
@@ -612,4 +631,82 @@ func absSample(b byte) int {
 		v = -v
 	}
 	return v
+}
+
+// TestEarcon_SuppressedWhileTheServerIsSpeaking is the regression test for a
+// beep played over a server's opening announcement.
+//
+// The earcon says "your microphone is being captured". It fires a second or
+// two into the call, which is fine against a server that is waiting for you --
+// and wrong against one that opens by playing something. An operator running a
+// demo call heard the tone land on top of the recorded introduction: the cue
+// arrived while the caller had nothing to do for another minute and a half,
+// and stepped on the content that was telling them so.
+//
+// The rule is that the tone never plays over the server's own audio. If the
+// server has already sent media by the time capture goes live, it is talking,
+// the caller is not about to speak, and the cue is noise on top of content.
+func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
+	s := &recordingSink{}
+
+	origNewPlayerFunc := newPlayerFunc
+	defer func() { newPlayerFunc = origNewPlayerFunc }()
+	newPlayerFunc = func(ctx context.Context) (*audioPlayer, error) {
+		return newPlayerWithSink(s), nil
+	}
+
+	// A distinctive payload so server audio and earcon bytes cannot be
+	// confused for one another in the sink.
+	serverAudio := bytes.Repeat([]byte{0xAB}, muLawFrame20ms)
+
+	// The fake mic waits until the server's audio has actually reached the
+	// player before signalling mic-warm, which is the ordering the bug needs:
+	// the server is already speaking when capture goes live.
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
+		deadline := time.Now().Add(5 * time.Second)
+		for s.len() < len(serverAudio) && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := s.len(); got < len(serverAudio) {
+			return fmt.Errorf("server audio never reached the player: %d bytes", got)
+		}
+		onMicWarm(false)
+		// Give the read loop a moment to play a tone if it is going to.
+		time.Sleep(200 * time.Millisecond)
+		return nil
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
+		readHandshake(t, buf) // consume connected + start
+
+		media, err := twilio.EncodeMedia("MZearcontest", serverAudio)
+		if err != nil {
+			t.Errorf("encode media: %v", err)
+			return
+		}
+		if err := writeWSText(conn, media); err != nil {
+			t.Errorf("write media: %v", err)
+			return
+		}
+		// Hold the connection open so the client's read loop stays alive.
+		io.Copy(io.Discard, buf)
+	}))
+	defer srv.Close()
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	if got := s.len(); got != len(serverAudio) {
+		t.Errorf("playback sink: got %d bytes, want %d (the server's audio and nothing else -- an earcon is %d bytes)",
+			got, len(serverAudio), len(generateEarcon()))
+	}
 }

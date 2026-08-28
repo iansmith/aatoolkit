@@ -122,3 +122,26 @@ func writeWSFrame(w io.Writer, payload []byte) error {
 	}
 	return nil
 }
+
+// writeWSText writes one unmasked server→client text frame. Server frames are
+// never masked (RFC 6455 §5.1), which is what makes this the short half of the
+// pair with readWSFrame.
+//
+// Only the two length forms these tests actually produce are handled: a
+// payload of 126 bytes or more uses the 16-bit extended length, and anything
+// needing the 64-bit form would be a frame no test here sends.
+func writeWSText(conn net.Conn, payload []byte) error {
+	var header []byte
+	switch n := len(payload); {
+	case n < 126:
+		header = []byte{0x81, byte(n)}
+	case n < 1<<16:
+		header = []byte{0x81, 126, byte(n >> 8), byte(n)}
+	default:
+		return fmt.Errorf("writeWSText: payload of %d bytes needs the 64-bit length form", n)
+	}
+	if _, err := conn.Write(append(header, payload...)); err != nil {
+		return fmt.Errorf("writeWSText: %w", err)
+	}
+	return nil
+}
