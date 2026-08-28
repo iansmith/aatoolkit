@@ -372,10 +372,12 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 		t.Error("onMicWarm callback was never called")
 	}
 
-	// Verify exactly one earcon tone (160 bytes) was written.
-	if s.buf.Len() != muLawFrame20ms {
+	// Verify exactly one earcon tone was written. Sized from the tone's own
+	// constant, not a literal: this assertion used to hard-code 160 and had to
+	// be edited when the tone was lengthened to be audible at all.
+	if want := len(generateEarcon()); s.buf.Len() != want {
 		t.Errorf("playback sink: got %d bytes written, want %d (one earcon tone)",
-			s.buf.Len(), muLawFrame20ms)
+			s.buf.Len(), want)
 	}
 }
 
@@ -419,9 +421,9 @@ func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
 	}
 
 	// Verify the earcon tone was written to the playback sink.
-	if s.buf.Len() != muLawFrame20ms {
+	if want := len(generateEarcon()); s.buf.Len() != want {
 		t.Errorf("playback sink: got %d bytes, want %d",
-			s.buf.Len(), muLawFrame20ms)
+			s.buf.Len(), want)
 	}
 
 	// Verify tone was written exactly once (one Write call).
@@ -535,4 +537,79 @@ func TestLazyPlayer_DisablesAndReapsAfterMidCallWriteError(t *testing.T) {
 	if failing.closes != 1 {
 		t.Errorf("sink closed %d times, want 1 (dead player must be reaped)", failing.closes)
 	}
+}
+
+// TestGenerateEarcon_LongEnoughToHear pins the tone's duration.
+//
+// It was one 20 ms frame -- 160 bytes, eight cycles of 400 Hz -- which is a
+// click, not a cue. An operator running a demo call reported never hearing it
+// at all, and the tone being inaudible is why. This asserts a duration a
+// person can actually register as a tone rather than a transient.
+func TestGenerateEarcon_LongEnoughToHear(t *testing.T) {
+	tone := generateEarcon()
+
+	wantBytes := sampleRateHz * earconDurationMS / 1000
+	if len(tone) != wantBytes {
+		t.Errorf("earcon length: got %d bytes, want %d (%d ms at %d Hz)",
+			len(tone), wantBytes, earconDurationMS, sampleRateHz)
+	}
+	if earconDurationMS < 150 {
+		t.Errorf("earconDurationMS = %d, want >= 150: a shorter tone reads as a click", earconDurationMS)
+	}
+	if len(tone)%muLawFrame20ms != 0 {
+		t.Errorf("earcon length %d is not a whole number of %d-byte frames", len(tone), muLawFrame20ms)
+	}
+}
+
+// TestGenerateEarcon_RampsInAndOut pins the envelope.
+//
+// A tone that starts and ends at full amplitude puts a step discontinuity into
+// the stream, which is heard as a click on either side of the tone -- the exact
+// artifact that makes a short tone read as a pop. The ramp is what makes the
+// tone sound deliberate rather than like a dropout.
+func TestGenerateEarcon_RampsInAndOut(t *testing.T) {
+	tone := generateEarcon()
+	if len(tone) == 0 {
+		t.Fatal("earcon is empty")
+	}
+
+	const quiet = 2000 // well under the 32767 peak, well over digital silence
+
+	if got := absSample(tone[0]); got > quiet {
+		t.Errorf("first sample amplitude %d, want <= %d: the tone starts with a step", got, quiet)
+	}
+	if got := absSample(tone[len(tone)-1]); got > quiet {
+		t.Errorf("last sample amplitude %d, want <= %d: the tone ends with a step", got, quiet)
+	}
+
+	// The middle must still be loud, or "ramps in and out" is satisfied by a
+	// tone that is silent throughout.
+	var peak int
+	for _, b := range tone {
+		if a := absSample(b); a > peak {
+			peak = a
+		}
+	}
+	if peak < 16000 {
+		t.Errorf("peak amplitude %d, want >= 16000: the tone is too quiet to hear", peak)
+	}
+}
+
+// absSample decodes one mu-law byte and returns its magnitude.
+//
+// telephony exports LinearToMuLaw but no inverse, and adding one to the
+// engine's public API to satisfy a CLI test would be the wrong place for it.
+// This is the standard G.711 decode, test-only.
+func absSample(b byte) int {
+	b = ^b
+	mantissa := int(b&0x0F)<<3 + 0x84
+	exponent := int(b&0x70) >> 4
+	v := (mantissa << exponent) - 0x84
+	if b&0x80 != 0 {
+		v = -v
+	}
+	if v < 0 {
+		v = -v
+	}
+	return v
 }

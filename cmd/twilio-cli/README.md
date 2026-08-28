@@ -22,11 +22,21 @@ go run ./cmd/twilio-cli +15551234567
 Posts the voice webhook, then opens the media-stream WebSocket and plays microphone audio in,
 printing the server's marks and control frames as they arrive.
 
-**Speaking after the earcon cue:** When capture emits the mic-warm signal (indicating the
-initial silence-discard period is over), twilio-cli plays a 400Hz earcon tone to the local
-speaker to signal "capture is live — speak now." This allows the operator to know exactly
-when the call is ready to record speech without relying on blind timing. Speak promptly
-*after* the cue so the full opening word is captured.
+**The earcon cue means capture is live — not that the server is listening.** When capture
+emits the mic-warm signal (the initial silence-discard period is over), twilio-cli plays a
+240 ms 400 Hz tone to the local speaker. It fires within a second or two of the call
+connecting, and it says one thing: your microphone is now being streamed, so a word spoken
+from here on will not be clipped.
+
+It does **not** say the server is ready for you. A server that opens with a recorded
+introduction, or takes several seconds to generate its first response, is not listening
+when this tone sounds — against a server whose introduction runs a minute or more, the cue
+lands that far ahead of the caller's first real turn. Whatever signals "now it is your
+turn" has to come from the server, over the call, because only the server knows. Treat
+this tone as a capture check and wait for the server's own greeting.
+
+This tone used to be a single 20 ms frame, which nobody could hear; it is now 240 ms with a
+20 ms fade at each end (`earconDurationMS`, `earconRampMS` in `playback.go`).
 
 | Flag | Purpose |
 |---|---|

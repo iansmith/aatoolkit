@@ -123,19 +123,50 @@ func (l *lazyPlayer) close() {
 	}
 }
 
-// generateEarcon returns a 160-byte μ-law encoded earcon tone (400Hz sine wave at 8kHz).
+// earconDurationMS is how long the capture-live tone sounds for.
+//
+// It was one 20 ms frame. Eight cycles of 400 Hz is not a tone, it is a click,
+// and an operator running a demo call reported never hearing the earcon at
+// all -- correctly, because at that length there is nothing to hear. 240 ms is
+// long enough to register as a deliberate cue and short enough not to sit on
+// top of whatever the server is saying. It is a whole number of 20 ms frames
+// so the tone can be written frame-aligned like every other payload here.
+const earconDurationMS = 240
+
+// earconRampMS fades the tone in and out.
+//
+// Starting and ending at full amplitude puts a step discontinuity into the
+// stream on both sides of the tone, which is heard as a pop -- so a tone made
+// long enough to hear would arrive bracketed by two clicks. The ramp is what
+// makes it sound like a cue rather than a dropout.
+const earconRampMS = 20
+
+// generateEarcon returns the μ-law capture-live tone: a 400 Hz sine at 8 kHz,
+// earconDurationMS long, ramped in and out over earconRampMS at each end.
 func generateEarcon() []byte {
 	const (
 		sampleRate = 8000.0
 		frequency  = 400.0
-		samples    = muLawFrame20ms
 	)
+	samples := sampleRateHz * earconDurationMS / 1000
+	ramp := sampleRateHz * earconRampMS / 1000
 
 	earcon := make([]byte, samples)
 	for i := 0; i < samples; i++ {
 		// Generate a 400Hz sine wave in the range [-32767, 32767].
 		t := float64(i) / sampleRate
 		amplitude := 32767.0 * math.Sin(2*math.Pi*frequency*t)
+
+		// Linear fade over the first and last ramp samples. Applied to the
+		// sine rather than to the encoded byte: mu-law is logarithmic, so
+		// scaling the code word does not scale the sample it stands for.
+		switch {
+		case i < ramp:
+			amplitude *= float64(i) / float64(ramp)
+		case i >= samples-ramp:
+			amplitude *= float64(samples-1-i) / float64(ramp)
+		}
+
 		// Convert to μ-law.
 		earcon[i] = telephony.LinearToMuLaw(int16(amplitude))
 	}
