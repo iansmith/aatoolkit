@@ -70,6 +70,21 @@ func (f *playoutFiller) fed(payload []byte, now time.Time) {
 // every other call, and the rounding error is at most one frame, which is
 // recovered on the next fill.
 func (f *playoutFiller) fill(now time.Time, play func([]byte)) int {
+	// Past this much deficit, resync instead of catching up frame by frame.
+	//
+	// A laptop that slept, or a loop stalled behind a slow write, can come back
+	// minutes behind. Filling that honestly means pushing minutes of silence
+	// into ffplay's 64KB stdin pipe in one loop; ffplay drains it at 8000 B/s,
+	// so play() blocks and takes the only websocket reader with it -- turning a
+	// stall into a hang, which is strictly worse than the gap it was covering.
+	//
+	// A skip loses the illusion of continuity for one moment. A hang loses the
+	// call.
+	if now.Sub(f.fedThrough) > maxFillCatchUp {
+		f.fedThrough = now
+		return 0
+	}
+
 	n := 0
 	for f.fedThrough.Add(mulawPlayoutDuration(len(f.frame))).Compare(now) <= 0 {
 		play(f.frame)
@@ -77,4 +92,29 @@ func (f *playoutFiller) fill(now time.Time, play func([]byte)) int {
 		n++
 	}
 	return n
+}
+
+// maxFillCatchUp bounds how much silence one fill may write. Two seconds is far
+// above any scheduling jitter the 20ms tick produces and far below the point
+// where writing it would block on the player.
+const maxFillCatchUp = 2 * time.Second
+
+// outstanding is how much handed-over audio has not played yet.
+//
+// This is what a mark echo must wait for. A mark asks "tell me when everything
+// before this has played", and fedThrough is by construction the wall-clock
+// instant through which audio has been supplied -- so the answer is simply how
+// far that is still ahead of now.
+//
+// It replaces an arithmetic that measured from the previous mark and so
+// charged silence preceding the audio against it; see
+// TestPlayoutFiller_OutstandingIsWhatHasNotPlayedYet for the shape that broke.
+//
+// Zero when the stream has caught up, and never negative: a player that is
+// idle has nothing queued, however long it has been idle.
+func (f *playoutFiller) outstanding(now time.Time) time.Duration {
+	if remaining := f.fedThrough.Sub(now); remaining > 0 {
+		return remaining
+	}
+	return 0
 }

@@ -144,9 +144,16 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 // volume media itself never logs, and resets the counter for the next mark.
 func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 	player := testPlayer(&recordingSink{})
-	// A window that opened just now, so essentially none of that second has
-	// played yet and the whole of it is still outstanding.
+	// One second of audio handed to the player just now, so the whole of it is
+	// still queued.
+	//
+	// The filler has to be TOLD -- it is what tracks outstanding audio now, and
+	// setting bytesSinceMark alone no longer implies anything is queued. That is
+	// the point of the change: bytes-since-mark counts what arrived, and the
+	// mark echo depends on what has not yet played, which are different numbers
+	// the moment the stream is not perfectly paced.
 	audio := &callAudio{bytesSinceMark: sampleRateHz, markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
+	audio.filler.fed(make([]byte, sampleRateHz), time.Now())
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
@@ -233,66 +240,15 @@ func TestHandleFrame_OtherControlEventsAreLogged(t *testing.T) {
 	}
 }
 
-// TestMarkEchoDelay_SubtractsTimeAlreadySpent pins the arithmetic behind the
-// mark echo.
+// The mark-echo timing test that stood here asserted the wrong formula.
 //
-// The delay used to be the raw playout duration of the bytes received since
-// the last mark, which double-counts: audio streamed at real time has already
-// played by the time the last of it arrives. Against a server that plays a
-// 100-second introduction and then waits for the echo, that put the echo 100
-// seconds late and the server timed out on every call.
-func TestMarkEchoDelay_SubtractsTimeAlreadySpent(t *testing.T) {
-	oneSecond := sampleRateHz // bytes: 1 byte/sample at 8 kHz
-
-	cases := []struct {
-		name    string
-		bytes   int
-		elapsed time.Duration
-		want    time.Duration
-	}{
-		{
-			name:    "burst: nothing has played yet, the whole clip is queued",
-			bytes:   oneSecond,
-			elapsed: 0,
-			want:    time.Second,
-		},
-		{
-			name:    "half real time: half of it is still queued",
-			bytes:   oneSecond,
-			elapsed: 500 * time.Millisecond,
-			want:    500 * time.Millisecond,
-		},
-		{
-			name:    "paced at real time: nothing is queued, echo immediately",
-			bytes:   oneSecond,
-			elapsed: time.Second,
-			want:    0,
-		},
-		{
-			name:    "slower than real time: still zero, never negative",
-			bytes:   oneSecond,
-			elapsed: 100 * time.Second,
-			want:    0,
-		},
-		{
-			name:    "the live case: 100s of audio delivered over 100s",
-			bytes:   100 * oneSecond,
-			elapsed: 100 * time.Second,
-			want:    0,
-		},
-		{
-			name:    "no audio at all",
-			bytes:   0,
-			elapsed: 0,
-			want:    0,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := markEchoDelay(tc.bytes, tc.elapsed); got != tc.want {
-				t.Errorf("markEchoDelay(%d bytes, %s) = %s, want %s", tc.bytes, tc.elapsed, got, tc.want)
-			}
-		})
-	}
-}
+// TestMarkEchoDelay_SubtractsTimeAlreadySpent covered
+// playout(bytesSinceMark) - elapsed, including a case
+// ("slower than real time: still zero") that IS the broken shape: it measured
+// elapsed from the previous mark, so silence arriving before the audio was
+// charged against the audio and the mark was echoed while the burst was still
+// queued. No case in it had idle time PRECEDING the audio, which is the only
+// shape that tells the two formulas apart, so the test could not have failed.
+//
+// The quantity is now playoutFiller.outstanding, tested in filler_test.go by
+// TestPlayoutFiller_OutstandingIsWhatHasNotPlayedYet -- including that case.

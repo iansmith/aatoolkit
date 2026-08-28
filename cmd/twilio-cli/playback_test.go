@@ -362,9 +362,13 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 	// Inject a fake mic that fires onMicWarm exactly once (capHit=false).
 	var onMicWarmCalled bool
 	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
-		// Before calling onMicWarm, the sink should be empty.
-		if s.buf.Len() != 0 {
-			t.Errorf("before onMicWarm: got %d bytes, want 0", s.buf.Len())
+		// Before onMicWarm, no TONE has been played. Not "the sink is empty":
+		// the filler may already have written silence, and reading s.buf
+		// directly from this goroutine races the read loop's own Write --
+		// which is why recordingSink grew a mutex and snapshot().
+		buf, _ := s.snapshot()
+		if bytes.Contains(buf, generateEarcon()) {
+			t.Error("the earcon played before onMicWarm signalled")
 		}
 
 		// Call onMicWarm to trigger the earcon.
@@ -398,12 +402,14 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 		t.Error("onMicWarm callback was never called")
 	}
 
-	// Verify exactly one earcon tone was written. Sized from the tone's own
-	// constant, not a literal: this assertion used to hard-code 160 and had to
-	// be edited when the tone was lengthened to be audible at all.
-	if want := len(generateEarcon()); s.buf.Len() != want {
-		t.Errorf("playback sink: got %d bytes written, want %d (one earcon tone)",
-			s.buf.Len(), want)
+	// The tone must be present. NOT an exact byte count of the whole sink: the
+	// playout filler writes silence into it on every 20ms tick, so an equality
+	// assertion holds only while the fake mic happens to return before the
+	// first tick. That made this latently flaky under load rather than wrong,
+	// which is worse -- it would have failed on someone else's machine.
+	buf, _ := s.snapshot()
+	if !bytes.Contains(buf, generateEarcon()) {
+		t.Errorf("playback sink holds %d bytes and does not contain the earcon tone", len(buf))
 	}
 }
 
@@ -446,15 +452,13 @@ func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 
-	// Verify the earcon tone was written to the playback sink.
-	if want := len(generateEarcon()); s.buf.Len() != want {
-		t.Errorf("playback sink: got %d bytes, want %d",
-			s.buf.Len(), want)
-	}
-
-	// Verify tone was written exactly once (one Write call).
-	if s.writes != 1 {
-		t.Errorf("playback sink writes: %d, want 1 (earcon fires once)", s.writes)
+	// Present, and present once. Counted by occurrence rather than by the
+	// sink's length or its Write count, both of which the playout filler also
+	// moves on every 20ms tick.
+	buf, _ := s.snapshot()
+	tone := generateEarcon()
+	if n := bytes.Count(buf, tone); n != 1 {
+		t.Errorf("earcon appears %d times in the playback sink, want exactly 1", n)
 	}
 }
 
@@ -669,12 +673,30 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 	// The fake mic waits until the server's audio has actually reached the
 	// player before signalling mic-warm, which is the ordering the bug needs:
 	// the server is already speaking when capture goes live.
+	// Wait on the SERVER's bytes specifically, not on the sink's total length.
+	//
+	// The playout filler writes a 160-byte silence frame into this same sink on
+	// its first 20ms tick, and serverAudio is exactly 160 bytes -- so a length
+	// check is satisfied by the filler alone, with no media handled at all.
+	// onMicWarm would then fire while serverSpoke is still false, the tone would
+	// play, and this test would fail for a reason that has nothing to do with
+	// what it is testing.
+	served := func() int {
+		buf, _ := s.snapshot()
+		n := 0
+		for _, b := range buf {
+			if b == serverAudio[0] {
+				n++
+			}
+		}
+		return n
+	}
 	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
 		deadline := time.Now().Add(5 * time.Second)
-		for s.len() < len(serverAudio) && time.Now().Before(deadline) {
+		for served() < len(serverAudio) && time.Now().Before(deadline) {
 			time.Sleep(5 * time.Millisecond)
 		}
-		if got := s.len(); got < len(serverAudio) {
+		if got := served(); got < len(serverAudio) {
 			return fmt.Errorf("server audio never reached the player: %d bytes", got)
 		}
 		onMicWarm(false)

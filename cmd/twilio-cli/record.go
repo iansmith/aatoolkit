@@ -73,8 +73,14 @@ func (r *inboundRecorder) writeIn(payload []byte, now time.Time) {
 	if _, err := r.audio.Write(payload); err != nil {
 		log.Printf("twilio-cli: record: write audio: %v", err)
 	}
-	fmt.Fprintf(r.events, `{"at_ms":%d,"bytes":%d,"gap_ms":%d,"total_bytes":%d}`+"\n",
-		now.Sub(r.started).Milliseconds(), len(payload), gap.Milliseconds(), r.total)
+	// Checked, like the audio write above. The sidecar is the whole reason
+	// -record exists -- the audio alone cannot show a thirty-second gap -- so a
+	// full disk losing it silently would leave an operator reading a truncated
+	// file as evidence about the call.
+	if _, err := fmt.Fprintf(r.events, `{"at_ms":%d,"bytes":%d,"gap_ms":%d,"total_bytes":%d}`+"\n",
+		now.Sub(r.started).Milliseconds(), len(payload), gap.Milliseconds(), r.total); err != nil {
+		log.Printf("twilio-cli: record: write timing: %v", err)
+	}
 }
 
 // close finishes the recording and logs the one summary that makes the file

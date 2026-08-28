@@ -20,15 +20,49 @@ func newTestFiller() *playoutFiller { return newPlayoutFiller(base, telephony.Mu
 func TestPlayoutFiller_SilentGapIsFilledAtRealTime(t *testing.T) {
 	f := newTestFiller()
 
+	// Driven the way the read loop drives it: one call per 20ms tick. A single
+	// call jumping the whole gap is not a shape the loop produces -- it only
+	// happens when the loop itself stalled, which is what maxFillCatchUp
+	// covers (see the test below).
 	var written int
-	n := f.fill(base.Add(47*time.Second), func(b []byte) { written += len(b) })
+	frames := 0
+	step := mulawPlayoutDuration(muLawFrame20ms)
+	for elapsed := step; elapsed <= 47*time.Second; elapsed += step {
+		frames += f.fill(base.Add(elapsed), func(b []byte) { written += len(b) })
+	}
 
-	wantFrames := int(47 * time.Second / mulawPlayoutDuration(muLawFrame20ms))
-	if n != wantFrames {
-		t.Errorf("frames written for a 47s gap: got %d, want %d", n, wantFrames)
+	wantFrames := int(47 * time.Second / step)
+	if frames != wantFrames {
+		t.Errorf("frames written across a 47s gap: got %d, want %d", frames, wantFrames)
 	}
 	if got := mulawPlayoutDuration(written); got != 47*time.Second {
 		t.Errorf("silence written: %s, want 47s", got)
+	}
+}
+
+// TestPlayoutFiller_ResyncsRatherThanBlockingAfterAStall bounds the catch-up.
+//
+// The loop ticks every 20ms, so a large deficit means the loop itself stopped
+// running -- a machine that slept, or a write that blocked. Filling that
+// honestly means pushing minutes of silence into ffplay's 64KB stdin pipe in
+// one loop; ffplay drains at 8000 B/s, so the write blocks and takes the only
+// websocket reader with it. That turns a stall into a hang, which is worse
+// than the gap being covered.
+//
+// A skip loses continuity for a moment. A hang loses the call.
+func TestPlayoutFiller_ResyncsRatherThanBlockingAfterAStall(t *testing.T) {
+	f := newTestFiller()
+
+	frames := 0
+	f.fill(base.Add(5*time.Minute), func([]byte) { frames++ })
+	if frames != 0 {
+		t.Errorf("wrote %d frames to cover a 5 minute stall; want a resync, not a catch-up", frames)
+	}
+
+	// And it must be usable immediately afterwards, not left behind again.
+	resumed := base.Add(5 * time.Minute)
+	if n := f.fill(resumed.Add(100*time.Millisecond), func([]byte) {}); n != 5 {
+		t.Errorf("after resync, 100ms of gap wrote %d frames, want 5", n)
 	}
 }
 
@@ -95,4 +129,59 @@ func TestPlayoutFiller_ResumesFromNowAfterAGap(t *testing.T) {
 	if n := f.fill(arrival.Add(500*time.Millisecond), func([]byte) {}); n != 0 {
 		t.Errorf("filler wrote %d frames over live audio; want 0", n)
 	}
+}
+
+// TestPlayoutFiller_OutstandingIsWhatHasNotPlayedYet pins the quantity a mark
+// echo must wait for, and the case the old arithmetic got wrong.
+//
+// markEchoDelay computed playout(bytesSinceMark) - elapsed, where elapsed ran
+// from the PREVIOUS mark. That makes elapsed include dead air that arrived
+// before the audio did, so on the shape this whole branch exists to handle --
+// a mark, then a long silence, then a burst faster than real time -- it
+// returned zero and the mark was echoed while seconds were still queued. The
+// server reads a mark echo as playout-complete, so it advanced the turn before
+// the caller had heard the reply. Late by the send duration was the old bug;
+// early by the whole burst is worse, because late costs a timeout and early
+// cuts the caller off.
+//
+// outstanding asks the only question that matters: how much audio has been
+// handed over that has not played yet.
+func TestPlayoutFiller_OutstandingIsWhatHasNotPlayedYet(t *testing.T) {
+	oneSecond := make([]byte, telephony.SampleRateHz)
+
+	t.Run("a burst is still queued", func(t *testing.T) {
+		f := newTestFiller()
+		f.fed(oneSecond, base)
+		if got := f.outstanding(base); got != time.Second {
+			t.Errorf("outstanding right after a 1s burst = %s, want 1s", got)
+		}
+		if got := f.outstanding(base.Add(400 * time.Millisecond)); got != 600*time.Millisecond {
+			t.Errorf("outstanding 400ms later = %s, want 600ms", got)
+		}
+	})
+
+	t.Run("idle before the audio does not discount it", func(t *testing.T) {
+		// THE CASE THE OLD TABLE HAD NO ENTRY FOR, and the one measured live:
+		// 47s of silence, then 4.9s of speech delivered in 2.4s.
+		f := newTestFiller()
+		gapEnd := base.Add(47 * time.Second)
+		f.fill(gapEnd, func([]byte) {}) // the filler covered the silence
+		burst := make([]byte, 5*telephony.SampleRateHz)
+		f.fed(burst, gapEnd)
+
+		got := f.outstanding(gapEnd)
+		if got != 5*time.Second {
+			t.Errorf("outstanding = %s, want 5s. The old formula charged the 47s "+
+				"of preceding silence against the audio and returned 0, echoing the "+
+				"mark while the whole burst was still queued", got)
+		}
+	})
+
+	t.Run("nothing queued once it has played", func(t *testing.T) {
+		f := newTestFiller()
+		f.fed(oneSecond, base)
+		if got := f.outstanding(base.Add(2 * time.Second)); got != 0 {
+			t.Errorf("outstanding = %s, want 0 -- never negative", got)
+		}
+	})
 }

@@ -72,7 +72,13 @@ func (p *audioPlayer) close() error {
 }
 
 // lazyPlayer starts one audioPlayer on the first non-empty frame and streams
-// every subsequent frame into it, so a call with no audio never spawns ffplay.
+// every subsequent frame into it.
+//
+// It used to say "so a call with no audio never spawns ffplay". That stopped
+// being true when the playout filler started writing silence within 20ms of
+// the read loop starting: every call now spawns ffplay, and a machine without
+// ffmpeg logs "audio playback disabled" on every call rather than only on
+// calls that had audio.
 // Playback is disabled permanently after the first failure — whether the ffplay
 // process fails to start or dies mid-call — so a broken player is not retried
 // (and not error-logged) once per frame. Not safe for concurrent use — drive it
@@ -144,10 +150,12 @@ const earconRampMS = 20
 // generateEarcon returns the μ-law capture-live tone: a 400 Hz sine at 8 kHz,
 // earconDurationMS long, ramped in and out over earconRampMS at each end.
 func generateEarcon() []byte {
-	const (
-		sampleRate = 8000.0
-		frequency  = 400.0
-	)
+	// One definition of the rate. `sampleRate` was a second, float copy used
+	// only by the phase term, so a change to sampleRateHz would have altered
+	// the tone's LENGTH without altering its PITCH -- silently, and only
+	// audibly wrong.
+	const frequency = 400.0
+	sampleRate := float64(sampleRateHz)
 	samples := sampleRateHz * earconDurationMS / 1000
 	ramp := sampleRateHz * earconRampMS / 1000
 
@@ -173,8 +181,12 @@ func generateEarcon() []byte {
 	return earcon
 }
 
-// playEarcon plays one earcon tone to the given lazy player.
-func playEarcon(l *lazyPlayer) {
+// playEarcon plays one earcon tone to the given lazy player and returns the
+// bytes it wrote, so the caller can account for them. Audio that reaches the
+// player without the playout filler knowing is audio the filler will pad on
+// top of, permanently offsetting everything after it.
+func playEarcon(l *lazyPlayer) []byte {
 	tone := generateEarcon()
 	l.play(tone)
+	return tone
 }
