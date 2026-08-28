@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
@@ -114,15 +115,19 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 	const frames = 50
 	sink := &recordingSink{}
 	player := testPlayer(sink)
-	var bytesSinceMark int
+	audio := &callAudio{markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
 
 	out := captureLog(t, func() {
 		for i := 0; i < frames; i++ {
 			// conn is nil: a media frame must never touch the connection.
 			handleFrame(twilio.Frame{Event: twilio.EventMedia, Payload: mkFrame(0x7f)},
-				player, nil, "MZtest", &bytesSinceMark, true)
+				player, audio, nil, "MZtest", true)
 		}
 	})
+
+	if !audio.serverSpoke {
+		t.Error("serverSpoke stayed false after 50 media frames — the earcon gate reads this")
+	}
 
 	if out != "" {
 		t.Errorf("media frames produced log output; want silence:\n%s", out)
@@ -130,8 +135,8 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 	if sink.writes != frames {
 		t.Errorf("frames played: got %d, want %d — media must still reach the player", sink.writes, frames)
 	}
-	if want := frames * muLawFrame20ms; bytesSinceMark != want {
-		t.Errorf("bytesSinceMark: got %d, want %d", bytesSinceMark, want)
+	if want := frames * muLawFrame20ms; audio.bytesSinceMark != want {
+		t.Errorf("bytesSinceMark: got %d, want %d", audio.bytesSinceMark, want)
 	}
 }
 
@@ -139,11 +144,20 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 // volume media itself never logs, and resets the counter for the next mark.
 func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 	player := testPlayer(&recordingSink{})
-	bytesSinceMark := sampleRateHz // exactly 1s of μ-law audio
+	// One second of audio handed to the player just now, so the whole of it is
+	// still queued.
+	//
+	// The filler has to be TOLD -- it is what tracks outstanding audio now, and
+	// setting bytesSinceMark alone no longer implies anything is queued. That is
+	// the point of the change: bytes-since-mark counts what arrived, and the
+	// mark echo depends on what has not yet played, which are different numbers
+	// the moment the stream is not perfectly paced.
+	audio := &callAudio{bytesSinceMark: sampleRateHz, markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
+	audio.filler.fed(make([]byte, sampleRateHz), time.Now())
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
-			player, nil, "MZtest", &bytesSinceMark, true) // noEchoMarks: no conn needed
+			player, audio, nil, "MZtest", true) // noEchoMarks: no conn needed
 	})
 
 	for _, want := range []string{`mark "farewell"`, "8000 bytes", "1s"} {
@@ -151,8 +165,8 @@ func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 			t.Errorf("mark log missing %q:\n%s", want, out)
 		}
 	}
-	if bytesSinceMark != 0 {
-		t.Errorf("bytesSinceMark after mark: got %d, want 0 (reset for the next mark)", bytesSinceMark)
+	if audio.bytesSinceMark != 0 {
+		t.Errorf("bytesSinceMark after mark: got %d, want 0 (reset for the next mark)", audio.bytesSinceMark)
 	}
 }
 
@@ -160,11 +174,11 @@ func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 // test mode, so it says so rather than looking like a dropped mark.
 func TestHandleFrame_NoEchoMarksIsLoud(t *testing.T) {
 	player := testPlayer(&recordingSink{})
-	var bytesSinceMark int
+	audio := &callAudio{markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
-			player, nil, "MZtest", &bytesSinceMark, true)
+			player, audio, nil, "MZtest", true)
 	})
 
 	if !strings.Contains(out, "suppressed") {
@@ -213,10 +227,10 @@ func TestHandleFrame_OtherControlEventsAreLogged(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			player := testPlayer(&recordingSink{})
-			var bytesSinceMark int
+			audio := &callAudio{markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
 
 			out := captureLog(t, func() {
-				handleFrame(twilio.Frame{Event: tc.event}, player, nil, "MZtest", &bytesSinceMark, true)
+				handleFrame(twilio.Frame{Event: tc.event}, player, audio, nil, "MZtest", true)
 			})
 
 			if !strings.Contains(out, tc.want) {
@@ -225,3 +239,16 @@ func TestHandleFrame_OtherControlEventsAreLogged(t *testing.T) {
 		})
 	}
 }
+
+// The mark-echo timing test that stood here asserted the wrong formula.
+//
+// TestMarkEchoDelay_SubtractsTimeAlreadySpent covered
+// playout(bytesSinceMark) - elapsed, including a case
+// ("slower than real time: still zero") that IS the broken shape: it measured
+// elapsed from the previous mark, so silence arriving before the audio was
+// charged against the audio and the mark was echoed while the burst was still
+// queued. No case in it had idle time PRECEDING the audio, which is the only
+// shape that tells the two formulas apart, so the test could not have failed.
+//
+// The quantity is now playoutFiller.outstanding, tested in filler_test.go by
+// TestPlayoutFiller_OutstandingIsWhatHasNotPlayedYet -- including that case.

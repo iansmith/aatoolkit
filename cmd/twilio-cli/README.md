@@ -22,11 +22,21 @@ go run ./cmd/twilio-cli +15551234567
 Posts the voice webhook, then opens the media-stream WebSocket and plays microphone audio in,
 printing the server's marks and control frames as they arrive.
 
-**Speaking after the earcon cue:** When capture emits the mic-warm signal (indicating the
-initial silence-discard period is over), twilio-cli plays a 400Hz earcon tone to the local
-speaker to signal "capture is live — speak now." This allows the operator to know exactly
-when the call is ready to record speech without relying on blind timing. Speak promptly
-*after* the cue so the full opening word is captured.
+**The earcon cue means capture is live — not that the server is listening.** When capture
+emits the mic-warm signal (the initial silence-discard period is over), twilio-cli plays a
+240 ms 400 Hz tone to the local speaker. It fires within a second or two of the call
+connecting, and it says one thing: your microphone is now being streamed, so a word spoken
+from here on will not be clipped.
+
+It does **not** say the server is ready for you. A server that opens with a recorded
+introduction, or takes several seconds to generate its first response, is not listening
+when this tone sounds — against a server whose introduction runs a minute or more, the cue
+lands that far ahead of the caller's first real turn. Whatever signals "now it is your
+turn" has to come from the server, over the call, because only the server knows. Treat
+this tone as a capture check and wait for the server's own greeting.
+
+This tone used to be a single 20 ms frame, which nobody could hear; it is now 240 ms with a
+20 ms fade at each end (`earconDurationMS`, `earconRampMS` in `playback.go`).
 
 | Flag | Purpose |
 |---|---|
@@ -34,6 +44,37 @@ when the call is ready to record speech without relying on blind timing. Speak p
 | `-to` | The dialed number, E.164. |
 | `-audio` | Stream a raw μ-law file instead of capturing the mic. Any platform. |
 | `-no-echo-marks` | Suppress mark-echo, to exercise the server's `AwaitingMarkEcho` timeout. |
+| `-record <file>` | Record inbound server audio to a raw μ-law file, with per-arrival timing in `<file>.jsonl`. |
+
+### Recording what the server sent
+
+`-record` answers the question a speaker cannot: **did the server's audio arrive?**
+
+```bash
+go run ./cmd/twilio-cli -record /tmp/call.ulaw +15551234567
+```
+
+It writes two files. `/tmp/call.ulaw` is the raw μ-law exactly as it came off the
+socket — play it with `ffplay -f mulaw -ar 8000 /tmp/call.ulaw`. `/tmp/call.ulaw.jsonl`
+carries one line per arrival with the offset into the call, the payload size, and the
+gap since the previous payload:
+
+```json
+{"at_ms":100620,"bytes":160,"gap_ms":20,"total_bytes":804990}
+```
+
+The gaps are the useful part. A stream that stops for thirty seconds and resumes looks
+identical to a continuous one in the audio file alone, and those gaps are precisely where
+an operator reports hearing nothing. At the end of the call one summary line reports how
+much sound arrived against how long the call ran:
+
+```
+recorded 812150 bytes of inbound audio (1m41.5s of sound over a 3m51s call, 0.44×)
+```
+
+A ratio well below 1 means the server genuinely sent silence for the rest of the call. A
+ratio near 1 means the audio was there and anything unheard was lost after this process
+received it.
 
 ### Streaming a file instead of the mic
 

@@ -4,30 +4,56 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 
 	"github.com/iansmith/aatoolkit/telephony"
+	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
 // recordingSink is an in-memory io.WriteCloser standing in for ffplay's stdin.
 // It records everything written (in order) and counts Close calls, so tests can
 // assert that frames form one continuous stream through a single sink.
 type recordingSink struct {
+	// mu guards buf for the one test that reads it while dial() is still
+	// running (TestEarcon_SuppressedWhileTheServerIsSpeaking, whose fake mic
+	// waits for the server's audio to arrive). Every other test reads the
+	// fields directly after dial has returned, where there is no second
+	// goroutine and no lock is needed.
+	mu       sync.Mutex
 	buf      bytes.Buffer
 	writes   int
 	closes   int
 	writeErr error
 }
 
+// len is the concurrency-safe read of how many bytes have been written.
+func (s *recordingSink) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Len()
+}
+
+// snapshot is the concurrency-safe copy of everything written, and the count.
+func (s *recordingSink) snapshot() ([]byte, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.buf.Bytes()...), s.writes
+}
+
 func (s *recordingSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.writes++
 	if s.writeErr != nil {
 		return 0, s.writeErr
@@ -336,9 +362,13 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 	// Inject a fake mic that fires onMicWarm exactly once (capHit=false).
 	var onMicWarmCalled bool
 	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
-		// Before calling onMicWarm, the sink should be empty.
-		if s.buf.Len() != 0 {
-			t.Errorf("before onMicWarm: got %d bytes, want 0", s.buf.Len())
+		// Before onMicWarm, no TONE has been played. Not "the sink is empty":
+		// the filler may already have written silence, and reading s.buf
+		// directly from this goroutine races the read loop's own Write --
+		// which is why recordingSink grew a mutex and snapshot().
+		buf, _ := s.snapshot()
+		if bytes.Contains(buf, generateEarcon()) {
+			t.Error("the earcon played before onMicWarm signalled")
 		}
 
 		// Call onMicWarm to trigger the earcon.
@@ -372,10 +402,14 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 		t.Error("onMicWarm callback was never called")
 	}
 
-	// Verify exactly one earcon tone (160 bytes) was written.
-	if s.buf.Len() != muLawFrame20ms {
-		t.Errorf("playback sink: got %d bytes written, want %d (one earcon tone)",
-			s.buf.Len(), muLawFrame20ms)
+	// The tone must be present. NOT an exact byte count of the whole sink: the
+	// playout filler writes silence into it on every 20ms tick, so an equality
+	// assertion holds only while the fake mic happens to return before the
+	// first tick. That made this latently flaky under load rather than wrong,
+	// which is worse -- it would have failed on someone else's machine.
+	buf, _ := s.snapshot()
+	if !bytes.Contains(buf, generateEarcon()) {
+		t.Errorf("playback sink holds %d bytes and does not contain the earcon tone", len(buf))
 	}
 }
 
@@ -418,15 +452,13 @@ func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 
-	// Verify the earcon tone was written to the playback sink.
-	if s.buf.Len() != muLawFrame20ms {
-		t.Errorf("playback sink: got %d bytes, want %d",
-			s.buf.Len(), muLawFrame20ms)
-	}
-
-	// Verify tone was written exactly once (one Write call).
-	if s.writes != 1 {
-		t.Errorf("playback sink writes: %d, want 1 (earcon fires once)", s.writes)
+	// Present, and present once. Counted by occurrence rather than by the
+	// sink's length or its Write count, both of which the playout filler also
+	// moves on every 20ms tick.
+	buf, _ := s.snapshot()
+	tone := generateEarcon()
+	if n := bytes.Count(buf, tone); n != 1 {
+		t.Errorf("earcon appears %d times in the playback sink, want exactly 1", n)
 	}
 }
 
@@ -534,5 +566,190 @@ func TestLazyPlayer_DisablesAndReapsAfterMidCallWriteError(t *testing.T) {
 	}
 	if failing.closes != 1 {
 		t.Errorf("sink closed %d times, want 1 (dead player must be reaped)", failing.closes)
+	}
+}
+
+// TestGenerateEarcon_LongEnoughToHear pins the tone's duration.
+//
+// It was one 20 ms frame -- 160 bytes, eight cycles of 400 Hz -- which is a
+// click, not a cue. An operator running a demo call reported never hearing it
+// at all, and the tone being inaudible is why. This asserts a duration a
+// person can actually register as a tone rather than a transient.
+func TestGenerateEarcon_LongEnoughToHear(t *testing.T) {
+	tone := generateEarcon()
+
+	wantBytes := sampleRateHz * earconDurationMS / 1000
+	if len(tone) != wantBytes {
+		t.Errorf("earcon length: got %d bytes, want %d (%d ms at %d Hz)",
+			len(tone), wantBytes, earconDurationMS, sampleRateHz)
+	}
+	if earconDurationMS < 150 {
+		t.Errorf("earconDurationMS = %d, want >= 150: a shorter tone reads as a click", earconDurationMS)
+	}
+	if len(tone)%muLawFrame20ms != 0 {
+		t.Errorf("earcon length %d is not a whole number of %d-byte frames", len(tone), muLawFrame20ms)
+	}
+}
+
+// TestGenerateEarcon_RampsInAndOut pins the envelope.
+//
+// A tone that starts and ends at full amplitude puts a step discontinuity into
+// the stream, which is heard as a click on either side of the tone -- the exact
+// artifact that makes a short tone read as a pop. The ramp is what makes the
+// tone sound deliberate rather than like a dropout.
+func TestGenerateEarcon_RampsInAndOut(t *testing.T) {
+	tone := generateEarcon()
+	if len(tone) == 0 {
+		t.Fatal("earcon is empty")
+	}
+
+	const quiet = 2000 // well under the 32767 peak, well over digital silence
+
+	if got := absSample(tone[0]); got > quiet {
+		t.Errorf("first sample amplitude %d, want <= %d: the tone starts with a step", got, quiet)
+	}
+	if got := absSample(tone[len(tone)-1]); got > quiet {
+		t.Errorf("last sample amplitude %d, want <= %d: the tone ends with a step", got, quiet)
+	}
+
+	// The middle must still be loud, or "ramps in and out" is satisfied by a
+	// tone that is silent throughout.
+	var peak int
+	for _, b := range tone {
+		if a := absSample(b); a > peak {
+			peak = a
+		}
+	}
+	if peak < 16000 {
+		t.Errorf("peak amplitude %d, want >= 16000: the tone is too quiet to hear", peak)
+	}
+}
+
+// absSample decodes one mu-law byte and returns its magnitude.
+//
+// telephony exports LinearToMuLaw but no inverse, and adding one to the
+// engine's public API to satisfy a CLI test would be the wrong place for it.
+// This is the standard G.711 decode, test-only.
+func absSample(b byte) int {
+	b = ^b
+	mantissa := int(b&0x0F)<<3 + 0x84
+	exponent := int(b&0x70) >> 4
+	v := (mantissa << exponent) - 0x84
+	if b&0x80 != 0 {
+		v = -v
+	}
+	if v < 0 {
+		v = -v
+	}
+	return v
+}
+
+// TestEarcon_SuppressedWhileTheServerIsSpeaking is the regression test for a
+// beep played over a server's opening announcement.
+//
+// The earcon says "your microphone is being captured". It fires a second or
+// two into the call, which is fine against a server that is waiting for you --
+// and wrong against one that opens by playing something. An operator running a
+// demo call heard the tone land on top of the recorded introduction: the cue
+// arrived while the caller had nothing to do for another minute and a half,
+// and stepped on the content that was telling them so.
+//
+// The rule is that the tone never plays over the server's own audio. If the
+// server has already sent media by the time capture goes live, it is talking,
+// the caller is not about to speak, and the cue is noise on top of content.
+func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
+	s := &recordingSink{}
+
+	origNewPlayerFunc := newPlayerFunc
+	defer func() { newPlayerFunc = origNewPlayerFunc }()
+	newPlayerFunc = func(ctx context.Context) (*audioPlayer, error) {
+		return newPlayerWithSink(s), nil
+	}
+
+	// A distinctive payload so server audio and earcon bytes cannot be
+	// confused for one another in the sink.
+	serverAudio := bytes.Repeat([]byte{0xAB}, muLawFrame20ms)
+
+	// The fake mic waits until the server's audio has actually reached the
+	// player before signalling mic-warm, which is the ordering the bug needs:
+	// the server is already speaking when capture goes live.
+	// Wait on the SERVER's bytes specifically, not on the sink's total length.
+	//
+	// The playout filler writes a 160-byte silence frame into this same sink on
+	// its first 20ms tick, and serverAudio is exactly 160 bytes -- so a length
+	// check is satisfied by the filler alone, with no media handled at all.
+	// onMicWarm would then fire while serverSpoke is still false, the tone would
+	// play, and this test would fail for a reason that has nothing to do with
+	// what it is testing.
+	served := func() int {
+		buf, _ := s.snapshot()
+		n := 0
+		for _, b := range buf {
+			if b == serverAudio[0] {
+				n++
+			}
+		}
+		return n
+	}
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
+		deadline := time.Now().Add(5 * time.Second)
+		for served() < len(serverAudio) && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := served(); got < len(serverAudio) {
+			return fmt.Errorf("server audio never reached the player: %d bytes", got)
+		}
+		onMicWarm(false)
+		// Give the read loop a moment to play a tone if it is going to.
+		time.Sleep(200 * time.Millisecond)
+		return nil
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
+		readHandshake(t, buf) // consume connected + start
+
+		media, err := twilio.EncodeMedia("MZearcontest", serverAudio)
+		if err != nil {
+			t.Errorf("encode media: %v", err)
+			return
+		}
+		if err := writeWSText(conn, media); err != nil {
+			t.Errorf("write media: %v", err)
+			return
+		}
+		// Hold the connection open so the client's read loop stays alive.
+		io.Copy(io.Discard, buf)
+	}))
+	defer srv.Close()
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// Asserted by content, not by byte count: the playout filler legitimately
+	// writes silence into the sink whenever the server is quiet, so a count is
+	// no longer a statement about the earcon. What must be absent is tone.
+	//
+	// Everything the sink is allowed to hold is either the server's own
+	// payload byte or mu-law silence. An earcon sample is neither, and one
+	// such byte is enough to fail -- which is a stricter claim than the count
+	// this replaced, since it also rules out a partial tone.
+	got, _ := s.snapshot()
+	for i, b := range got {
+		if b != serverAudio[0] && b != telephony.MuLawSilence {
+			t.Fatalf("playback sink byte %d of %d is 0x%02x: neither the server's audio nor silence, so a tone was played",
+				i, len(got), b)
+		}
+	}
+	if len(got) < len(serverAudio) {
+		t.Errorf("playback sink holds %d bytes, want at least the server's %d", len(got), len(serverAudio))
 	}
 }
