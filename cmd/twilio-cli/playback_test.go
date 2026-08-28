@@ -44,6 +44,13 @@ func (s *recordingSink) len() int {
 	return s.buf.Len()
 }
 
+// snapshot is the concurrency-safe copy of everything written, and the count.
+func (s *recordingSink) snapshot() ([]byte, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.buf.Bytes()...), s.writes
+}
+
 func (s *recordingSink) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -705,8 +712,22 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 
-	if got := s.len(); got != len(serverAudio) {
-		t.Errorf("playback sink: got %d bytes, want %d (the server's audio and nothing else -- an earcon is %d bytes)",
-			got, len(serverAudio), len(generateEarcon()))
+	// Asserted by content, not by byte count: the playout filler legitimately
+	// writes silence into the sink whenever the server is quiet, so a count is
+	// no longer a statement about the earcon. What must be absent is tone.
+	//
+	// Everything the sink is allowed to hold is either the server's own
+	// payload byte or mu-law silence. An earcon sample is neither, and one
+	// such byte is enough to fail -- which is a stricter claim than the count
+	// this replaced, since it also rules out a partial tone.
+	got, _ := s.snapshot()
+	for i, b := range got {
+		if b != serverAudio[0] && b != telephony.MuLawSilence {
+			t.Fatalf("playback sink byte %d of %d is 0x%02x: neither the server's audio nor silence, so a tone was played",
+				i, len(got), b)
+		}
+	}
+	if len(got) < len(serverAudio) {
+		t.Errorf("playback sink holds %d bytes, want at least the server's %d", len(got), len(serverAudio))
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
@@ -114,19 +115,17 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 	const frames = 50
 	sink := &recordingSink{}
 	player := testPlayer(sink)
-	var bytesSinceMark int
-	windowStart := time.Now()
-	var serverSpoke bool
+	audio := &callAudio{markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
 
 	out := captureLog(t, func() {
 		for i := 0; i < frames; i++ {
 			// conn is nil: a media frame must never touch the connection.
 			handleFrame(twilio.Frame{Event: twilio.EventMedia, Payload: mkFrame(0x7f)},
-				player, nil, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
+				player, audio, nil, "MZtest", true)
 		}
 	})
 
-	if !serverSpoke {
+	if !audio.serverSpoke {
 		t.Error("serverSpoke stayed false after 50 media frames — the earcon gate reads this")
 	}
 
@@ -136,8 +135,8 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 	if sink.writes != frames {
 		t.Errorf("frames played: got %d, want %d — media must still reach the player", sink.writes, frames)
 	}
-	if want := frames * muLawFrame20ms; bytesSinceMark != want {
-		t.Errorf("bytesSinceMark: got %d, want %d", bytesSinceMark, want)
+	if want := frames * muLawFrame20ms; audio.bytesSinceMark != want {
+		t.Errorf("bytesSinceMark: got %d, want %d", audio.bytesSinceMark, want)
 	}
 }
 
@@ -145,15 +144,13 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 // volume media itself never logs, and resets the counter for the next mark.
 func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 	player := testPlayer(&recordingSink{})
-	bytesSinceMark := sampleRateHz // exactly 1s of μ-law audio
 	// A window that opened just now, so essentially none of that second has
 	// played yet and the whole of it is still outstanding.
-	windowStart := time.Now()
-	var serverSpoke bool
+	audio := &callAudio{bytesSinceMark: sampleRateHz, markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
-			player, nil, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true) // noEchoMarks: no conn needed
+			player, audio, nil, "MZtest", true) // noEchoMarks: no conn needed
 	})
 
 	for _, want := range []string{`mark "farewell"`, "8000 bytes", "1s"} {
@@ -161,8 +158,8 @@ func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 			t.Errorf("mark log missing %q:\n%s", want, out)
 		}
 	}
-	if bytesSinceMark != 0 {
-		t.Errorf("bytesSinceMark after mark: got %d, want 0 (reset for the next mark)", bytesSinceMark)
+	if audio.bytesSinceMark != 0 {
+		t.Errorf("bytesSinceMark after mark: got %d, want 0 (reset for the next mark)", audio.bytesSinceMark)
 	}
 }
 
@@ -170,13 +167,11 @@ func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 // test mode, so it says so rather than looking like a dropped mark.
 func TestHandleFrame_NoEchoMarksIsLoud(t *testing.T) {
 	player := testPlayer(&recordingSink{})
-	var bytesSinceMark int
-	windowStart := time.Now()
-	var serverSpoke bool
+	audio := &callAudio{markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
-			player, nil, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
+			player, audio, nil, "MZtest", true)
 	})
 
 	if !strings.Contains(out, "suppressed") {
@@ -225,12 +220,10 @@ func TestHandleFrame_OtherControlEventsAreLogged(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			player := testPlayer(&recordingSink{})
-			var bytesSinceMark int
-			windowStart := time.Now()
-			var serverSpoke bool
+			audio := &callAudio{markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
 
 			out := captureLog(t, func() {
-				handleFrame(twilio.Frame{Event: tc.event}, player, nil, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
+				handleFrame(twilio.Frame{Event: tc.event}, player, audio, nil, "MZtest", true)
 			})
 
 			if !strings.Contains(out, tc.want) {
