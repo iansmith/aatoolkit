@@ -100,6 +100,12 @@ func validateType(s Server) error {
 		if s.Command == "" {
 			return fmt.Errorf("server %q: type exec requires 'command'", s.Name)
 		}
+		if s.Detached && len(s.TeardownArgs) == 0 {
+			return fmt.Errorf("server %q: detached requires 'teardown_args' (e.g. [\"compose\", \"down\"])", s.Name)
+		}
+		if !s.Detached && len(s.TeardownArgs) > 0 {
+			return fmt.Errorf("server %q: 'teardown_args' is only valid with detached = true", s.Name)
+		}
 	default:
 		return fmt.Errorf("server %q: unknown type %q (must be mlx, python, exec, or source)", s.Name, s.Type)
 	}
