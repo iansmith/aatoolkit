@@ -178,6 +178,7 @@ func main() {
 	noEchoMarks := flag.Bool("no-echo-marks", false, "suppress mark-echo (for testing the server's AwaitingMarkEcho timeout)")
 	toNumber := flag.String("to", defaultTo, "dialed (listening) number, E.164")
 	audioPath := flag.String("audio", "", "stream this raw μ-law file instead of capturing the mic (any platform)")
+	recordPath := flag.String("record", "", "record inbound server audio to this raw μ-law file, with per-arrival timing in <file>.jsonl")
 	flag.Parse()
 
 	// The caller's E.164 number is a required positional arg, validated locally
@@ -224,6 +225,9 @@ func main() {
 	var dialOpts []dialOption
 	if *noEchoMarks {
 		dialOpts = append(dialOpts, withNoEchoMarks())
+	}
+	if *recordPath != "" {
+		dialOpts = append(dialOpts, withRecording(*recordPath))
 	}
 	if err := dial(ctx, callSid, streamURL, dialOpts...); err != nil {
 		log.Fatalf("twilio-cli: %v", err)

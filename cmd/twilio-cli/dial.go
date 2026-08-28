@@ -35,6 +35,7 @@ var frameSourceLabel = "mic"
 // dialOptions configures optional dial() behavior.
 type dialOptions struct {
 	noEchoMarks bool
+	recordPath  string
 }
 
 // dialOption configures dialOptions.
@@ -45,6 +46,12 @@ type dialOption func(*dialOptions)
 // instead of receiving an echo.
 func withNoEchoMarks() dialOption {
 	return func(o *dialOptions) { o.noEchoMarks = true }
+}
+
+// withRecording records every inbound media payload to path (see -record in
+// main.go and inboundRecorder's own doc for why this exists).
+func withRecording(path string) dialOption {
+	return func(o *dialOptions) { o.recordPath = path }
 }
 
 func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
@@ -64,6 +71,12 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	// lets ffplay drain and finish; Ctrl-C (ctx cancel) kills it.
 	player := newLazyPlayer(ctx)
 	defer player.close()
+
+	recorder, err := newInboundRecorder(cfg.recordPath, time.Now())
+	if err != nil {
+		return err
+	}
+	defer func() { recorder.close(time.Now()) }()
 
 	// earconCh signals the main read loop to play an earcon tone.
 	// The mic goroutine sends on this channel; the read loop receives and plays
@@ -244,7 +257,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		}
 	}()
 
-	return dialReadLoop(readCtx, earconCh, readCh, player, conn, streamSID, &bytesSinceMark, &markWindowStart, &serverSpoke, cfg.noEchoMarks, cancelMic, micErrCh)
+	return dialReadLoop(readCtx, earconCh, readCh, player, recorder, conn, streamSID, &bytesSinceMark, &markWindowStart, &serverSpoke, cfg.noEchoMarks, cancelMic, micErrCh)
 }
 
 // readResult is one conn.Read outcome, pumped through readCh by dial's reader
@@ -312,7 +325,7 @@ func finishCallEnded(cause error, cancelMic context.CancelFunc, micErrCh <-chan 
 // by the mic goroutine and dispatches decoded frames until the call ends,
 // then runs finishCallEnded to unwind the mic goroutine and report its
 // result to the caller.
-func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan readResult, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, markWindowStart *time.Time, serverSpoke *bool, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error) error {
+func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan readResult, player *lazyPlayer, recorder *inboundRecorder, conn *websocket.Conn, streamSID string, bytesSinceMark *int, markWindowStart *time.Time, serverSpoke *bool, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error) error {
 	for {
 		// Give a pending earcon signal priority over call-ended detection: the
 		// mic goroutine always sends on earconCh (if at all) strictly before
@@ -340,7 +353,7 @@ func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan r
 			return finishCallEnded(context.Canceled, cancelMic, micErrCh, earconCh, player, serverSpoke)
 
 		case r := <-readCh:
-			if err, done := dialHandleReadResult(r, player, conn, streamSID, bytesSinceMark, markWindowStart, serverSpoke, noEchoMarks, cancelMic, micErrCh, earconCh); done {
+			if err, done := dialHandleReadResult(r, player, recorder, conn, streamSID, bytesSinceMark, markWindowStart, serverSpoke, noEchoMarks, cancelMic, micErrCh, earconCh); done {
 				return err
 			}
 		}
@@ -352,7 +365,7 @@ func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan r
 // call-ended close, the latter already run through finishCallEnded) — in
 // which case err is dialReadLoop's return value; otherwise the loop
 // continues and err is always nil.
-func dialHandleReadResult(r readResult, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, markWindowStart *time.Time, serverSpoke *bool, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error, earconCh chan struct{}) (err error, done bool) {
+func dialHandleReadResult(r readResult, player *lazyPlayer, recorder *inboundRecorder, conn *websocket.Conn, streamSID string, bytesSinceMark *int, markWindowStart *time.Time, serverSpoke *bool, noEchoMarks bool, cancelMic context.CancelFunc, micErrCh <-chan error, earconCh chan struct{}) (err error, done bool) {
 	if r.err != nil {
 		if isCallEnded(r.err) {
 			return finishCallEnded(r.err, cancelMic, micErrCh, earconCh, player, serverSpoke), true
@@ -372,7 +385,7 @@ func dialHandleReadResult(r readResult, player *lazyPlayer, conn *websocket.Conn
 	if f.Event != twilio.EventMedia {
 		logCtlFrame("<-", r.msg)
 	}
-	handleFrame(f, player, conn, streamSID, bytesSinceMark, markWindowStart, serverSpoke, noEchoMarks)
+	handleFrame(f, player, recorder, conn, streamSID, bytesSinceMark, markWindowStart, serverSpoke, noEchoMarks)
 	return nil, false
 }
 
@@ -512,10 +525,13 @@ func logCtlFrame(dir string, raw []byte) {
 	log.Printf("twilio-cli: %s %s", dir, raw)
 }
 
-func handleFrame(f twilio.Frame, player *lazyPlayer, conn *websocket.Conn, streamSID string, bytesSinceMark *int, markWindowStart *time.Time, serverSpoke *bool, noEchoMarks bool) {
+func handleFrame(f twilio.Frame, player *lazyPlayer, recorder *inboundRecorder, conn *websocket.Conn, streamSID string, bytesSinceMark *int, markWindowStart *time.Time, serverSpoke *bool, noEchoMarks bool) {
 	switch f.Event {
 	case twilio.EventMedia:
 		// Stream media audio into the single player for continuous playback.
+		// Recorded first: what arrived is a fact independent of whether the
+		// player was in any state to render it.
+		recorder.writeIn(f.Payload, time.Now())
 		player.play(f.Payload)
 		*bytesSinceMark += len(f.Payload)
 		*serverSpoke = true

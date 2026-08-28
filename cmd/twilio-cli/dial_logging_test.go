@@ -122,7 +122,7 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 		for i := 0; i < frames; i++ {
 			// conn is nil: a media frame must never touch the connection.
 			handleFrame(twilio.Frame{Event: twilio.EventMedia, Payload: mkFrame(0x7f)},
-				player, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
+				player, nil, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
 		}
 	})
 
@@ -153,7 +153,7 @@ func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
-			player, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true) // noEchoMarks: no conn needed
+			player, nil, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true) // noEchoMarks: no conn needed
 	})
 
 	for _, want := range []string{`mark "farewell"`, "8000 bytes", "1s"} {
@@ -176,7 +176,7 @@ func TestHandleFrame_NoEchoMarksIsLoud(t *testing.T) {
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
-			player, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
+			player, nil, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
 	})
 
 	if !strings.Contains(out, "suppressed") {
@@ -230,7 +230,7 @@ func TestHandleFrame_OtherControlEventsAreLogged(t *testing.T) {
 			var serverSpoke bool
 
 			out := captureLog(t, func() {
-				handleFrame(twilio.Frame{Event: tc.event}, player, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
+				handleFrame(twilio.Frame{Event: tc.event}, player, nil, nil, "MZtest", &bytesSinceMark, &windowStart, &serverSpoke, true)
 			})
 
 			if !strings.Contains(out, tc.want) {
