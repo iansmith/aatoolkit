@@ -1,9 +1,11 @@
 package main
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -18,15 +20,41 @@ command = "true"
 health = { path = "/healthz", port = 9730 }
 `
 
-// writeConfig writes contents to a fresh "aa-server-status.toml" in a temp
-// directory and returns its path.
+// writeConfig writes contents to a fresh config file in a temp directory and
+// returns its absolute path. The filename is arbitrary on purpose: twilio-cli
+// no longer knows any config filename, so nothing here may depend on one.
 func writeConfig(t *testing.T, contents string) string {
 	t.Helper()
-	basePath := filepath.Join(t.TempDir(), "aa-server-status.toml")
+	basePath := filepath.Join(t.TempDir(), "fleet-config.toml")
 	if err := os.WriteFile(basePath, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return basePath
+}
+
+// buildTwilioCLI builds the entrypoint and returns the binary path together
+// with the repo root. Four tests drive the real binary as a subprocess and had
+// grown four verbatim copies of this block; the parts that legitimately differ
+// — the config fixtures, the run closures, the assertions — all sit below it.
+// GOWORK=off is the load-bearing line: without it the build resolves this
+// module through the workspace one directory up rather than standalone.
+func buildTwilioCLI(t *testing.T, name string) (bin, repoRoot string) {
+	t.Helper()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot = filepath.Join(cwd, "..", "..")
+
+	bin = filepath.Join(t.TempDir(), name)
+	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
+	build.Dir = repoRoot
+	build.Env = append(os.Environ(), "GOWORK=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build entrypoint: %v\n%s", err, out)
+	}
+	return bin, repoRoot
 }
 
 // TestE164Validation pins AATK-16 observable behavior 1: the CLI validates the
@@ -60,7 +88,7 @@ func TestE164Validation(t *testing.T) {
 func TestWebhookTarget_ExplicitFlagOverridesConfig(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
 
-	got, err := webhookTarget("http://explicit.example/webhook", basePath)
+	got, err := webhookTarget("http://explicit.example/webhook", basePath, "")
 	if err != nil {
 		t.Fatalf("webhookTarget: %v", err)
 	}
@@ -75,7 +103,7 @@ func TestWebhookTarget_ExplicitFlagOverridesConfig(t *testing.T) {
 func TestWebhookTarget_ExplicitFlagOverridesEvenBrokenConfig(t *testing.T) {
 	basePath := filepath.Join(t.TempDir(), "does-not-exist.toml")
 
-	got, err := webhookTarget("http://explicit.example/webhook", basePath)
+	got, err := webhookTarget("http://explicit.example/webhook", basePath, "")
 	if err != nil {
 		t.Fatalf("webhookTarget with missing config but explicit flag: unexpected error: %v", err)
 	}
@@ -90,7 +118,7 @@ func TestWebhookTarget_ExplicitFlagOverridesEvenBrokenConfig(t *testing.T) {
 func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
 
-	got, err := webhookTarget("", basePath)
+	got, err := webhookTarget("", basePath, "")
 	if err != nil {
 		t.Fatalf("webhookTarget: %v", err)
 	}
@@ -103,9 +131,9 @@ func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 // behavior 3: a missing config file with no -webhook flag must fail with a
 // clear, actionable error naming the missing file, not a silent fallback.
 func TestWebhookTarget_MissingConfigProducesClearError(t *testing.T) {
-	basePath := filepath.Join(t.TempDir(), "aa-server-status.toml")
+	basePath := filepath.Join(t.TempDir(), "fleet-config.toml")
 
-	_, err := webhookTarget("", basePath)
+	_, err := webhookTarget("", basePath, "")
 	if err == nil {
 		t.Fatal("expected an error for a missing config file")
 	}
@@ -119,7 +147,7 @@ func TestWebhookTarget_MissingConfigProducesClearError(t *testing.T) {
 func TestWebhookTarget_MalformedConfigProducesClearError(t *testing.T) {
 	basePath := writeConfig(t, "not valid = [toml")
 
-	_, err := webhookTarget("", basePath)
+	_, err := webhookTarget("", basePath, "")
 	if err == nil {
 		t.Fatal("expected an error for a malformed config file")
 	}
@@ -138,7 +166,7 @@ command = "true"
 health = { path = "/healthz", port = 80 }
 `)
 
-	_, err := webhookTarget("", basePath)
+	_, err := webhookTarget("", basePath, "")
 	if err == nil {
 		t.Fatal("expected an error when no the server server is declared")
 	}
@@ -158,7 +186,7 @@ command = "true"
 health = { path = "/healthz", port = 9730 }
 `)
 
-	_, err := webhookTarget("", basePath)
+	_, err := webhookTarget("", basePath, "")
 	if err == nil {
 		t.Fatal("expected an error when the server server declares no webhook port")
 	}
@@ -178,20 +206,7 @@ func TestTwilioCLIRelativeAudioPathFromOtherCwd(t *testing.T) {
 		t.Skip("builds a binary; skipped under -short")
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	repoRoot := filepath.Join(cwd, "..", "..")
-
-	// Build the entrypoint.
-	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk56")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
-	build.Dir = repoRoot
-	build.Env = append(os.Environ(), "GOWORK=off")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build entrypoint: %v\n%s", err, out)
-	}
+	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-aatk56")
 
 	// Stage the fixture in a directory that is NOT the repo root.
 	fixture := filepath.Join(repoRoot, "telephony", "testdata", "how_are_you.ulaw")
@@ -248,19 +263,7 @@ func TestTwilioCLIWithoutAudioFlagKeepsMicDefault(t *testing.T) {
 		t.Skip("builds a binary; skipped under -short")
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	repoRoot := filepath.Join(cwd, "..", "..")
-
-	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk56-default")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
-	build.Dir = repoRoot
-	build.Env = append(os.Environ(), "GOWORK=off")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build entrypoint: %v\n%s", err, out)
-	}
+	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-aatk56-default")
 
 	cmd := exec.Command(bin,
 		"-webhook", "http://127.0.0.1:1/voice",
@@ -277,4 +280,395 @@ func TestTwilioCLIWithoutAudioFlagKeepsMicDefault(t *testing.T) {
 	if strings.Contains(got, "panic:") {
 		t.Errorf("a run with no -audio panicked.\noutput:\n%s", got)
 	}
+}
+
+// --- AATK-97: config-path resolution -----------------------------------------
+//
+// twilio-cli used to bake a bare relative config filename into the binary and
+// read it from the process working directory. That name belonged to one
+// consuming project, and it stopped existing when that project reorganized its
+// config; the no--webhook invocation then died with `open <name>: no such file`
+// and offered the operator no way to point the CLI anywhere else. A bare
+// relative path is also wrong on its own terms: the documented workflow runs
+// twilio-cli from this checkout while the config lives in the consumer's, so a
+// cwd-relative name can never resolve across that boundary.
+//
+// The contract these tests pin: the config path comes from the operator — the
+// -config flag first, then AATOOLKIT_TWILIO_CONFIG — and when neither is given
+// the error names both, rather than a filename the engine invented.
+
+// TestResolveConfigPath_FlagWinsOverEnv pins the precedence: an explicit
+// -config beats the environment, so a one-off run can override the operator's
+// exported default without unsetting it.
+func TestResolveConfigPath_FlagWinsOverEnv(t *testing.T) {
+	got, err := resolveConfigPath("/from/flag.toml", "/from/env.toml")
+	if err != nil {
+		t.Fatalf("resolveConfigPath: %v", err)
+	}
+	if got != "/from/flag.toml" {
+		t.Errorf("got %q, want the -config flag value to win", got)
+	}
+}
+
+// TestResolveConfigPath_EnvUsedWhenFlagAbsent pins the second source: with no
+// -config, the environment supplies the path. This is the mechanism that makes
+// resolution work across the repo boundary — the operator exports one absolute
+// path and every invocation resolves from any working directory.
+func TestResolveConfigPath_EnvUsedWhenFlagAbsent(t *testing.T) {
+	got, err := resolveConfigPath("", "/from/env.toml")
+	if err != nil {
+		t.Fatalf("resolveConfigPath: %v", err)
+	}
+	if got != "/from/env.toml" {
+		t.Errorf("got %q, want the environment value", got)
+	}
+}
+
+// TestResolveConfigPath_NeitherSetNamesBothSources is the ticket's core
+// requirement. With no source given there is nothing to fall back to: inventing
+// a filename is what broke, and it produced an error the operator could not act
+// on. The error must instead name both ways to supply the path.
+func TestResolveConfigPath_NeitherSetNamesBothSources(t *testing.T) {
+	got, err := resolveConfigPath("", "")
+	if err == nil {
+		t.Fatalf("resolveConfigPath with no source returned %q and no error; want an actionable error", got)
+	}
+	for _, want := range []string{"-config", configEnvVar} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q — the operator cannot act on it", err.Error(), want)
+		}
+	}
+}
+
+// TestWebhookTarget_ResolvesViaEnvConfig is the end-to-end path for a voice
+// call: no -webhook, no -config, the environment carries an absolute config
+// path, and the target is derived from it.
+func TestWebhookTarget_ResolvesViaEnvConfig(t *testing.T) {
+	basePath := writeConfig(t, validServerConfig)
+
+	got, err := webhookTarget("", "", basePath)
+	if err != nil {
+		t.Fatalf("webhookTarget: %v", err)
+	}
+	if got != "http://127.0.0.1:9740/webhook" {
+		t.Errorf("got %q, want http://127.0.0.1:9740/webhook", got)
+	}
+}
+
+// TestSMSWebhookTarget_ExplicitFlagWins covers the sms side of the escape
+// hatch. The voice route has three tests for this contract; the sms route had
+// none, and smsWebhookTarget is a separate three-argument positional forward —
+// blanking `explicit` in it left the whole package green. The failure that
+// hides there is the cruel one: `twilio-cli sms -webhook <url>` answering with
+// an error that tells the operator to pass the flag they just passed.
+func TestSMSWebhookTarget_ExplicitFlagWins(t *testing.T) {
+	const explicit = "http://explicit.example/sms/inbound"
+
+	t.Run("wins over a resolvable config", func(t *testing.T) {
+		got, err := smsWebhookTarget(explicit, writeConfig(t, validServerConfig), "")
+		if err != nil {
+			t.Fatalf("smsWebhookTarget: %v", err)
+		}
+		if got != explicit {
+			t.Errorf("got %q, want the explicit flag value unchanged", got)
+		}
+	})
+
+	t.Run("wins with no config source at all", func(t *testing.T) {
+		got, err := smsWebhookTarget(explicit, "", "")
+		if err != nil {
+			t.Fatalf("smsWebhookTarget with -webhook and no config source: unexpected error: %v", err)
+		}
+		if got != explicit {
+			t.Errorf("got %q, want the explicit flag value unchanged", got)
+		}
+	})
+
+	t.Run("wins over a broken config, without reading it", func(t *testing.T) {
+		got, err := smsWebhookTarget(explicit, filepath.Join(t.TempDir(), "does-not-exist.toml"), "")
+		if err != nil {
+			t.Fatalf("smsWebhookTarget with -webhook and a missing config: unexpected error: %v", err)
+		}
+		if got != explicit {
+			t.Errorf("got %q, want the explicit flag value unchanged", got)
+		}
+	})
+}
+
+// TestSMSWebhookTarget_ResolvesViaEnvConfig mirrors the voice case for the sms
+// subcommand, which resolves the same config to a different route.
+func TestSMSWebhookTarget_ResolvesViaEnvConfig(t *testing.T) {
+	basePath := writeConfig(t, validServerConfig)
+
+	got, err := smsWebhookTarget("", "", basePath)
+	if err != nil {
+		t.Fatalf("smsWebhookTarget: %v", err)
+	}
+	if got != "http://127.0.0.1:9740/sms/inbound" {
+		t.Errorf("got %q, want http://127.0.0.1:9740/sms/inbound", got)
+	}
+}
+
+// TestWebhookTarget_ExplicitFlagWinsWithNoConfigSourceAtAll guards the
+// documented escape hatch: -webhook skips config resolution entirely, so it
+// must still work when no config path is available from any source. Without
+// this, making a missing path an error would break the one invocation that was
+// unblocking people.
+func TestWebhookTarget_ExplicitFlagWinsWithNoConfigSourceAtAll(t *testing.T) {
+	got, err := webhookTarget("http://explicit.example/webhook", "", "")
+	if err != nil {
+		t.Fatalf("webhookTarget with -webhook and no config source: unexpected error: %v", err)
+	}
+	if got != "http://explicit.example/webhook" {
+		t.Errorf("got %q, want the explicit flag value unchanged", got)
+	}
+}
+
+// TestTwilioCLIResolvesConfigFromEnvOutsideRepoRoot exercises the whole
+// entrypoint the way the operator does, from a working directory that holds no
+// config of its own.
+//
+// The paired control is what makes it meaningful. Both runs are identical
+// except for AATOOLKIT_TWILIO_CONFIG: the control (unset) must fail at config
+// resolution naming both sources, and the treatment (set to an absolute path)
+// must get past resolution entirely and die later at the unreachable webhook.
+// The "gets past resolution" assertion alone would be satisfied by a build that
+// resolved nothing at all, so only the control proves the environment value is
+// what carried it.
+func TestTwilioCLIResolvesConfigFromEnvOutsideRepoRoot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
+
+	bin, _ := buildTwilioCLI(t, "twilio-cli-aatk97")
+
+	// A directory that is neither the repo root nor anywhere a config lives.
+	elsewhere := t.TempDir()
+
+	// NOT validServerConfig: this test actually launches the binary, which
+	// dials whatever the config resolves to. validServerConfig names 9730/9740
+	// — the ports a developer's own server binds — so it would fire an
+	// unsolicited signed webhook at a live server, and against one that
+	// answered 200 the subprocess would open a media stream and hold the
+	// microphone until the go test timeout. Ports 1 and 2 are privileged and
+	// bound by nothing, so resolution still succeeds and the dial still fails
+	// fast, against nobody.
+	configPath := writeConfig(t, `
+[[server]]
+name = "the server"
+type = "exec"
+host = "127.0.0.1"
+listens = [1, 2]
+command = "true"
+health = { path = "/healthz", port = 1 }
+`)
+
+	// env is always set explicitly — including to empty — so a value exported in
+	// the developer's own shell cannot leak in and make a subtest pass for the
+	// wrong reason.
+	run := func(env string, args ...string) string {
+		cmd := exec.Command(bin, append(args, "+15551234567")...)
+		cmd.Dir = elsewhere
+		cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk97-test-token")
+		cmd.Env = append(cmd.Env, configEnvVar+"="+env)
+		out, _ := cmd.CombinedOutput() // a non-zero exit is expected in every run
+		return string(out)
+	}
+
+	// resolved is the target the config above produces: host, its second listen
+	// (the webhook port), and the voice route.
+	const resolved = "127.0.0.1:2/webhook"
+
+	// A second, distinguishable config for the precedence subtest: same shape,
+	// different webhook port, so which file won is visible in the output.
+	otherConfigPath := writeConfig(t, `
+[[server]]
+name = "the server"
+type = "exec"
+host = "127.0.0.1"
+listens = [1, 3]
+command = "true"
+health = { path = "/healthz", port = 1 }
+`)
+	const otherResolved = "127.0.0.1:3/webhook"
+
+	t.Run("config path in the environment resolves from any cwd", func(t *testing.T) {
+		out := run(configPath)
+		if strings.Contains(out, "no such file") {
+			t.Errorf("resolution did not use %s=%s; it still looked for a file of its own.\ncwd: %s\noutput:\n%s",
+				configEnvVar, configPath, elsewhere, out)
+		}
+		// Port 2 is the config's second listen — its webhook port. Reaching a
+		// connection failure against that exact target proves resolution read
+		// the file rather than merely skipping the missing-file error.
+		if !strings.Contains(out, resolved) {
+			t.Errorf("run did not get as far as dialing the resolved target (want %s named).\noutput:\n%s", resolved, out)
+		}
+	})
+
+	// -config must be pinned end-to-end, not just as a pure function. The
+	// plumbing is four positional string parameters into resolveWebhook, so a
+	// dropped or transposed argument would silently stop the flag working while
+	// TestResolveConfigPath_FlagWinsOverEnv — which never touches main — stayed
+	// green. The environment is empty here, so only the flag can carry this.
+	t.Run("-config resolves with nothing in the environment", func(t *testing.T) {
+		out := run("", "-config", configPath)
+		if strings.Contains(out, "no config path") {
+			t.Errorf("-config was not consulted: resolution reported no config source at all.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, resolved) {
+			t.Errorf("-config did not reach resolution (want %s named).\noutput:\n%s", resolved, out)
+		}
+	})
+
+	// The documented precedence — "-config overrides the environment" — is only
+	// observable when both are set, so neither single-source subtest above can
+	// see the two arguments transposed at the call site. This one can: the two
+	// configs resolve to different ports.
+	t.Run("-config overrides the environment", func(t *testing.T) {
+		out := run(otherConfigPath, "-config", configPath)
+		if strings.Contains(out, otherResolved) {
+			t.Errorf("the environment's config won over -config; precedence is inverted.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, resolved) {
+			t.Errorf("-config did not win (want %s named).\noutput:\n%s", resolved, out)
+		}
+	})
+
+	t.Run("control: with no config source the error names both", func(t *testing.T) {
+		out := run("")
+		for _, want := range []string{"-config", configEnvVar} {
+			if !strings.Contains(out, want) {
+				t.Errorf("control run's error does not name %q, so the operator is not told how to supply a config.\noutput:\n%s", want, out)
+			}
+		}
+	})
+
+	// The short-circuit has to be pinned at the CALL SITE, not just in
+	// webhookTarget: main forwards three positional strings, and blanking
+	// `explicit` there leaves every function-level test green. What that ships
+	// is the cruel failure — the operator passes -webhook and is answered with
+	// an error telling them to pass -webhook. The environment is empty, so a
+	// run that reaches the explicit URL can only have short-circuited.
+	t.Run("-webhook skips config resolution entirely", func(t *testing.T) {
+		out := run("", "-webhook", "http://127.0.0.1:1/explicit-webhook")
+		if strings.Contains(out, "no config path") {
+			t.Errorf("-webhook did not reach resolution: it demanded a config instead of skipping it.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "explicit-webhook") {
+			t.Errorf("-webhook was not the target dialed.\noutput:\n%s", out)
+		}
+	})
+}
+
+// TestTwilioCLISMSResolvesConfig pins the sms subcommand's config plumbing.
+//
+// The sms entrypoint parses its own flag set and makes its own resolution call,
+// so the voice test above proves nothing about it: severing both sources from
+// smsWebhookTarget leaves every other test in this package green. The two
+// entrypoints are the two places this can be got wrong, so both are pinned.
+func TestTwilioCLISMSResolvesConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
+
+	bin, _ := buildTwilioCLI(t, "twilio-cli-aatk97-sms")
+
+	elsewhere := t.TempDir()
+	// Ports 1 and 2 are privileged and bound by nothing, so resolution succeeds
+	// and the POST fails fast against nobody.
+	configPath := writeConfig(t, `
+[[server]]
+name = "the server"
+type = "exec"
+host = "127.0.0.1"
+listens = [1, 2]
+command = "true"
+health = { path = "/healthz", port = 1 }
+`)
+	const resolved = "127.0.0.1:2/sms/inbound"
+
+	// A second, distinguishable config for the precedence subtest: same shape,
+	// different webhook port, so which file won is visible in the output.
+	otherConfigPath := writeConfig(t, `
+[[server]]
+name = "the server"
+type = "exec"
+host = "127.0.0.1"
+listens = [1, 3]
+command = "true"
+health = { path = "/healthz", port = 1 }
+`)
+	const otherResolved = "127.0.0.1:3/sms/inbound"
+
+	// The sms entrypoint validates and binds the capture port after resolving
+	// the config, so a real free port is needed to reach the assertion. Take
+	// one from the kernel and release it immediately.
+	capturePort := func() int {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve a capture port: %v", err)
+		}
+		defer ln.Close()
+		return ln.Addr().(*net.TCPAddr).Port
+	}()
+
+	run := func(env string, args ...string) string {
+		full := append([]string{"sms", "-capture-port", strconv.Itoa(capturePort)}, args...)
+		cmd := exec.Command(bin, append(full, "+15551234567", "hi")...)
+		cmd.Dir = elsewhere
+		cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk97-test-token")
+		cmd.Env = append(cmd.Env, configEnvVar+"="+env)
+		out, _ := cmd.CombinedOutput() // a non-zero exit is expected in every run
+		return string(out)
+	}
+
+	t.Run("resolves from the environment", func(t *testing.T) {
+		if out := run(configPath); !strings.Contains(out, resolved) {
+			t.Errorf("sms did not resolve from %s (want %s named).\noutput:\n%s", configEnvVar, resolved, out)
+		}
+	})
+
+	t.Run("resolves from -config with nothing in the environment", func(t *testing.T) {
+		if out := run("", "-config", configPath); !strings.Contains(out, resolved) {
+			t.Errorf("sms did not resolve from -config (want %s named).\noutput:\n%s", resolved, out)
+		}
+	})
+
+	t.Run("control: with no config source the error names both", func(t *testing.T) {
+		out := run("")
+		for _, want := range []string{"-config", configEnvVar} {
+			if !strings.Contains(out, want) {
+				t.Errorf("sms error does not name %q.\noutput:\n%s", want, out)
+			}
+		}
+	})
+
+	// Precedence needs both sources set to be observable at all, so the three
+	// single-source subtests above cannot see the two config arguments
+	// transposed at the call site — and a transposition there silently inverts
+	// what the README promises for this subcommand.
+	t.Run("-config overrides the environment", func(t *testing.T) {
+		out := run(otherConfigPath, "-config", configPath)
+		if strings.Contains(out, otherResolved) {
+			t.Errorf("the environment's config won over -config; precedence is inverted.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, resolved) {
+			t.Errorf("-config did not win (want %s named).\noutput:\n%s", resolved, out)
+		}
+	})
+
+	// The sms call site is its own place to get this wrong, for the same reason
+	// its config plumbing is: a separate flag set and a separate three-argument
+	// forward. TestSMSWebhookTarget_ExplicitFlagWins pins the function; this
+	// pins that main actually hands it the flag.
+	t.Run("-webhook skips config resolution entirely", func(t *testing.T) {
+		out := run("", "-webhook", "http://127.0.0.1:1/explicit-sms")
+		if strings.Contains(out, "no config path") {
+			t.Errorf("-webhook did not reach resolution: sms demanded a config instead of skipping it.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "explicit-sms") {
+			t.Errorf("-webhook was not the target posted to.\noutput:\n%s", out)
+		}
+	})
 }

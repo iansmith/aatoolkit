@@ -7,17 +7,24 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
 )
 
-// newFFmpegCmd builds the avfoundation→μ-law ffmpeg capture command for mic.
+// newFFmpegCmd builds the avfoundation→μ-law ffmpeg capture command for mic,
+// which is the operator's raw AATOOLKIT_STT_MIC value (possibly empty).
+//
+// Normalization happens HERE rather than at the call site so no caller can
+// route around it: the whole defect was a raw value reaching avfoundation's -i,
+// and a helper the caller must remember to apply can be forgotten by the next
+// one. There is exactly one way to build this command, and it normalizes.
 func newFFmpegCmd(ctx context.Context, mic string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
-		"-f", "avfoundation", "-i", mic,
+		"-f", "avfoundation", "-i", normalizeMicSpec(mic),
 		"-ar", "8000", "-ac", "1",
 		"-acodec", "pcm_mulaw", "-f", "mulaw", "-",
 	)
@@ -51,6 +58,26 @@ func gracefulCancel(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
+// normalizeMicSpec turns the AATOOLKIT_STT_MIC value into an avfoundation
+// device spec.
+//
+// avfoundation's -i takes "[video]:[audio]", so a value with no colon names the
+// *video* device: AATOOLKIT_STT_MIC=1, meant as "audio device 1", opens the
+// camera and dies on an unsupported framerate — an error that names nothing the
+// operator did. Nobody points a microphone variable at a camera, so a
+// colon-less value can only have been meant as the audio half; supply the
+// colon rather than rejecting it. A value that already carries a colon is a
+// complete spec and is passed through untouched.
+func normalizeMicSpec(v string) string {
+	if v == "" {
+		return ":default"
+	}
+	if strings.Contains(v, ":") {
+		return v
+	}
+	return ":" + v
+}
+
 // streamMicFrames captures mic input via ffmpeg, slices it into 8 kHz μ-law
 // 20 ms frames (160 bytes each), discards leading all-0xFF silence frames
 // (bounded at 75 frames / 1500 ms), and sends each frame to conn as a Twilio
@@ -58,11 +85,7 @@ func gracefulCancel(cmd *exec.Cmd) {
 // (capHit=false) or the discard cap is hit (capHit=true). Returns when ctx is cancelled
 // or the connection closes.
 func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, onMicWarm func(bool)) error {
-	mic := os.Getenv("AATOOLKIT_STT_MIC")
-	if mic == "" {
-		mic = ":default"
-	}
-	cmd := newFFmpegCmd(ctx, mic)
+	cmd := newFFmpegCmd(ctx, os.Getenv("AATOOLKIT_STT_MIC"))
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

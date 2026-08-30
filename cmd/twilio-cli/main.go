@@ -27,15 +27,52 @@ func validateE164(s string) error {
 }
 
 const (
-	defaultBasePath = "aa-server-status.toml"
-	serverName      = "the server"
+	serverName = "the server"
+
+	// configEnvVar names the environment variable that points twilio-cli at
+	// the config to resolve webhook targets from.
+	configEnvVar = "AATOOLKIT_TWILIO_CONFIG"
 )
 
-// resolveTarget loads the merged aa-server-status config at basePath and
-// derives the server's URL for pathSuffix (e.g. "/webhook" or "/sms/inbound")
-// from its host and webhook port. Shared by webhookTarget and
-// smsWebhookTarget, which differ only in which route they need.
-func resolveTarget(basePath, pathSuffix string) (string, error) {
+// resolveConfigPath returns the config file to load for webhook resolution:
+// the -config flag wins, then the configEnvVar environment value.
+//
+// There is deliberately no built-in default. The previous one was a bare
+// relative filename belonging to a particular consuming project, resolved
+// against the process working directory — which meant it named a file this
+// engine has no business knowing about, stopped resolving the moment that
+// project reorganized, and could never have resolved at all from the checkout
+// the documented workflow runs twilio-cli in. An operator-supplied absolute
+// path resolves from any directory; an error naming both ways to supply one is
+// more use than a filename the engine invented.
+func resolveConfigPath(flagValue, envValue string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
+	}
+	if envValue != "" {
+		return envValue, nil
+	}
+	return "", fmt.Errorf("no config path: pass -config <file>, set %s, or skip config resolution entirely with -webhook <url>", configEnvVar)
+}
+
+// resolveWebhook resolves the URL to send to for pathSuffix (e.g. "/webhook"
+// or "/sms/inbound"): an explicit flag value always wins and skips config
+// resolution entirely (even when no config is available anywhere), otherwise
+// the config named by resolveConfigPath is loaded and the server's host and
+// webhook port are read from it.
+//
+// One function rather than a voice copy and an SMS copy: the two routes differ
+// only in pathSuffix, and every other line — the short-circuit, the path
+// resolution, the three error cases — is identical. webhookTarget and
+// smsWebhookTarget name the two routes for their callers.
+func resolveWebhook(explicit, configFlag, configEnv, pathSuffix string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	basePath, err := resolveConfigPath(configFlag, configEnv)
+	if err != nil {
+		return "", err
+	}
 	cfg, err := config.Load(basePath)
 	if err != nil {
 		return "", err
@@ -51,33 +88,22 @@ func resolveTarget(basePath, pathSuffix string) (string, error) {
 	return fmt.Sprintf("http://%s:%d%s", srv.Host, port, pathSuffix), nil
 }
 
-// webhookTarget resolves the voice webhook URL to dial: an explicit flag
-// value always wins and skips config resolution entirely (even if config is
-// missing or broken); otherwise it's derived from the aa-server-status config
-// at basePath.
-func webhookTarget(explicit, basePath string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	return resolveTarget(basePath, "/webhook")
+// webhookTarget resolves the voice webhook URL to dial.
+func webhookTarget(explicit, configFlag, configEnv string) (string, error) {
+	return resolveWebhook(explicit, configFlag, configEnv, "/webhook")
 }
 
-// smsWebhookTarget resolves the inbound-SMS webhook URL to post to (the
-// /sms/inbound route, not /webhook): an explicit flag value always wins,
-// skipping config resolution entirely; otherwise it's derived from the
-// aa-server-status config at basePath. Mirrors webhookTarget.
-func smsWebhookTarget(explicit, basePath string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	return resolveTarget(basePath, "/sms/inbound")
+// smsWebhookTarget resolves the inbound-SMS webhook URL to post to — the
+// /sms/inbound route, not /webhook.
+func smsWebhookTarget(explicit, configFlag, configEnv string) (string, error) {
+	return resolveWebhook(explicit, configFlag, configEnv, "/sms/inbound")
 }
 
 // defaultCapturePort is the port the SMS capture server binds unless
 // -capture-port overrides it. Fixed rather than ephemeral so the operator can
 // launch the server with TWILIO_API_BASE_URL pointed at it *before* the CLI
-// runs; free against every port aa-server-status.toml declares, and adjacent
-// to the server's own 9730/9740 pair.
+// runs; free against every port the fleet config declares, and adjacent to the
+// server's own 9730/9740 pair.
 const defaultCapturePort = 9750
 
 // smsCaptureGuidance returns the operator-facing line printed before the round
@@ -118,7 +144,8 @@ func startCapture(port int) (*smsCaptureServer, string, error) {
 // the usage text.
 func runSMSMode(args []string) {
 	fs := flag.NewFlagSet("sms", flag.ExitOnError)
-	webhookURL := fs.String("webhook", "", "the server server SMS webhook URL (default: resolved from aa-server-status.toml)")
+	webhookURL := fs.String("webhook", "", "the server SMS webhook URL; skips config resolution entirely (default: resolved from -config / $"+configEnvVar+")")
+	configPath := fs.String("config", "", "path to the fleet config to resolve the webhook target from; overrides $"+configEnvVar)
 	toNumber := fs.String("to", defaultTo, "the Twilio number the SMS was sent to, E.164")
 	capturePort := fs.Int("capture-port", defaultCapturePort, "port the local reply-capture server binds; must match the TWILIO_API_BASE_URL the server was launched with")
 	fs.Parse(args)
@@ -146,7 +173,7 @@ func runSMSMode(args []string) {
 		log.Fatalf("twilio-cli: sms: -to: %v", err)
 	}
 
-	target, err := smsWebhookTarget(*webhookURL, defaultBasePath)
+	target, err := smsWebhookTarget(*webhookURL, *configPath, os.Getenv(configEnvVar))
 	if err != nil {
 		log.Fatalf("twilio-cli: sms: %v", err)
 	}
@@ -174,7 +201,8 @@ func main() {
 		return
 	}
 
-	webhookURL := flag.String("webhook", "", "the server server webhook URL (default: resolved from aa-server-status.toml)")
+	webhookURL := flag.String("webhook", "", "the server webhook URL; skips config resolution entirely (default: resolved from -config / $"+configEnvVar+")")
+	configPath := flag.String("config", "", "path to the fleet config to resolve the webhook target from; overrides $"+configEnvVar)
 	noEchoMarks := flag.Bool("no-echo-marks", false, "suppress mark-echo (for testing the server's AwaitingMarkEcho timeout)")
 	toNumber := flag.String("to", defaultTo, "dialed (listening) number, E.164")
 	audioPath := flag.String("audio", "", "stream this raw μ-law file instead of capturing the mic (any platform)")
@@ -205,7 +233,7 @@ func main() {
 		log.Fatalf("twilio-cli: %v", err)
 	}
 
-	target, err := webhookTarget(*webhookURL, defaultBasePath)
+	target, err := webhookTarget(*webhookURL, *configPath, os.Getenv(configEnvVar))
 	if err != nil {
 		log.Fatalf("twilio-cli: %v", err)
 	}

@@ -41,10 +41,31 @@ This tone used to be a single 20 ms frame, which nobody could hear; it is now 24
 | Flag | Purpose |
 |---|---|
 | `-webhook` | Full webhook URL. Skips config resolution entirely. |
+| `-config` | Path to the config to resolve the target from. Overrides `$AATOOLKIT_TWILIO_CONFIG`. |
 | `-to` | The dialed number, E.164. |
 | `-audio` | Stream a raw μ-law file instead of capturing the mic. Any platform. |
 | `-no-echo-marks` | Suppress mark-echo, to exercise the server's `AwaitingMarkEcho` timeout. |
 | `-record <file>` | Record inbound server audio to a raw μ-law file, with per-arrival timing in `<file>.jsonl`. |
+
+### Pointing twilio-cli at a config
+
+With no `-webhook`, the target is resolved from a config file **you** name — there is no
+built-in default path. Give it with `-config <file>`, or export it once:
+
+```bash
+export AATOOLKIT_TWILIO_CONFIG=/absolute/path/to/your-fleet-config.toml
+```
+
+`-config` overrides the environment; `-webhook` overrides both and skips config resolution
+entirely. Use an absolute path: twilio-cli is normally run from this checkout while the
+config lives in the consuming project's, and a relative path resolves against your current
+directory.
+
+From the config, the target is the server named `"the server"`, at its second declared
+listen port. If your config names it something else, resolution fails and you must pass
+`-webhook` explicitly.
+
+This applies to the `sms` subcommand too — same flag, same variable, same precedence.
 
 ### Recording what the server sent
 
@@ -107,10 +128,6 @@ audio. Convert with:
 ffmpeg -i input.wav -ar 8000 -ac 1 -acodec pcm_mulaw -f mulaw out.ulaw
 ```
 
-With no `-webhook`, the target is resolved from `aa-server-status.toml`: the server named
-`"the server"`, at its second declared listen port. If your config names it something else,
-resolution fails and you must pass `-webhook` explicitly.
-
 ## SMS — two steps, in this order
 
 The reply to an inbound SMS is **not** in the webhook response. The server answers the webhook
@@ -144,9 +161,10 @@ captured reply — From=+12183767443 To=+15551234567
 |---|---|
 | `-capture-port` | Port the capture server binds. Default `9750`. Must match the `TWILIO_API_BASE_URL` the server was launched with. |
 | `-webhook` | Full `/sms/inbound` URL. Skips config resolution. |
+| `-config` | Path to the config to resolve the target from. Overrides `$AATOOLKIT_TWILIO_CONFIG`. |
 | `-to` | The Twilio number the SMS was addressed to, E.164. |
 
-Do **not** set `TWILIO_API_BASE_URL` in `aa-server-status.toml`. Pointing the fleet at a local
+Do **not** set `TWILIO_API_BASE_URL` in your fleet config. Pointing the fleet at a local
 capture server by default would silently stop real SMS replies from being sent.
 
 ## Acoustic bleed mitigation
@@ -164,6 +182,15 @@ To eliminate acoustic bleed, use one of these mitigation strategies:
   (e.g. a USB headset microphone instead of the system mic), while the earcon plays through
   built-in speakers.
 
+  The value is an ffmpeg avfoundation device spec, `[video]:[audio]` — so the **leading colon
+  matters**: `AATOOLKIT_STT_MIC=":1"` or `AATOOLKIT_STT_MIC=":USB Audio Device"`. A value with
+  no colon is treated as the audio half and gets one prepended, so a bare `1` still works;
+  passing a full spec such as `0:1` is left alone. List the devices ffmpeg can see with:
+
+  ```bash
+  ffmpeg -f avfoundation -list_devices true -i ""
+  ```
+
 For most testing scenarios, the small acoustic bleed is acceptable — speech will still
 transcribe clearly.
 
@@ -172,6 +199,8 @@ transcribe clearly.
 | Symptom | Cause |
 |---|---|
 | `returned status 403` | `TWILIO_AUTH_TOKEN` doesn't match the server's, or the server was launched with `wss`. |
-| `no "the server" server declared in aa-server-status.toml` | Your config names the server something else. Pass `-webhook` explicitly. |
+| `no "the server" server declared in <your config>` | Your config names the server something else. Pass `-webhook` explicitly. |
+| `no config path: pass -config <file>, set AATOOLKIT_TWILIO_CONFIG...` | No `-webhook` and no config source. Supply one of the three the message names. |
+| ffmpeg `Selected framerate ... is not supported` on mic capture | `AATOOLKIT_STT_MIC` named a **camera**: a bare value used to be read as the video device. Use the `:N` form. |
 | `no reply reached the capture server within 35s` | The server was not launched with `TWILIO_API_BASE_URL` pointed at the capture port — it sent the reply to the real Twilio API instead. |
 | `bind SMS capture server on port N` | Something else holds that port. Pick another with `-capture-port`, and launch the server with the matching `TWILIO_API_BASE_URL`. |
