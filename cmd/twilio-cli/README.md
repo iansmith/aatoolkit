@@ -41,6 +41,7 @@ This tone used to be a single 20 ms frame, which nobody could hear; it is now 24
 | Flag | Purpose |
 |---|---|
 | `-webhook` | Full webhook URL. Skips config resolution entirely. |
+| `-config` | Path to the config to resolve the target from. Overrides `$AATOOLKIT_TWILIO_CONFIG`. |
 | `-to` | The dialed number, E.164. |
 | `-audio` | Stream a raw μ-law file instead of capturing the mic. Any platform. |
 | `-no-echo-marks` | Suppress mark-echo, to exercise the server's `AwaitingMarkEcho` timeout. |

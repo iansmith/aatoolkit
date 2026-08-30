@@ -55,11 +55,24 @@ func resolveConfigPath(flagValue, envValue string) (string, error) {
 	return "", fmt.Errorf("no config path: pass -config <file>, set %s, or skip config resolution entirely with -webhook <url>", configEnvVar)
 }
 
-// resolveTarget loads the merged config at basePath and
-// derives the server's URL for pathSuffix (e.g. "/webhook" or "/sms/inbound")
-// from its host and webhook port. Shared by webhookTarget and
-// smsWebhookTarget, which differ only in which route they need.
-func resolveTarget(basePath, pathSuffix string) (string, error) {
+// resolveWebhook resolves the URL to send to for pathSuffix (e.g. "/webhook"
+// or "/sms/inbound"): an explicit flag value always wins and skips config
+// resolution entirely (even when no config is available anywhere), otherwise
+// the config named by resolveConfigPath is loaded and the server's host and
+// webhook port are read from it.
+//
+// One function rather than a voice copy and an SMS copy: the two routes differ
+// only in pathSuffix, and every other line — the short-circuit, the path
+// resolution, the three error cases — is identical. webhookTarget and
+// smsWebhookTarget name the two routes for their callers.
+func resolveWebhook(explicit, configFlag, configEnv, pathSuffix string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	basePath, err := resolveConfigPath(configFlag, configEnv)
+	if err != nil {
+		return "", err
+	}
 	cfg, err := config.Load(basePath)
 	if err != nil {
 		return "", err
@@ -75,34 +88,15 @@ func resolveTarget(basePath, pathSuffix string) (string, error) {
 	return fmt.Sprintf("http://%s:%d%s", srv.Host, port, pathSuffix), nil
 }
 
-// webhookTarget resolves the voice webhook URL to dial: an explicit flag
-// value always wins and skips config resolution entirely (even if config is
-// missing or broken); otherwise it's derived from the config resolved by
-// resolveConfigPath.
+// webhookTarget resolves the voice webhook URL to dial.
 func webhookTarget(explicit, configFlag, configEnv string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	basePath, err := resolveConfigPath(configFlag, configEnv)
-	if err != nil {
-		return "", err
-	}
-	return resolveTarget(basePath, "/webhook")
+	return resolveWebhook(explicit, configFlag, configEnv, "/webhook")
 }
 
-// smsWebhookTarget resolves the inbound-SMS webhook URL to post to (the
-// /sms/inbound route, not /webhook): an explicit flag value always wins,
-// skipping config resolution entirely; otherwise it's derived from the config
-// resolved by resolveConfigPath. Mirrors webhookTarget.
+// smsWebhookTarget resolves the inbound-SMS webhook URL to post to — the
+// /sms/inbound route, not /webhook.
 func smsWebhookTarget(explicit, configFlag, configEnv string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	basePath, err := resolveConfigPath(configFlag, configEnv)
-	if err != nil {
-		return "", err
-	}
-	return resolveTarget(basePath, "/sms/inbound")
+	return resolveWebhook(explicit, configFlag, configEnv, "/sms/inbound")
 }
 
 // defaultCapturePort is the port the SMS capture server binds unless

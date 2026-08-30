@@ -414,7 +414,24 @@ func TestTwilioCLIResolvesConfigFromEnvOutsideRepoRoot(t *testing.T) {
 
 	// A directory that is neither the repo root nor anywhere a config lives.
 	elsewhere := t.TempDir()
-	configPath := writeConfig(t, validServerConfig)
+
+	// NOT validServerConfig: this test actually launches the binary, which
+	// dials whatever the config resolves to. validServerConfig names 9730/9740
+	// — the ports a developer's own server binds — so it would fire an
+	// unsolicited signed webhook at a live server, and against one that
+	// answered 200 the subprocess would open a media stream and hold the
+	// microphone until the go test timeout. Ports 1 and 2 are privileged and
+	// bound by nothing, so resolution still succeeds and the dial still fails
+	// fast, against nobody.
+	configPath := writeConfig(t, `
+[[server]]
+name = "the server"
+type = "exec"
+host = "127.0.0.1"
+listens = [1, 2]
+command = "true"
+health = { path = "/healthz", port = 1 }
+`)
 
 	run := func(env ...string) string {
 		cmd := exec.Command(bin, "+15551234567")
@@ -431,10 +448,11 @@ func TestTwilioCLIResolvesConfigFromEnvOutsideRepoRoot(t *testing.T) {
 			t.Errorf("resolution did not use %s=%s; it still looked for a file of its own.\ncwd: %s\noutput:\n%s",
 				configEnvVar, configPath, elsewhere, out)
 		}
-		// 9740 is validServerConfig's webhook port: reaching a connection
-		// failure against it proves resolution produced the right target.
-		if !strings.Contains(out, "9740") {
-			t.Errorf("run did not get as far as dialing the resolved target (want the webhook port 9740 named).\noutput:\n%s", out)
+		// Port 2 is the config's second listen — its webhook port. Reaching a
+		// connection failure against that exact target proves resolution read
+		// the file rather than merely skipping the missing-file error.
+		if !strings.Contains(out, "127.0.0.1:2/webhook") {
+			t.Errorf("run did not get as far as dialing the resolved target (want http://127.0.0.1:2/webhook named).\noutput:\n%s", out)
 		}
 	})
 
