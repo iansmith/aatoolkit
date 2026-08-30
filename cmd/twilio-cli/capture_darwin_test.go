@@ -107,3 +107,36 @@ func TestNormalizeMicSpec(t *testing.T) {
 		})
 	}
 }
+
+// TestNewFFmpegCmd_NormalizesTheMicSpec pins the composition, not just the
+// function. TestNormalizeMicSpec proves normalizeMicSpec is correct; it says
+// nothing about whether the ffmpeg command actually gets the normalized value.
+// Reinstating the original `-i <raw env value>` leaves that test green and the
+// camera bug back, so the assertion has to be made against the built argv.
+func TestNewFFmpegCmd_NormalizesTheMicSpec(t *testing.T) {
+	cases := []struct {
+		mic, want, desc string
+	}{
+		{"1", ":1", "bare index reaches ffmpeg as the audio device, not the camera"},
+		{"", ":default", "empty reaches ffmpeg as the built-in default"},
+		{"0:1", "0:1", "a full spec reaches ffmpeg untouched"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			cmd := newFFmpegCmd(context.Background(), tc.mic)
+
+			// Assert on the value ffmpeg actually receives: the argument
+			// immediately after -i.
+			var got string
+			for i, a := range cmd.Args {
+				if a == "-i" && i+1 < len(cmd.Args) {
+					got = cmd.Args[i+1]
+					break
+				}
+			}
+			if got != tc.want {
+				t.Errorf("ffmpeg -i argument for mic %q = %q, want %q\nargv: %v", tc.mic, got, tc.want, cmd.Args)
+			}
+		})
+	}
+}

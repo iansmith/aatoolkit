@@ -1,9 +1,11 @@
 package main
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -449,6 +451,19 @@ health = { path = "/healthz", port = 1 }
 	// (the webhook port), and the voice route.
 	const resolved = "127.0.0.1:2/webhook"
 
+	// A second, distinguishable config for the precedence subtest: same shape,
+	// different webhook port, so which file won is visible in the output.
+	otherConfigPath := writeConfig(t, `
+[[server]]
+name = "the server"
+type = "exec"
+host = "127.0.0.1"
+listens = [1, 3]
+command = "true"
+health = { path = "/healthz", port = 1 }
+`)
+	const otherResolved = "127.0.0.1:3/webhook"
+
 	t.Run("config path in the environment resolves from any cwd", func(t *testing.T) {
 		out := run(configPath)
 		if strings.Contains(out, "no such file") {
@@ -478,11 +493,108 @@ health = { path = "/healthz", port = 1 }
 		}
 	})
 
+	// The documented precedence — "-config overrides the environment" — is only
+	// observable when both are set, so neither single-source subtest above can
+	// see the two arguments transposed at the call site. This one can: the two
+	// configs resolve to different ports.
+	t.Run("-config overrides the environment", func(t *testing.T) {
+		out := run(otherConfigPath, "-config", configPath)
+		if strings.Contains(out, otherResolved) {
+			t.Errorf("the environment's config won over -config; precedence is inverted.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, resolved) {
+			t.Errorf("-config did not win (want %s named).\noutput:\n%s", resolved, out)
+		}
+	})
+
 	t.Run("control: with no config source the error names both", func(t *testing.T) {
 		out := run("")
 		for _, want := range []string{"-config", configEnvVar} {
 			if !strings.Contains(out, want) {
 				t.Errorf("control run's error does not name %q, so the operator is not told how to supply a config.\noutput:\n%s", want, out)
+			}
+		}
+	})
+}
+
+// TestTwilioCLISMSResolvesConfig pins the sms subcommand's config plumbing.
+//
+// The sms entrypoint parses its own flag set and makes its own resolution call,
+// so the voice test above proves nothing about it: severing both sources from
+// smsWebhookTarget leaves every other test in this package green. The two
+// entrypoints are the two places this can be got wrong, so both are pinned.
+func TestTwilioCLISMSResolvesConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := filepath.Join(cwd, "..", "..")
+
+	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk97-sms")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
+	build.Dir = repoRoot
+	build.Env = append(os.Environ(), "GOWORK=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build entrypoint: %v\n%s", err, out)
+	}
+
+	elsewhere := t.TempDir()
+	// Ports 1 and 2 are privileged and bound by nothing, so resolution succeeds
+	// and the POST fails fast against nobody.
+	configPath := writeConfig(t, `
+[[server]]
+name = "the server"
+type = "exec"
+host = "127.0.0.1"
+listens = [1, 2]
+command = "true"
+health = { path = "/healthz", port = 1 }
+`)
+	const resolved = "127.0.0.1:2/sms/inbound"
+
+	// The sms entrypoint validates and binds the capture port after resolving
+	// the config, so a real free port is needed to reach the assertion. Take
+	// one from the kernel and release it immediately.
+	capturePort := func() int {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve a capture port: %v", err)
+		}
+		defer ln.Close()
+		return ln.Addr().(*net.TCPAddr).Port
+	}()
+
+	run := func(env string, args ...string) string {
+		full := append([]string{"sms", "-capture-port", strconv.Itoa(capturePort)}, args...)
+		cmd := exec.Command(bin, append(full, "+15551234567", "hi")...)
+		cmd.Dir = elsewhere
+		cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk97-test-token")
+		cmd.Env = append(cmd.Env, configEnvVar+"="+env)
+		out, _ := cmd.CombinedOutput() // a non-zero exit is expected in every run
+		return string(out)
+	}
+
+	t.Run("resolves from the environment", func(t *testing.T) {
+		if out := run(configPath); !strings.Contains(out, resolved) {
+			t.Errorf("sms did not resolve from %s (want %s named).\noutput:\n%s", configEnvVar, resolved, out)
+		}
+	})
+
+	t.Run("resolves from -config with nothing in the environment", func(t *testing.T) {
+		if out := run("", "-config", configPath); !strings.Contains(out, resolved) {
+			t.Errorf("sms did not resolve from -config (want %s named).\noutput:\n%s", resolved, out)
+		}
+	})
+
+	t.Run("control: with no config source the error names both", func(t *testing.T) {
+		out := run("")
+		for _, want := range []string{"-config", configEnvVar} {
+			if !strings.Contains(out, want) {
+				t.Errorf("sms error does not name %q.\noutput:\n%s", want, out)
 			}
 		}
 	})

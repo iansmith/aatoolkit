@@ -14,11 +14,17 @@ import (
 	"github.com/coder/websocket"
 )
 
-// newFFmpegCmd builds the avfoundation→μ-law ffmpeg capture command for mic.
+// newFFmpegCmd builds the avfoundation→μ-law ffmpeg capture command for mic,
+// which is the operator's raw AATOOLKIT_STT_MIC value (possibly empty).
+//
+// Normalization happens HERE rather than at the call site so no caller can
+// route around it: the whole defect was a raw value reaching avfoundation's -i,
+// and a helper the caller must remember to apply can be forgotten by the next
+// one. There is exactly one way to build this command, and it normalizes.
 func newFFmpegCmd(ctx context.Context, mic string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
-		"-f", "avfoundation", "-i", mic,
+		"-f", "avfoundation", "-i", normalizeMicSpec(mic),
 		"-ar", "8000", "-ac", "1",
 		"-acodec", "pcm_mulaw", "-f", "mulaw", "-",
 	)
@@ -79,7 +85,7 @@ func normalizeMicSpec(v string) string {
 // (capHit=false) or the discard cap is hit (capHit=true). Returns when ctx is cancelled
 // or the connection closes.
 func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, onMicWarm func(bool)) error {
-	cmd := newFFmpegCmd(ctx, normalizeMicSpec(os.Getenv("AATOOLKIT_STT_MIC")))
+	cmd := newFFmpegCmd(ctx, os.Getenv("AATOOLKIT_STT_MIC"))
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
