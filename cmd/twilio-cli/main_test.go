@@ -433,17 +433,24 @@ command = "true"
 health = { path = "/healthz", port = 1 }
 `)
 
-	run := func(env ...string) string {
-		cmd := exec.Command(bin, "+15551234567")
+	// env is always set explicitly — including to empty — so a value exported in
+	// the developer's own shell cannot leak in and make a subtest pass for the
+	// wrong reason.
+	run := func(env string, args ...string) string {
+		cmd := exec.Command(bin, append(args, "+15551234567")...)
 		cmd.Dir = elsewhere
 		cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk97-test-token")
-		cmd.Env = append(cmd.Env, env...)
-		out, _ := cmd.CombinedOutput() // a non-zero exit is expected in both runs
+		cmd.Env = append(cmd.Env, configEnvVar+"="+env)
+		out, _ := cmd.CombinedOutput() // a non-zero exit is expected in every run
 		return string(out)
 	}
 
+	// resolved is the target the config above produces: host, its second listen
+	// (the webhook port), and the voice route.
+	const resolved = "127.0.0.1:2/webhook"
+
 	t.Run("config path in the environment resolves from any cwd", func(t *testing.T) {
-		out := run(configEnvVar + "=" + configPath)
+		out := run(configPath)
 		if strings.Contains(out, "no such file") {
 			t.Errorf("resolution did not use %s=%s; it still looked for a file of its own.\ncwd: %s\noutput:\n%s",
 				configEnvVar, configPath, elsewhere, out)
@@ -451,13 +458,28 @@ health = { path = "/healthz", port = 1 }
 		// Port 2 is the config's second listen — its webhook port. Reaching a
 		// connection failure against that exact target proves resolution read
 		// the file rather than merely skipping the missing-file error.
-		if !strings.Contains(out, "127.0.0.1:2/webhook") {
-			t.Errorf("run did not get as far as dialing the resolved target (want http://127.0.0.1:2/webhook named).\noutput:\n%s", out)
+		if !strings.Contains(out, resolved) {
+			t.Errorf("run did not get as far as dialing the resolved target (want %s named).\noutput:\n%s", resolved, out)
+		}
+	})
+
+	// -config must be pinned end-to-end, not just as a pure function. The
+	// plumbing is four positional string parameters into resolveWebhook, so a
+	// dropped or transposed argument would silently stop the flag working while
+	// TestResolveConfigPath_FlagWinsOverEnv — which never touches main — stayed
+	// green. The environment is empty here, so only the flag can carry this.
+	t.Run("-config resolves with nothing in the environment", func(t *testing.T) {
+		out := run("", "-config", configPath)
+		if strings.Contains(out, "no config path") {
+			t.Errorf("-config was not consulted: resolution reported no config source at all.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, resolved) {
+			t.Errorf("-config did not reach resolution (want %s named).\noutput:\n%s", resolved, out)
 		}
 	})
 
 	t.Run("control: with no config source the error names both", func(t *testing.T) {
-		out := run(configEnvVar + "=")
+		out := run("")
 		for _, want := range []string{"-config", configEnvVar} {
 			if !strings.Contains(out, want) {
 				t.Errorf("control run's error does not name %q, so the operator is not told how to supply a config.\noutput:\n%s", want, out)

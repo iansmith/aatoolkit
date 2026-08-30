@@ -144,7 +144,7 @@ func startCapture(port int) (*smsCaptureServer, string, error) {
 // the usage text.
 func runSMSMode(args []string) {
 	fs := flag.NewFlagSet("sms", flag.ExitOnError)
-	webhookURL := fs.String("webhook", "", "the server SMS webhook URL; skips config resolution entirely (default: resolved from -config / $AATOOLKIT_TWILIO_CONFIG)")
+	webhookURL := fs.String("webhook", "", "the server SMS webhook URL; skips config resolution entirely (default: resolved from -config / $"+configEnvVar+")")
 	configPath := fs.String("config", "", "path to the fleet config to resolve the webhook target from; overrides $"+configEnvVar)
 	toNumber := fs.String("to", defaultTo, "the Twilio number the SMS was sent to, E.164")
 	capturePort := fs.Int("capture-port", defaultCapturePort, "port the local reply-capture server binds; must match the TWILIO_API_BASE_URL the server was launched with")
@@ -201,7 +201,7 @@ func main() {
 		return
 	}
 
-	webhookURL := flag.String("webhook", "", "the server webhook URL; skips config resolution entirely (default: resolved from -config / $AATOOLKIT_TWILIO_CONFIG)")
+	webhookURL := flag.String("webhook", "", "the server webhook URL; skips config resolution entirely (default: resolved from -config / $"+configEnvVar+")")
 	configPath := flag.String("config", "", "path to the fleet config to resolve the webhook target from; overrides $"+configEnvVar)
 	noEchoMarks := flag.Bool("no-echo-marks", false, "suppress mark-echo (for testing the server's AwaitingMarkEcho timeout)")
 	toNumber := flag.String("to", defaultTo, "dialed (listening) number, E.164")
