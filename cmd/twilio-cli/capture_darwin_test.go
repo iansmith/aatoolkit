@@ -81,3 +81,29 @@ func TestGracefulCancel_IsolatesFromCallerProcessGroup(t *testing.T) {
 		t.Errorf("child pgid %d is not its own pid %d — expected a new process-group leader", childPgid, cmd.Process.Pid)
 	}
 }
+
+// TestNormalizeMicSpec pins AATK-97's second half. AATOOLKIT_STT_MIC is handed
+// straight to ffmpeg's avfoundation `-i`, whose device spec is `[video]:[audio]`
+// — so a bare index names the *video* device. Setting it to "1" meaning "audio
+// device 1" opens the camera instead and fails with an unrelated framerate
+// error that says nothing about the real mistake. A value with no colon can
+// only have been meant as the audio device, so supply the colon.
+func TestNormalizeMicSpec(t *testing.T) {
+	cases := []struct {
+		in, want, desc string
+	}{
+		{"", ":default", "unset: the built-in default, empty video and audio \"default\""},
+		{"1", ":1", "bare index: meant as audio, must not become the video device"},
+		{"MacBook Pro Microphone", ":MacBook Pro Microphone", "bare device name: same treatment"},
+		{":1", ":1", "already a spec: passed through untouched"},
+		{":default", ":default", "explicit default: passed through untouched"},
+		{"0:1", "0:1", "full video:audio spec: passed through untouched"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			if got := normalizeMicSpec(tc.in); got != tc.want {
+				t.Errorf("normalizeMicSpec(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

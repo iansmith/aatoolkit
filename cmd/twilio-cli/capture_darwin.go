@@ -51,6 +51,15 @@ func gracefulCancel(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
+// normalizeMicSpec turns the AATOOLKIT_STT_MIC value into an avfoundation
+// device spec.
+func normalizeMicSpec(v string) string {
+	if v == "" {
+		return ":default"
+	}
+	return v
+}
+
 // streamMicFrames captures mic input via ffmpeg, slices it into 8 kHz μ-law
 // 20 ms frames (160 bytes each), discards leading all-0xFF silence frames
 // (bounded at 75 frames / 1500 ms), and sends each frame to conn as a Twilio
@@ -58,11 +67,7 @@ func gracefulCancel(cmd *exec.Cmd) {
 // (capHit=false) or the discard cap is hit (capHit=true). Returns when ctx is cancelled
 // or the connection closes.
 func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, onMicWarm func(bool)) error {
-	mic := os.Getenv("AATOOLKIT_STT_MIC")
-	if mic == "" {
-		mic = ":default"
-	}
-	cmd := newFFmpegCmd(ctx, mic)
+	cmd := newFFmpegCmd(ctx, normalizeMicSpec(os.Getenv("AATOOLKIT_STT_MIC")))
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

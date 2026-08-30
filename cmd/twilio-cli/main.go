@@ -29,7 +29,20 @@ func validateE164(s string) error {
 const (
 	defaultBasePath = "aa-server-status.toml"
 	serverName      = "the server"
+
+	// configEnvVar names the environment variable that points twilio-cli at
+	// the fleet config to resolve webhook targets from.
+	configEnvVar = "AATOOLKIT_TWILIO_CONFIG"
 )
+
+// resolveConfigPath returns the config file to load: the -config flag wins,
+// then the configEnvVar environment value.
+func resolveConfigPath(flagValue, envValue string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
+	}
+	return defaultBasePath, nil
+}
 
 // resolveTarget loads the merged aa-server-status config at basePath and
 // derives the server's URL for pathSuffix (e.g. "/webhook" or "/sms/inbound")
@@ -55,9 +68,13 @@ func resolveTarget(basePath, pathSuffix string) (string, error) {
 // value always wins and skips config resolution entirely (even if config is
 // missing or broken); otherwise it's derived from the aa-server-status config
 // at basePath.
-func webhookTarget(explicit, basePath string) (string, error) {
+func webhookTarget(explicit, configFlag, configEnv string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
+	}
+	basePath, err := resolveConfigPath(configFlag, configEnv)
+	if err != nil {
+		return "", err
 	}
 	return resolveTarget(basePath, "/webhook")
 }
@@ -66,9 +83,13 @@ func webhookTarget(explicit, basePath string) (string, error) {
 // /sms/inbound route, not /webhook): an explicit flag value always wins,
 // skipping config resolution entirely; otherwise it's derived from the
 // aa-server-status config at basePath. Mirrors webhookTarget.
-func smsWebhookTarget(explicit, basePath string) (string, error) {
+func smsWebhookTarget(explicit, configFlag, configEnv string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
+	}
+	basePath, err := resolveConfigPath(configFlag, configEnv)
+	if err != nil {
+		return "", err
 	}
 	return resolveTarget(basePath, "/sms/inbound")
 }
@@ -146,7 +167,7 @@ func runSMSMode(args []string) {
 		log.Fatalf("twilio-cli: sms: -to: %v", err)
 	}
 
-	target, err := smsWebhookTarget(*webhookURL, defaultBasePath)
+	target, err := smsWebhookTarget(*webhookURL, "", os.Getenv(configEnvVar))
 	if err != nil {
 		log.Fatalf("twilio-cli: sms: %v", err)
 	}
@@ -205,7 +226,7 @@ func main() {
 		log.Fatalf("twilio-cli: %v", err)
 	}
 
-	target, err := webhookTarget(*webhookURL, defaultBasePath)
+	target, err := webhookTarget(*webhookURL, "", os.Getenv(configEnvVar))
 	if err != nil {
 		log.Fatalf("twilio-cli: %v", err)
 	}
