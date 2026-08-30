@@ -543,6 +543,22 @@ health = { path = "/healthz", port = 1 }
 			}
 		}
 	})
+
+	// The short-circuit has to be pinned at the CALL SITE, not just in
+	// webhookTarget: main forwards three positional strings, and blanking
+	// `explicit` there leaves every function-level test green. What that ships
+	// is the cruel failure — the operator passes -webhook and is answered with
+	// an error telling them to pass -webhook. The environment is empty, so a
+	// run that reaches the explicit URL can only have short-circuited.
+	t.Run("-webhook skips config resolution entirely", func(t *testing.T) {
+		out := run("", "-webhook", "http://127.0.0.1:1/explicit-webhook")
+		if strings.Contains(out, "no config path") {
+			t.Errorf("-webhook did not reach resolution: it demanded a config instead of skipping it.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "explicit-webhook") {
+			t.Errorf("-webhook was not the target dialed.\noutput:\n%s", out)
+		}
+	})
 }
 
 // TestTwilioCLISMSResolvesConfig pins the sms subcommand's config plumbing.
@@ -612,6 +628,20 @@ health = { path = "/healthz", port = 1 }
 			if !strings.Contains(out, want) {
 				t.Errorf("sms error does not name %q.\noutput:\n%s", want, out)
 			}
+		}
+	})
+
+	// The sms call site is its own place to get this wrong, for the same reason
+	// its config plumbing is: a separate flag set and a separate three-argument
+	// forward. TestSMSWebhookTarget_ExplicitFlagWins pins the function; this
+	// pins that main actually hands it the flag.
+	t.Run("-webhook skips config resolution entirely", func(t *testing.T) {
+		out := run("", "-webhook", "http://127.0.0.1:1/explicit-sms")
+		if strings.Contains(out, "no config path") {
+			t.Errorf("-webhook did not reach resolution: sms demanded a config instead of skipping it.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "explicit-sms") {
+			t.Errorf("-webhook was not the target posted to.\noutput:\n%s", out)
 		}
 	})
 }
