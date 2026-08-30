@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -53,11 +54,22 @@ func gracefulCancel(cmd *exec.Cmd) {
 
 // normalizeMicSpec turns the AATOOLKIT_STT_MIC value into an avfoundation
 // device spec.
+//
+// avfoundation's -i takes "[video]:[audio]", so a value with no colon names the
+// *video* device: AATOOLKIT_STT_MIC=1, meant as "audio device 1", opens the
+// camera and dies on an unsupported framerate — an error that names nothing the
+// operator did. Nobody points a microphone variable at a camera, so a
+// colon-less value can only have been meant as the audio half; supply the
+// colon rather than rejecting it. A value that already carries a colon is a
+// complete spec and is passed through untouched.
 func normalizeMicSpec(v string) string {
 	if v == "" {
 		return ":default"
 	}
-	return v
+	if strings.Contains(v, ":") {
+		return v
+	}
+	return ":" + v
 }
 
 // streamMicFrames captures mic input via ffmpeg, slices it into 8 kHz μ-law

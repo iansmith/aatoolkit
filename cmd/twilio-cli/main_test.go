@@ -18,11 +18,12 @@ command = "true"
 health = { path = "/healthz", port = 9730 }
 `
 
-// writeConfig writes contents to a fresh "aa-server-status.toml" in a temp
-// directory and returns its path.
+// writeConfig writes contents to a fresh config file in a temp directory and
+// returns its absolute path. The filename is arbitrary on purpose: twilio-cli
+// no longer knows any config filename, so nothing here may depend on one.
 func writeConfig(t *testing.T, contents string) string {
 	t.Helper()
-	basePath := filepath.Join(t.TempDir(), "aa-server-status.toml")
+	basePath := filepath.Join(t.TempDir(), "fleet-config.toml")
 	if err := os.WriteFile(basePath, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +104,7 @@ func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 // behavior 3: a missing config file with no -webhook flag must fail with a
 // clear, actionable error naming the missing file, not a silent fallback.
 func TestWebhookTarget_MissingConfigProducesClearError(t *testing.T) {
-	basePath := filepath.Join(t.TempDir(), "aa-server-status.toml")
+	basePath := filepath.Join(t.TempDir(), "fleet-config.toml")
 
 	_, err := webhookTarget("", basePath, "")
 	if err == nil {
