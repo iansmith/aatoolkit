@@ -588,6 +588,19 @@ health = { path = "/healthz", port = 1 }
 `)
 	const resolved = "127.0.0.1:2/sms/inbound"
 
+	// A second, distinguishable config for the precedence subtest: same shape,
+	// different webhook port, so which file won is visible in the output.
+	otherConfigPath := writeConfig(t, `
+[[server]]
+name = "the server"
+type = "exec"
+host = "127.0.0.1"
+listens = [1, 3]
+command = "true"
+health = { path = "/healthz", port = 1 }
+`)
+	const otherResolved = "127.0.0.1:3/sms/inbound"
+
 	// The sms entrypoint validates and binds the capture port after resolving
 	// the config, so a real free port is needed to reach the assertion. Take
 	// one from the kernel and release it immediately.
@@ -628,6 +641,20 @@ health = { path = "/healthz", port = 1 }
 			if !strings.Contains(out, want) {
 				t.Errorf("sms error does not name %q.\noutput:\n%s", want, out)
 			}
+		}
+	})
+
+	// Precedence needs both sources set to be observable at all, so the three
+	// single-source subtests above cannot see the two config arguments
+	// transposed at the call site — and a transposition there silently inverts
+	// what the README promises for this subcommand.
+	t.Run("-config overrides the environment", func(t *testing.T) {
+		out := run(otherConfigPath, "-config", configPath)
+		if strings.Contains(out, otherResolved) {
+			t.Errorf("the environment's config won over -config; precedence is inverted.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, resolved) {
+			t.Errorf("-config did not win (want %s named).\noutput:\n%s", resolved, out)
 		}
 	})
 
