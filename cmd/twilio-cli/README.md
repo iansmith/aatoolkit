@@ -47,6 +47,26 @@ This tone used to be a single 20 ms frame, which nobody could hear; it is now 24
 | `-no-echo-marks` | Suppress mark-echo, to exercise the server's `AwaitingMarkEcho` timeout. |
 | `-record <file>` | Record inbound server audio to a raw μ-law file, with per-arrival timing in `<file>.jsonl`. |
 
+### Pointing twilio-cli at a config
+
+With no `-webhook`, the target is resolved from a config file **you** name — there is no
+built-in default path. Give it with `-config <file>`, or export it once:
+
+```bash
+export AATOOLKIT_TWILIO_CONFIG=/absolute/path/to/your-fleet-config.toml
+```
+
+`-config` overrides the environment; `-webhook` overrides both and skips config resolution
+entirely. Use an absolute path: twilio-cli is normally run from this checkout while the
+config lives in the consuming project's, and a relative path resolves against your current
+directory.
+
+From the config, the target is the server named `"the server"`, at its second declared
+listen port. If your config names it something else, resolution fails and you must pass
+`-webhook` explicitly.
+
+This applies to the `sms` subcommand too — same flag, same variable, same precedence.
+
 ### Recording what the server sent
 
 `-record` answers the question a speaker cannot: **did the server's audio arrive?**
@@ -107,22 +127,6 @@ audio. Convert with:
 ```bash
 ffmpeg -i input.wav -ar 8000 -ac 1 -acodec pcm_mulaw -f mulaw out.ulaw
 ```
-
-With no `-webhook`, the target is resolved from a config file **you** name — there is no
-built-in default path. Give it with `-config <file>`, or export it once:
-
-```bash
-export AATOOLKIT_TWILIO_CONFIG=/absolute/path/to/your-fleet-config.toml
-```
-
-`-config` overrides the environment; `-webhook` overrides both and skips config resolution
-entirely. Use an absolute path: twilio-cli is normally run from this checkout while the
-config lives in the consuming project's, and a relative path resolves against your current
-directory.
-
-From the config, the target is the server named `"the server"`, at its second declared
-listen port. If your config names it something else, resolution fails and you must pass
-`-webhook` explicitly.
 
 ## SMS — two steps, in this order
 

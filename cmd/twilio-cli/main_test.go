@@ -32,6 +32,31 @@ func writeConfig(t *testing.T, contents string) string {
 	return basePath
 }
 
+// buildTwilioCLI builds the entrypoint and returns the binary path together
+// with the repo root. Four tests drive the real binary as a subprocess and had
+// grown four verbatim copies of this block; the parts that legitimately differ
+// — the config fixtures, the run closures, the assertions — all sit below it.
+// GOWORK=off is the load-bearing line: without it the build resolves this
+// module through the workspace one directory up rather than standalone.
+func buildTwilioCLI(t *testing.T, name string) (bin, repoRoot string) {
+	t.Helper()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot = filepath.Join(cwd, "..", "..")
+
+	bin = filepath.Join(t.TempDir(), name)
+	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
+	build.Dir = repoRoot
+	build.Env = append(os.Environ(), "GOWORK=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build entrypoint: %v\n%s", err, out)
+	}
+	return bin, repoRoot
+}
+
 // TestE164Validation pins AATK-16 observable behavior 1: the CLI validates the
 // caller's FROM number locally (^\+[1-9]\d{1,14}$) before any network call.
 func TestE164Validation(t *testing.T) {
@@ -181,20 +206,7 @@ func TestTwilioCLIRelativeAudioPathFromOtherCwd(t *testing.T) {
 		t.Skip("builds a binary; skipped under -short")
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	repoRoot := filepath.Join(cwd, "..", "..")
-
-	// Build the entrypoint.
-	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk56")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
-	build.Dir = repoRoot
-	build.Env = append(os.Environ(), "GOWORK=off")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build entrypoint: %v\n%s", err, out)
-	}
+	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-aatk56")
 
 	// Stage the fixture in a directory that is NOT the repo root.
 	fixture := filepath.Join(repoRoot, "telephony", "testdata", "how_are_you.ulaw")
@@ -251,19 +263,7 @@ func TestTwilioCLIWithoutAudioFlagKeepsMicDefault(t *testing.T) {
 		t.Skip("builds a binary; skipped under -short")
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	repoRoot := filepath.Join(cwd, "..", "..")
-
-	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk56-default")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
-	build.Dir = repoRoot
-	build.Env = append(os.Environ(), "GOWORK=off")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build entrypoint: %v\n%s", err, out)
-	}
+	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-aatk56-default")
 
 	cmd := exec.Command(bin,
 		"-webhook", "http://127.0.0.1:1/voice",
@@ -355,6 +355,46 @@ func TestWebhookTarget_ResolvesViaEnvConfig(t *testing.T) {
 	}
 }
 
+// TestSMSWebhookTarget_ExplicitFlagWins covers the sms side of the escape
+// hatch. The voice route has three tests for this contract; the sms route had
+// none, and smsWebhookTarget is a separate three-argument positional forward —
+// blanking `explicit` in it left the whole package green. The failure that
+// hides there is the cruel one: `twilio-cli sms -webhook <url>` answering with
+// an error that tells the operator to pass the flag they just passed.
+func TestSMSWebhookTarget_ExplicitFlagWins(t *testing.T) {
+	const explicit = "http://explicit.example/sms/inbound"
+
+	t.Run("wins over a resolvable config", func(t *testing.T) {
+		got, err := smsWebhookTarget(explicit, writeConfig(t, validServerConfig), "")
+		if err != nil {
+			t.Fatalf("smsWebhookTarget: %v", err)
+		}
+		if got != explicit {
+			t.Errorf("got %q, want the explicit flag value unchanged", got)
+		}
+	})
+
+	t.Run("wins with no config source at all", func(t *testing.T) {
+		got, err := smsWebhookTarget(explicit, "", "")
+		if err != nil {
+			t.Fatalf("smsWebhookTarget with -webhook and no config source: unexpected error: %v", err)
+		}
+		if got != explicit {
+			t.Errorf("got %q, want the explicit flag value unchanged", got)
+		}
+	})
+
+	t.Run("wins over a broken config, without reading it", func(t *testing.T) {
+		got, err := smsWebhookTarget(explicit, filepath.Join(t.TempDir(), "does-not-exist.toml"), "")
+		if err != nil {
+			t.Fatalf("smsWebhookTarget with -webhook and a missing config: unexpected error: %v", err)
+		}
+		if got != explicit {
+			t.Errorf("got %q, want the explicit flag value unchanged", got)
+		}
+	})
+}
+
 // TestSMSWebhookTarget_ResolvesViaEnvConfig mirrors the voice case for the sms
 // subcommand, which resolves the same config to a different route.
 func TestSMSWebhookTarget_ResolvesViaEnvConfig(t *testing.T) {
@@ -400,19 +440,7 @@ func TestTwilioCLIResolvesConfigFromEnvOutsideRepoRoot(t *testing.T) {
 		t.Skip("builds a binary; skipped under -short")
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	repoRoot := filepath.Join(cwd, "..", "..")
-
-	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk97")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
-	build.Dir = repoRoot
-	build.Env = append(os.Environ(), "GOWORK=off")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build entrypoint: %v\n%s", err, out)
-	}
+	bin, _ := buildTwilioCLI(t, "twilio-cli-aatk97")
 
 	// A directory that is neither the repo root nor anywhere a config lives.
 	elsewhere := t.TempDir()
@@ -528,19 +556,7 @@ func TestTwilioCLISMSResolvesConfig(t *testing.T) {
 		t.Skip("builds a binary; skipped under -short")
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	repoRoot := filepath.Join(cwd, "..", "..")
-
-	bin := filepath.Join(t.TempDir(), "twilio-cli-aatk97-sms")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/twilio-cli")
-	build.Dir = repoRoot
-	build.Env = append(os.Environ(), "GOWORK=off")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build entrypoint: %v\n%s", err, out)
-	}
+	bin, _ := buildTwilioCLI(t, "twilio-cli-aatk97-sms")
 
 	elsewhere := t.TempDir()
 	// Ports 1 and 2 are privileged and bound by nothing, so resolution succeeds
