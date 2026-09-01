@@ -500,7 +500,7 @@ listens = [1, 3]
 command = "true"
 health = { path = "/healthz", port = 1 }
 `)
-	const otherResolved = "127.0.0.1:4/webhook"
+	const otherResolved = "127.0.0.1:3/webhook"
 
 	t.Run("config path in the environment resolves from any cwd", func(t *testing.T) {
 		out := run(configPath)
@@ -609,7 +609,7 @@ listens = [1, 3]
 command = "true"
 health = { path = "/healthz", port = 1 }
 `)
-	const otherResolved = "127.0.0.1:4/sms/inbound"
+	const otherResolved = "127.0.0.1:3/sms/inbound"
 
 	// The sms entrypoint validates and binds the capture port after resolving
 	// the config, so a real free port is needed to reach the assertion. Take
@@ -875,6 +875,9 @@ func TestDefaultFromIsValidE164(t *testing.T) {
 // must emit no warning. Together they pin that the warning tracks the
 // defaulting and nothing else.
 func TestTwilioCLIVoiceNoFromWarnsAndProceeds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
 	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-nofrom")
 
 	run := func(args ...string) string {
@@ -904,6 +907,9 @@ func TestTwilioCLIVoiceNoFromWarnsAndProceeds(t *testing.T) {
 // `twilio-cli sms "hello"` ambiguous between the two. One positional argument
 // must still be a usage error, not a message sent from a defaulted number.
 func TestTwilioCLISMSStillRequiresExplicitFrom(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
 	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-smsfrom")
 
 	cmd := exec.Command(bin, "sms", "hello there")
@@ -933,6 +939,9 @@ func TestTwilioCLISMSStillRequiresExplicitFrom(t *testing.T) {
 // the dial fails fast against nobody rather than firing a signed webhook at a
 // developer's live server.
 func TestTwilioCLIServerFlagResolvesEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
 	bin, _ := buildTwilioCLI(t, "twilio-cli-serverflag")
 	elsewhere := t.TempDir()
 
@@ -953,6 +962,20 @@ listens = [3, 4]
 command = "true"
 health = { path = "/healthz", port = 3 }
 `)
+
+	// The sms subtest binds a capture server after resolving, so it needs a
+	// real free port to reach its assertion. The fixed default is 9750 — the
+	// port the README tells operators to point their own server at, so binding
+	// it here turns a developer mid-SMS-workflow into a red test that has
+	// nothing to do with their change.
+	capturePort := func() int {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve a capture port: %v", err)
+		}
+		defer ln.Close()
+		return ln.Addr().(*net.TCPAddr).Port
+	}()
 
 	// The environment always names alpha. Every subtest that expects beta can
 	// only get there through the flag, so the override is observable rather
@@ -987,7 +1010,7 @@ health = { path = "/healthz", port = 3 }
 	// Observable behavior 4: the same name drives the SMS route, which is a
 	// separate five-argument forward reaching the same resolver.
 	t.Run("sms: -server overrides the environment", func(t *testing.T) {
-		out := run("sms", "-server", "beta", "+15551234567", "hi")
+		out := run("sms", "-capture-port", strconv.Itoa(capturePort), "-server", "beta", "+15551234567", "hi")
 		if strings.Contains(out, "127.0.0.1:2/sms/inbound") {
 			t.Errorf("sms took the environment's name over -server.\noutput:\n%s", out)
 		}

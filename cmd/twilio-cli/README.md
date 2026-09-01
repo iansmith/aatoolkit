@@ -11,10 +11,10 @@ signed-webhook ceremony Twilio does, so the server cannot tell the difference.
 - **Launch the server with the `ws` stream scheme, not `wss`.** Answering `wss` makes every
   signature fail with a silent 403.
 - **`<FROM>` must be a number the server's roster knows**, in E.164 (`+15551234567`).
-  Unknown callers are rejected before a turn starts — unless the server is running in a
-  demo mode that binds any caller, in which case any well-formed E.164 gets through.
-  In voice mode `<FROM>` is optional and defaults to `+15105557890` with a warning; see
-  [Voice](#voice). The `sms` subcommand always requires it.
+  Whether an unknown caller is rejected before a turn starts is the server's policy, not
+  twilio-cli's — a server that binds any caller accepts any well-formed E.164. twilio-cli
+  only checks the shape. In voice mode `<FROM>` is optional and defaults with a warning;
+  see [Voice](#voice). The `sms` subcommand always requires it.
 
 ## Voice
 
