@@ -213,15 +213,83 @@ func TestLogCtlFrame_EmitsRawJSONVerbatim(t *testing.T) {
 	}
 }
 
+// TestHandleFrame_ClearFlushesQueuedPlayout is barge-in reaching the test
+// harness.
+//
+// The server sends `clear` when the caller starts talking over the reply: stop
+// playing it, the rest is abandoned. twilio-cli used to receive that and log
+// it, on the premise that it had "no outbound audio buffer to flush" -- but a
+// clear is not about the outbound direction at all. It flushes the client's
+// playout of server audio, and twilio-cli's model of that playout is the
+// filler. Leaving it alone leaves seconds of thrown-away reply charged against
+// the next mark echo, so the server sits waiting on audio nobody will hear:
+// the harness reports barge-in working when production would not.
+//
+// ffplay's own stdin pipe cannot be flushed in process (that would mean killing
+// the player mid-call), so the filler's timing state is the whole of what
+// honoring a clear can mean here -- and it is the part every downstream
+// decision reads.
+func TestHandleFrame_ClearFlushesQueuedPlayout(t *testing.T) {
+	const frames = 50 // one second of reply, delivered in a burst
+	sink := &recordingSink{}
+	player := testPlayer(sink)
+	audio := &callAudio{markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
+
+	for i := 0; i < frames; i++ {
+		handleFrame(twilio.Frame{Event: twilio.EventMedia, Payload: mkFrame(0x7f)},
+			player, audio, nil, "MZtest", true)
+	}
+	if audio.filler.outstanding(time.Now()) == 0 {
+		t.Fatal("nothing queued before the clear — the test cannot tell a flush from a no-op")
+	}
+	playedBeforeClear := sink.writes
+
+	out := captureLog(t, func() {
+		handleFrame(twilio.Frame{Event: twilio.EventClear}, player, audio, nil, "MZtest", true)
+	})
+
+	if got := audio.filler.outstanding(time.Now()); got != 0 {
+		t.Errorf("outstanding after a clear = %s, want 0 — the abandoned reply is still "+
+			"queued, so the next mark echo waits it out", got)
+	}
+	if audio.bytesSinceMark != 0 {
+		t.Errorf("bytesSinceMark after a clear: got %d, want 0 — the flushed audio is "+
+			"still counted as volume delivered since the last mark", audio.bytesSinceMark)
+	}
+	if sink.writes != playedBeforeClear {
+		t.Errorf("player writes across the clear: got %d, want %d — a clear plays nothing",
+			sink.writes, playedBeforeClear)
+	}
+	if !strings.Contains(out, "clear") {
+		t.Errorf("clear frame was not logged:\n%s", out)
+	}
+
+	// The consequence the ticket exists for: a mark arriving right behind the
+	// clear is echoed at once, because there is nothing left to wait for.
+	markOut := captureLog(t, func() {
+		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
+			player, audio, nil, "MZtest", true)
+	})
+	if !strings.Contains(markOut, "0s still queued") {
+		t.Errorf("mark after a clear did not report an empty queue:\n%s", markOut)
+	}
+}
+
 // TestHandleFrame_OtherControlEventsAreLogged: clear is handled, and an event
 // the server has no business sending back is logged loudly rather than dropped.
+//
+// The clear case here says only that the frame is reported; what it does to
+// the playout is TestHandleFrame_ClearFlushesQueuedPlayout's. It used to want
+// the old "no outbound audio buffer to flush" line, which pinned the bug as
+// the contract -- and note the wanted substring is "flushed", not "flush",
+// since the old line contained the latter and would have passed unchanged.
 func TestHandleFrame_OtherControlEventsAreLogged(t *testing.T) {
 	cases := []struct {
 		name  string
 		event twilio.EventType
 		want  string
 	}{
-		{"clear", twilio.EventClear, "clear"},
+		{"clear", twilio.EventClear, "flushed"},
 		{"unexpected start", twilio.EventStart, "unexpected"},
 	}
 	for _, tc := range cases {

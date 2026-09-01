@@ -497,7 +497,8 @@ func mulawPlayoutDuration(n int) time.Duration {
 
 // handleFrame dispatches a decoded inbound frame: media plays out and feeds
 // the mark-echo delay estimate, mark triggers the delayed echo (unless
-// suppressed), and clear is accepted with no further action.
+// suppressed), and clear flushes the queued playout so the abandoned reply
+// stops being counted.
 //
 // Every control-plane event is logged, inbound (<-) and outbound (->): they
 // are rare, and each one says something about the call. Media is the data
@@ -590,9 +591,20 @@ func handleFrame(f twilio.Frame, player *lazyPlayer, audio *callAudio, conn *web
 		go echoMark(conn, streamSID, f.MarkName, delay)
 
 	case twilio.EventClear:
-		// Twilio buffer-flush signal; twilio-cli has no outbound audio
-		// buffer to flush, so this is accepted and logged only.
-		log.Printf("twilio-cli: <- clear (no outbound audio buffer to flush)")
+		// Barge-in: the caller talked over the reply, so the server abandoned
+		// the rest of it and is telling the client to drop what is queued.
+		//
+		// This case used to log and nothing else, on the premise that
+		// twilio-cli had no buffer to flush. It has one: the filler is its
+		// model of the player's playout, and everything downstream reads it.
+		// Left alone, the discarded reply keeps being counted -- the next mark
+		// waits out audio nobody hears, and the filler stays quiet through the
+		// stretch the caller is talking over.
+		now := time.Now()
+		flushed := audio.filler.outstanding(now)
+		audio.filler.flush(now)
+		audio.bytesSinceMark = 0
+		log.Printf("twilio-cli: <- clear (flushed %s of queued playout)", flushed.Round(time.Millisecond))
 
 	default:
 		// start/stop/connected are client->server events; the server has no
