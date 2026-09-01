@@ -497,7 +497,8 @@ func mulawPlayoutDuration(n int) time.Duration {
 
 // handleFrame dispatches a decoded inbound frame: media plays out and feeds
 // the mark-echo delay estimate, mark triggers the delayed echo (unless
-// suppressed), and clear is accepted with no further action.
+// suppressed), and clear flushes the queued playout so the abandoned reply
+// stops being counted.
 //
 // Every control-plane event is logged, inbound (<-) and outbound (->): they
 // are rare, and each one says something about the call. Media is the data
