@@ -28,7 +28,7 @@ import (
 //
 // This is the ONE frame-source seam — a second one (a dialOption, say) would
 // leave two mechanisms selecting the same thing.
-var streamMic func(context.Context, *websocket.Conn, string, *int, func(bool)) error = streamMicFrames
+var streamMic func(context.Context, *websocket.Conn, string, *int, *streamRecorder, func(bool)) error = streamMicFrames
 
 // frameSourceLabel names whatever streamMic currently is, for the connected log
 // line. Set alongside streamMic, never independently.
@@ -51,7 +51,7 @@ type callAudio struct {
 	serverSpoke bool
 
 	// recorder is nil unless -record was passed; every method tolerates nil.
-	recorder *inboundRecorder
+	recorder *streamRecorder
 
 	// filler keeps the player's stream level with the wall clock across the
 	// silences a conversation is mostly made of.
@@ -60,8 +60,9 @@ type callAudio struct {
 
 // dialOptions configures optional dial() behavior.
 type dialOptions struct {
-	noEchoMarks bool
-	recordPath  string
+	noEchoMarks    bool
+	recordPath     string
+	recordSentPath string
 }
 
 // dialOption configures dialOptions.
@@ -75,9 +76,16 @@ func withNoEchoMarks() dialOption {
 }
 
 // withRecording records every inbound media payload to path (see -record in
-// main.go and inboundRecorder's own doc for why this exists).
+// main.go and streamRecorder's own doc for why this exists).
 func withRecording(path string) dialOption {
 	return func(o *dialOptions) { o.recordPath = path }
+}
+
+// withSentRecording records every outbound media payload -- the caller's own
+// audio, whatever its source -- to path (see -record-sent in main.go). The file
+// is raw μ-law, so it is directly replayable with -audio.
+func withSentRecording(path string) dialOption {
+	return func(o *dialOptions) { o.recordSentPath = path }
 }
 
 func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
@@ -104,11 +112,20 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		filler:          newPlayoutFiller(time.Now(), telephony.MuLawSilence),
 	}
 
-	audio.recorder, err = newInboundRecorder(cfg.recordPath, time.Now())
+	audio.recorder, err = newStreamRecorder(recordInbound, cfg.recordPath, time.Now())
 	if err != nil {
 		return err
 	}
 	defer func() { audio.recorder.close(time.Now()) }()
+
+	// The outbound recorder is dial's to own for the same reason the inbound one
+	// is: it lives exactly as long as the call. The frame source only writes to
+	// it, so it is created and closed here and handed down to streamMic.
+	sentRecorder, err := newStreamRecorder(recordOutbound, cfg.recordSentPath, time.Now())
+	if err != nil {
+		return err
+	}
+	defer func() { sentRecorder.close(time.Now()) }()
 
 	// earconCh signals the main read loop to play an earcon tone.
 	// The mic goroutine sends on this channel; the read loop receives and plays
@@ -231,7 +248,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 				// Earcon signal already pending; skip this one.
 			}
 		}
-		err := streamMic(micCtx, conn, streamSID, &seqNum, onMicWarm)
+		err := streamMic(micCtx, conn, streamSID, &seqNum, sentRecorder, onMicWarm)
 		// naturalEnd: streamMic returned on its OWN (mic EOF = caller hangup), not
 		// because something cancelled micCtx (Ctrl-C, or a server-initiated close via
 		// the read loop's cancelMic).
@@ -538,7 +555,7 @@ func handleFrame(f twilio.Frame, player *lazyPlayer, audio *callAudio, conn *web
 		// Recorded first: what arrived is a fact independent of whether the
 		// player was in any state to render it.
 		now := time.Now()
-		audio.recorder.writeIn(f.Payload, now)
+		audio.recorder.write(f.Payload, now)
 		player.play(f.Payload)
 		audio.filler.fed(f.Payload, now)
 		audio.bytesSinceMark += len(f.Payload)

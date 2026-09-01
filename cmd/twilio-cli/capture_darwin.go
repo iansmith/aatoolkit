@@ -82,9 +82,10 @@ func normalizeMicSpec(v string) string {
 // 20 ms frames (160 bytes each), discards leading all-0xFF silence frames
 // (bounded at 75 frames / 1500 ms), and sends each frame to conn as a Twilio
 // media event. onMicWarm fires exactly once when the first real frame is emitted
-// (capHit=false) or the discard cap is hit (capHit=true). Returns when ctx is cancelled
-// or the connection closes.
-func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, onMicWarm func(bool)) error {
+// (capHit=false) or the discard cap is hit (capHit=true). rec is nil unless
+// -record-sent named a file. Returns when ctx is cancelled or the connection
+// closes.
+func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, onMicWarm func(bool)) error {
 	cmd := newFFmpegCmd(ctx, os.Getenv("AATOOLKIT_STT_MIC"))
 
 	stdout, err := cmd.StdoutPipe()
@@ -95,23 +96,15 @@ func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string
 		return fmt.Errorf("streamMicFrames: start ffmpeg (installed? `brew install ffmpeg`): %w", err)
 	}
 
-	enc := newMediaFrameEncoder(streamSID, seqNum)
+	send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn))
 	// Drain on context.Background(), NOT ctx: on shutdown ctx is cancelled, which
 	// (via newFFmpegCmd's cmd.Cancel) sends ffmpeg a SIGINT so it flushes its buffer
 	// and closes stdout. drainFrames must read that flushed tail through to EOF rather
 	// than bail on the cancelled ctx — otherwise the last ~100-300ms of audio is lost.
 	// Termination is EOF-driven (ffmpeg's close), bounded by cmd.WaitDelay. Each frame
-	// is sent with a fresh short-lived write context so the now-dead ctx can't abort the
-	// trailing writes (matching sendStop/echoMark's teardown-write pattern in dial.go).
-	_, drainErr := drainFramesWithDiscard(context.Background(), stdout, muLawFrame20ms, func(frame []byte) error {
-		msg, encErr := enc.encode(frame)
-		if encErr != nil {
-			return encErr
-		}
-		writeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		return conn.Write(writeCtx, websocket.MessageText, msg)
-	}, onMicWarm)
+	// is sent with a fresh short-lived write context (connFrameWriter) so the now-dead
+	// ctx can't abort the trailing writes.
+	_, drainErr := drainFramesWithDiscard(context.Background(), stdout, muLawFrame20ms, send, onMicWarm)
 	// If drainFrames exited due to a send error (not context cancellation),
 	// ffmpeg may still be running and will fill the pipe buffer, blocking
 	// cmd.Wait indefinitely. Kill it now so Wait returns promptly.
