@@ -32,7 +32,26 @@ const (
 	// configEnvVar names the environment variable that points twilio-cli at
 	// the config to resolve webhook targets from.
 	configEnvVar = "AATOOLKIT_TWILIO_CONFIG"
+
+	// serverEnvVar names the environment variable that supplies the config
+	// server-entry name to resolve webhook targets from.
+	serverEnvVar = "AATOOLKIT_SERVER_NAME"
 )
+
+// resolveServerName returns the config server-entry name to look up.
+//
+// RED STUB (AATK-98): still answers the hardcoded name, ignoring both sources.
+func resolveServerName(flagValue, envValue string) (string, error) {
+	return serverName, nil
+}
+
+// resolveFrom returns the caller's E.164 for a voice dial and the warning line
+// to log when the positional FROM was omitted.
+//
+// RED STUB (AATK-98): no defaulting yet.
+func resolveFrom(positional string) (from, warning string) {
+	return positional, ""
+}
 
 // resolveConfigPath returns the config file to load for webhook resolution:
 // the -config flag wins, then the configEnvVar environment value.
@@ -65,9 +84,13 @@ func resolveConfigPath(flagValue, envValue string) (string, error) {
 // only in pathSuffix, and every other line — the short-circuit, the path
 // resolution, the three error cases — is identical. webhookTarget and
 // smsWebhookTarget name the two routes for their callers.
-func resolveWebhook(explicit, configFlag, configEnv, pathSuffix string) (string, error) {
+func resolveWebhook(explicit, configFlag, configEnv, serverFlag, serverEnv, pathSuffix string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
+	}
+	serverName, err := resolveServerName(serverFlag, serverEnv)
+	if err != nil {
+		return "", err
 	}
 	basePath, err := resolveConfigPath(configFlag, configEnv)
 	if err != nil {
@@ -89,14 +112,14 @@ func resolveWebhook(explicit, configFlag, configEnv, pathSuffix string) (string,
 }
 
 // webhookTarget resolves the voice webhook URL to dial.
-func webhookTarget(explicit, configFlag, configEnv string) (string, error) {
-	return resolveWebhook(explicit, configFlag, configEnv, "/webhook")
+func webhookTarget(explicit, configFlag, configEnv, serverFlag, serverEnv string) (string, error) {
+	return resolveWebhook(explicit, configFlag, configEnv, serverFlag, serverEnv, "/webhook")
 }
 
 // smsWebhookTarget resolves the inbound-SMS webhook URL to post to — the
 // /sms/inbound route, not /webhook.
-func smsWebhookTarget(explicit, configFlag, configEnv string) (string, error) {
-	return resolveWebhook(explicit, configFlag, configEnv, "/sms/inbound")
+func smsWebhookTarget(explicit, configFlag, configEnv, serverFlag, serverEnv string) (string, error) {
+	return resolveWebhook(explicit, configFlag, configEnv, serverFlag, serverEnv, "/sms/inbound")
 }
 
 // defaultCapturePort is the port the SMS capture server binds unless
@@ -173,7 +196,7 @@ func runSMSMode(args []string) {
 		log.Fatalf("twilio-cli: sms: -to: %v", err)
 	}
 
-	target, err := smsWebhookTarget(*webhookURL, *configPath, os.Getenv(configEnvVar))
+	target, err := smsWebhookTarget(*webhookURL, *configPath, os.Getenv(configEnvVar), "", os.Getenv(serverEnvVar))
 	if err != nil {
 		log.Fatalf("twilio-cli: sms: %v", err)
 	}
@@ -233,7 +256,7 @@ func main() {
 		log.Fatalf("twilio-cli: %v", err)
 	}
 
-	target, err := webhookTarget(*webhookURL, *configPath, os.Getenv(configEnvVar))
+	target, err := webhookTarget(*webhookURL, *configPath, os.Getenv(configEnvVar), "", os.Getenv(serverEnvVar))
 	if err != nil {
 		log.Fatalf("twilio-cli: %v", err)
 	}

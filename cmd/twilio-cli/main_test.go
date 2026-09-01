@@ -88,7 +88,7 @@ func TestE164Validation(t *testing.T) {
 func TestWebhookTarget_ExplicitFlagOverridesConfig(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
 
-	got, err := webhookTarget("http://explicit.example/webhook", basePath, "")
+	got, err := webhookTarget("http://explicit.example/webhook", basePath, "", "", "")
 	if err != nil {
 		t.Fatalf("webhookTarget: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestWebhookTarget_ExplicitFlagOverridesConfig(t *testing.T) {
 func TestWebhookTarget_ExplicitFlagOverridesEvenBrokenConfig(t *testing.T) {
 	basePath := filepath.Join(t.TempDir(), "does-not-exist.toml")
 
-	got, err := webhookTarget("http://explicit.example/webhook", basePath, "")
+	got, err := webhookTarget("http://explicit.example/webhook", basePath, "", "", "")
 	if err != nil {
 		t.Fatalf("webhookTarget with missing config but explicit flag: unexpected error: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestWebhookTarget_ExplicitFlagOverridesEvenBrokenConfig(t *testing.T) {
 func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
 
-	got, err := webhookTarget("", basePath, "")
+	got, err := webhookTarget("", basePath, "", "", "")
 	if err != nil {
 		t.Fatalf("webhookTarget: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 func TestWebhookTarget_MissingConfigProducesClearError(t *testing.T) {
 	basePath := filepath.Join(t.TempDir(), "fleet-config.toml")
 
-	_, err := webhookTarget("", basePath, "")
+	_, err := webhookTarget("", basePath, "", "", "")
 	if err == nil {
 		t.Fatal("expected an error for a missing config file")
 	}
@@ -147,7 +147,7 @@ func TestWebhookTarget_MissingConfigProducesClearError(t *testing.T) {
 func TestWebhookTarget_MalformedConfigProducesClearError(t *testing.T) {
 	basePath := writeConfig(t, "not valid = [toml")
 
-	_, err := webhookTarget("", basePath, "")
+	_, err := webhookTarget("", basePath, "", "", "")
 	if err == nil {
 		t.Fatal("expected an error for a malformed config file")
 	}
@@ -166,7 +166,7 @@ command = "true"
 health = { path = "/healthz", port = 80 }
 `)
 
-	_, err := webhookTarget("", basePath, "")
+	_, err := webhookTarget("", basePath, "", "", "")
 	if err == nil {
 		t.Fatal("expected an error when no the server server is declared")
 	}
@@ -186,7 +186,7 @@ command = "true"
 health = { path = "/healthz", port = 9730 }
 `)
 
-	_, err := webhookTarget("", basePath, "")
+	_, err := webhookTarget("", basePath, "", "", "")
 	if err == nil {
 		t.Fatal("expected an error when the server server declares no webhook port")
 	}
@@ -346,7 +346,7 @@ func TestResolveConfigPath_NeitherSetNamesBothSources(t *testing.T) {
 func TestWebhookTarget_ResolvesViaEnvConfig(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
 
-	got, err := webhookTarget("", "", basePath)
+	got, err := webhookTarget("", "", basePath, "", "")
 	if err != nil {
 		t.Fatalf("webhookTarget: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestSMSWebhookTarget_ExplicitFlagWins(t *testing.T) {
 	const explicit = "http://explicit.example/sms/inbound"
 
 	t.Run("wins over a resolvable config", func(t *testing.T) {
-		got, err := smsWebhookTarget(explicit, writeConfig(t, validServerConfig), "")
+		got, err := smsWebhookTarget(explicit, writeConfig(t, validServerConfig), "", "", "")
 		if err != nil {
 			t.Fatalf("smsWebhookTarget: %v", err)
 		}
@@ -375,7 +375,7 @@ func TestSMSWebhookTarget_ExplicitFlagWins(t *testing.T) {
 	})
 
 	t.Run("wins with no config source at all", func(t *testing.T) {
-		got, err := smsWebhookTarget(explicit, "", "")
+		got, err := smsWebhookTarget(explicit, "", "", "", "")
 		if err != nil {
 			t.Fatalf("smsWebhookTarget with -webhook and no config source: unexpected error: %v", err)
 		}
@@ -385,7 +385,7 @@ func TestSMSWebhookTarget_ExplicitFlagWins(t *testing.T) {
 	})
 
 	t.Run("wins over a broken config, without reading it", func(t *testing.T) {
-		got, err := smsWebhookTarget(explicit, filepath.Join(t.TempDir(), "does-not-exist.toml"), "")
+		got, err := smsWebhookTarget(explicit, filepath.Join(t.TempDir(), "does-not-exist.toml"), "", "", "")
 		if err != nil {
 			t.Fatalf("smsWebhookTarget with -webhook and a missing config: unexpected error: %v", err)
 		}
@@ -400,7 +400,7 @@ func TestSMSWebhookTarget_ExplicitFlagWins(t *testing.T) {
 func TestSMSWebhookTarget_ResolvesViaEnvConfig(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
 
-	got, err := smsWebhookTarget("", "", basePath)
+	got, err := smsWebhookTarget("", "", basePath, "", "")
 	if err != nil {
 		t.Fatalf("smsWebhookTarget: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestSMSWebhookTarget_ResolvesViaEnvConfig(t *testing.T) {
 // this, making a missing path an error would break the one invocation that was
 // unblocking people.
 func TestWebhookTarget_ExplicitFlagWinsWithNoConfigSourceAtAll(t *testing.T) {
-	got, err := webhookTarget("http://explicit.example/webhook", "", "")
+	got, err := webhookTarget("http://explicit.example/webhook", "", "", "", "")
 	if err != nil {
 		t.Fatalf("webhookTarget with -webhook and no config source: unexpected error: %v", err)
 	}
@@ -671,4 +671,241 @@ health = { path = "/healthz", port = 1 }
 			t.Errorf("-webhook was not the target posted to.\noutput:\n%s", out)
 		}
 	})
+}
+
+// twoServerConfig declares two servers so a resolution test can prove the
+// looked-up name actually selects between them. A single-entry fixture cannot:
+// any name that resolves at all would resolve to the same entry.
+const twoServerConfig = `
+[[server]]
+name = "alpha"
+type = "exec"
+host = "127.0.0.1"
+listens = [9730, 9740]
+command = "true"
+health = { path = "/healthz", port = 9730 }
+
+[[server]]
+name = "beta"
+type = "exec"
+host = "10.0.0.9"
+listens = [8730, 8740]
+command = "true"
+health = { path = "/healthz", port = 8730 }
+`
+
+// TestResolveServerName_FlagWinsOverEnv pins the precedence AATK-98 owns: an
+// explicit -server beats the environment, so a one-off run against another
+// entry does not require unsetting the operator's exported default.
+func TestResolveServerName_FlagWinsOverEnv(t *testing.T) {
+	got, err := resolveServerName("from-flag", "from-env")
+	if err != nil {
+		t.Fatalf("resolveServerName: %v", err)
+	}
+	if got != "from-flag" {
+		t.Errorf("got %q, want the -server flag value to win", got)
+	}
+}
+
+// TestResolveServerName_EnvUsedWhenFlagAbsent pins the second source. This is
+// the mechanism that removes the friction the ticket names: the operator
+// exports the name once and every invocation resolves without typing it.
+func TestResolveServerName_EnvUsedWhenFlagAbsent(t *testing.T) {
+	got, err := resolveServerName("", "from-env")
+	if err != nil {
+		t.Fatalf("resolveServerName: %v", err)
+	}
+	if got != "from-env" {
+		t.Errorf("got %q, want the environment value", got)
+	}
+}
+
+// TestResolveServerName_NeitherSetNamesBothSources is the core requirement.
+// The old hardcoded name belonged to one particular consuming project and
+// stopped matching the moment that project renamed its entry — an invented
+// default is exactly what broke, and it failed with an error naming a server
+// the operator had never heard of. With no source given the error must instead
+// name both ways to supply one.
+func TestResolveServerName_NeitherSetNamesBothSources(t *testing.T) {
+	got, err := resolveServerName("", "")
+	if err == nil {
+		t.Fatalf("resolveServerName with no source returned %q and no error; want an actionable error", got)
+	}
+	for _, want := range []string{"-server", serverEnvVar} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q — the operator cannot act on it", err.Error(), want)
+		}
+	}
+}
+
+// TestWebhookTarget_ServerFlagSelectsEntry proves the resolved name reaches the
+// config lookup: against a config declaring two servers, -server picks the one
+// it names, host and webhook port and all.
+func TestWebhookTarget_ServerFlagSelectsEntry(t *testing.T) {
+	basePath := writeConfig(t, twoServerConfig)
+
+	got, err := webhookTarget("", basePath, "", "beta", "")
+	if err != nil {
+		t.Fatalf("webhookTarget: %v", err)
+	}
+	if got != "http://10.0.0.9:8740/webhook" {
+		t.Errorf("got %q, want http://10.0.0.9:8740/webhook", got)
+	}
+}
+
+// TestWebhookTarget_ServerFlagOverridesEnv is the same selection driven through
+// both sources at once: the flag must win at the point of the lookup, not just
+// inside resolveServerName. A forward that passed the env value along would
+// still pass the precedence unit test and fail here.
+func TestWebhookTarget_ServerFlagOverridesEnv(t *testing.T) {
+	basePath := writeConfig(t, twoServerConfig)
+
+	got, err := webhookTarget("", basePath, "", "alpha", "beta")
+	if err != nil {
+		t.Fatalf("webhookTarget: %v", err)
+	}
+	if got != "http://127.0.0.1:9740/webhook" {
+		t.Errorf("got %q, want the -server flag entry http://127.0.0.1:9740/webhook", got)
+	}
+}
+
+// TestWebhookTarget_ServerNameFromEnv is the end-to-end path the operator
+// actually runs: no -server, the name carried by the environment alongside the
+// config path.
+func TestWebhookTarget_ServerNameFromEnv(t *testing.T) {
+	basePath := writeConfig(t, twoServerConfig)
+
+	got, err := webhookTarget("", "", basePath, "", "beta")
+	if err != nil {
+		t.Fatalf("webhookTarget: %v", err)
+	}
+	if got != "http://10.0.0.9:8740/webhook" {
+		t.Errorf("got %q, want http://10.0.0.9:8740/webhook", got)
+	}
+}
+
+// TestWebhookTarget_UnknownServerNamesTheValueLookedUp pins the error text on
+// the value actually looked up. The failure this ticket started from was an
+// error naming a hardcoded server the operator had never configured; an error
+// that quotes the name it searched for is the difference between "typo in
+// -server" and "no idea what this tool wants".
+func TestWebhookTarget_UnknownServerNamesTheValueLookedUp(t *testing.T) {
+	basePath := writeConfig(t, twoServerConfig)
+
+	_, err := webhookTarget("", basePath, "", "gamma", "")
+	if err == nil {
+		t.Fatal("expected an error when the named server is not declared")
+	}
+	if !strings.Contains(err.Error(), "gamma") {
+		t.Errorf("error %q does not name the server it looked up", err.Error())
+	}
+}
+
+// TestSMSWebhookTarget_ServerNameSelectsEntry pins observable behavior 4: the
+// -server default and override apply to the SMS route too, since both go
+// through resolveWebhook. smsWebhookTarget is a separate positional forward,
+// and this package has already been bitten once by a forward that dropped an
+// argument while every voice test stayed green.
+func TestSMSWebhookTarget_ServerNameSelectsEntry(t *testing.T) {
+	basePath := writeConfig(t, twoServerConfig)
+
+	got, err := smsWebhookTarget("", basePath, "", "beta", "")
+	if err != nil {
+		t.Fatalf("smsWebhookTarget: %v", err)
+	}
+	if got != "http://10.0.0.9:8740/sms/inbound" {
+		t.Errorf("got %q, want http://10.0.0.9:8740/sms/inbound", got)
+	}
+}
+
+// TestResolveFrom_EmptyDefaultsWithWarning pins observable behavior 3: a voice
+// dial with no positional FROM uses the default source number and produces one
+// warning line identifying it as a default, rather than exiting with usage.
+func TestResolveFrom_EmptyDefaultsWithWarning(t *testing.T) {
+	from, warning := resolveFrom("")
+	if from != defaultFrom {
+		t.Errorf("got FROM %q, want the default %q", from, defaultFrom)
+	}
+	if warning == "" {
+		t.Fatal("no warning for a defaulted FROM; the operator must be told the number is not theirs")
+	}
+	for _, want := range []string{"WARNING", defaultFrom} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning %q does not contain %q", warning, want)
+		}
+	}
+}
+
+// TestResolveFrom_ExplicitIsVerbatimAndSilent is the other half: an explicit
+// FROM is used exactly as given and warns about nothing.
+func TestResolveFrom_ExplicitIsVerbatimAndSilent(t *testing.T) {
+	from, warning := resolveFrom("+15105551234")
+	if from != "+15105551234" {
+		t.Errorf("got FROM %q, want the explicit value verbatim", from)
+	}
+	if warning != "" {
+		t.Errorf("got warning %q for an explicit FROM, want none", warning)
+	}
+}
+
+// TestDefaultFromIsValidE164 guards the default against the same check every
+// operator-supplied FROM passes. A default that cannot survive validateE164
+// would turn "no FROM" from a usage error into a confusing validation error.
+func TestDefaultFromIsValidE164(t *testing.T) {
+	if err := validateE164(defaultFrom); err != nil {
+		t.Errorf("defaultFrom %q is not valid E.164: %v", defaultFrom, err)
+	}
+}
+
+// TestTwilioCLIVoiceNoFromWarnsAndProceeds drives the real binary: with no
+// positional FROM and no way to resolve a webhook, it must get PAST the FROM
+// check — emitting the warning — and fail later on config resolution. The
+// paired control below runs the identical invocation with an explicit FROM and
+// must emit no warning. Together they pin that the warning tracks the
+// defaulting and nothing else.
+func TestTwilioCLIVoiceNoFromWarnsAndProceeds(t *testing.T) {
+	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-nofrom")
+
+	run := func(args ...string) string {
+		cmd := exec.Command(bin, args...)
+		cmd.Dir = repoRoot
+		cmd.Env = append(os.Environ(), "GOWORK=off", "AATOOLKIT_TWILIO_CONFIG=", "AATOOLKIT_SERVER_NAME=")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected a failure with no config source; got success\n%s", out)
+		}
+		return string(out)
+	}
+
+	defaulted := run()
+	if !strings.Contains(defaulted, "WARNING") || !strings.Contains(defaulted, defaultFrom) {
+		t.Errorf("no-FROM run did not warn about the default source number:\n%s", defaulted)
+	}
+
+	explicit := run("+15105551234")
+	if strings.Contains(explicit, "WARNING") {
+		t.Errorf("explicit-FROM run warned about a default it did not use:\n%s", explicit)
+	}
+}
+
+// TestTwilioCLISMSStillRequiresExplicitFrom pins the deliberate asymmetry: SMS
+// mode parses <FROM> <BODY> positionally, so defaulting FROM there would make
+// `twilio-cli sms "hello"` ambiguous between the two. One positional argument
+// must still be a usage error, not a message sent from a defaulted number.
+func TestTwilioCLISMSStillRequiresExplicitFrom(t *testing.T) {
+	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-smsfrom")
+
+	cmd := exec.Command(bin, "sms", "hello there")
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "GOWORK=off", "AATOOLKIT_TWILIO_CONFIG=", "AATOOLKIT_SERVER_NAME=")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("sms with a single positional argument succeeded; want a usage error\n%s", out)
+	}
+	if !strings.Contains(string(out), "<FROM-e164>") {
+		t.Errorf("sms usage error does not state the required FROM positional:\n%s", out)
+	}
+	if strings.Contains(string(out), defaultFrom) {
+		t.Errorf("sms mode defaulted the FROM number; it must not:\n%s", out)
+	}
 }
