@@ -61,8 +61,10 @@ func connFrameWriter(conn *websocket.Conn) func([]byte) error {
 // cannot drift from one source's idea of them. Two details are load-bearing:
 // the payload is teed pre-encode, so the file is a plain μ-law stream that
 // -audio replays directly rather than the framed JSON that went on the wire;
-// and the tee runs after the write, so a frame that never reached the server is
-// not in the file that claims to be what the server heard.
+// and the tee runs after the write, so a frame whose write failed is not in the
+// file that claims to be what went out. That claim is about sending, not
+// delivery -- a write that succeeds has left this process, which is as much as
+// anything here can observe.
 func mediaFrameSender(enc *mediaFrameEncoder, rec *streamRecorder, write func([]byte) error) func([]byte) error {
 	return func(payload []byte) error {
 		msg, err := enc.encode(payload)

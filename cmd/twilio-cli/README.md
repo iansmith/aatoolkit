@@ -148,9 +148,13 @@ go run ./cmd/twilio-cli -record-sent /tmp/me.ulaw +15551234567    # talk to mode
 go run ./cmd/twilio-cli -audio /tmp/me.ulaw -server other +15551234567   # same audio, model B
 ```
 
-The bytes are teed after the frame goes out, so the file is what the server received, not
-what the microphone heard: a frame that failed to send is not in it. Chaining is safe —
-recording a replay reproduces the file it replayed, byte for byte.
+The bytes are teed after the frame goes out, so the file is what this process put on the
+socket, not what the microphone heard: a frame whose write failed is not in it. That is a
+claim about sending, not about delivery — a write can succeed and the frame still be lost
+if the connection drops straight after. Chaining is safe: recording a replay reproduces
+the file it replayed, byte for byte, as long as the recording goes to a different file — a
+run that would record over the audio it is replaying is refused before anything is
+opened, since recording truncates.
 
 ### Streaming a file instead of the mic
 

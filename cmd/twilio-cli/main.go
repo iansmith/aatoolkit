@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -24,6 +25,62 @@ func validateE164(s string) error {
 		return fmt.Errorf("invalid E.164 number %q (want +<country><subscriber>, e.g. +15105551234)", s)
 	}
 	return nil
+}
+
+// validateRecordingPaths rejects a run whose files would step on each other.
+// Every file a run touches -- each recording, each .jsonl sidecar, and the
+// -audio input -- must be named by exactly one flag.
+//
+// It exists because both collisions are silent and one is destructive. dial
+// opens the recorders with os.Create, which truncates, and it does so before
+// the frame source opens whatever -audio names: `-audio me.ulaw -record-sent
+// me.ulaw` empties the operator's recording, streams no media at all, and
+// reports it only as "recorded 0 bytes of outbound audio". Two recordings on
+// one path is the milder version -- two file handles writing one path from
+// independent offsets -- and leaves a file that is evidence about neither
+// direction.
+//
+// A pure validator in validateE164's shape, called before any file is opened
+// for writing and before any network call, so a refusal costs nothing and
+// arrives on its own terms.
+func validateRecordingPaths(audioPath, recordPath, recordSentPath string) error {
+	// claimed maps each file to the flag that already named it. -audio goes in
+	// first because it is the only one that is read rather than written, so it
+	// is the one whose collision means data loss.
+	claimed := map[string]string{}
+	if audioPath != "" {
+		claimed[canonicalPath(audioPath)] = "-audio"
+	}
+	for _, out := range []struct{ flag, path string }{
+		{"-record", recordPath},
+		{"-record-sent", recordSentPath},
+	} {
+		if out.path == "" {
+			continue
+		}
+		// The sidecar counts: -record x and -record-sent x.jsonl name
+		// different audio files but the same timing file.
+		for _, f := range []string{out.path, out.path + ".jsonl"} {
+			key := canonicalPath(f)
+			if prev, taken := claimed[key]; taken {
+				return fmt.Errorf("%s %s: %s already names %s -- every file must be named by one flag",
+					out.flag, out.path, prev, f)
+			}
+			claimed[key] = out.flag
+		}
+	}
+	return nil
+}
+
+// canonicalPath is the key two path strings are compared by, so that distinct
+// spellings of one file do not read as distinct files. A failure to resolve is
+// not fatal here: the cleaned string still catches the identical-spelling case,
+// which is the mistake operators actually make.
+func canonicalPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(p)
 }
 
 const (
@@ -289,6 +346,13 @@ func main() {
 	// terms, rather than behind a config-resolution or connection error that
 	// says nothing about the file.
 	if err := installAudioFrameSource(*audioPath); err != nil {
+		log.Fatalf("twilio-cli: %v", err)
+	}
+
+	// Checked here, after -audio has been proved readable and before any
+	// network call: the recordings are opened (and truncated) inside dial, so
+	// a guard any later than this is too late on a run that reaches a server.
+	if err := validateRecordingPaths(*audioPath, *recordPath, *recordSentPath); err != nil {
 		log.Fatalf("twilio-cli: %v", err)
 	}
 
