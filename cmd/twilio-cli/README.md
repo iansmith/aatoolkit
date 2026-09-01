@@ -61,6 +61,7 @@ This tone used to be a single 20 ms frame, which nobody could hear; it is now 24
 | `-audio` | Stream a raw μ-law file instead of capturing the mic. Any platform. |
 | `-no-echo-marks` | Suppress mark-echo, to exercise the server's `AwaitingMarkEcho` timeout. |
 | `-record <file>` | Record inbound server audio to a raw μ-law file, with per-arrival timing in `<file>.jsonl`. |
+| `-record-sent <file>` | Record the outbound caller audio (mic or `-audio`) to a raw μ-law file, replayable with `-audio`. |
 
 ### Pointing twilio-cli at a config
 
@@ -124,6 +125,32 @@ recorded 812150 bytes of inbound audio (1m41.5s of sound over a 3m51s call, 0.44
 A ratio well below 1 means the server genuinely sent silence for the rest of the call. A
 ratio near 1 means the audio was there and anything unheard was lost after this process
 received it.
+
+### Recording what you sent
+
+`-record-sent` is the other half: it saves the caller's own audio — the μ-law actually put
+on the socket, whether it came from the mic or from `-audio`.
+
+```bash
+go run ./cmd/twilio-cli -record-sent /tmp/me.ulaw +15551234567
+```
+
+It writes the same pair of files as `-record`, in the outbound direction: `/tmp/me.ulaw`
+holds the payloads in send order, and `/tmp/me.ulaw.jsonl` their timing. The two flags are
+independent and can be used together, giving one file per direction.
+
+The point of it is replay. Without it the caller's audio only ever exists in flight, so a
+live conversation cannot be put to a second server — you can only say the words again,
+differently. With it, the recording is exactly the format `-audio` streams:
+
+```bash
+go run ./cmd/twilio-cli -record-sent /tmp/me.ulaw +15551234567    # talk to model A
+go run ./cmd/twilio-cli -audio /tmp/me.ulaw -server other +15551234567   # same audio, model B
+```
+
+The bytes are teed after the frame goes out, so the file is what the server received, not
+what the microphone heard: a frame that failed to send is not in it. Chaining is safe —
+recording a replay reproduces the file it replayed, byte for byte.
 
 ### Streaming a file instead of the mic
 

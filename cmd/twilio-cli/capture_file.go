@@ -145,25 +145,15 @@ func installAudioFrameSource(audioPath string) error {
 // set: it opens path, wraps each frame with the call's mediaFrameEncoder, and
 // writes it to conn. The returned func matches the streamMic seam's signature
 // (dial.go), mirroring capture_darwin.go's streamMicFrames shape.
-func streamFileFrames(path string) func(context.Context, *websocket.Conn, string, *int, func(bool)) error {
-	return func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, onMicWarm func(bool)) error {
+func streamFileFrames(path string) func(context.Context, *websocket.Conn, string, *int, *streamRecorder, func(bool)) error {
+	return func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, onMicWarm func(bool)) error {
 		f, err := os.Open(path)
 		if err != nil {
 			return fmt.Errorf("streamFileFrames: %w", err)
 		}
 		defer f.Close()
 
-		enc := newMediaFrameEncoder(streamSID, seqNum)
-		return streamFileFramesFrom(ctx, f, func(frame []byte) error {
-			msg, err := enc.encode(frame)
-			if err != nil {
-				return err
-			}
-			// Fresh short-lived write context per frame, matching
-			// streamMicFrames: a write must not inherit an unbounded deadline.
-			writeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			return conn.Write(writeCtx, websocket.MessageText, msg)
-		}, onMicWarm)
+		send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn))
+		return streamFileFramesFrom(ctx, f, send, onMicWarm)
 	}
 }

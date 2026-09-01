@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
@@ -33,6 +36,45 @@ func (e *mediaFrameEncoder) encode(payload []byte) ([]byte, error) {
 	e.chunk++
 	*e.seqNum++
 	return twilio.EncodeMediaWithMetadata(e.streamSID, payload, e.chunk, *e.seqNum)
+}
+
+// connFrameWriter returns the func that puts one encoded media frame on conn.
+// Every write gets a fresh short-lived context rather than the call's: a write
+// must not inherit an unbounded deadline, and on teardown the call's context is
+// already cancelled while the trailing frames still have to go out (the same
+// reason sendStop and echoMark build their own in dial.go).
+func connFrameWriter(conn *websocket.Conn) func([]byte) error {
+	return func(msg []byte) error {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		return conn.Write(ctx, websocket.MessageText, msg)
+	}
+}
+
+// mediaFrameSender builds the send func a frame source hands to its drain loop:
+// encode the raw μ-law payload as a Twilio media frame, write it, and -- only
+// once the write has succeeded -- tee the payload to rec.
+//
+// This is the one place an outbound frame leaves the process, which is why
+// -record-sent tees here rather than in either frame source. The mic and the
+// -audio file both send through it, so the recording is of the bytes sent and
+// cannot drift from one source's idea of them. Two details are load-bearing:
+// the payload is teed pre-encode, so the file is a plain μ-law stream that
+// -audio replays directly rather than the framed JSON that went on the wire;
+// and the tee runs after the write, so a frame that never reached the server is
+// not in the file that claims to be what the server heard.
+func mediaFrameSender(enc *mediaFrameEncoder, rec *streamRecorder, write func([]byte) error) func([]byte) error {
+	return func(payload []byte) error {
+		msg, err := enc.encode(payload)
+		if err != nil {
+			return err
+		}
+		if err := write(msg); err != nil {
+			return err
+		}
+		rec.write(payload, time.Now())
+		return nil
+	}
 }
 
 // drainFramesWithDiscard reads frames from r, discarding leading all-0xFF frames

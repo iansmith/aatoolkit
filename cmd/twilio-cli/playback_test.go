@@ -361,7 +361,7 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 
 	// Inject a fake mic that fires onMicWarm exactly once (capHit=false).
 	var onMicWarmCalled bool
-	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, onMicWarm func(bool)) error {
 		// Before onMicWarm, no TONE has been played. Not "the sink is empty":
 		// the filler may already have written silence, and reading s.buf
 		// directly from this goroutine races the read loop's own Write --
@@ -428,7 +428,7 @@ func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
 	}
 
 	// Inject a fake mic that fires onMicWarm.
-	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, onMicWarm func(bool)) error {
 		// Call onMicWarm to trigger the earcon.
 		onMicWarm(false)
 		return nil
@@ -691,7 +691,7 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 		}
 		return n
 	}
-	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, onMicWarm func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, onMicWarm func(bool)) error {
 		deadline := time.Now().Add(5 * time.Second)
 		for served() < len(serverAudio) && time.Now().Before(deadline) {
 			time.Sleep(5 * time.Millisecond)
