@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net"
 	"os"
 	"os/exec"
@@ -1036,4 +1037,138 @@ health = { path = "/healthz", port = 3 }
 			}
 		}
 	})
+}
+
+// --- AATK-99 review: colliding recording paths -------------------------------
+//
+// dial creates both recorders with os.Create, which TRUNCATES, and it does so
+// before the frame source opens whatever -audio names. So the one invocation
+// the README's record-then-replay workflow makes easy to typo --
+// `-audio me.ulaw -record-sent me.ulaw` -- empties the operator's recording,
+// streams nothing, and reports it only as "recorded 0 bytes of outbound audio".
+// The same collision between the two recorders is the milder version: two
+// os.File handles writing one path from independent offsets, plus two
+// recorders writing one .jsonl sidecar, giving a file that is evidence about
+// neither direction.
+//
+// Every file a run touches must therefore be named by exactly one flag, and
+// the run must be refused before anything is opened for writing.
+
+// TestTwilioCLIRecordSentMustNotClobberTheAudioItReplays is the differential
+// one: it drives the real binary, because the whole failure is an ordering
+// between main's flag handling and dial's os.Create, and asserts on the file
+// itself rather than on the message. A build without the guard leaves it at
+// zero bytes.
+func TestTwilioCLIRecordSentMustNotClobberTheAudioItReplays(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
+
+	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-aatk99")
+
+	fixture := filepath.Join(repoRoot, "telephony", "testdata", "how_are_you.ulaw")
+	data, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatalf("fixture %s is empty; the assertion below would be vacuous", fixture)
+	}
+	audio := filepath.Join(t.TempDir(), "me.ulaw")
+	if err := os.WriteFile(audio, data, 0o644); err != nil {
+		t.Fatalf("stage fixture: %v", err)
+	}
+
+	cmd := exec.Command(bin,
+		"-audio", audio,
+		"-record-sent", audio,
+		"-webhook", "http://127.0.0.1:1/voice",
+		"+15551234567",
+	)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk99-test-token")
+	out, err := cmd.CombinedOutput() // a non-zero exit is expected: the run must be refused
+	got := string(out)
+	if err == nil {
+		t.Errorf("the run was accepted; a recording that would truncate its own -audio source must be refused.\noutput:\n%s", got)
+	}
+
+	after, readErr := os.ReadFile(audio)
+	if readErr != nil {
+		t.Fatalf("read %s after the run: %v", audio, readErr)
+	}
+	if !bytes.Equal(after, data) {
+		t.Errorf("the -audio file was modified: %d bytes before, %d after -- the run must be refused before anything is opened for writing", len(data), len(after))
+	}
+	if !strings.Contains(got, "-record-sent") || !strings.Contains(got, "-audio") {
+		t.Errorf("the refusal must name both flags so the operator can tell which two collided.\noutput:\n%s", got)
+	}
+	// Ordering, which is the whole defect: the truncation happens inside dial,
+	// so a guard that ran any later than the webhook call would already be too
+	// late on a run that reaches a live server.
+	if strings.Contains(got, "post webhook") {
+		t.Errorf("the run reached webhook resolution before being refused; the guard must run before any network call.\noutput:\n%s", got)
+	}
+}
+
+// TestValidateRecordingPaths is the unit half: every file a run touches --
+// each recording, each .jsonl sidecar, and the -audio input -- must be named
+// by exactly one flag.
+func TestValidateRecordingPaths(t *testing.T) {
+	dir := t.TempDir()
+	x := filepath.Join(dir, "x.ulaw")
+	y := filepath.Join(dir, "y.ulaw")
+
+	cases := []struct {
+		desc                      string
+		audio, record, recordSent string
+		wantErr                   bool
+		wantMentions              []string
+	}{
+		{desc: "nothing set", wantErr: false},
+		{desc: "-record alone", record: x, wantErr: false},
+		{desc: "-record-sent alone", recordSent: x, wantErr: false},
+		{desc: "two recordings, distinct paths", record: x, recordSent: y, wantErr: false},
+		{desc: "-audio and -record-sent, distinct paths", audio: x, recordSent: y, wantErr: false},
+		{
+			desc:  "-audio and -record-sent on one path: the replay source would be truncated",
+			audio: x, recordSent: x, wantErr: true,
+			wantMentions: []string{"-audio", "-record-sent"},
+		},
+		{
+			desc:  "-audio and -record on one path",
+			audio: x, record: x, wantErr: true,
+			wantMentions: []string{"-audio", "-record"},
+		},
+		{
+			desc:   "both recordings on one path",
+			record: x, recordSent: x, wantErr: true,
+			wantMentions: []string{"-record", "-record-sent"},
+		},
+		{
+			desc:   "one recording's audio is the other's sidecar",
+			record: x, recordSent: x + ".jsonl", wantErr: true,
+			wantMentions: []string{"-record", "-record-sent"},
+		},
+		{
+			desc:  "the same file spelled two ways is still the same file",
+			audio: filepath.Join(dir, ".", "x.ulaw"), recordSent: x, wantErr: true,
+			wantMentions: []string{"-audio", "-record-sent"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			err := validateRecordingPaths(tc.audio, tc.record, tc.recordSent)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateRecordingPaths(%q, %q, %q) = %v, wantErr %v",
+					tc.audio, tc.record, tc.recordSent, err, tc.wantErr)
+			}
+			for _, want := range tc.wantMentions {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %s; the operator has to be told which flags collided", err, want)
+				}
+			}
+		})
+	}
 }
