@@ -185,3 +185,46 @@ func TestPlayoutFiller_OutstandingIsWhatHasNotPlayedYet(t *testing.T) {
 		}
 	})
 }
+
+// TestPlayoutFiller_FlushDropsQueuedPlayout pins what a Twilio `clear` does to
+// the filler.
+//
+// `clear` is barge-in: the caller started talking, so the server abandons the
+// rest of its reply and tells the client to drop whatever of it is still
+// queued. The filler is twilio-cli's model of that queue -- fedThrough is the
+// instant through which audio has been handed over -- so honoring the clear
+// means fedThrough comes back to now. Two things then follow, and this test
+// asserts both because either alone can be got right by accident:
+//
+//   - Nothing is outstanding, so a mark arriving after the clear echoes at
+//     once instead of waiting out audio that was thrown away.
+//   - Filling resumes immediately. While fedThrough sat seconds ahead, fill
+//     wrote nothing -- correct for audio that is about to play, wrong for
+//     audio that was discarded, which leaves the player with no bytes at all
+//     across the very stretch the caller is talking over.
+func TestPlayoutFiller_FlushDropsQueuedPlayout(t *testing.T) {
+	f := newTestFiller()
+
+	// 5 seconds of reply delivered in one burst, the shape the speech backend
+	// actually produces.
+	f.fed(make([]byte, 5*telephony.SampleRateHz), base)
+
+	// Barge-in half a second in: 4.5s of it has not played.
+	clearAt := base.Add(500 * time.Millisecond)
+	if got := f.outstanding(clearAt); got != 4500*time.Millisecond {
+		t.Fatalf("outstanding before the clear = %s, want 4.5s (test setup is wrong)", got)
+	}
+
+	f.flush(clearAt)
+
+	if got := f.outstanding(clearAt); got != 0 {
+		t.Errorf("outstanding after a clear = %s, want 0 -- the discarded audio is still "+
+			"charged against the next mark echo, so the server waits out a reply nobody hears", got)
+	}
+
+	step := mulawPlayoutDuration(muLawFrame20ms)
+	if n := f.fill(clearAt.Add(step), func([]byte) {}); n != 1 {
+		t.Errorf("frames filled one tick after a clear: got %d, want 1 -- the player is "+
+			"being starved for as long as the flushed audio would have run", n)
+	}
+}
