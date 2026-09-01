@@ -14,7 +14,11 @@ import (
 
 const (
 	// defaultTo is the -to flag's default dialed number.
-	defaultTo         = "+15105559999"
+	defaultTo = "+15105559999"
+	// defaultFrom is the caller number a voice dial uses when the positional
+	// FROM is omitted. Same reserved 555 block as defaultTo: a throwaway
+	// source for a local validation call, never a number that can be reached.
+	defaultFrom       = "+15105557890"
 	defaultAccountSid = "ACtwiliocli0000000000000000000000"
 	defaultAPIVersion = "2010-04-01"
 	defaultCallStatus = "ringing"

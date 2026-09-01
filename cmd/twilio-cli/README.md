@@ -11,13 +11,27 @@ signed-webhook ceremony Twilio does, so the server cannot tell the difference.
 - **Launch the server with the `ws` stream scheme, not `wss`.** Answering `wss` makes every
   signature fail with a silent 403.
 - **`<FROM>` must be a number the server's roster knows**, in E.164 (`+15551234567`).
-  Unknown callers are rejected before a turn starts.
+  Whether an unknown caller is rejected before a turn starts is the server's policy, not
+  twilio-cli's — a server that binds any caller accepts any well-formed E.164. twilio-cli
+  only checks the shape. In voice mode `<FROM>` is optional and defaults with a warning;
+  see [Voice](#voice). The `sms` subcommand always requires it.
 
 ## Voice
 
 ```bash
 go run ./cmd/twilio-cli +15551234567
 ```
+
+`<FROM>` is optional here. Omit it and the call dials from `+15105557890`, announcing the
+substitution on one line so a defaulted number is never mistaken for one you chose:
+
+```
+twilio-cli: WARNING: no FROM given, defaulting source number to +15105557890
+```
+
+An explicit `<FROM>` is used verbatim and warns about nothing. The `sms` subcommand does
+**not** default it: `sms` parses `<FROM> <BODY>` positionally, so defaulting the first
+would make `twilio-cli sms "hello"` ambiguous between the two.
 
 Posts the voice webhook, then opens the media-stream WebSocket and plays microphone audio in,
 printing the server's marks and control frames as they arrive.
@@ -42,6 +56,7 @@ This tone used to be a single 20 ms frame, which nobody could hear; it is now 24
 |---|---|
 | `-webhook` | Full webhook URL. Skips config resolution entirely. |
 | `-config` | Path to the config to resolve the target from. Overrides `$AATOOLKIT_TWILIO_CONFIG`. |
+| `-server` | Name of the config server entry to resolve from. Overrides `$AATOOLKIT_SERVER_NAME`. |
 | `-to` | The dialed number, E.164. |
 | `-audio` | Stream a raw μ-law file instead of capturing the mic. Any platform. |
 | `-no-echo-marks` | Suppress mark-echo, to exercise the server's `AwaitingMarkEcho` timeout. |
@@ -61,11 +76,24 @@ entirely. Use an absolute path: twilio-cli is normally run from this checkout wh
 config lives in the consuming project's, and a relative path resolves against your current
 directory.
 
-From the config, the target is the server named `"the server"`, at its second declared
-listen port. If your config names it something else, resolution fails and you must pass
-`-webhook` explicitly.
+### Naming the server entry
 
-This applies to the `sms` subcommand too — same flag, same variable, same precedence.
+Which entry in that config to read is likewise **yours** to name — there is no built-in
+default name, for the same reason there is no default path. A fixed one would belong to
+whichever consuming project happened to write it, and would stop resolving the day that
+project renamed its entry, failing with an error naming a server you never configured.
+
+```bash
+export AATOOLKIT_SERVER_NAME=my-agent-server
+```
+
+`-server <name>` overrides the environment; `-webhook` overrides both and skips the lookup
+entirely. The target is that entry's host at its **second** declared listen port — the
+webhook port — so the entry needs two listens.
+
+Both the path and the name apply to the `sms` subcommand too — same flags, same variables,
+same precedence. The only difference is the route: `/webhook` for voice, `/sms/inbound`
+for SMS.
 
 ### Recording what the server sent
 
@@ -162,6 +190,7 @@ captured reply — From=+12183767443 To=+15551234567
 | `-capture-port` | Port the capture server binds. Default `9750`. Must match the `TWILIO_API_BASE_URL` the server was launched with. |
 | `-webhook` | Full `/sms/inbound` URL. Skips config resolution. |
 | `-config` | Path to the config to resolve the target from. Overrides `$AATOOLKIT_TWILIO_CONFIG`. |
+| `-server` | Name of the config server entry to resolve from. Overrides `$AATOOLKIT_SERVER_NAME`. |
 | `-to` | The Twilio number the SMS was addressed to, E.164. |
 
 Do **not** set `TWILIO_API_BASE_URL` in your fleet config. Pointing the fleet at a local
@@ -199,7 +228,8 @@ transcribe clearly.
 | Symptom | Cause |
 |---|---|
 | `returned status 403` | `TWILIO_AUTH_TOKEN` doesn't match the server's, or the server was launched with `wss`. |
-| `no "the server" server declared in <your config>` | Your config names the server something else. Pass `-webhook` explicitly. |
+| `no "<name>" server declared in <your config>` | `-server`/`$AATOOLKIT_SERVER_NAME` names an entry your config does not declare. Fix the name, or pass `-webhook` explicitly. |
+| `no server name: pass -server <name>, set AATOOLKIT_SERVER_NAME...` | No `-webhook` and no server name. Supply one of the three the message names. |
 | `no config path: pass -config <file>, set AATOOLKIT_TWILIO_CONFIG...` | No `-webhook` and no config source. Supply one of the three the message names. |
 | ffmpeg `Selected framerate ... is not supported` on mic capture | `AATOOLKIT_STT_MIC` named a **camera**: a bare value used to be read as the video device. Use the `:N` form. |
 | `no reply reached the capture server within 35s` | The server was not launched with `TWILIO_API_BASE_URL` pointed at the capture port — it sent the reply to the real Twilio API instead. |
