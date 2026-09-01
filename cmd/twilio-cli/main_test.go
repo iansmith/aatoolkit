@@ -10,6 +10,12 @@ import (
 	"testing"
 )
 
+// fixtureServerName is the entry name declared by validServerConfig. Named
+// rather than repeated: since AATK-98 the lookup name is operator-supplied, so
+// every resolution test has to hand one in, and a fixture whose name is spelled
+// out at fifteen call sites is a rename waiting to go half-done.
+const fixtureServerName = "the server"
+
 const validServerConfig = `
 [[server]]
 name = "the server"
@@ -114,11 +120,11 @@ func TestWebhookTarget_ExplicitFlagOverridesEvenBrokenConfig(t *testing.T) {
 
 // TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent covers observable
 // behavior 1: with no -webhook flag, the target is derived from the merged
-// config's the server server host + webhook port.
+// config's named server host + webhook port.
 func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
 
-	got, err := webhookTarget("", basePath, "", "", "")
+	got, err := webhookTarget("", basePath, "", fixtureServerName, "")
 	if err != nil {
 		t.Fatalf("webhookTarget: %v", err)
 	}
@@ -154,7 +160,7 @@ func TestWebhookTarget_MalformedConfigProducesClearError(t *testing.T) {
 }
 
 // TestWebhookTarget_NoServerProducesClearError is the boundary case
-// where config loads fine but has no server named "the server" to resolve.
+// where config loads fine but has no entry under the looked-up name to resolve.
 func TestWebhookTarget_NoServerProducesClearError(t *testing.T) {
 	basePath := writeConfig(t, `
 [[server]]
@@ -166,15 +172,15 @@ command = "true"
 health = { path = "/healthz", port = 80 }
 `)
 
-	_, err := webhookTarget("", basePath, "", "", "")
+	_, err := webhookTarget("", basePath, "", fixtureServerName, "")
 	if err == nil {
-		t.Fatal("expected an error when no the server server is declared")
+		t.Fatalf("expected an error when no %q server is declared", fixtureServerName)
 	}
 }
 
 // TestWebhookTarget_NoWebhookPortProducesClearError is the boundary case
-// where the the server server exists but declares fewer than two listens, so it
-// has no webhook port to resolve.
+// where the named server exists but declares fewer than two listens, so it has
+// no webhook port to resolve.
 func TestWebhookTarget_NoWebhookPortProducesClearError(t *testing.T) {
 	basePath := writeConfig(t, `
 [[server]]
@@ -186,9 +192,9 @@ command = "true"
 health = { path = "/healthz", port = 9730 }
 `)
 
-	_, err := webhookTarget("", basePath, "", "", "")
+	_, err := webhookTarget("", basePath, "", fixtureServerName, "")
 	if err == nil {
-		t.Fatal("expected an error when the server server declares no webhook port")
+		t.Fatalf("expected an error when the %q server declares no webhook port", fixtureServerName)
 	}
 }
 
@@ -346,7 +352,7 @@ func TestResolveConfigPath_NeitherSetNamesBothSources(t *testing.T) {
 func TestWebhookTarget_ResolvesViaEnvConfig(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
 
-	got, err := webhookTarget("", "", basePath, "", "")
+	got, err := webhookTarget("", "", basePath, fixtureServerName, "")
 	if err != nil {
 		t.Fatalf("webhookTarget: %v", err)
 	}
@@ -400,7 +406,7 @@ func TestSMSWebhookTarget_ExplicitFlagWins(t *testing.T) {
 func TestSMSWebhookTarget_ResolvesViaEnvConfig(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
 
-	got, err := smsWebhookTarget("", "", basePath, "", "")
+	got, err := smsWebhookTarget("", "", basePath, fixtureServerName, "")
 	if err != nil {
 		t.Fatalf("smsWebhookTarget: %v", err)
 	}
@@ -471,6 +477,10 @@ health = { path = "/healthz", port = 1 }
 		cmd.Dir = elsewhere
 		cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk97-test-token")
 		cmd.Env = append(cmd.Env, configEnvVar+"="+env)
+		// The server name is held constant across every subtest here: these
+		// pin CONFIG-path precedence, and a run that failed for want of a name
+		// would report that instead of the resolution under test.
+		cmd.Env = append(cmd.Env, serverEnvVar+"="+fixtureServerName)
 		out, _ := cmd.CombinedOutput() // a non-zero exit is expected in every run
 		return string(out)
 	}
@@ -490,7 +500,7 @@ listens = [1, 3]
 command = "true"
 health = { path = "/healthz", port = 1 }
 `)
-	const otherResolved = "127.0.0.1:3/webhook"
+	const otherResolved = "127.0.0.1:4/webhook"
 
 	t.Run("config path in the environment resolves from any cwd", func(t *testing.T) {
 		out := run(configPath)
@@ -599,7 +609,7 @@ listens = [1, 3]
 command = "true"
 health = { path = "/healthz", port = 1 }
 `)
-	const otherResolved = "127.0.0.1:3/sms/inbound"
+	const otherResolved = "127.0.0.1:4/sms/inbound"
 
 	// The sms entrypoint validates and binds the capture port after resolving
 	// the config, so a real free port is needed to reach the assertion. Take
@@ -619,6 +629,7 @@ health = { path = "/healthz", port = 1 }
 		cmd.Dir = elsewhere
 		cmd.Env = append(os.Environ(), "TWILIO_AUTH_TOKEN=aatk97-test-token")
 		cmd.Env = append(cmd.Env, configEnvVar+"="+env)
+		cmd.Env = append(cmd.Env, serverEnvVar+"="+fixtureServerName)
 		out, _ := cmd.CombinedOutput() // a non-zero exit is expected in every run
 		return string(out)
 	}
@@ -908,4 +919,98 @@ func TestTwilioCLISMSStillRequiresExplicitFrom(t *testing.T) {
 	if strings.Contains(string(out), defaultFrom) {
 		t.Errorf("sms mode defaulted the FROM number; it must not:\n%s", out)
 	}
+}
+
+// TestTwilioCLIServerFlagResolvesEndToEnd drives the real binary for both
+// modes. The unit tests above prove resolveServerName's precedence and prove
+// webhookTarget honors a name — neither touches main, where the flag and the
+// environment value are threaded in as two more positional strings among five.
+// A dropped or transposed argument there stops -server working while every
+// pure-function test stays green, which is the exact failure this package has
+// already been bitten by once.
+//
+// Ports 1-4 are privileged and bound by nothing, so resolution succeeds and
+// the dial fails fast against nobody rather than firing a signed webhook at a
+// developer's live server.
+func TestTwilioCLIServerFlagResolvesEndToEnd(t *testing.T) {
+	bin, _ := buildTwilioCLI(t, "twilio-cli-serverflag")
+	elsewhere := t.TempDir()
+
+	configPath := writeConfig(t, `
+[[server]]
+name = "alpha"
+type = "exec"
+host = "127.0.0.1"
+listens = [1, 2]
+command = "true"
+health = { path = "/healthz", port = 1 }
+
+[[server]]
+name = "beta"
+type = "exec"
+host = "127.0.0.1"
+listens = [3, 4]
+command = "true"
+health = { path = "/healthz", port = 3 }
+`)
+
+	// The environment always names alpha. Every subtest that expects beta can
+	// only get there through the flag, so the override is observable rather
+	// than inferred.
+	run := func(args ...string) string {
+		cmd := exec.Command(bin, args...)
+		cmd.Dir = elsewhere
+		cmd.Env = append(os.Environ(),
+			"TWILIO_AUTH_TOKEN=aatk98-test-token",
+			configEnvVar+"="+configPath,
+			serverEnvVar+"=alpha")
+		out, _ := cmd.CombinedOutput() // a non-zero exit is expected in every run
+		return string(out)
+	}
+
+	t.Run("voice: the environment name resolves", func(t *testing.T) {
+		if out := run("+15551234567"); !strings.Contains(out, "127.0.0.1:2/webhook") {
+			t.Errorf("voice did not resolve alpha from %s (want 127.0.0.1:2/webhook named).\noutput:\n%s", serverEnvVar, out)
+		}
+	})
+
+	t.Run("voice: -server overrides the environment", func(t *testing.T) {
+		out := run("-server", "beta", "+15551234567")
+		if strings.Contains(out, "127.0.0.1:2/webhook") {
+			t.Errorf("the environment's name won over -server; precedence is inverted.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "127.0.0.1:4/webhook") {
+			t.Errorf("-server did not reach resolution (want 127.0.0.1:4/webhook named).\noutput:\n%s", out)
+		}
+	})
+
+	// Observable behavior 4: the same name drives the SMS route, which is a
+	// separate five-argument forward reaching the same resolver.
+	t.Run("sms: -server overrides the environment", func(t *testing.T) {
+		out := run("sms", "-server", "beta", "+15551234567", "hi")
+		if strings.Contains(out, "127.0.0.1:2/sms/inbound") {
+			t.Errorf("sms took the environment's name over -server.\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "127.0.0.1:4/sms/inbound") {
+			t.Errorf("sms -server did not reach resolution (want 127.0.0.1:4/sms/inbound named).\noutput:\n%s", out)
+		}
+	})
+
+	t.Run("control: with no name anywhere the error names both sources", func(t *testing.T) {
+		cmd := exec.Command(bin, "+15551234567")
+		cmd.Dir = elsewhere
+		cmd.Env = append(os.Environ(),
+			"TWILIO_AUTH_TOKEN=aatk98-test-token",
+			configEnvVar+"="+configPath,
+			serverEnvVar+"=")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected a failure with no server name anywhere\n%s", out)
+		}
+		for _, want := range []string{"-server", serverEnvVar} {
+			if !strings.Contains(string(out), want) {
+				t.Errorf("error does not name %q — the operator cannot act on it.\noutput:\n%s", want, out)
+			}
+		}
+	})
 }
