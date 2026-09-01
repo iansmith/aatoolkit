@@ -1151,8 +1151,12 @@ func TestValidateRecordingPaths(t *testing.T) {
 			wantMentions: []string{"-record", "-record-sent"},
 		},
 		{
+			// Built by joining on the separator, NOT with filepath.Join:
+			// Join cleans its result, so a "two spellings" case written that
+			// way hands the validator one spelling and asserts nothing about
+			// canonicalPath. The uncleaned form has to survive into the call.
 			desc:  "the same file spelled two ways is still the same file",
-			audio: filepath.Join(dir, ".", "x.ulaw"), recordSent: x, wantErr: true,
+			audio: strings.Join([]string{dir, ".", "x.ulaw"}, string(filepath.Separator)), recordSent: x, wantErr: true,
 			wantMentions: []string{"-audio", "-record-sent"},
 		},
 	}
@@ -1170,5 +1174,25 @@ func TestValidateRecordingPaths(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestValidateRecordingPaths_RelativeAndAbsoluteAreOneFile pins the other half
+// of canonicalPath. Cleaning alone cannot see that a path relative to the
+// working directory and an absolute one name the same file, and that collision
+// destroys data exactly as the identical spelling does: the recording truncates
+// the -audio source before a byte of it is read.
+func TestValidateRecordingPaths_RelativeAndAbsoluteAreOneFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	err := validateRecordingPaths("x.ulaw", "", filepath.Join(dir, "x.ulaw"))
+	if err == nil {
+		t.Fatalf("validateRecordingPaths accepted a relative -audio and an absolute -record-sent naming one file; the recording would truncate the file it replays")
+	}
+	for _, want := range []string{"-audio", "-record-sent"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
 	}
 }

@@ -235,29 +235,7 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 			return nil
 		})
 
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			conn, buf, err := w.(http.Hijacker).Hijack()
-			if err != nil {
-				t.Errorf("hijack: %v", err)
-				return
-			}
-			trackConn(t, conn)
-			defer conn.Close()
-			wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-			readHandshake(t, buf) // connected + start
-			// The media frames arrive before stop; the server has to consume
-			// them for the caller-hangup teardown to run.
-			for {
-				msg, err := readWSFrame(buf)
-				if err != nil {
-					return
-				}
-				var m map[string]any
-				if json.Unmarshal(msg, &m) == nil && m["event"] == "stop" {
-					return
-				}
-			}
-		}))
+		srv := mediaConsumingServer(t)
 		defer srv.Close()
 
 		addr := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -284,5 +262,76 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 
 	if run(t) {
 		t.Errorf("no -record-sent, but the frame source was handed a recorder: recording must be off unless the flag names a file")
+	}
+}
+
+// mediaConsumingServer serves one call whose far end reads every frame through
+// to the stop event. A frame source that ends on its own is a caller hangup, and
+// dial only runs that teardown -- and so only closes the outbound recorder --
+// once the media it already wrote has been consumed; a server that stopped
+// reading after the handshake would leave the frames in the socket buffer.
+func mediaConsumingServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		trackConn(t, conn)
+		defer conn.Close()
+		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
+		readHandshake(t, buf) // connected + start
+		for {
+			msg, err := readWSFrame(buf)
+			if err != nil {
+				return
+			}
+			var m map[string]any
+			if json.Unmarshal(msg, &m) == nil && m["event"] == "stop" {
+				return
+			}
+		}
+	}))
+}
+
+// TestDial_RecordSentThroughTheAudioFrameSource pins the -audio half of the
+// wiring, which nothing else reaches: streamFileFrames must hand dial's
+// outbound recorder to mediaFrameSender.
+//
+// TestDial_RecordsSentAudioOnlyWhenAsked builds its own sender inside a fake
+// mic, so it proves dial passes a recorder down but cannot see what the real
+// file source does with one; every other test here drives streamFileFramesFrom,
+// which is the level below the wiring. So a build whose streamFileFrames passed
+// nil stays green across the whole suite while `-audio in.ulaw -record-sent
+// out.ulaw` -- the README's record-then-replay workflow, and the only frame
+// source that exists off macOS -- writes an empty file.
+func TestDial_RecordSentThroughTheAudioFrameSource(t *testing.T) {
+	dir := t.TempDir()
+	spoken := framePattern(3)
+	src := filepath.Join(dir, "in.ulaw")
+	if err := os.WriteFile(src, spoken, 0o644); err != nil {
+		t.Fatalf("write -audio source: %v", err)
+	}
+
+	// The real file frame source, installed on the seam -audio installs it on.
+	withFakeMic(t, streamFileFrames(src))
+
+	srv := mediaConsumingServer(t)
+	defer srv.Close()
+
+	out := filepath.Join(dir, "sent.ulaw")
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+	if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, withSentRecording(out)); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	recorded, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read %s: %v", out, err)
+	}
+	if !bytes.Equal(recorded, spoken) {
+		t.Errorf("-audio %s -record-sent %s recorded %d bytes, want the %d streamed from the file",
+			src, out, len(recorded), len(spoken))
 	}
 }
