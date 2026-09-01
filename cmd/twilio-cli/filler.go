@@ -94,6 +94,27 @@ func (f *playoutFiller) fill(now time.Time, play func([]byte)) int {
 	return n
 }
 
+// flush drops the queued playout: audio handed to the player that has not
+// been heard yet is abandoned, and the stream restarts from now.
+//
+// This is what a Twilio `clear` means on the client side. On barge-in the
+// server stops mid-reply and tells the client to discard the rest, so every
+// quantity derived from fedThrough must stop describing audio that will never
+// be heard: outstanding goes to zero, so the next mark echoes at once instead
+// of waiting out the discarded reply, and fill resumes covering the gap the
+// caller is now talking through rather than sitting out seconds it believes
+// are still playing.
+//
+// It is deliberately the same assignment maxFillCatchUp's resync makes, for
+// the same reason -- fedThrough is a claim about the player, and both cases
+// are the claim ceasing to be true. What twilio-cli cannot do is flush the
+// bytes already inside ffplay's stdin pipe; that would mean killing the
+// player mid-call. The timing state is the whole of what a clear can mean
+// here, and it is what every downstream decision reads.
+func (f *playoutFiller) flush(now time.Time) {
+	f.fedThrough = now
+}
+
 // maxFillCatchUp bounds how much silence one fill may write. Two seconds is far
 // above any scheduling jitter the 20ms tick produces and far below the point
 // where writing it would block on the player.
