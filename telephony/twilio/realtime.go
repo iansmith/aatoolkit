@@ -1267,6 +1267,18 @@ func (s *carrierMediaSink) Clear(ctx context.Context) error {
 		// quantity derived from the playout clock must stop describing audio
 		// nobody will hear. A mark written after this is owed the grace and
 		// nothing more, instead of waiting out an abandoned reply.
+		//
+		// A mark already ARMED when this clear goes out keeps its original,
+		// longer bound, and deliberately so. Twilio does not discard queued
+		// marks on a clear: it empties the audio buffer and immediately echoes
+		// back every mark still queued behind it. So the echo arrives at once,
+		// markTracker.echo stops the timer, and the stale bound never fires —
+		// shortening it here would buy nothing and would add a second path
+		// into the tracker from this goroutine. Recorded because three review
+		// rounds re-opened the question from this file alone; the classic path
+		// cannot answer it either, since handleResponseReady always sends its
+		// clear immediately BEFORE the next clip and mark and so never holds
+		// one across a clear.
 		s.playout.flush(time.Now())
 	}); err != nil {
 		return err
