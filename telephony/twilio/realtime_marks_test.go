@@ -115,14 +115,21 @@ func markIndexes(records []carrierWireRecord) []int {
 // behavior 1: a requested mark reaches the carrier AFTER every media frame the
 // engine had already written, never interleaved ahead of queued audio.
 //
-// The assertion is positional, on the sequence the carrier actually received:
-// three media frames are driven and observed on the wire FIRST, and only then
-// is the mark requested, so an implementation that wrote the mark from
-// HandleStreamRealtime's select loop without routing it through the sink's own
-// writer would be free to land it anywhere — including ahead of a media frame
-// Bridge.Run had not yet flushed, which is the defect the routing exists to
-// prevent. Counting marks, or asserting one merely arrived, is green against
-// that implementation.
+// The assertion is positional, on the sequence the carrier actually received,
+// rather than on a count: exactly one mark, at an index at or after the three
+// media frames, with those three frames still carrying payloads. Counting
+// marks, or asserting one merely arrived, is green against a mark that landed
+// first.
+//
+// What it does NOT see, and this comment used to claim it did, is the WRITER
+// the mark went through. The three frames are observed on the wire before the
+// mark is requested, so nothing is in flight by then and a Mark that wrote the
+// carrier connection directly — the second-writer defect routing through the
+// sink exists to prevent — still lands after them. Mutation-verified during
+// review: bypassing carrierMediaSink.write left this test green under a plain
+// `go test`. That property is pinned by
+// TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight
+// (realtime_marks_gaps_test.go), which holds the slot open across the mark.
 //
 // slopstop:test contract
 func TestMarkRequestChan_MarkReachesCarrierAfterQueuedAudio(t *testing.T) {

@@ -1,9 +1,14 @@
 package twilio
 
 import (
+	"context"
+	"errors"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/iansmith/aatoolkit/telephony"
 )
@@ -145,5 +150,138 @@ func TestMarkEchoBound_KeepsTheSubMillisecondRemainder(t *testing.T) {
 		t.Fatalf("markEchoBound after %d bytes = %s, want %s; a truncating whole-millisecond spelling would give %s",
 			queued, got, want,
 			time.Duration(queued*1000/telephony.SampleRateHz)*time.Millisecond+telephony.MarkEchoGraceMS*time.Millisecond)
+	}
+}
+
+// blockingWSWriter parks in Write until release is closed, and records every
+// message it was handed. It is what lets a test hold carrierMediaSink's write
+// slot open while a second writer tries to take it — the interleaving the sink
+// exists to serialise, and one that cannot be provoked through the handler,
+// where both writers complete in microseconds.
+type blockingWSWriter struct {
+	entered chan struct{}
+	release chan struct{}
+
+	mu   sync.Mutex
+	sent [][]byte
+}
+
+// Write records the message BEFORE parking, so a caller that reached the
+// connection without going through the slot is visible in writes() even though
+// its write never completed — that caller having got this far is the defect.
+// The park honours ctx so a bypassing write fails on its own deadline rather
+// than hanging the test out to its timeout.
+func (b *blockingWSWriter) Write(ctx context.Context, _ websocket.MessageType, msg []byte) error {
+	b.mu.Lock()
+	b.sent = append(b.sent, append([]byte(nil), msg...))
+	b.mu.Unlock()
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *blockingWSWriter) writes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.sent)
+}
+
+// TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight is what actually holds
+// a mark to carrierMediaSink.writeSem, and holds that slot to a CANCELLABLE
+// acquisition.
+//
+// TestMarkRequestChan_MarkReachesCarrierAfterQueuedAudio cannot: it observes
+// the three media frames on the wire before requesting the mark, so the mark is
+// asked for only once nothing is in flight, and a Mark that wrote the carrier
+// connection directly — the second-writer defect the sink exists to prevent —
+// still lands after them. Mutation-verified during review: replacing Mark's
+// s.write call with a bare s.conn.Write left every mark test green under a
+// plain `go test`; only `-race` failed it, and then on the playout clock rather
+// than on the ordering.
+//
+// The deadline half is the same story one level down. writeSem is a one-slot
+// channel rather than a sync.Mutex precisely so the wait honours ctx, because a
+// mark is written under a bounded context from the select loop that observes
+// every way the call can end, while the media it queues behind is written on
+// the call's own unbounded one. Mutation-verified: replacing write's select
+// with a bare `s.writeSem <- struct{}{}` left the whole package green under
+// -race.
+//
+// slopstop:test regression — guards: "a mark reaches the carrier after every
+// media frame the engine had already written, never from a goroutine racing
+// the sink's writer"
+func TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight(t *testing.T) {
+	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	tr := newMarkTracker(make(chan MarkEcho, 4))
+	sink := newCarrierMediaSink(w, "SSslot", nil, tr)
+
+	mediaDone := make(chan error, 1)
+	go func() { mediaDone <- sink.Media(context.Background(), silencePayloadB64()) }()
+
+	select {
+	case <-w.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the media write never reached the carrier connection")
+	}
+
+	// The slot is held by that write. A mark taken under a short deadline must
+	// come back on the WAIT rather than overtaking it onto the connection.
+	markCtx, cancelMark := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelMark()
+	// In a goroutine, so an acquisition that does NOT honour ctx — the
+	// sync.Mutex spelling writeSem exists instead of — reports itself here
+	// rather than hanging the package out to its test timeout.
+	marked := make(chan error, 1)
+	go func() { marked <- sink.Mark(markCtx, "queued") }()
+	var err error
+	select {
+	case err = <-marked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a mark queued behind an in-flight write never came back; its 200ms deadline did not cover the wait for the slot")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a mark queued behind an in-flight write must fail on its own deadline, got err %v", err)
+	}
+	if n := w.writes(); n != 1 {
+		t.Fatalf("only the media write may have reached the connection while it held the slot, got %d writes", n)
+	}
+	// A mark that never got the slot never went out, so nothing may be
+	// outstanding waiting for an echo that can never come.
+	tr.mu.Lock()
+	outstanding := len(tr.outstanding)
+	tr.mu.Unlock()
+	if outstanding != 0 {
+		t.Fatalf("a mark whose write never happened must not be armed, got %d outstanding", outstanding)
+	}
+
+	// Control: the refusal above is the slot being held, not Mark being broken.
+	// Once the media write completes, the same mark goes out and is armed.
+	close(w.release)
+	select {
+	case err := <-mediaDone:
+		if err != nil {
+			t.Fatalf("Media: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the media write never completed after the connection was released")
+	}
+	if err := sink.Mark(context.Background(), "queued"); err != nil {
+		t.Fatalf("Mark once the slot is free: %v", err)
+	}
+	if n := w.writes(); n != 2 {
+		t.Fatalf("the mark must reach the connection once the slot is free, got %d writes", n)
+	}
+	tr.mu.Lock()
+	_, armed := tr.outstanding["queued"]
+	tr.mu.Unlock()
+	if !armed {
+		t.Fatal("a mark that reached the carrier must be armed for its echo")
 	}
 }
