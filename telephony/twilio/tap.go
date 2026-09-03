@@ -100,11 +100,47 @@ type tapSidecar struct {
 	OutDroppedFrames int `json:"out_dropped_frames,omitempty"`
 }
 
-func NewTap(dir, streamSID, callSID, label string, startedAt time.Time) *Tap {
+// duplexAlignment is the sidecar "alignment" string a duplex recording
+// carries: out.ulaw is written one frame per inbound frame, so byte offset is
+// the same instant in both files. It is named rather than inlined because a
+// one-directional recording must be able to say it is NOT this.
+const duplexAlignment = "inbound-frame-clock, 20ms/frame, silence=0xFF"
+
+// Channel names one direction of a call. The values are the strings the
+// sidecar's "channels" field carries, so there is one definition of each name
+// rather than a constant here and a literal in writeSidecar.
+type Channel string
+
+const (
+	ChannelIn  Channel = "in"
+	ChannelOut Channel = "out"
+)
+
+// TapOption configures a Tap at construction, matching the RealtimeOption /
+// SessionOption vocabulary the rest of this package uses.
+type TapOption func(*Tap)
+
+// WithChannels declares which directions of the call this Tap will be given,
+// which is what lets it behave correctly for each. Stub: accepted and ignored.
+func WithChannels(channels ...Channel) TapOption {
+	return func(*Tap) {}
+}
+
+// withNow injects the clock an outbound-only Tap paces its gap fill against.
+// Test-only, like newTapWithWriter. Stub: accepted and ignored.
+func withNow(now func() time.Time) TapOption {
+	return func(*Tap) {}
+}
+
+func NewTap(dir, streamSID, callSID, label string, startedAt time.Time, opts ...TapOption) *Tap {
 	if dir == "" {
 		return nil
 	}
-	return &Tap{dir: dir, streamSID: streamSID, callSID: callSID, label: label, startedAt: startedAt}
+	t := &Tap{dir: dir, streamSID: streamSID, callSID: callSID, label: label, startedAt: startedAt}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 func newTapWithWriter(w io.WriteCloser, dir, streamSID, callSID, label string, startedAt time.Time) *Tap {
@@ -308,7 +344,7 @@ func (t *Tap) writeSidecar() {
 		Frames:           t.frames,
 		Bytes:            t.bytes,
 		VADConfig:        telephony.DefaultVADConfig(),
-		Alignment:        "inbound-frame-clock, 20ms/frame, silence=0xFF",
+		Alignment:        duplexAlignment,
 		Channels:         []string{"in", "out"},
 		OutTruncated:     t.outCount > 0,
 		OutDroppedFrames: t.outDrops,
