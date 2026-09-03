@@ -460,10 +460,13 @@ func (t *Tap) appendOut(frame []byte) {
 }
 
 // appendOutFrames writes one Write's worth of outbound audio -- frames whole
-// mu-law frames, laid end to end -- and counts what landed. A short write
-// still counts them all, the same rounding appendOut has always made for a
-// single partial frame. Caller holds t.mu and has already called
-// ensureOutWriter.
+// mu-law frames, laid end to end. outBytes counts what landed; outFrames counts
+// what was offered, so a short write over-counts by up to frames-1, where
+// appendOut's single frame could only ever be off by one. That is a rounding
+// this can afford rather than one it hides: outFrames is read only as a zero
+// test (removeEmptyRecordings, and Close deciding whether to write a sidecar),
+// and any short write with n > 0 answers that test the same way whatever it is
+// counted as. Caller holds t.mu and has already called ensureOutWriter.
 func (t *Tap) appendOutFrames(buf []byte, frames int) {
 	n, err := t.wOut.Write(buf)
 	if err != nil {
@@ -500,11 +503,17 @@ func (t *Tap) appendOutFrames(buf []byte, frames int) {
 // Unlike that filler this has no catch-up bound, deliberately: there a deficit
 // past maxFillCatchUp is resynced away because filling it honestly would block
 // on the player, while here a minutes-long gap is the ordinary case and
-// dropping it would be exactly the lie the fill exists to prevent. The price
-// is that a wall-clock step forward -- an NTP step, a suspended host -- is
-// indistinguishable from a long silence and is written out as one, so the cost
-// of a step is its own size in bytes on disk. Batching (silenceChunkFrames)
-// keeps that from also being a syscall per frame under the lock.
+// dropping it would be exactly the lie the fill exists to prevent. The price is
+// paid under t.mu, on the send path WriteOut is called from: a gap costs its own
+// length in bytes on disk, plus one Write call per silenceChunkFrames of it --
+// that constant bounds the buffer handed to each Write, never the total.
+//
+// A gap here can only be real elapsed time, never a clock correction: in
+// production both now and fedThrough descend from a time.Now reading, Add
+// preserves the monotonic reading, and time.Time.Sub then uses the monotonic
+// readings alone. An NTP step moves the wall clock and does not appear here at
+// all. (withNow's injected clock carries no monotonic reading, so a test's gaps
+// are exactly the durations it advances by -- which is the point of it.)
 func (t *Tap) fillOutGap(now time.Time) {
 	if t.fedThrough.IsZero() {
 		t.fedThrough = now

@@ -1395,3 +1395,36 @@ func TestTap_WithChannelsIgnoresRepeats(t *testing.T) {
 		t.Errorf("sidecar alignment = %q, want %q", side.Alignment, duplexAlignment)
 	}
 }
+
+// TestTap_OutboundOnlyAbsorbsFasterThanRealTimeBursts pins the half of the
+// wall-clock pacing fillOutGap's comment claims and nothing asserted: a backend
+// that hands over a clip faster than it plays leaves fedThrough ahead of the
+// clock, and the surplus is absorbed by the next real gap rather than fought
+// over. A fill that treated a negative gap as anything but zero frames would
+// either pad silence in between a burst's frames or, by resyncing fedThrough to
+// now, swallow the part of the following gap the burst already covers.
+func TestTap_OutboundOnlyAbsorbsFasterThanRealTimeBursts(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSburst"
+	clk := &fakeClock{t: testStreamStartedAt}
+
+	tap := outboundOnlyTap(dir, streamSID, "CAburst", clk)
+	burst := [][]byte{realFrame(0x31), realFrame(0x32), realFrame(0x33)}
+	for _, p := range burst { // 60ms of audio handed over at one instant
+		tap.WriteOut(p)
+	}
+	clk.advance(100 * time.Millisecond) // 60ms of which the burst is still playing
+	last := realFrame(0x34)
+	tap.WriteOut(last)
+	tap.Close() // fedThrough is 20ms past now again, so no tail
+
+	audio, err := os.ReadFile(outulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("reading the outbound recording: %v", err)
+	}
+	silence := bytes.Repeat([]byte{0xFF}, defaultFrameBytes)
+	want := bytes.Join([][]byte{burst[0], burst[1], burst[2], silence, silence, last}, nil)
+	if !bytes.Equal(audio, want) {
+		t.Fatalf("outbound audio = %d bytes, want %d — a burst must not be padded apart, and only the 40ms it did not cover may become silence", len(audio), len(want))
+	}
+}
