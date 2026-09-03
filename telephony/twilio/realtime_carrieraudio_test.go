@@ -25,12 +25,19 @@ import (
 // synchronous MediaSink wrapper before any code existed).
 
 // carrierWireRecord is one message this suite observed on the carrier
-// connection — either a media payload or a clear — so a test can compare
+// connection — a media payload, a clear, or a mark — so a test can compare
 // what the consumer's channel delivered against what the carrier actually
 // received, rather than against what the test merely intended to send.
+//
+// markName was added by AATK-105, which needed the mark's POSITION in the
+// sequence rather than only its presence: the ordering property that ticket
+// buys is "the mark lands after the media already written", and a capture that
+// dropped marks could not see it. Recording it here rather than in a second
+// capture helper keeps one definition of what this suite saw on the wire.
 type carrierWireRecord struct {
-	payload string
-	clear   bool
+	payload  string
+	clear    bool
+	markName string
 }
 
 // captureCarrierWire mirrors realtimeHarness.countMediaFrames
@@ -66,6 +73,10 @@ func (h *realtimeHarness) captureCarrierWire(t *testing.T) func() []carrierWireR
 			case EventClear:
 				mu.Lock()
 				records = append(records, carrierWireRecord{clear: true})
+				mu.Unlock()
+			case EventMark:
+				mu.Lock()
+				records = append(records, carrierWireRecord{markName: f.MarkName})
 				mu.Unlock()
 			}
 		}
