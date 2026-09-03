@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// buildVoiceUpdate is the mid-call voice change on the wire (AATK-104). It is
+// BuildVoiceUpdate is the mid-call voice change on the wire (AATK-104). It is
 // a separate builder from buildSessionUpdate on purpose, and these tests are
 // what hold the two apart.
 //
@@ -45,9 +45,9 @@ func voiceUpdateKeyPaths(v any, prefix string, out *[]string) {
 // discriminated union and rejects the transcription variant, so an update
 // without it does not parse as the accepted variant at all.
 func TestBuildVoiceUpdate_CarriesVoiceAndNothingElse(t *testing.T) {
-	raw, err := buildVoiceUpdate("cedar")
+	raw, err := BuildVoiceUpdate("cedar")
 	if err != nil {
-		t.Fatalf("buildVoiceUpdate: %v", err)
+		t.Fatalf("BuildVoiceUpdate: %v", err)
 	}
 
 	var doc any
@@ -100,9 +100,9 @@ func TestBuildVoiceUpdate_CarriesVoiceAndNothingElse(t *testing.T) {
 // states for the dial voice. What is a legal voice is the backend's to say.
 func TestBuildVoiceUpdate_ForwardsTheVoiceUnmodified(t *testing.T) {
 	const odd = "  Cedar-Mixed_Case.99  "
-	raw, err := buildVoiceUpdate(odd)
+	raw, err := BuildVoiceUpdate(odd)
 	if err != nil {
-		t.Fatalf("buildVoiceUpdate: %v", err)
+		t.Fatalf("BuildVoiceUpdate: %v", err)
 	}
 	var got struct {
 		Session struct {

@@ -103,6 +103,10 @@ type realtimeConfig struct {
 	// than opening that passthrough. Voice does not touch turn-taking. With
 	// no stated need to vary it per call, there is no WithVoiceFor to go
 	// with it.
+	//
+	// This is the voice the call OPENS with, not the voice for its whole
+	// life: voiceUpdateChanFor below carries mid-call changes, taking the
+	// identical shape for the identical reason.
 	voice string
 
 	// tools mirrors voice: a plain value rather than a per-call resolver.
@@ -121,6 +125,15 @@ type realtimeConfig struct {
 	// reason as the others — NewStreamHandler binds its options once and
 	// reuses them for every call it serves.
 	clientEventChanFor func(start Frame) <-chan json.RawMessage
+
+	// voiceUpdateChanFor mirrors clientEventChanFor — the consumer writes,
+	// the engine reads — but carries voice IDs rather than event bytes.
+	// AATK-104: it is the mid-call half of the same policy voice's field
+	// above states for the dial half. A general session-config passthrough
+	// stays out of scope, so voice gets its own seam here too, and because
+	// the engine marshals the frame a consumer cannot reach turn detection,
+	// instructions or tools through it even by accident.
+	voiceUpdateChanFor func(start Frame) <-chan string
 
 	// carrierAudioChanFor mirrors serverEventChanFor: resolved per call
 	// rather than stored as a plain channel, for the same reason.
@@ -176,6 +189,15 @@ func (c realtimeConfig) clientEventChan(start Frame) <-chan json.RawMessage {
 		return nil
 	}
 	return c.clientEventChanFor(start)
+}
+
+// voiceUpdateChan resolves the source for one call, or nil when the consumer
+// supplied none. Mirrors clientEventChan.
+func (c realtimeConfig) voiceUpdateChan(start Frame) <-chan string {
+	if c.voiceUpdateChanFor == nil {
+		return nil
+	}
+	return c.voiceUpdateChanFor(start)
 }
 
 // carrierAudioChan resolves the destination for one call, or nil when the
@@ -236,6 +258,12 @@ func WithInstructions(text string) RealtimeOption {
 //
 // Empty omits the field entirely, which is byte-for-byte the handshake a
 // caller supplying no option gets.
+//
+// This sets the voice the call OPENS with. It is no longer the only chance to
+// set one: WithVoiceUpdateChan changes the backend's output voice mid-call,
+// through a seam of the same shape and for the same reason — voice gets its
+// own channel rather than the session-config passthrough this comment rules
+// out.
 func WithVoice(name string) RealtimeOption {
 	return func(c *realtimeConfig) { c.voice = name }
 }
@@ -435,6 +463,54 @@ func WithClientEventChanFor(fn func(start Frame) <-chan json.RawMessage) Realtim
 	return func(c *realtimeConfig) { c.clientEventChanFor = fn }
 }
 
+// WithVoiceUpdateChan lets a consumer change the backend's OUTPUT voice
+// during a call (AATK-104): every non-empty value read from ch is turned into
+// a minimal session.update and sent to the backend, and the call carries on.
+//
+// The channel carries a voice ID — a string — not event bytes, and that is
+// the point of it. This engine builds the frame itself, so what crosses the
+// wire is exactly {"type":"session.update","session":{"type":"realtime",
+// "audio":{"output":{"voice":"<id>"}}}} and nothing else: no instructions, no
+// tools, no turn_detection, and no audio format on either direction. A
+// consumer cannot reach the rest of the session config through this seam even
+// by mistake, which is what lets the seam exist at all — the general
+// session-config passthrough WithVoice's doc rules out stays shut, and
+// WithClientEventChan's refusal of a consumer-supplied session.update is
+// untouched. The two are halves of one policy: session config changes through
+// this package's own options, never through consumer-supplied event bytes.
+//
+// The voice ID is not validated, trimmed, or case-folded — which names a
+// backend accepts is the backend's to say, the same rule WithVoice states for
+// the dial voice. An EMPTY string is the one value that is not forwarded: an
+// empty voice is what WithVoice means by "no voice", so sending one would ask
+// the backend to unset a field rather than to change it, and this package has
+// nothing to say about what unsetting a voice mid-call means.
+//
+// A voice update is a consumer event, not backend activity: it does not reset
+// the idle timeout. A chatty consumer against a silent backend must not mask
+// that silence.
+//
+// Closing ch is not an error and does not end the call — the engine simply
+// stops reading it. A send that never completes is bounded rather than waited
+// on, exactly as WithClientEventChan's is and for the same reason: the read
+// shares HandleStreamRealtime's select loop with every other way the call can
+// end, so an unbounded write here would silence the idle timer and the
+// carrier hangup along with itself.
+func WithVoiceUpdateChan(ch <-chan string) RealtimeOption {
+	return WithVoiceUpdateChanFor(func(Frame) <-chan string { return ch })
+}
+
+// WithVoiceUpdateChanFor resolves the source when the call arrives, from the
+// start frame — so a consumer can route different calls to different
+// channels. Mirrors WithClientEventChanFor.
+//
+// A nil function, or one returning nil, means no consumer: the engine never
+// sends a mid-call session.update at all, and the frames the backend receives
+// are byte-for-byte what it receives with no option supplied.
+func WithVoiceUpdateChanFor(fn func(start Frame) <-chan string) RealtimeOption {
+	return func(c *realtimeConfig) { c.voiceUpdateChanFor = fn }
+}
+
 // WithInstructionsFor resolves the session persona when the call arrives, from
 // the start frame — which carries the caller identity, so a consumer can vary
 // the persona per caller.
@@ -574,6 +650,11 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// being whether the select picked the stale timer or the pending
 	// bridge.Activity() signal that would have reset it.
 	clientEventCh := cfg.clientEventChan(start)
+	// Resolved here, beside clientEventCh and before the idle guard is armed,
+	// for the reason stated immediately above: this runs consumer code on
+	// this goroutine, and an armed guard would spend its first window inside
+	// the resolver.
+	voiceUpdateCh := cfg.voiceUpdateChan(start)
 
 	idle := newIdleGuard(cfg.idleTimeout)
 	defer idle.stop()
@@ -597,6 +678,12 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 		case ev, ok := <-clientEventCh:
 			var err error
 			clientEventCh, err = handleClientEvent(ctx, client, clientEventCh, ev, ok)
+			if err != nil {
+				return err
+			}
+		case voice, ok := <-voiceUpdateCh:
+			var err error
+			voiceUpdateCh, err = handleVoiceUpdate(ctx, client, voiceUpdateCh, voice, ok)
 			if err != nil {
 				return err
 			}
@@ -658,6 +745,64 @@ func handleClientEvent(ctx context.Context, client *realtime.Client, ch <-chan j
 		// caller unable to tell the two apart from the error alone. The idle
 		// timeout names itself on the way out for the same reason.
 		return ch, fmt.Errorf("twilio: realtime: client event send: %w", err)
+	}
+	return ch, nil
+}
+
+// handleVoiceUpdate processes one receive from the voice-update select case,
+// returning the channel HandleStreamRealtime's loop should keep selecting on
+// next (nil once the consumer has closed it) and any error that should end
+// the call. Mirrors handleClientEvent, which is the shape it is deliberately
+// modelled on — same extraction, same bound, same failure path.
+//
+// The engine marshals the frame; the consumer supplies a voice ID and nothing
+// else. realtime.BuildVoiceUpdate emits the minimal shape rather than the
+// dial handshake's, and that distinction is load-bearing rather than tidy:
+// the handshake's audio channels carry a non-omitempty format, and a backend
+// that merges exactly the fields an update sent would read an empty one as an
+// instruction to clear the negotiated G.711 mu-law format on a live call.
+//
+// Deliberately does NOT call idle.reset(), for the reason handleClientEvent
+// gives: a voice update is a consumer event, not backend activity, and a
+// chatty consumer against a silent backend must not mask that silence.
+//
+// An empty voice is dropped rather than sent. Empty is what WithVoice means
+// by "no voice" (the field is omitempty at the handshake), so forwarding one
+// would ask the backend to unset a field rather than to change it, and this
+// package has no way to say what unsetting a voice mid-call means.
+func handleVoiceUpdate(ctx context.Context, client *realtime.Client, ch <-chan string, voice string, ok bool) (<-chan string, error) {
+	if !ok {
+		// The consumer closed its channel: return nil so the caller's select
+		// case never fires again, rather than busy-looping on a closed
+		// channel that is always ready to receive its zero value.
+		return nil, nil
+	}
+	if voice == "" {
+		return ch, nil
+	}
+
+	ev, err := realtime.BuildVoiceUpdate(voice)
+	if err != nil {
+		log.Printf("twilio: realtime: build voice update: %v", err)
+		return ch, fmt.Errorf("twilio: realtime: build voice update: %w", err)
+	}
+
+	// Bounded, because this runs on HandleStreamRealtime's select loop: an
+	// unbounded write that parks here parks every other way the call can end.
+	// See realtimeClientEventSendTimeout, whose bound this shares — it is one
+	// small frame on the same socket, sent from the same loop, for the same
+	// reason.
+	sendCtx, cancelSend := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
+	defer cancelSend()
+	if err := client.Send(sendCtx, ev); err != nil {
+		log.Printf("twilio: realtime: voice update send failed: %v", err)
+		// Wrapped for the reason handleClientEvent's is: the transport's
+		// write error reads identically whether it came from carrier audio, a
+		// consumer event, or this, so an unwrapped return would leave the
+		// caller unable to tell them apart from the error alone. This
+		// transport's writer poisons itself after one write error, so a
+		// failure here is never transient.
+		return ch, fmt.Errorf("twilio: realtime: voice update send: %w", err)
 	}
 	return ch, nil
 }

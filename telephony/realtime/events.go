@@ -177,3 +177,68 @@ func buildSessionUpdate(instructions, voice string, tools json.RawMessage) ([]by
 	out = append(out, '}', '}')
 	return out, nil
 }
+
+// voiceUpdateOutput is the mid-call frame's OUTPUT audio channel: a voice and
+// nothing else. It is a separate type from audioChannel, not a re-use of it,
+// and that is the whole point of this builder — audioChannel.Format has no
+// omitempty, so marshalling one with no format set emits
+// "format":{"type":""}. The backend deep-merges exactly the fields an update
+// actually sent, so such a frame would overwrite the negotiated G.711 mu-law
+// format on a live call. See BuildVoiceUpdate.
+type voiceUpdateOutput struct {
+	Voice string `json:"voice"`
+}
+
+type voiceUpdateAudio struct {
+	Output voiceUpdateOutput `json:"output"`
+}
+
+// voiceUpdateSession carries Type because the backend maps session.update
+// onto a discriminated union of session variants and rejects the
+// transcription one explicitly; an update without "type":"realtime" does not
+// parse as the accepted variant at all.
+type voiceUpdateSession struct {
+	Type  string           `json:"type"`
+	Audio voiceUpdateAudio `json:"audio"`
+}
+
+type voiceUpdate struct {
+	Type    string             `json:"type"`
+	Session voiceUpdateSession `json:"session"`
+}
+
+// BuildVoiceUpdate marshals the minimal session.update that changes the
+// backend's OUTPUT voice mid-call and touches nothing else:
+//
+//	{"type":"session.update","session":{"type":"realtime","audio":{"output":{"voice":"<id>"}}}}
+//
+// It is deliberately NOT a parameterisation of newSessionUpdate. That
+// constructor builds the dial handshake, whose job is to declare the audio
+// format on both directions; its audioChannel.Format has no omitempty because
+// the handshake always sets it. Reusing it here would send two empty format
+// types, and a backend that merges only the fields it was sent would take
+// them literally — clearing the negotiated format on a call already carrying
+// audio. Hence a separate, minimal shape.
+//
+// Exported, unlike buildSessionUpdate beside it, because its caller is in
+// another package: the handshake is built and sent inside Dial, but the
+// mid-call frame is built for HandleStreamRealtime to write through
+// Client.Send. Send itself stays a raw client method — this adds a shape the
+// engine can hand it, it does not restrict what else may be sent.
+//
+// The voice reaches the wire exactly as supplied: not validated, trimmed, or
+// case-folded. Which names are legal is the backend's to say, the same rule
+// WithVoice's doc comment states for the dial voice.
+func BuildVoiceUpdate(voice string) ([]byte, error) {
+	out, err := json.Marshal(voiceUpdate{
+		Type: EventSessionUpdate,
+		Session: voiceUpdateSession{
+			Type:  "realtime",
+			Audio: voiceUpdateAudio{Output: voiceUpdateOutput{Voice: voice}},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("realtime: marshal voice session.update: %w", err)
+	}
+	return out, nil
+}
