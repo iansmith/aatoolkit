@@ -495,7 +495,21 @@ func WithClientEventChanFor(fn func(start Frame) <-chan json.RawMessage) Realtim
 // on, exactly as WithClientEventChan's is and for the same reason: the read
 // shares HandleStreamRealtime's select loop with every other way the call can
 // end, so an unbounded write here would silence the idle timer and the
-// carrier hangup along with itself.
+// carrier hangup along with itself. A send that FAILS is logged, and the call
+// ends with a non-nil error — the same ending path as the backend going away,
+// because this transport's writer poisons itself after one write error.
+//
+// Everything WithClientEventChan's doc says about the reversed arrow — the
+// consumer writes, the engine reads — holds here unchanged, because it is the
+// same reversal, and the two consequences that bite are stated there in full
+// rather than restated here. In short: the engine's leak-freedom is not the
+// CONSUMER's, so a consumer parked in a send on an unbuffered or full ch when
+// the call ends stays parked forever; and ONE ch SERVES ONE CALL AT A TIME,
+// so two calls running concurrently off the same ch split the stream between
+// them at random — a voice meant for one caller silently changes the other
+// caller's instead. NewStreamHandler binds this option once and reuses it for
+// every call it serves, so for calls that can overlap use
+// WithVoiceUpdateChanFor and give each call its own channel.
 func WithVoiceUpdateChan(ch <-chan string) RealtimeOption {
 	return WithVoiceUpdateChanFor(func(Frame) <-chan string { return ch })
 }
