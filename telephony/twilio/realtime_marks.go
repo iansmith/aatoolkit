@@ -88,10 +88,12 @@ func (p *playoutClock) outstanding(now time.Time) time.Duration {
 // consumer may have more than one mark in flight, and an echo carrying a name
 // nothing is waiting on must not be read as the one that is.
 //
-// Both goroutines that touch a mark reach it through here — the select loop
-// arms one after writing it, pumpCarrierToBridge's goroutine resolves the echo
-// — so the map is mutex-guarded rather than owned by one loop, which is the
-// exception on this path and the reason it is a type of its own.
+// Every goroutine that touches a mark reaches it through here — the select
+// loop arms one after writing it and stops the tracker when the call ends,
+// pumpCarrierToBridge's goroutine resolves the echo, and each bound's own
+// timer goroutine expires it — so the map is mutex-guarded rather than owned
+// by one loop, which is the exception on this path and the reason it is a type
+// of its own.
 //
 // A nil *markTracker is the "consumer asked for no marks" case and every
 // method tolerates it: HandleStreamRealtime builds one only when a mark option
@@ -105,18 +107,36 @@ type markTracker struct {
 	echoCh chan<- MarkEcho
 
 	mu sync.Mutex
-	// outstanding maps each written-but-unechoed mark name to the timer
-	// enforcing its bound.
-	outstanding map[string]*time.Timer
-	dropped     int
+	// outstanding maps each written-but-unechoed mark name to the arming that
+	// wrote it.
+	outstanding map[string]outstandingMark
+	// gen numbers the armings, so each one can recognise its own bound firing.
+	// See outstandingMark.
+	gen     uint64
+	dropped int
 	// stopped is set when the call ends. It is what keeps a timer that fires,
 	// or an echo that arrives, during teardown from delivering on a channel
 	// whose consumer has already been told the call is over.
 	stopped bool
 }
 
+// outstandingMark is one written-but-unechoed mark: the timer enforcing its
+// bound, and the number of the arming that started it.
+//
+// The number is what lets expire act on its OWN arming and no other.
+// time.Timer.Stop cannot unwind a callback that has already begun, so a
+// re-arm of a name whose previous bound had just fired leaves that bound's
+// callback in flight, blocked on markTracker.mu. Matching on the name alone,
+// it would then resolve whichever arming had replaced it: a TimedOut record
+// for a mark still well inside its own bound, whose real echo would afterwards
+// match nothing outstanding and be discarded.
+type outstandingMark struct {
+	timer *time.Timer
+	gen   uint64
+}
+
 func newMarkTracker(echoCh chan<- MarkEcho) *markTracker {
-	return &markTracker{echoCh: echoCh, outstanding: make(map[string]*time.Timer)}
+	return &markTracker{echoCh: echoCh, outstanding: make(map[string]outstandingMark)}
 }
 
 // arm records name as outstanding and starts its bound.
@@ -141,9 +161,13 @@ func (t *markTracker) arm(name string, bound time.Duration) {
 	}
 	if old, ok := t.outstanding[name]; ok {
 		log.Printf("twilio: realtime: mark %q was already outstanding; re-arming its bound to %s", name, bound)
-		old.Stop()
+		old.timer.Stop()
 	}
-	t.outstanding[name] = time.AfterFunc(bound, func() { t.expire(name) })
+	t.gen++
+	gen := t.gen
+	// The callback takes t.mu, which is held here, so a bound of zero cannot
+	// beat this assignment: expire waits for arm to return either way.
+	t.outstanding[name] = outstandingMark{timer: time.AfterFunc(bound, func() { t.expire(name, gen) }), gen: gen}
 }
 
 // echo resolves an inbound mark echo from the carrier.
@@ -161,12 +185,12 @@ func (t *markTracker) echo(name string) {
 	if t.stopped {
 		return
 	}
-	timer, ok := t.outstanding[name]
+	m, ok := t.outstanding[name]
 	if !ok {
 		log.Printf("twilio: realtime: mark echo %q matches no outstanding mark; not delivered as a match", name)
 		return
 	}
-	timer.Stop()
+	m.timer.Stop()
 	delete(t.outstanding, name)
 	t.deliver(MarkEcho{Name: name})
 }
@@ -175,16 +199,21 @@ func (t *markTracker) echo(name string) {
 // still goes to the consumer, carrying TimedOut, because the whole point of
 // the bound is that a peer which does not honor the mark protocol must not
 // leave the consumer waiting forever.
-func (t *markTracker) expire(name string) {
+//
+// gen names the arming this bound belongs to, and only that arming is resolved
+// here — see outstandingMark for why matching the name alone is not enough.
+func (t *markTracker) expire(name string, gen uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.stopped {
 		return
 	}
-	if _, ok := t.outstanding[name]; !ok {
-		// Echoed while this timer was already running its func and waiting on
-		// the mutex. Stop() cannot unwind that, so the check here is what
-		// keeps one mark from being reported twice.
+	if m, ok := t.outstanding[name]; !ok || m.gen != gen {
+		// This arming was already resolved — echoed, or replaced by a re-arm
+		// of the same name — while this timer was running its func and waiting
+		// on the mutex. Stop() cannot unwind that, so the check here is what
+		// keeps one mark from being reported twice and keeps a spent bound
+		// from resolving the arming that replaced it.
 		return
 	}
 	delete(t.outstanding, name)
@@ -203,8 +232,8 @@ func (t *markTracker) stop() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.stopped = true
-	for name, timer := range t.outstanding {
-		timer.Stop()
+	for name, m := range t.outstanding {
+		m.timer.Stop()
 		delete(t.outstanding, name)
 	}
 }
