@@ -96,11 +96,7 @@ func (f *failingWSWriter) Write(context.Context, websocket.MessageType, []byte) 
 func TestCarrierMediaSink_WriteFailureNeverDeliversCarrierAudio(t *testing.T) {
 	writeErr := errors.New("carrier write failed")
 	ch := make(chan CarrierAudio, 1)
-	sink := &carrierMediaSink{
-		conn:           &failingWSWriter{err: writeErr},
-		streamSID:      "SSfail",
-		carrierAudioCh: ch,
-	}
+	sink := newCarrierMediaSink(&failingWSWriter{err: writeErr}, "SSfail", ch, nil)
 
 	if err := sink.Media(context.Background(), carrierPayloadB64()); !errors.Is(err, writeErr) {
 		t.Fatalf("Media: got err %v, want %v", err, writeErr)

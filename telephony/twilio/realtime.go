@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/realtime"
 )
 
@@ -34,6 +35,13 @@ const realtimeDialTimeout = 10 * time.Second
 // would prevent the timer from ever being selected on. Measured before this
 // bound existed: with a 200 ms idle timeout and a write that blocks, the call
 // was still hung 3 s later.
+//
+// It bounds one more write, on the other socket: the mark handleMarkRequest
+// writes to the CARRIER. The reason is the same one stated above and so is the
+// value, so this stays the single definition rather than growing a near-identical
+// twin (CLAUDE.md #5) — that write also happens on the select loop, and the
+// write slot it queues behind is held by carrier audio written on the call's own
+// unbounded context.
 //
 // Generous by orders of magnitude for what it bounds — a client event is one
 // small frame, which a backend that is reading at all accepts in
@@ -138,6 +146,17 @@ type realtimeConfig struct {
 	// carrierAudioChanFor mirrors serverEventChanFor: resolved per call
 	// rather than stored as a plain channel, for the same reason.
 	carrierAudioChanFor func(start Frame) chan<- CarrierAudio
+
+	// markRequestChanFor mirrors voiceUpdateChanFor — the consumer writes,
+	// the engine reads — but carries the name of a Twilio mark to place after
+	// the audio written so far. AATK-105: it is the request half of the
+	// playout-position seam this path had no answer for, the echo half being
+	// markEchoChanFor below.
+	markRequestChanFor func(start Frame) <-chan string
+
+	// markEchoChanFor mirrors carrierAudioChanFor: the engine writes, the
+	// consumer reads, resolved per call for the same reason.
+	markEchoChanFor func(start Frame) chan<- MarkEcho
 }
 
 // CarrierAudio is one record of what the engine sent to the carrier —
@@ -207,6 +226,24 @@ func (c realtimeConfig) carrierAudioChan(start Frame) chan<- CarrierAudio {
 		return nil
 	}
 	return c.carrierAudioChanFor(start)
+}
+
+// markRequestChan resolves the source for one call, or nil when the consumer
+// supplied none. Mirrors voiceUpdateChan.
+func (c realtimeConfig) markRequestChan(start Frame) <-chan string {
+	if c.markRequestChanFor == nil {
+		return nil
+	}
+	return c.markRequestChanFor(start)
+}
+
+// markEchoChan resolves the destination for one call, or nil when the consumer
+// asked for none. Mirrors carrierAudioChan.
+func (c realtimeConfig) markEchoChan(start Frame) chan<- MarkEcho {
+	if c.markEchoChanFor == nil {
+		return nil
+	}
+	return c.markEchoChanFor(start)
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -525,6 +562,105 @@ func WithVoiceUpdateChanFor(fn func(start Frame) <-chan string) RealtimeOption {
 	return func(c *realtimeConfig) { c.voiceUpdateChanFor = fn }
 }
 
+// WithMarkRequestChan lets a consumer ask "has everything I sent to the
+// carrier actually played yet?" (AATK-105): every non-empty name read from ch
+// is written to the carrier as a Twilio mark, placed AFTER every media frame
+// the engine had already written, and the carrier echoes it back once that
+// audio has finished playing. WithMarkEchoChan is where the echo arrives.
+//
+// The classic path has answered that question since SOP-125 and this path
+// could not: the backend owns playback here, so nothing local consumed marks
+// and an inbound one was dropped. A consumer can still have a reason to care
+// about the carrier's playout position — ending a call after a spoken line,
+// without cutting the line mid-word — and the alternative was for it to model
+// the carrier as a real-time player and add up the audio deltas it observed.
+// That estimate is short by however many deltas it missed, because they reach
+// a consumer through a seam that drops when the consumer is behind.
+//
+// Ordering is the property being bought, and it comes from WHERE the write
+// happens: through carrierMediaSink's own write slot, never from this
+// package's select loop directly. See handleMarkRequest, which states the
+// hazard in full — a second writer on the carrier connection, and a mark able
+// to land ahead of audio the bridge has not yet flushed, so the echo would
+// report a playout position that has not happened.
+//
+// NAME EVERY MARK DISTINCTLY. A consumer may have more than one outstanding,
+// the wire carries nothing but the name, and an echo is matched on it: reusing
+// a name while the first is still in flight collapses the two, and the engine
+// logs that and re-arms rather than tracking both. An empty name is refused
+// outright — its echo could never be matched to the request that caused it.
+//
+// A mark request does NOT reset the idle timer armed by WithIdleTimeout: only
+// backend activity does. A consumer marking steadily against a backend that
+// has gone silent must not mask that silence.
+//
+// A write that fails is logged and ends the call with a non-nil error, and one
+// that never completes is bounded rather than waited on — both exactly as
+// WithClientEventChan's are, and for the reasons stated there.
+//
+// Everything WithClientEventChan's doc says about the reversed arrow — the
+// consumer writes, the engine reads — holds here unchanged. In short: the
+// engine's leak-freedom is not the CONSUMER's, so a consumer parked in a send
+// on an unbuffered or full ch when the call ends stays parked forever; and ONE
+// ch SERVES ONE CALL AT A TIME, so two concurrent calls off the same ch split
+// the stream between them at random — a mark meant for one caller is written
+// to the other caller's carrier instead. NewStreamHandler binds this option
+// once and reuses it for every call it serves, so for calls that can overlap
+// use WithMarkRequestChanFor and give each call its own channel.
+//
+// Supplying neither this nor WithMarkEchoChan is byte-for-byte today's
+// behavior: no mark is written, and an inbound mark frame is still ignored.
+func WithMarkRequestChan(ch <-chan string) RealtimeOption {
+	return WithMarkRequestChanFor(func(Frame) <-chan string { return ch })
+}
+
+// WithMarkRequestChanFor resolves the source when the call arrives, from the
+// start frame — so a consumer can route different calls to different channels.
+// Mirrors WithVoiceUpdateChanFor.
+//
+// A nil function, or one returning nil, means no consumer: the engine writes
+// no mark at all.
+func WithMarkRequestChanFor(fn func(start Frame) <-chan string) RealtimeOption {
+	return func(c *realtimeConfig) { c.markRequestChanFor = fn }
+}
+
+// WithMarkEchoChan delivers each resolved mark to ch: the carrier has finished
+// playing everything written ahead of that mark. It is the answer half of
+// WithMarkRequestChan, and it mirrors WithCarrierAudioChan — the consumer owns
+// ch (its buffer, its reader, its lifetime), the engine NEVER closes it, and
+// delivery is non-blocking, so a full ch drops the record (counted and logged)
+// rather than parking an engine goroutine.
+//
+// A record arrives for a requested mark in exactly two cases, distinguished by
+// MarkEcho.TimedOut: the carrier echoed it, or it did not and the engine's own
+// bound elapsed. THE BOUND LIVES HERE, not in the consumer — see
+// carrierMediaSink.markEchoBound, which derives it from the playout still
+// queued ahead of the mark plus telephony.MarkEchoGraceMS, the same grace the
+// classic path's MarkEchoTimeout adds atop a clip. So a carrier that never
+// honors the mark protocol cannot leave a consumer waiting, and a carrier that
+// is honoring it perfectly is not cut short for still playing.
+//
+// An echo whose name matches nothing outstanding is logged and NOT delivered:
+// it is not the mark anything is waiting on, and delivering it as one is the
+// mistake a consumer with two marks in flight cannot recover from.
+//
+// Nothing is delivered once the call has ended. A consumer must not treat this
+// channel as the only way its wait can finish — the call ending is the other,
+// and it is the consumer's own context that ends it.
+func WithMarkEchoChan(ch chan<- MarkEcho) RealtimeOption {
+	return WithMarkEchoChanFor(func(Frame) chan<- MarkEcho { return ch })
+}
+
+// WithMarkEchoChanFor resolves the destination when the call arrives, from the
+// start frame — so a consumer can route different calls to different channels.
+// Mirrors WithCarrierAudioChanFor.
+//
+// A nil function, or one returning nil, means no consumer: a requested mark is
+// still written and still tracked, but its resolution goes nowhere.
+func WithMarkEchoChanFor(fn func(start Frame) chan<- MarkEcho) RealtimeOption {
+	return func(c *realtimeConfig) { c.markEchoChanFor = fn }
+}
+
 // WithInstructionsFor resolves the session persona when the call arrives, from
 // the start frame — which carries the caller identity, so a consumer can vary
 // the persona per caller.
@@ -606,11 +742,34 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// audio frame from bridge.Run's own read-loop goroutine, and re-invoking
 	// consumer code there on every frame is exactly the hazard this file's
 	// drain-ordering comment above warns about for clientEventChan.
-	bridge := realtime.NewBridge(client, &carrierMediaSink{
-		conn:           conn,
-		streamSID:      start.StreamSID,
-		carrierAudioCh: cfg.carrierAudioChan(start),
-	})
+	//
+	// Both mark channels are resolved here too, earlier than clientEventChan
+	// and voiceUpdateChan below, and for a reason of construction rather than
+	// preference: the sink needs the tracker and the tracker needs the echo
+	// destination, and whether a tracker exists at all depends on whether
+	// EITHER mark option was supplied. Resolving them here runs consumer code
+	// on this goroutine before bridge.Run is spawned, the same cost
+	// carrierAudioChan already pays and for the same reason; it is far ahead
+	// of the idle guard being armed, which is the ordering that comment below
+	// protects.
+	markRequestCh := cfg.markRequestChan(start)
+	markEchoCh := cfg.markEchoChan(start)
+
+	// nil tracker when the consumer asked for no marks, which is what keeps a
+	// call with neither option byte-identical to today: no mark is written,
+	// and an inbound mark frame is ignored without even a log line.
+	var marks *markTracker
+	if markRequestCh != nil || markEchoCh != nil {
+		marks = newMarkTracker(markEchoCh)
+	}
+	// Before conn.CloseNow's defer runs, so a bound firing during teardown
+	// cannot deliver on a channel the consumer may already be reusing — while
+	// pumpCarrierToBridge, which outlives this until the conn closes, is still
+	// free to call marks.echo and be ignored.
+	defer marks.stop()
+
+	sink := newCarrierMediaSink(conn, start.StreamSID, cfg.carrierAudioChan(start), marks)
+	bridge := realtime.NewBridge(client, sink)
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -643,7 +802,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event")
 
 	carrierDone := make(chan error, 1)
-	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge) }()
+	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge, marks) }()
 
 	// Resolved once, before the loop, mirroring how transcriptChan/
 	// serverEventChan are resolved once via cfg.transcriptChan(start) /
@@ -676,9 +835,9 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// One goroutine, one select: bridge.Activity() resets the guard without any
 	// Reset call crossing a goroutine boundary, which is what keeps this
 	// race-free under -race. Only backendDone, carrierDone, the guard firing,
-	// or a consumer send failure — client event or voice update alike — ends
-	// the loop; an activity signal, a forwarded client event or a forwarded
-	// voice update just re-arms/loops again.
+	// or a consumer send failure — client event, voice update or mark alike —
+	// ends the loop; an activity signal, a forwarded client event, a forwarded
+	// voice update or a written mark just re-arms/loops again.
 	for {
 		select {
 		case err := <-backendDone:
@@ -699,6 +858,12 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 		case voice, ok := <-voiceUpdateCh:
 			var err error
 			voiceUpdateCh, err = handleVoiceUpdate(ctx, client, voiceUpdateCh, voice, ok)
+			if err != nil {
+				return err
+			}
+		case name, ok := <-markRequestCh:
+			var err error
+			markRequestCh, err = handleMarkRequest(ctx, sink, markRequestCh, name, ok)
 			if err != nil {
 				return err
 			}
@@ -942,7 +1107,7 @@ func deliver[T any](src <-chan T, out chan<- T, what string) {
 // It forwards Frame.EncodedPayload — the base64 exactly as it arrived — never
 // re-encoding Frame.Payload, which would spend a decode and an encode per 20 ms
 // frame reproducing bytes the carrier already sent.
-func pumpCarrierToBridge(ctx context.Context, conn *websocket.Conn, bridge *realtime.Bridge) error {
+func pumpCarrierToBridge(ctx context.Context, conn *websocket.Conn, bridge *realtime.Bridge, marks *markTracker) error {
 	for {
 		_, raw, err := conn.Read(ctx)
 		if err != nil {
@@ -964,10 +1129,17 @@ func pumpCarrierToBridge(ctx context.Context, conn *websocket.Conn, bridge *real
 			}
 		case EventStop:
 			return nil
+		case EventMark:
+			// The carrier has finished playing everything written ahead of
+			// this mark. A nil tracker — the consumer asked for no marks — is
+			// today's behavior: dropped, silently.
+			marks.echo(f.MarkName)
 		default:
-			// mark/clear/connected carry no meaning on this path: the backend
-			// owns playback and barge-in, so there is no local mark-echo or
-			// clear handling for them to drive.
+			// clear/connected carry no meaning on this path: the backend owns
+			// playback and barge-in, so there is no local clear handling for
+			// them to drive. Marks are the exception, handled above, because a
+			// consumer can have a reason to care about the carrier's playout
+			// position even when it does not own playback (AATK-105).
 		}
 	}
 }
@@ -992,18 +1164,93 @@ type carrierMediaSink struct {
 	// carrierAudioDropped counts records dropped because carrierAudioCh was
 	// full. No lock: Bridge.Run calls Media and Clear from a single read
 	// loop, never concurrently — the same reasoning Bridge records for its
-	// own eventsDropped.
+	// own eventsDropped. Mark does NOT deliver a carrier-audio record, so the
+	// second writer this sink acquired in AATK-105 does not reach this field.
 	carrierAudioDropped int
+
+	// writeSem serialises every write to the carrier connection through one
+	// chokepoint. It exists because this sink has TWO writers: Bridge.Run's
+	// read loop calls Media and Clear, while HandleStreamRealtime's select
+	// loop calls Mark. Ordering is what a mark is for, so the two cannot
+	// simply race — a mark that overtook a media frame would report a playout
+	// position that has not happened.
+	//
+	// A one-slot channel rather than a sync.Mutex, and THAT part is
+	// load-bearing for the reason realtime.Client.writeSem states in full:
+	// acquisition has to honour ctx, because the two writers do not carry the
+	// same kind of deadline. Media and Clear are written on the call's own
+	// context, which has none; Mark is written under a bounded one, from the
+	// select loop that observes every way the call can end. sync.Mutex.Lock
+	// cannot be cancelled, so a plain mutex would put an unbounded wait in
+	// front of a bounded write and void its deadline — wedging that loop.
+	writeSem chan struct{}
+
+	// playout is how much written audio has not been heard yet, which is what
+	// a mark's echo bound is derived from. Guarded by writeSem: every method
+	// on it runs inside the slot, beside the write it accounts for, so the
+	// figure a mark's bound is computed from is the queue that mark actually
+	// sits behind.
+	playout playoutClock
+
+	// marks tracks the marks written and not yet echoed, nil when the consumer
+	// asked for none — see markTracker, whose methods all tolerate nil.
+	marks *markTracker
+}
+
+// newCarrierMediaSink builds the sink with its write slot open. A constructor
+// rather than a struct literal because writeSem must exist: a nil channel
+// blocks forever in a send, so a sink assembled without it would hang on its
+// first write rather than fail visibly.
+func newCarrierMediaSink(conn wsWriter, streamSID string, carrierAudioCh chan<- CarrierAudio, marks *markTracker) *carrierMediaSink {
+	return &carrierMediaSink{
+		conn:           conn,
+		streamSID:      streamSID,
+		carrierAudioCh: carrierAudioCh,
+		marks:          marks,
+		writeSem:       make(chan struct{}, 1),
+	}
 }
 
 var _ realtime.MediaSink = (*carrierMediaSink)(nil)
+
+// write is the single chokepoint every carrier write funnels through, and
+// afterWrite is whatever bookkeeping belongs to that write and must not be
+// separable from it — the playout clock, and a mark's bound.
+//
+// Inside the slot rather than after it, which is the point of taking a
+// closure at all: the playout figure a mark's bound is derived from is the
+// queue as of that mark's own write, so a media frame slipping in between the
+// write and the accounting would change the answer. Holding the slot across
+// both is what makes them one step.
+//
+// The wait for the slot is taken under ctx, so a caller's deadline covers the
+// whole write — the queueing behind the other writer as well as the write
+// itself. See writeSem for why that is not optional.
+func (s *carrierMediaSink) write(ctx context.Context, msg []byte, afterWrite func()) error {
+	select {
+	case s.writeSem <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("twilio: realtime: awaiting carrier write slot: %w", ctx.Err())
+	}
+	defer func() { <-s.writeSem }()
+
+	if err := s.conn.Write(ctx, websocket.MessageText, msg); err != nil {
+		return err
+	}
+	if afterWrite != nil {
+		afterWrite()
+	}
+	return nil
+}
 
 func (s *carrierMediaSink) Media(ctx context.Context, payload string) error {
 	msg, err := EncodeMediaB64(s.streamSID, payload)
 	if err != nil {
 		return err
 	}
-	if err := s.conn.Write(ctx, websocket.MessageText, msg); err != nil {
+	if err := s.write(ctx, msg, func() {
+		s.playout.fed(muLawBytesInB64(payload), time.Now())
+	}); err != nil {
 		return err
 	}
 	s.deliverCarrierAudio(CarrierAudio{Payload: payload})
@@ -1015,11 +1262,54 @@ func (s *carrierMediaSink) Clear(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := s.conn.Write(ctx, websocket.MessageText, msg); err != nil {
+	if err := s.write(ctx, msg, func() {
+		// Barge-in: the carrier discards what it has buffered, so every
+		// quantity derived from the playout clock must stop describing audio
+		// nobody will hear. A mark written after this is owed the grace and
+		// nothing more, instead of waiting out an abandoned reply.
+		s.playout.flush(time.Now())
+	}); err != nil {
 		return err
 	}
 	s.deliverCarrierAudio(CarrierAudio{Clear: true})
 	return nil
+}
+
+// Mark writes a Twilio mark named name to the carrier, after every media frame
+// written before it, and arms the bound for its echo.
+//
+// Called only from HandleStreamRealtime's select loop, via handleMarkRequest,
+// which is where the reason the write belongs to the sink is stated. Nothing
+// is delivered to the carrier-audio channel: a mark is not audio, and
+// CarrierAudio's two record kinds are what shipped as sound.
+func (s *carrierMediaSink) Mark(ctx context.Context, name string) error {
+	msg, err := EncodeMark(s.streamSID, name)
+	if err != nil {
+		return err
+	}
+	return s.write(ctx, msg, func() {
+		s.marks.arm(name, s.markEchoBound(time.Now()))
+	})
+}
+
+// markEchoBound is how long the carrier is given to echo a mark written now:
+// the playout still queued ahead of it, plus telephony.MarkEchoGraceMS.
+//
+// Derived, not a constant, for the reason telephony.MarkEchoTimeout is derived
+// from its clip — a mark written behind two seconds of audio cannot be judged
+// late until that audio has had two seconds to play, or a carrier honoring the
+// protocol perfectly is reported as having timed out simply for still playing.
+// The grace is the classic path's own, reused rather than restated: same
+// protocol, same peer, same purpose (CLAUDE.md #5).
+//
+// The playout term comes from telephony.MuLawDuration, the module's one
+// definition of the μ-law byte-to-duration conversion. Its result is exact,
+// keeping the sub-millisecond remainder; the truncating whole-millisecond
+// spelling is a different function and must not be substituted.
+//
+// Called under writeSem, beside the write whose queue it describes.
+func (s *carrierMediaSink) markEchoBound(now time.Time) time.Duration {
+	return s.playout.outstanding(now) + telephony.MarkEchoGraceMS*time.Millisecond
 }
 
 // deliverCarrierAudio hands rec to carrierAudioCh without ever blocking, via
