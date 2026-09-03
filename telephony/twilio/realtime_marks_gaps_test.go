@@ -285,3 +285,111 @@ func TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight(t *testing.T) {
 		t.Fatal("a mark that reached the carrier must be armed for its echo")
 	}
 }
+
+// TestCarrierMediaSink_BoundTracksItsOwnWrites pins the playout clock to the
+// sink's own Media and Clear, rather than to a test driving playoutClock by
+// hand.
+//
+// TestMarkRequestChan_BoundCoversQueuedPlayout and
+// TestMarkEchoBound_KeepsTheSubMillisecondRemainder both reach past those two
+// methods — they call sink.playout.fed and sink.playout.flush directly — so
+// they pin the ARITHMETIC and say nothing about the two lines that feed it.
+// Mutation-verified during review: dropping playoutClock.flush from Clear's
+// afterWrite left the whole suite green, the twilio-cli end-to-end run
+// included; dropping playoutClock.fed from Media's left this package green and
+// was caught only by that end-to-end run, which -short skips.
+//
+// Either is a bound describing the wrong queue, and the ticket's fourth
+// behavior turns on the bound: a mark written behind a second of audio judged
+// late after the bare grace, or a mark written after a barge-in waiting out the
+// abandoned reply nobody will hear.
+//
+// slopstop:test regression — guards: "a mark's echo bound is derived from the
+// playout the sink itself has written, and a clear discards it"
+func TestCarrierMediaSink_BoundTracksItsOwnWrites(t *testing.T) {
+	// One second of μ-law audio, in the 20 ms frames the backend sends.
+	const frames = 50
+	const grace = telephony.MarkEchoGraceMS * time.Millisecond
+
+	sink := newCarrierMediaSink(&discardWSWriter{}, "SSwiring", nil, nil)
+
+	if got := sink.markEchoBound(time.Now()); got != grace {
+		t.Fatalf("with nothing written, markEchoBound = %s, want the bare grace %s", got, grace)
+	}
+
+	for i := 0; i < frames; i++ {
+		if err := sink.Media(context.Background(), silencePayloadB64()); err != nil {
+			t.Fatalf("Media frame %d: %v", i, err)
+		}
+	}
+
+	// The clock runs from the first write, so the bound is the queued playout
+	// plus the grace LESS however long the writes themselves took — bounded on
+	// both sides rather than compared for equality. The lower bound is far
+	// above anything write time plausibly costs here and far above the bare
+	// grace, which is what a Media that fed nothing would leave.
+	queued := telephony.MuLawDuration(frames * oneFrameBytes)
+	got := sink.markEchoBound(time.Now())
+	if got > queued+grace {
+		t.Fatalf("markEchoBound after %s of written audio = %s, want at most %s", queued, got, queued+grace)
+	}
+	if got < queued+grace-200*time.Millisecond {
+		t.Fatalf("markEchoBound after %s of written audio = %s; the audio Media wrote is not in the bound (the bare grace alone is %s)",
+			queued, got, grace)
+	}
+
+	// A clear is barge-in: the carrier drops what it had buffered, so the next
+	// mark is owed the grace and nothing more.
+	if err := sink.Clear(context.Background()); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if got := sink.markEchoBound(time.Now()); got != grace {
+		t.Fatalf("markEchoBound after a clear = %s, want the bare grace %s; the abandoned reply is still being waited out", got, grace)
+	}
+}
+
+// TestCarrierMediaSink_MarkArmsTheDerivedBound closes the last link in the same
+// chain: Mark arms the tracker with markEchoBound, not with the bare grace.
+//
+// Mutation-verified during review: arming
+// `telephony.MarkEchoGraceMS*time.Millisecond` instead left this whole package
+// green. TestMarkRequestChan_NonEchoingCarrierDoesNotHang cannot see it — it
+// drives no audio, so the derived bound IS the bare grace there — and
+// TestCarrierMediaSink_BoundTracksItsOwnWrites reads markEchoBound directly
+// rather than through Mark. Only the twilio-cli end-to-end run caught it, and
+// -short skips that.
+//
+// The assertion is that the bound has NOT elapsed: a second of audio is queued
+// ahead of this mark, so a carrier still playing it is not late yet, and
+// reporting TimedOut here is exactly the false alarm the derivation exists to
+// prevent.
+//
+// slopstop:test regression — guards: "a mark's echo bound is derived from the
+// playout the sink itself has written, and a clear discards it"
+func TestCarrierMediaSink_MarkArmsTheDerivedBound(t *testing.T) {
+	const frames = 50
+	const grace = telephony.MarkEchoGraceMS * time.Millisecond
+
+	echoes := make(chan MarkEcho, 4)
+	tr := newMarkTracker(echoes)
+	t.Cleanup(tr.stop)
+	sink := newCarrierMediaSink(&discardWSWriter{}, "SSderived", nil, tr)
+
+	for i := 0; i < frames; i++ {
+		if err := sink.Media(context.Background(), silencePayloadB64()); err != nil {
+			t.Fatalf("Media frame %d: %v", i, err)
+		}
+	}
+	if err := sink.Mark(context.Background(), "derived"); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+
+	// Comfortably past the bare grace, comfortably inside the derived bound
+	// (the queued second plus that grace).
+	select {
+	case rec := <-echoes:
+		t.Fatalf("a mark written behind %s of queued audio was abandoned within %s: got %+v; its bound is the bare grace rather than the derived one",
+			telephony.MuLawDuration(frames*oneFrameBytes), grace+150*time.Millisecond, rec)
+	case <-time.After(grace + 150*time.Millisecond):
+	}
+}
