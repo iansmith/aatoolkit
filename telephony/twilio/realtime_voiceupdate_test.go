@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -448,39 +447,11 @@ func TestVoiceUpdateChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
 
 	const window = 300 * time.Millisecond
 
-	measure := func(withClosedChan bool) time.Duration {
-		be := newFakeRealtimeBackend(t)
-		var h *realtimeHarness
-		if withClosedChan {
-			ch := make(chan string)
-			close(ch)
-			h = newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithVoiceUpdateChan(ch)))
-		} else {
-			h = newRealtimeHarness(t, be.url())
-		}
-		waitBackendReady(t, be, h)
+	closed := make(chan string)
+	close(closed)
 
-		var before, after syscall.Rusage
-		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &before); err != nil {
-			t.Fatalf("getrusage: %v", err)
-		}
-		time.Sleep(window)
-		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &after); err != nil {
-			t.Fatalf("getrusage: %v", err)
-		}
-
-		h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
-		_ = h.waitDone(5 * time.Second)
-
-		userDelta := time.Duration(after.Utime.Sec-before.Utime.Sec)*time.Second +
-			time.Duration(after.Utime.Usec-before.Utime.Usec)*time.Microsecond
-		sysDelta := time.Duration(after.Stime.Sec-before.Stime.Sec)*time.Second +
-			time.Duration(after.Stime.Usec-before.Stime.Usec)*time.Microsecond
-		return userDelta + sysDelta
-	}
-
-	baseline := measure(false)
-	withClosed := measure(true)
+	baseline := measureCallCPU(t, window)
+	withClosed := measureCallCPU(t, window, WithVoiceUpdateChan(closed))
 
 	if withClosed > baseline+50*time.Millisecond {
 		t.Fatalf("a closed voice-update channel must not busy-loop: baseline CPU %v, with-closed-channel CPU %v (over a %v wall-clock window)",
