@@ -461,12 +461,14 @@ func (t *Tap) appendOut(frame []byte) {
 
 // appendOutFrames writes one Write's worth of outbound audio -- frames whole
 // mu-law frames, laid end to end. outBytes counts what landed; outFrames counts
-// what was offered, so a short write over-counts by up to frames-1, where
-// appendOut's single frame could only ever be off by one. That is a rounding
-// this can afford rather than one it hides: outFrames is read only as a zero
-// test (removeEmptyRecordings, and Close deciding whether to write a sidecar),
-// and any short write with n > 0 answers that test the same way whatever it is
-// counted as. Caller holds t.mu and has already called ensureOutWriter.
+// what was offered, so a short write over-counts by up to frames -- a Write
+// returning 1 byte of a 100-frame buffer still adds 100, none of them whole.
+// appendOut is that same rounding at frames == 1, off by the one frame it
+// offered. That is a rounding this can afford rather than one it hides:
+// outFrames is read only as a zero test (removeEmptyRecordings, and Close
+// deciding whether to write a sidecar), and any short write with n > 0 answers
+// that test the same way whatever it is counted as. Caller holds t.mu and has
+// already called ensureOutWriter.
 func (t *Tap) appendOutFrames(buf []byte, frames int) {
 	n, err := t.wOut.Write(buf)
 	if err != nil {
@@ -508,12 +510,15 @@ func (t *Tap) appendOutFrames(buf []byte, frames int) {
 // length in bytes on disk, plus one Write call per silenceChunkFrames of it --
 // that constant bounds the buffer handed to each Write, never the total.
 //
-// A gap here can only be real elapsed time, never a clock correction: in
-// production both now and fedThrough descend from a time.Now reading, Add
-// preserves the monotonic reading, and time.Time.Sub then uses the monotonic
-// readings alone. An NTP step moves the wall clock and does not appear here at
-// all. (withNow's injected clock carries no monotonic reading, so a test's gaps
-// are exactly the durations it advances by -- which is the point of it.)
+// A gap here can only be elapsed time, never a clock correction: in production
+// both now and fedThrough descend from a time.Now reading, Add preserves the
+// monotonic reading, and time.Time.Sub then uses the monotonic readings alone.
+// An NTP step moves the wall clock and does not appear here at all. The cost of
+// reading that clock is in the other direction: the time package documents that
+// on some systems the monotonic clock stops while the host sleeps, so a call
+// spanning a suspend is filled short of the wall clock rather than past it. (withNow's injected clock
+// carries no monotonic reading, so a test's gaps are exactly the durations it
+// advances by -- which is the point of it.)
 func (t *Tap) fillOutGap(now time.Time) {
 	if t.fedThrough.IsZero() {
 		t.fedThrough = now
