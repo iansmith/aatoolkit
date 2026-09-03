@@ -585,3 +585,59 @@ func TestVoiceUpdateChan_SendThatNeverCompletesEndsCallOnItsBound(t *testing.T) 
 		t.Fatalf("the call must end naming the voice-update send in its error, got: %v", err)
 	}
 }
+
+// --- resolver ordering ----------------------------------------------------
+
+// TestVoiceUpdateChanFor_SlowResolverDoesNotBurnTheIdleWindow is the sibling
+// of TestClientEventChanFor_SlowResolverDoesNotBurnTheIdleWindow, and it
+// exists because HandleStreamRealtime's own comment calls the position of
+// `voiceUpdateCh := cfg.voiceUpdateChan(start)` — before the idle guard is
+// armed — load-bearing, while nothing measured it.
+//
+// WithVoiceUpdateChanFor's resolver is CONSUMER code running on
+// HandleStreamRealtime's goroutine, and nothing bounds how long it takes (a
+// consumer that picks the voice per caller may well look that up remotely).
+// Armed before it runs, the guard spends its whole first window inside that
+// resolver and is already expired when the select loop is entered, so a call
+// whose backend was healthy throughout ends immediately with "idle timeout"
+// — the exact misattribution WithIdleTimeout exists to avoid making.
+//
+// Mutation-verified: moving the resolution below newIdleGuard left the whole
+// telephony suite green before this test existed.
+//
+// slopstop:test regression — guards: "arming the idle guard happens after the voice-update resolver runs, so a slow consumer resolver cannot spend the guard's first window and end a healthy call with a bogus idle timeout"
+func TestVoiceUpdateChanFor_SlowResolverDoesNotBurnTheIdleWindow(t *testing.T) {
+	const (
+		idleTimeout  = 1500 * time.Millisecond
+		resolverWork = 2 * time.Second
+		// Past when a guard armed too early would have fired (≈resolverWork),
+		// and well short of when a correctly armed one fires
+		// (≈resolverWork+idleTimeout).
+		checkAt = 2600 * time.Millisecond
+	)
+
+	be := newFakeRealtimeBackend(t)
+	start := time.Now()
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
+		WithIdleTimeout(idleTimeout),
+		WithVoiceUpdateChanFor(func(Frame) <-chan string {
+			time.Sleep(resolverWork)
+			// Never written to and never closed: this test is about the
+			// resolver's cost, not about anything crossing the channel.
+			return make(chan string)
+		}),
+	))
+	waitBackendReady(t, be, h)
+
+	// The backend deliberately emits nothing, so there is no bridge.Activity()
+	// signal pending to compete with a prematurely fired timer — the ending is
+	// decided by when the guard was armed and by nothing else.
+	time.Sleep(time.Until(start.Add(checkAt)))
+	assertStillRunning(t, h, "a slow voice-update resolver must not spend the idle guard's first window")
+
+	// The guard is deferred, not disarmed: the call must still end on it.
+	err := h.waitDone(idleTimeout + 5*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "idle timeout") {
+		t.Fatalf("the idle guard must still fire once armed, got: %v", err)
+	}
+}

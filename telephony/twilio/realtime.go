@@ -662,8 +662,9 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// One goroutine, one select: bridge.Activity() resets the guard without any
 	// Reset call crossing a goroutine boundary, which is what keeps this
 	// race-free under -race. Only backendDone, carrierDone, the guard firing,
-	// or a client-event send failure ends the loop; an activity signal or a
-	// forwarded client event just re-arms/loops again.
+	// or a consumer send failure — client event or voice update alike — ends
+	// the loop; an activity signal, a forwarded client event or a forwarded
+	// voice update just re-arms/loops again.
 	for {
 		select {
 		case err := <-backendDone:
@@ -815,7 +816,7 @@ func handleVoiceUpdate(ctx context.Context, client *realtime.Client, ch <-chan s
 }
 
 // idleGuard is the idle timeout as a single object, so HandleStreamRealtime's
-// loop reads as five things that can end or extend a call rather than as timer
+// loop reads as six things that can end or extend a call rather than as timer
 // bookkeeping. A zero duration produces a guard that never fires: fired()
 // returns a nil channel, which blocks forever in a select, so the loop reduces
 // to the original two-case shape — unbounded, exactly today's behavior.
