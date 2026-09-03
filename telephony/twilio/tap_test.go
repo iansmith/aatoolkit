@@ -6,7 +6,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -982,5 +984,447 @@ func TestTap_SidecarRecordsDropCount(t *testing.T) {
 	side := readSidecar(t, dir, streamSID)
 	if side.OutDroppedFrames != 50 {
 		t.Errorf("sidecar out_dropped_frames = %d, want 50 — the tracked outDrops count must be surfaced in the sidecar", side.OutDroppedFrames)
+	}
+}
+
+// --- one-directional taps (AATK-101) -----------------------------------------
+//
+// Every test above drives a duplex Tap, which is the only kind that existed.
+// A consumer that only ever sees one direction of a call -- the realtime path
+// hands out outbound audio and never surfaces inbound -- could not use Tap at
+// all, and got no error saying so: WriteOut only enqueues, so with no inbound
+// frames nothing ever drained and out.ulaw was never opened; and Close deleted
+// both recordings whenever t.frames (inbound only) was zero. The tests below
+// pin the declared-channel-set behavior that fixes both, and the golden that
+// keeps duplex exactly as it was.
+
+// outboundOnlyTap builds the Tap under test in this section: outbound-only,
+// paced by a hand-advanced clock so the gap fill is deterministic rather than
+// a function of how long the test took to run.
+func outboundOnlyTap(dir, streamSID, callSID string, clk *fakeClock) *Tap {
+	return NewTap(dir, streamSID, callSID, "", testStreamStartedAt, WithChannels(ChannelOut), withNow(clk.now))
+}
+
+// realFrame is one 20ms mu-law frame of distinguishable audio. Frame-sized
+// payloads matter here for the same reason they do in
+// TestTap_SilenceMatchesRealFrameSize: a 1-byte payload cannot tell a
+// frame-sized silence fill from a 1-byte one.
+func realFrame(seed byte) []byte {
+	f := make([]byte, telephony.SampleRateHz*telephony.MuLawFrameMS/1000)
+	for i := range f {
+		f[i] = seed + byte(i%16)
+	}
+	return f
+}
+
+// TestTap_OutboundOnlyWritesWithoutInboundFrames is behavior 1: a Tap declared
+// outbound-only records the payloads it is given without any inbound frame to
+// clock it, and its sidecar says what the recording is.
+//
+// Against the pre-AATK-101 tap this fails by finding no out.ulaw at all --
+// WriteOut enqueued into the ring buffer and only DrainOut, called once per
+// inbound frame, ever opened the file.
+//
+// The clock does not advance here, so no gap fill is involved: this test is
+// about the bytes reaching disk, and TestTap_OutboundOnlyFillsGapsWithSilence
+// is about their timing.
+func TestTap_OutboundOnlyWritesWithoutInboundFrames(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSoutonly"
+	clk := &fakeClock{t: testStreamStartedAt}
+
+	tap := outboundOnlyTap(dir, streamSID, "CAoutonly", clk)
+	payloads := [][]byte{realFrame(0x10), realFrame(0x20), realFrame(0x30)}
+	for _, p := range payloads {
+		tap.WriteOut(p)
+	}
+	tap.Close()
+
+	audio, err := os.ReadFile(outulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("reading the outbound recording: %v — an outbound-only tap must open out.ulaw on WriteOut, without waiting for an inbound frame to drain it", err)
+	}
+	if want := bytes.Join(payloads, nil); !bytes.Equal(audio, want) {
+		t.Errorf("outbound audio = %d bytes, want %d — WriteOut must write through on an outbound-only tap", len(audio), len(want))
+	}
+
+	side := readSidecar(t, dir, streamSID)
+	if want := []string{string(ChannelOut)}; !slices.Equal(side.Channels, want) {
+		t.Errorf("sidecar channels = %v, want %v — downstream must be able to tell a one-directional recording from a duplex one without opening the audio", side.Channels, want)
+	}
+	// Asserted as an equality, not merely as "not the duplex string": every
+	// channel set states a different clock, and swapping this recording's for
+	// another one's is not caught by a test that only rules out one of them.
+	if side.Alignment != outboundWallClockAlignment {
+		t.Errorf("sidecar alignment = %q, want %q — there is no inbound frame clock on an outbound-only recording, and a consumer trusting the wrong string misreads the whole timeline", side.Alignment, outboundWallClockAlignment)
+	}
+}
+
+// TestTap_OutboundOnlyCloseKeepsTheRecording is behavior 4 in the shape that
+// bites: Close's deletion rule counted inbound frames only, so a recording with
+// nothing but outbound audio was unlinked on the way out -- both ulaw files
+// removed and the early return skipping the sidecar too.
+//
+// Asserted as a contrast, deliberately: "the file is still there" is also true
+// of a Close that does nothing at all, so the same test requires the opposite
+// case -- an outbound-only tap that recorded nothing leaves nothing behind.
+func TestTap_OutboundOnlyCloseKeepsTheRecording(t *testing.T) {
+	dir := t.TempDir()
+	const recordedSID, silentSID = "SSkept", "SSnothing"
+
+	clk := &fakeClock{t: testStreamStartedAt}
+	recorded := outboundOnlyTap(dir, recordedSID, "CAkept", clk)
+	recorded.WriteOut(realFrame(0x40))
+	recorded.Close()
+
+	if _, err := os.Stat(outulawPath(dir, recordedSID)); err != nil {
+		t.Errorf("an outbound-only recording was deleted by Close (stat err = %v) — the frames==0 rule counts inbound frames, and there are none by construction here", err)
+	}
+	if _, err := os.Stat(sidecarPath(dir, recordedSID)); err != nil {
+		t.Errorf("an outbound-only recording got no sidecar (stat err = %v) — a .ulaw with nothing next to it is indistinguishable from capture noise", err)
+	}
+
+	// The contrast: nothing recorded, so nothing left behind.
+	silent := outboundOnlyTap(dir, silentSID, "CAnothing", clk)
+	silent.Close()
+	if _, err := os.Stat(outulawPath(dir, silentSID)); !os.IsNotExist(err) {
+		t.Errorf("an outbound-only tap that captured nothing left an audio file (stat err = %v)", err)
+	}
+	if _, err := os.Stat(sidecarPath(dir, silentSID)); !os.IsNotExist(err) {
+		t.Errorf("an outbound-only tap that captured nothing left a sidecar (stat err = %v)", err)
+	}
+}
+
+// TestTap_OutboundOnlyIgnoresDrainOut is behavior 2's first half. A consumer
+// that copied the duplex call pattern will call DrainOut as well as WriteOut;
+// on an outbound-only tap the payload has already been written through, so a
+// drain that did anything would duplicate frames or interleave silence into a
+// file that has no inbound clock to justify it.
+func TestTap_OutboundOnlyIgnoresDrainOut(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSnodrain"
+	clk := &fakeClock{t: testStreamStartedAt}
+
+	tap := outboundOnlyTap(dir, streamSID, "CAnodrain", clk)
+	first, second := realFrame(0x50), realFrame(0x60)
+	tap.WriteOut(first)
+	tap.DrainOut()
+	tap.DrainOut()
+	tap.WriteOut(second)
+	tap.DrainOut()
+	tap.Close()
+
+	audio, err := os.ReadFile(outulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("reading the outbound recording: %v", err)
+	}
+	want := append(append([]byte{}, first...), second...)
+	if !bytes.Equal(audio, want) {
+		t.Errorf("outbound audio = %d bytes, want %d — DrainOut must be a no-op on an outbound-only tap, so a consumer calling both cannot double-write or pad the file", len(audio), len(want))
+	}
+}
+
+// TestTap_OutboundOnlyIgnoresInboundWrites is behavior 2's second half: the
+// channel set is a declaration, so a direction that was not declared never
+// reaches disk. Without this, a consumer that wired WriteIn by mistake would
+// get an in.ulaw whose timeline has no relation to out.ulaw's, and a sidecar
+// saying channels: ["out"] over two files.
+func TestTap_OutboundOnlyIgnoresInboundWrites(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSnoinbound"
+	clk := &fakeClock{t: testStreamStartedAt}
+
+	tap := outboundOnlyTap(dir, streamSID, "CAnoinbound", clk)
+	tap.WriteOut(realFrame(0x70))
+	tap.WriteIn(realFrame(0x80))
+	tap.Close()
+
+	if _, err := os.Stat(inulawPath(dir, streamSID)); !os.IsNotExist(err) {
+		t.Errorf("an outbound-only tap opened in.ulaw (stat err = %v) — an undeclared direction must not reach disk", err)
+	}
+	if side := readSidecar(t, dir, streamSID); side.Frames != 0 || side.Bytes != 0 {
+		t.Errorf("sidecar frames/bytes = %d/%d, want 0/0 — an undeclared direction must not be counted either", side.Frames, side.Bytes)
+	}
+}
+
+// TestTap_OutboundOnlyFillsGapsWithSilence is behavior 5, the clock. A gapless
+// concatenation of what the engine said would turn a 3-minute call with 40
+// seconds of speech into 40 seconds of audio with every pause removed -- the
+// same failure cmd/twilio-cli/filler.go exists to prevent on the playout side.
+// So an outbound-only recording is paced against the wall clock: the gap
+// between two WriteOut calls appears as silence of that length, and a call that
+// outlives its last frame is padded to its end at Close.
+//
+// Driven through the injected clock, never time.Sleep: the assertion is an
+// exact byte count, and a real clock would make it a race.
+func TestTap_OutboundOnlyFillsGapsWithSilence(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSgaps"
+	frameBytes := telephony.SampleRateHz * telephony.MuLawFrameMS / 1000
+	clk := &fakeClock{t: testStreamStartedAt}
+
+	tap := outboundOnlyTap(dir, streamSID, "CAgaps", clk)
+	first, second := realFrame(0x11), realFrame(0x22)
+
+	tap.WriteOut(first) // t=0: the recording starts at the first outbound frame
+	clk.advance(120 * time.Millisecond)
+	tap.WriteOut(second) // 20ms of that gap is `first` playing out; 100ms is silence
+	clk.advance(60 * time.Millisecond)
+	tap.Close() // 20ms of that is `second`; 40ms is trailing silence
+
+	audio, err := os.ReadFile(outulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("reading the outbound recording: %v", err)
+	}
+
+	silence := bytes.Repeat([]byte{0xFF}, frameBytes)
+	var want []byte
+	want = append(want, first...)
+	want = append(want, bytes.Repeat(silence, 5)...) // the 100ms gap
+	want = append(want, second...)
+	want = append(want, bytes.Repeat(silence, 2)...) // the 40ms tail
+	if !bytes.Equal(audio, want) {
+		t.Fatalf("outbound audio = %d bytes, want %d — the recording must carry the call's silence, not just its speech", len(audio), len(want))
+	}
+
+	// The point of the byte count, stated as what it means: the recording is
+	// as long as the span of the call it covers, not as long as its payloads.
+	gotMS := len(audio) * 1000 / telephony.SampleRateHz
+	if wantMS := 180; gotMS != wantMS {
+		t.Errorf("recording duration = %dms, want %dms (payload total is only %dms)", gotMS, wantMS, 2*telephony.MuLawFrameMS)
+	}
+}
+
+// TestTap_DuplexOutputUnchanged is behavior 3, and it is a golden rather than a
+// red test: it must pass both before and after AATK-101. Duplex recordings are
+// what probeset build already consumes, so the load-bearing safety property of
+// the channel set is that adding it changed nothing for them -- the queue, the
+// inbound frame clock, the empty-queue silence, the truncation flag and the
+// sidecar strings all as they were. Reasoning that "duplex is untouched" is not
+// the same as a fixed script asserting it byte for byte.
+func TestTap_DuplexOutputUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID, callSID = "SSduplexgolden", "CAduplexgolden"
+	frameBytes := telephony.SampleRateHz * telephony.MuLawFrameMS / 1000
+
+	in1, in2, in3 := realFrame(0x01), realFrame(0x02), realFrame(0x03)
+	out1, out2, out3 := realFrame(0xA0), realFrame(0xB0), realFrame(0xC0)
+
+	tap := NewTap(dir, streamSID, callSID, "golden", testStreamStartedAt)
+	tap.WriteOut(out1)
+	tap.WriteOut(out2)
+	tap.WriteIn(in1)
+	tap.DrainOut() // dequeues out1
+	tap.WriteIn(in2)
+	tap.DrainOut() // dequeues out2
+	tap.WriteIn(in3)
+	tap.DrainOut() // queue empty: one frame of 0xFF, sized to the inbound frame
+	tap.WriteOut(out3)
+	tap.Close() // out3 is still queued: truncated
+
+	gotIn, err := os.ReadFile(inulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("reading inbound recording: %v", err)
+	}
+	gotOut, err := os.ReadFile(outulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("reading outbound recording: %v", err)
+	}
+
+	wantIn := bytes.Join([][]byte{in1, in2, in3}, nil)
+	wantOut := bytes.Join([][]byte{out1, out2, bytes.Repeat([]byte{0xFF}, frameBytes)}, nil)
+	if !bytes.Equal(gotIn, wantIn) {
+		t.Errorf("duplex in.ulaw changed: %d bytes, want %d", len(gotIn), len(wantIn))
+	}
+	if !bytes.Equal(gotOut, wantOut) {
+		t.Errorf("duplex out.ulaw changed: %d bytes, want %d — the inbound frame clock and its 0xFF fill are what make the two files time-aligned", len(gotOut), len(wantOut))
+	}
+	if len(gotIn) != len(gotOut) {
+		t.Errorf("duplex channels desynced: in=%d out=%d", len(gotIn), len(gotOut))
+	}
+
+	side := readSidecar(t, dir, streamSID)
+	want := tapSidecar{
+		StreamSID:    streamSID,
+		CallSID:      callSID,
+		Label:        "golden",
+		StartedAt:    testStreamStartedAt,
+		Frames:       3,
+		Bytes:        3 * frameBytes,
+		VADConfig:    telephony.DefaultVADConfig(),
+		Alignment:    duplexAlignment,
+		Channels:     []string{string(ChannelIn), string(ChannelOut)},
+		OutTruncated: true,
+	}
+	if !reflect.DeepEqual(side, want) {
+		t.Errorf("duplex sidecar = %+v, want %+v", side, want)
+	}
+}
+
+// TestTap_DuplexKeepsSidecarWhenOnlyOneDirectionRecorded is behavior 4 for a
+// duplex tap: a real call where the engine never spoke opens no out.ulaw, and
+// that must not cost the recording its sidecar. Green before AATK-101 as well
+// -- it pins the half of the per-file rule that already held, so the
+// generalization in Close cannot quietly drop it.
+func TestTap_DuplexKeepsSidecarWhenOnlyOneDirectionRecorded(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSinboundonly"
+
+	tap := NewTap(dir, streamSID, "CAinboundonly", "", testStreamStartedAt)
+	tap.WriteIn(realFrame(0x05))
+	tap.Close()
+
+	if _, err := os.Stat(inulawPath(dir, streamSID)); err != nil {
+		t.Errorf("the direction that recorded left no file (stat err = %v)", err)
+	}
+	if _, err := os.Stat(outulawPath(dir, streamSID)); !os.IsNotExist(err) {
+		t.Errorf("the direction that recorded nothing left a file (stat err = %v)", err)
+	}
+	if _, err := os.Stat(sidecarPath(dir, streamSID)); err != nil {
+		t.Errorf("a recording with content on one channel got no sidecar (stat err = %v)", err)
+	}
+}
+
+// countingWriter accepts everything and counts the Write calls. It is the
+// assertion behind TestTap_OutboundOnlyBatchesLongGapFills: what the
+// silence fill puts on disk is already pinned byte for byte by
+// TestTap_OutboundOnlyFillsGapsWithSilence, so what is left to pin is how many
+// syscalls it takes to get there.
+type countingWriter struct {
+	writes int
+	bytes  int
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	c.writes++
+	c.bytes += len(p)
+	return len(p), nil
+}
+func (c *countingWriter) Close() error { return nil }
+
+// TestTap_OutboundOnlyBatchesLongGapFills pins the silence fill's cost, not
+// its bytes. A gap on a one-directional tap is legitimately call-length -- the
+// engine is quiet while the caller talks -- and the fill runs inside WriteOut,
+// under t.mu, on the outbound send path. A syscall per 20ms frame makes a quiet
+// half hour ~90,000 writes issued in one burst there; batching makes it ~900
+// and changes nothing about the recording.
+func TestTap_OutboundOnlyBatchesLongGapFills(t *testing.T) {
+	dir := t.TempDir()
+	clk := &fakeClock{t: testStreamStartedAt}
+	w := &countingWriter{}
+
+	tap := outboundOnlyTap(dir, "SSchunked", "CAchunked", clk)
+	tap.wOut = w // as newTapWithOutWriter does, but this tap needs the options too
+
+	const gapFrames = 1500 // 30 seconds of silence
+	frameDur := mulawDuration(defaultFrameBytes)
+
+	tap.WriteOut(realFrame(0x01))
+	// The first frame put fedThrough one frame ahead, so advancing by one more
+	// than the gap leaves exactly gapFrames to fill.
+	clk.advance(time.Duration(gapFrames+1) * frameDur)
+	tap.WriteOut(realFrame(0x02))
+	tap.Close()
+
+	if want := (gapFrames + 2) * defaultFrameBytes; w.bytes != want {
+		t.Fatalf("outbound bytes = %d, want %d — batching must not change what the recording holds", w.bytes, want)
+	}
+	// Two payload writes plus one per chunk, rounded up.
+	maxWrites := 2 + (gapFrames+silenceChunkFrames-1)/silenceChunkFrames
+	if w.writes > maxWrites {
+		t.Errorf("silence fill issued %d writes for a %d-frame gap, want at most %d — one write per frame stalls the send path it holds the lock on", w.writes, gapFrames, maxWrites)
+	}
+}
+
+// TestTap_InboundOnlyRecordsWithoutOutbound is the third channel set. It has no
+// out.ulaw to align against, so it claims neither the duplex inbound-frame
+// clock nor the outbound wall clock, and an outbound frame handed to it is
+// dropped the way an inbound one is dropped by an outbound-only tap.
+func TestTap_InboundOnlyRecordsWithoutOutbound(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSinonly"
+
+	tap := NewTap(dir, streamSID, "CAinonly", "", testStreamStartedAt, WithChannels(ChannelIn))
+	in1, in2 := realFrame(0x0A), realFrame(0x0B)
+	tap.WriteIn(in1)
+	tap.WriteOut(realFrame(0xF0))
+	tap.WriteIn(in2)
+	tap.DrainOut()
+	tap.Close()
+
+	audio, err := os.ReadFile(inulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("reading the inbound recording: %v", err)
+	}
+	if want := bytes.Join([][]byte{in1, in2}, nil); !bytes.Equal(audio, want) {
+		t.Errorf("inbound audio = %d bytes, want %d", len(audio), len(want))
+	}
+	if _, err := os.Stat(outulawPath(dir, streamSID)); !os.IsNotExist(err) {
+		t.Errorf("an inbound-only tap left an outbound recording (stat err = %v) — an undeclared direction must not reach disk, and DrainOut must not open a file for it either", err)
+	}
+
+	side := readSidecar(t, dir, streamSID)
+	if want := []string{string(ChannelIn)}; !slices.Equal(side.Channels, want) {
+		t.Errorf("sidecar channels = %v, want %v", side.Channels, want)
+	}
+	if side.Alignment != inboundArrivalAlignment {
+		t.Errorf("sidecar alignment = %q, want %q — with no second file there is no cross-channel alignment to claim", side.Alignment, inboundArrivalAlignment)
+	}
+}
+
+// TestTap_WithChannelsIgnoresRepeats pins the channel set against a caller
+// naming a direction twice. The set is rendered straight into the sidecar, so
+// without this a duplex tap declared as (in, out, out) writes channels:
+// ["in","out","out"] -- a duplex recording that no longer looks like one to the
+// consumer reading that field.
+func TestTap_WithChannelsIgnoresRepeats(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSrepeats"
+
+	tap := NewTap(dir, streamSID, "CArepeats", "", testStreamStartedAt, WithChannels(ChannelIn, ChannelOut, ChannelOut))
+	tap.WriteIn(realFrame(0x0C))
+	tap.DrainOut()
+	tap.Close()
+
+	side := readSidecar(t, dir, streamSID)
+	want := []string{string(ChannelIn), string(ChannelOut)}
+	if !slices.Equal(side.Channels, want) {
+		t.Errorf("sidecar channels = %v, want %v — a repeated direction is one direction", side.Channels, want)
+	}
+	if side.Alignment != duplexAlignment {
+		t.Errorf("sidecar alignment = %q, want %q", side.Alignment, duplexAlignment)
+	}
+}
+
+// TestTap_OutboundOnlyAbsorbsFasterThanRealTimeBursts pins the half of the
+// wall-clock pacing fillOutGap's comment claims and nothing asserted: a backend
+// that hands over a clip faster than it plays leaves fedThrough ahead of the
+// clock, and the surplus is absorbed by the next real gap rather than fought
+// over. A fill that treated a negative gap as anything but zero frames would
+// either pad silence in between a burst's frames or, by resyncing fedThrough to
+// now, swallow the part of the following gap the burst already covers.
+func TestTap_OutboundOnlyAbsorbsFasterThanRealTimeBursts(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSburst"
+	clk := &fakeClock{t: testStreamStartedAt}
+
+	tap := outboundOnlyTap(dir, streamSID, "CAburst", clk)
+	burst := [][]byte{realFrame(0x31), realFrame(0x32), realFrame(0x33)}
+	for _, p := range burst { // 60ms of audio handed over at one instant
+		tap.WriteOut(p)
+	}
+	clk.advance(100 * time.Millisecond) // 60ms of which the burst is still playing
+	last := realFrame(0x34)
+	tap.WriteOut(last)
+	tap.Close() // fedThrough is 20ms past now again, so no tail
+
+	audio, err := os.ReadFile(outulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("reading the outbound recording: %v", err)
+	}
+	silence := bytes.Repeat([]byte{0xFF}, defaultFrameBytes)
+	want := bytes.Join([][]byte{burst[0], burst[1], burst[2], silence, silence, last}, nil)
+	if !bytes.Equal(audio, want) {
+		t.Fatalf("outbound audio = %d bytes, want %d — a burst must not be padded apart, and only the 40ms it did not cover may become silence", len(audio), len(want))
 	}
 }
