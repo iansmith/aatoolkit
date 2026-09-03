@@ -239,8 +239,12 @@ func TestTwilioCLIRealtimeMarkEchoRoundTrip(t *testing.T) {
 		t.Fatalf("no mark echo ever reached the consumer\n%s", out.String())
 	}
 
-	if got := out.String(); !strings.Contains(got, "mark") {
-		t.Errorf("the CLI's log never mentions a mark, so the echo cannot have come from echoMark\n%s", got)
+	// echoMark's own scheduling line, naming this mark, rather than a bare
+	// "mark" substring — the CLI logs every control frame it receives, so the
+	// loose form is satisfied by the mark merely ARRIVING and says nothing
+	// about the echo having been scheduled off the playout estimate.
+	if got, want := out.String(), `mark "e2e" echo scheduled`; !strings.Contains(got, want) {
+		t.Errorf("the CLI's log never shows %s, so the echo cannot have come from echoMark\n%s", want, got)
 	}
 }
 

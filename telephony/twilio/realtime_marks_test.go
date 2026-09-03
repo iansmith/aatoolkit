@@ -352,8 +352,14 @@ func TestMarkRequestChan_NonEchoingCarrierDoesNotHang(t *testing.T) {
 //
 // The expected duration comes from telephony.MuLawDuration, which is the one
 // definition of the μ-law byte-to-duration conversion (telephony/service.go).
-// This test is what stops the bound being derived from a second, restated
-// spelling of that arithmetic.
+//
+// It does NOT, on its own, stop the bound being derived from a second restated
+// spelling of that arithmetic, and this comment used to claim it did. The byte
+// count here is telephony.SampleRateHz, and the truncating whole-millisecond
+// form agrees with MuLawDuration exactly on every multiple of 8 — so the
+// longhand substituted into playoutClock.fed leaves this test green. That
+// property is pinned by TestMarkEchoBound_KeepsTheSubMillisecondRemainder
+// (realtime_marks_gaps_test.go), which uses a byte count that is not.
 //
 // slopstop:test contract
 func TestMarkRequestChan_BoundCoversQueuedPlayout(t *testing.T) {
@@ -419,8 +425,14 @@ func TestMarkRequestChan_EmptyNameIsNotSent(t *testing.T) {
 
 // TestMarkRequestChan_ClosedChannelLeavesTheCallRunning mirrors the guard the
 // client-event and voice-update channels carry: closing the channel is not an
-// error and does not end the call, and the loop must not busy-spin on a closed
-// channel that is always ready.
+// error and does not end the call.
+//
+// That is the LIVENESS half only, and this comment used to claim the other
+// half too. A loop that kept selecting on the closed channel would spin
+// forever without starving any sibling case, so the call stays up and this
+// test stays green — the CPU cost is what sees it, and that is measured by
+// TestMarkRequestChan_ClosedChannelDoesNotBusyLoop
+// (realtime_marks_gaps_test.go).
 //
 // slopstop:test regression — guards: "A call that supplies neither option
 // behaves byte-for-byte as it does today."
