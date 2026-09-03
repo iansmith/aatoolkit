@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1048,14 +1049,14 @@ func TestTap_OutboundOnlyWritesWithoutInboundFrames(t *testing.T) {
 	}
 
 	side := readSidecar(t, dir, streamSID)
-	if want := []string{string(ChannelOut)}; !slicesEqual(side.Channels, want) {
+	if want := []string{string(ChannelOut)}; !slices.Equal(side.Channels, want) {
 		t.Errorf("sidecar channels = %v, want %v — downstream must be able to tell a one-directional recording from a duplex one without opening the audio", side.Channels, want)
 	}
-	if side.Alignment == duplexAlignment {
-		t.Errorf("sidecar alignment = %q, but there is no inbound frame clock on an outbound-only recording — a consumer trusting that string misreads the whole timeline", side.Alignment)
-	}
-	if side.Alignment == "" {
-		t.Errorf("sidecar alignment is empty — the sidecar must say which clock produced the bytes, because a consumer cannot recover it from them")
+	// Asserted as an equality, not merely as "not the duplex string": every
+	// channel set states a different clock, and swapping this recording's for
+	// another one's is not caught by a test that only rules out one of them.
+	if side.Alignment != outboundWallClockAlignment {
+		t.Errorf("sidecar alignment = %q, want %q — there is no inbound frame clock on an outbound-only recording, and a consumer trusting the wrong string misreads the whole timeline", side.Alignment, outboundWallClockAlignment)
 	}
 }
 
@@ -1284,16 +1285,113 @@ func TestTap_DuplexKeepsSidecarWhenOnlyOneDirectionRecorded(t *testing.T) {
 	}
 }
 
-// slicesEqual compares the sidecar's channel list. Written out rather than
-// pulled in so this file keeps its stdlib-only imports.
-func slicesEqual(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
+// countingWriter accepts everything and counts the Write calls. It is the
+// assertion behind TestTap_OutboundOnlyBatchesLongGapFills: what the
+// silence fill puts on disk is already pinned byte for byte by
+// TestTap_OutboundOnlyFillsGapsWithSilence, so what is left to pin is how many
+// syscalls it takes to get there.
+type countingWriter struct {
+	writes int
+	bytes  int
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	c.writes++
+	c.bytes += len(p)
+	return len(p), nil
+}
+func (c *countingWriter) Close() error { return nil }
+
+// TestTap_OutboundOnlyBatchesLongGapFills pins the silence fill's cost, not
+// its bytes. A gap on a one-directional tap is legitimately call-length -- the
+// engine is quiet while the caller talks -- and the fill runs inside WriteOut,
+// under t.mu, on the outbound send path. A syscall per 20ms frame makes a quiet
+// half hour ~90,000 writes issued in one burst there; batching makes it ~900
+// and changes nothing about the recording.
+func TestTap_OutboundOnlyBatchesLongGapFills(t *testing.T) {
+	dir := t.TempDir()
+	clk := &fakeClock{t: testStreamStartedAt}
+	w := &countingWriter{}
+
+	tap := outboundOnlyTap(dir, "SSchunked", "CAchunked", clk)
+	tap.wOut = w // as newTapWithOutWriter does, but this tap needs the options too
+
+	const gapFrames = 1500 // 30 seconds of silence
+	frameDur := mulawDuration(defaultFrameBytes)
+
+	tap.WriteOut(realFrame(0x01))
+	// The first frame put fedThrough one frame ahead, so advancing by one more
+	// than the gap leaves exactly gapFrames to fill.
+	clk.advance(time.Duration(gapFrames+1) * frameDur)
+	tap.WriteOut(realFrame(0x02))
+	tap.Close()
+
+	if want := (gapFrames + 2) * defaultFrameBytes; w.bytes != want {
+		t.Fatalf("outbound bytes = %d, want %d — batching must not change what the recording holds", w.bytes, want)
 	}
-	for i := range got {
-		if got[i] != want[i] {
-			return false
-		}
+	// Two payload writes plus one per chunk, rounded up.
+	maxWrites := 2 + (gapFrames+silenceChunkFrames-1)/silenceChunkFrames
+	if w.writes > maxWrites {
+		t.Errorf("silence fill issued %d writes for a %d-frame gap, want at most %d — one write per frame stalls the send path it holds the lock on", w.writes, gapFrames, maxWrites)
 	}
-	return true
+}
+
+// TestTap_InboundOnlyRecordsWithoutOutbound is the third channel set. It has no
+// out.ulaw to align against, so it claims neither the duplex inbound-frame
+// clock nor the outbound wall clock, and an outbound frame handed to it is
+// dropped the way an inbound one is dropped by an outbound-only tap.
+func TestTap_InboundOnlyRecordsWithoutOutbound(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSinonly"
+
+	tap := NewTap(dir, streamSID, "CAinonly", "", testStreamStartedAt, WithChannels(ChannelIn))
+	in1, in2 := realFrame(0x0A), realFrame(0x0B)
+	tap.WriteIn(in1)
+	tap.WriteOut(realFrame(0xF0))
+	tap.WriteIn(in2)
+	tap.DrainOut()
+	tap.Close()
+
+	audio, err := os.ReadFile(inulawPath(dir, streamSID))
+	if err != nil {
+		t.Fatalf("reading the inbound recording: %v", err)
+	}
+	if want := bytes.Join([][]byte{in1, in2}, nil); !bytes.Equal(audio, want) {
+		t.Errorf("inbound audio = %d bytes, want %d", len(audio), len(want))
+	}
+	if _, err := os.Stat(outulawPath(dir, streamSID)); !os.IsNotExist(err) {
+		t.Errorf("an inbound-only tap left an outbound recording (stat err = %v) — an undeclared direction must not reach disk, and DrainOut must not open a file for it either", err)
+	}
+
+	side := readSidecar(t, dir, streamSID)
+	if want := []string{string(ChannelIn)}; !slices.Equal(side.Channels, want) {
+		t.Errorf("sidecar channels = %v, want %v", side.Channels, want)
+	}
+	if side.Alignment != inboundArrivalAlignment {
+		t.Errorf("sidecar alignment = %q, want %q — with no second file there is no cross-channel alignment to claim", side.Alignment, inboundArrivalAlignment)
+	}
+}
+
+// TestTap_WithChannelsIgnoresRepeats pins the channel set against a caller
+// naming a direction twice. The set is rendered straight into the sidecar, so
+// without this a duplex tap declared as (in, out, out) writes channels:
+// ["in","out","out"] -- a duplex recording that no longer looks like one to the
+// consumer reading that field.
+func TestTap_WithChannelsIgnoresRepeats(t *testing.T) {
+	dir := t.TempDir()
+	const streamSID = "SSrepeats"
+
+	tap := NewTap(dir, streamSID, "CArepeats", "", testStreamStartedAt, WithChannels(ChannelIn, ChannelOut, ChannelOut))
+	tap.WriteIn(realFrame(0x0C))
+	tap.DrainOut()
+	tap.Close()
+
+	side := readSidecar(t, dir, streamSID)
+	want := []string{string(ChannelIn), string(ChannelOut)}
+	if !slices.Equal(side.Channels, want) {
+		t.Errorf("sidecar channels = %v, want %v — a repeated direction is one direction", side.Channels, want)
+	}
+	if side.Alignment != duplexAlignment {
+		t.Errorf("sidecar alignment = %q, want %q", side.Alignment, duplexAlignment)
+	}
 }

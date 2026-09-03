@@ -1,11 +1,13 @@
 package twilio
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -45,6 +47,17 @@ const maxOutQueueFrames = 5 * 60 * 1000 / telephony.MuLawFrameMS // same bufferM
 func mulawDuration(n int) time.Duration {
 	return time.Duration(n) * time.Second / telephony.SampleRateHz
 }
+
+// silenceChunkFrames is how many silence frames fillOutGap hands to one Write.
+//
+// A gap in a one-directional recording is legitimately call-length: the engine
+// is simply quiet while the caller talks, and the whole point of the fill is
+// that those minutes appear in the recording. One 160-byte syscall per 20ms
+// frame would make a quiet half hour ~90,000 writes issued in a single burst,
+// all of them under t.mu and so all of them on the outbound send path WriteOut
+// is called from. Batching costs one 16KB buffer and changes neither the bytes
+// on disk nor the timeline they describe.
+const silenceChunkFrames = 100
 
 func tapDirFromEnv() string {
 	return os.Getenv(tapDirEnv)
@@ -196,16 +209,23 @@ type TapOption func(*Tap)
 // writing one is a caller mistake, and a tap's whole ethos is to absorb those
 // rather than fail a call over them.
 //
-// An empty or unrecognized set is treated as duplex. There is no error return
-// on this path -- NewTap cannot fail today, and a silently-off tap is exactly
-// the failure mode this ticket exists to remove.
+// Unrecognized values and repeats are dropped -- the set is rendered straight
+// into the sidecar's "channels", so a caller naming a direction twice would
+// otherwise publish a duplex recording that no longer reads as one. An empty
+// result is treated as duplex. There is no error return on this path -- NewTap
+// cannot fail today, and a silently-off tap is exactly the failure mode this
+// ticket exists to remove.
 func WithChannels(channels ...Channel) TapOption {
 	return func(t *Tap) {
 		var set []Channel
 		for _, ch := range channels {
-			if ch == ChannelIn || ch == ChannelOut {
-				set = append(set, ch)
+			if ch != ChannelIn && ch != ChannelOut {
+				continue
 			}
+			if slices.Contains(set, ch) {
+				continue
+			}
+			set = append(set, ch)
 		}
 		if len(set) > 0 {
 			t.channels = set
@@ -433,15 +453,24 @@ func (t *Tap) ensureOutWriter() bool {
 	return true
 }
 
-// appendOut writes one frame to out.ulaw and counts what landed. Caller holds
-// t.mu and has already called ensureOutWriter.
+// appendOut writes one frame to out.ulaw. Caller holds t.mu and has already
+// called ensureOutWriter.
 func (t *Tap) appendOut(frame []byte) {
-	n, err := t.wOut.Write(frame)
+	t.appendOutFrames(frame, 1)
+}
+
+// appendOutFrames writes one Write's worth of outbound audio -- frames whole
+// mu-law frames, laid end to end -- and counts what landed. A short write
+// still counts them all, the same rounding appendOut has always made for a
+// single partial frame. Caller holds t.mu and has already called
+// ensureOutWriter.
+func (t *Tap) appendOutFrames(buf []byte, frames int) {
+	n, err := t.wOut.Write(buf)
 	if err != nil {
 		t.logOnce(err)
 	}
 	if n > 0 {
-		t.outFrames++
+		t.outFrames += frames
 		t.outBytes += n
 	}
 }
@@ -456,16 +485,26 @@ func (t *Tap) appendOut(frame []byte) {
 // a reading of this clock. Byte 0 being the first frame of the declared
 // channel is also what duplex does with its first inbound one.
 //
-// fedThrough only ever advances by bytes actually written, never by jumping to
-// now, so len(out.ulaw) and fedThrough stay two views of one quantity. A
-// backend sending faster than real time leaves fedThrough ahead of now and
-// this loop simply does not run; the surplus is absorbed by the next real gap.
+// Past that first frame fedThrough advances only by whole frames handed to the
+// writer, never by jumping to now, so len(out.ulaw) and fedThrough stay two
+// views of one quantity -- with the one exception every path here shares: a
+// write that failed still advances it, because a fill that could not make
+// progress would loop forever. A backend sending faster than real time leaves
+// fedThrough ahead of now and this loop simply does not run; the surplus is
+// absorbed by the next real gap.
 //
 // Whole frames only, for the reason cmd/twilio-cli's playoutFiller.fill gives:
 // a partial frame would put the file off the 20ms grid, and the rounding error
-// is at most one frame and is recovered on the next fill. Unlike that filler
-// this has no catch-up bound -- a long gap here costs bytes on disk, where
-// there it would block on a player and turn a stall into a hang.
+// is at most one frame and is recovered on the next fill.
+//
+// Unlike that filler this has no catch-up bound, deliberately: there a deficit
+// past maxFillCatchUp is resynced away because filling it honestly would block
+// on the player, while here a minutes-long gap is the ordinary case and
+// dropping it would be exactly the lie the fill exists to prevent. The price
+// is that a wall-clock step forward -- an NTP step, a suspended host -- is
+// indistinguishable from a long silence and is written out as one, so the cost
+// of a step is its own size in bytes on disk. Batching (silenceChunkFrames)
+// keeps that from also being a syscall per frame under the lock.
 func (t *Tap) fillOutGap(now time.Time) {
 	if t.fedThrough.IsZero() {
 		t.fedThrough = now
@@ -473,17 +512,25 @@ func (t *Tap) fillOutGap(now time.Time) {
 	}
 
 	frameDur := mulawDuration(defaultFrameBytes)
-	if t.fedThrough.Add(frameDur).After(now) {
+	// Truncating division is the same "whole frames only" rule the loop below
+	// used to spell out one frame at a time, and it is <= 0 for both the
+	// sub-frame gap and a clock that went backwards.
+	frames := int64(now.Sub(t.fedThrough) / frameDur)
+	if frames <= 0 {
 		return
 	}
 
-	silence := make([]byte, defaultFrameBytes)
-	for i := range silence {
-		silence[i] = 0xFF
+	chunk := frames
+	if chunk > silenceChunkFrames {
+		chunk = silenceChunkFrames
 	}
-	for !t.fedThrough.Add(frameDur).After(now) {
-		t.appendOut(silence)
-		t.fedThrough = t.fedThrough.Add(frameDur)
+	silence := bytes.Repeat([]byte{0xFF}, int(chunk)*defaultFrameBytes)
+
+	for frames > 0 {
+		n := min(frames, chunk)
+		t.appendOutFrames(silence[:int(n)*defaultFrameBytes], int(n))
+		t.fedThrough = t.fedThrough.Add(time.Duration(n) * frameDur)
+		frames -= n
 	}
 }
 
@@ -537,12 +584,24 @@ func (t *Tap) closeWriters() {
 // counts inbound frames, and there are none by construction. Per file is the
 // honest form of the same rule rather than a special case for one channel set.
 //
-// One duplex sequence changes because of this: a duplex tap given outbound
-// frames and no inbound one used to lose both files, and now keeps out.ulaw
-// with a sidecar saying frames: 0. It cannot occur on the pipeline path, where
-// DrainOut is called only after WriteIn, so no recording probeset build
-// consumes is affected -- and keeping the audio that exists beats deleting it
-// silently. Caller holds t.mu.
+// Two duplex sequences change because of this, both of them a call where one
+// direction landed bytes and the other landed none:
+//
+//   - Outbound content with an inbound count of zero used to lose both files
+//     and the sidecar, and now keeps out.ulaw with a sidecar saying frames: 0.
+//     On the pipeline path DrainOut is called only after WriteIn, but that does
+//     not make the case unreachable: t.frames stays zero whenever the inbound
+//     side never landed a byte, and in.ulaw failing to open latches
+//     inOpenFailed so every WriteIn after it returns early. What the change
+//     costs there is keeping the recording of a call whose inbound capture
+//     broke, which beats the nothing it used to leave behind.
+//   - Inbound content with an outbound count of zero used to keep an empty
+//     out.ulaw and now removes it. That needs every outbound write to fail,
+//     since the drain writes a frame -- real or silence -- on every call, so it
+//     is a broken-disk path either way and an absent file states what a
+//     zero-byte one only implies.
+//
+// Caller holds t.mu.
 func (t *Tap) removeEmptyRecordings() {
 	if t.w != nil && t.frames == 0 {
 		if err := os.Remove(t.inulawPath()); err != nil && !os.IsNotExist(err) {
