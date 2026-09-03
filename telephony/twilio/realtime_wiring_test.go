@@ -9,11 +9,56 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 )
+
+// measureCallCPU runs one realtime call for window with opts applied, then
+// reports the process CPU time that window burned.
+//
+// One definition serving every closed-consumer-channel busy-loop guard on this
+// path — client event, voice update, mark request — because the measurement is
+// the same one three times over and a fourth channel would otherwise copy it
+// again (CLAUDE.md #4). What each guard needs is a DIFFERENTIAL: the same
+// window with the option supplied and a closed channel, against the same window
+// with no option supplied at all, so the caller calls this twice and compares.
+//
+// CPU rather than liveness, and that part is load-bearing: an implementation
+// that returns the channel unchanged on a closed receive spins the select loop
+// forever WITHOUT starving its sibling cases — Go's asynchronous preemption
+// (since 1.14) keeps them scheduled on time regardless — so the call stays up,
+// no extra frame reaches the backend, and every liveness assertion still
+// passes. Only the CPU burned can see it.
+//
+// syscall.Getrusage is not available on Windows; callers skip there.
+func measureCallCPU(t *testing.T, window time.Duration, opts ...RealtimeOption) time.Duration {
+	t.Helper()
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), opts...))
+	waitBackendReady(t, be, h)
+
+	var before, after syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &before); err != nil {
+		t.Fatalf("getrusage: %v", err)
+	}
+	time.Sleep(window)
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &after); err != nil {
+		t.Fatalf("getrusage: %v", err)
+	}
+
+	h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
+	_ = h.waitDone(5 * time.Second)
+
+	userDelta := time.Duration(after.Utime.Sec-before.Utime.Sec)*time.Second +
+		time.Duration(after.Utime.Usec-before.Utime.Usec)*time.Microsecond
+	sysDelta := time.Duration(after.Stime.Sec-before.Stime.Sec)*time.Second +
+		time.Duration(after.Stime.Usec-before.Stime.Usec)*time.Microsecond
+	return userDelta + sysDelta
+}
 
 // Wiring tests for the realtime voice transport (AATK-70). The property under
 // test is that carrier audio crosses this package to the backend as the

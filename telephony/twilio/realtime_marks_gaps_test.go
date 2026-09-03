@@ -1,8 +1,11 @@
 package twilio
 
 import (
+	"runtime"
 	"testing"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // Gaps found reviewing AATK-105's mark seam, in the shape the sibling
@@ -73,5 +76,74 @@ func TestMarkTracker_BoundStillFiresForTheLiveArming(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the bound never fired")
+	}
+}
+
+// TestMarkRequestChan_ClosedChannelDoesNotBusyLoop is the measured half of the
+// closed-channel guard, the sibling of
+// TestClientEventChan_ClosedChannelDoesNotBusyLoop and
+// TestVoiceUpdateChan_ClosedChannelDoesNotBusyLoop. The mark-request channel
+// arrived with only the liveness half
+// (TestMarkRequestChan_ClosedChannelLeavesTheCallRunning), and liveness cannot
+// see this defect: an implementation returning the channel unchanged on a
+// closed receive spins the select loop on the zero value forever while the
+// call stays up and every other assertion in the suite still passes.
+//
+// Mutation-verified during review: replacing handleMarkRequest's
+// `return nil, nil` with `return ch, nil` left
+// TestMarkRequestChan_ClosedChannelLeavesTheCallRunning green.
+//
+// slopstop:test regression — guards: "a closed mark-request channel retires its select case rather than busy-looping on the zero value"
+func TestMarkRequestChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("getrusage is not available on windows")
+	}
+
+	const window = 300 * time.Millisecond
+
+	closed := make(chan string)
+	close(closed)
+
+	baseline := measureCallCPU(t, window)
+	withClosed := measureCallCPU(t, window, WithMarkRequestChan(closed))
+
+	if withClosed > baseline+50*time.Millisecond {
+		t.Fatalf("a closed mark-request channel must not busy-loop: baseline CPU %v, with-closed-channel CPU %v (over a %v wall-clock window)",
+			baseline, withClosed, window)
+	}
+}
+
+// TestMarkEchoBound_KeepsTheSubMillisecondRemainder is what actually holds the
+// bound to telephony.MuLawDuration, the module's one definition of the μ-law
+// byte-to-duration conversion.
+//
+// TestMarkRequestChan_BoundCoversQueuedPlayout says it does that, but cannot:
+// its byte count is telephony.SampleRateHz, a multiple of 8, and the truncating
+// whole-millisecond spelling (`n * 1000 / SampleRateHz`) agrees with
+// MuLawDuration exactly on multiples of 8. Mutation-verified during review —
+// substituting that spelling in playoutClock.fed left it green.
+//
+// A byte count that is NOT a multiple of 8 is what separates them: 8001 bytes
+// is 1.000125s exactly, and 1s under the truncating spelling. The difference is
+// sub-millisecond by construction, so the assertion is on equality with
+// MuLawDuration rather than on a tolerance.
+//
+// slopstop:test regression — guards: "playout arithmetic goes through
+// telephony.MuLawDuration, never a restated longhand"
+func TestMarkEchoBound_KeepsTheSubMillisecondRemainder(t *testing.T) {
+	// Deliberately not a multiple of 8: the whole point is the remainder the
+	// truncating spelling drops.
+	const queued = telephony.SampleRateHz + 1
+
+	sink := newCarrierMediaSink(&discardWSWriter{}, "SSremainder", nil, nil)
+	base := time.Now()
+	sink.playout.fed(queued, base)
+
+	got := sink.markEchoBound(base)
+	want := telephony.MuLawDuration(queued) + telephony.MarkEchoGraceMS*time.Millisecond
+	if got != want {
+		t.Fatalf("markEchoBound after %d bytes = %s, want %s; a truncating whole-millisecond spelling would give %s",
+			queued, got, want,
+			time.Duration(queued*1000/telephony.SampleRateHz)*time.Millisecond+telephony.MarkEchoGraceMS*time.Millisecond)
 	}
 }
