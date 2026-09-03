@@ -691,6 +691,38 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	}
 }
 
+// sendBounded writes one frame to the backend from HandleStreamRealtime's
+// select loop and reports what went wrong in terms of what was being sent.
+// It is the single definition of that write: handleClientEvent and
+// handleVoiceUpdate both go through it, and what differs between them is one
+// label.
+//
+// Bounded, because this runs on HandleStreamRealtime's select loop: an
+// unbounded write that parks here parks every other way the call can end. See
+// realtimeClientEventSendTimeout, whose bound both senders share — each is one
+// small frame on the same socket, sent from the same loop, for the same
+// reason.
+//
+// Wrapped, not returned bare: the transport's write error reads identically
+// whether it came from forwarding carrier audio, a consumer event, or a voice
+// update, so an unwrapped return would leave the caller unable to tell them
+// apart from the error alone. The idle timeout names itself on the way out for
+// the same reason. This transport's writer poisons itself after one write
+// error, so a failure here is never transient — hence logged, and fatal to the
+// call, rather than swallowed.
+//
+// what names the sender in both the log line and the wrapped error, so those
+// strings stay one definition rather than two that can drift apart.
+func sendBounded(ctx context.Context, client *realtime.Client, ev json.RawMessage, what string) error {
+	sendCtx, cancelSend := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
+	defer cancelSend()
+	if err := client.Send(sendCtx, ev); err != nil {
+		log.Printf("twilio: realtime: %s send failed: %v", what, err)
+		return fmt.Errorf("twilio: realtime: %s send: %w", what, err)
+	}
+	return nil
+}
+
 // handleClientEvent processes one receive from the client-event select case,
 // returning the channel HandleStreamRealtime's loop should keep selecting on
 // next (nil once the consumer has closed it) and any error that should end
@@ -732,19 +764,8 @@ func handleClientEvent(ctx context.Context, client *realtime.Client, ch <-chan j
 		return ch, nil
 	}
 
-	// Bounded, because this runs on HandleStreamRealtime's select loop: an
-	// unbounded write that parks here parks every other way the call can end.
-	// See realtimeClientEventSendTimeout.
-	sendCtx, cancelSend := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
-	defer cancelSend()
-	if err := client.Send(sendCtx, ev); err != nil {
-		log.Printf("twilio: realtime: client event send failed: %v", err)
-		// Wrapped, not returned bare: the transport's write error is the same
-		// string whether it came from forwarding carrier audio or from
-		// forwarding a consumer event, so an unwrapped return would leave the
-		// caller unable to tell the two apart from the error alone. The idle
-		// timeout names itself on the way out for the same reason.
-		return ch, fmt.Errorf("twilio: realtime: client event send: %w", err)
+	if err := sendBounded(ctx, client, ev, "client event"); err != nil {
+		return ch, err
 	}
 	return ch, nil
 }
@@ -787,22 +808,8 @@ func handleVoiceUpdate(ctx context.Context, client *realtime.Client, ch <-chan s
 		return ch, fmt.Errorf("twilio: realtime: build voice update: %w", err)
 	}
 
-	// Bounded, because this runs on HandleStreamRealtime's select loop: an
-	// unbounded write that parks here parks every other way the call can end.
-	// See realtimeClientEventSendTimeout, whose bound this shares — it is one
-	// small frame on the same socket, sent from the same loop, for the same
-	// reason.
-	sendCtx, cancelSend := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
-	defer cancelSend()
-	if err := client.Send(sendCtx, ev); err != nil {
-		log.Printf("twilio: realtime: voice update send failed: %v", err)
-		// Wrapped for the reason handleClientEvent's is: the transport's
-		// write error reads identically whether it came from carrier audio, a
-		// consumer event, or this, so an unwrapped return would leave the
-		// caller unable to tell them apart from the error alone. This
-		// transport's writer poisons itself after one write error, so a
-		// failure here is never transient.
-		return ch, fmt.Errorf("twilio: realtime: voice update send: %w", err)
+	if err := sendBounded(ctx, client, ev, "voice update"); err != nil {
+		return ch, err
 	}
 	return ch, nil
 }

@@ -37,6 +37,14 @@ const (
 // format identifier carries no sample rate because the codec fixes it.
 const FormatG711ULaw = "audio/pcmu"
 
+// sessionTypeRealtime is the session variant every session.update this package
+// sends declares. The backend maps session.update onto a discriminated union
+// of session variants and rejects the transcription one explicitly, so an
+// update without it does not parse as the accepted variant at all — which is
+// true of the dial handshake and of the mid-call voice update alike, hence one
+// definition rather than a literal at each site.
+const sessionTypeRealtime = "realtime"
+
 type audioFormat struct {
 	Type string `json:"type"`
 }
@@ -107,7 +115,7 @@ func newSessionUpdate(instructions, voice string) sessionUpdate {
 	return sessionUpdate{
 		Type: EventSessionUpdate,
 		Session: sessionSpec{
-			Type:         "realtime",
+			Type:         sessionTypeRealtime,
 			Instructions: instructions,
 			Audio: sessionAudio{
 				Input:  audioChannel{Format: format},
@@ -233,7 +241,7 @@ func BuildVoiceUpdate(voice string) ([]byte, error) {
 	out, err := json.Marshal(voiceUpdate{
 		Type: EventSessionUpdate,
 		Session: voiceUpdateSession{
-			Type:  "realtime",
+			Type:  sessionTypeRealtime,
 			Audio: voiceUpdateAudio{Output: voiceUpdateOutput{Voice: voice}},
 		},
 	})

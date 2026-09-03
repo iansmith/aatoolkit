@@ -1,12 +1,18 @@
 package twilio
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony/realtime"
 )
 
 // Voice-update-channel tests for the realtime path (AATK-104, "change the
@@ -238,21 +244,9 @@ func TestVoiceUpdateChan_EmptyStringSendsNothing(t *testing.T) {
 	voices <- "juniper"
 	frame := waitForVoiceUpdate(t, be, 5*time.Second)
 
-	var got struct {
-		Session struct {
-			Audio struct {
-				Output struct {
-					Voice string `json:"voice"`
-				} `json:"output"`
-			} `json:"audio"`
-		} `json:"session"`
-	}
-	if err := json.Unmarshal(frame, &got); err != nil {
-		t.Fatalf("decode session.update: %v (raw: %s)", err, frame)
-	}
-	if got.Session.Audio.Output.Voice != "juniper" {
+	if got := voiceOf(t, frame); got != "juniper" {
 		t.Fatalf("first session.update carries voice %q, want juniper — the empty string must not have been sent (raw: %s)",
-			got.Session.Audio.Output.Voice, frame)
+			got, frame)
 	}
 
 	// Give any second frame time to arrive before counting.
@@ -425,5 +419,169 @@ func waitForVoiceUpdateCount(t *testing.T, be *fakeRealtimeBackend, n int, d tim
 				len(be.voiceUpdateFrames()), n)
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// --- closed channel: the CASE is retired, measured not inferred -----------
+
+// TestVoiceUpdateChan_ClosedChannelDoesNotBusyLoop is the measured half of
+// observable behaviour 8, and the sibling of
+// TestClientEventChan_ClosedChannelDoesNotBusyLoop. Liveness alone cannot
+// see this defect: an implementation that returns the channel unchanged on a
+// closed receive spins on the zero value forever, and every zero value it
+// reads is the empty string the engine already drops — so no extra frame
+// reaches the backend, the call stays up, and every liveness assertion in
+// this file still passes. Mutation-verified: replacing handleVoiceUpdate's
+// `return nil, nil` with `return ch, nil` left the whole telephony suite
+// green before this test existed.
+//
+// Measured differentially against the same window with no voice-update
+// option supplied, exactly as the client-event version does, with generous
+// headroom: a genuine busy loop burns an entire core continuously, orders of
+// magnitude more than idle call machinery.
+//
+// slopstop:test regression — guards: "a closed voice-update channel retires its select case rather than busy-looping on the zero value"
+func TestVoiceUpdateChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("getrusage is not available on windows")
+	}
+
+	const window = 300 * time.Millisecond
+
+	measure := func(withClosedChan bool) time.Duration {
+		be := newFakeRealtimeBackend(t)
+		var h *realtimeHarness
+		if withClosedChan {
+			ch := make(chan string)
+			close(ch)
+			h = newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithVoiceUpdateChan(ch)))
+		} else {
+			h = newRealtimeHarness(t, be.url())
+		}
+		waitBackendReady(t, be, h)
+
+		var before, after syscall.Rusage
+		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &before); err != nil {
+			t.Fatalf("getrusage: %v", err)
+		}
+		time.Sleep(window)
+		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &after); err != nil {
+			t.Fatalf("getrusage: %v", err)
+		}
+
+		h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
+		_ = h.waitDone(5 * time.Second)
+
+		userDelta := time.Duration(after.Utime.Sec-before.Utime.Sec)*time.Second +
+			time.Duration(after.Utime.Usec-before.Utime.Usec)*time.Microsecond
+		sysDelta := time.Duration(after.Stime.Sec-before.Stime.Sec)*time.Second +
+			time.Duration(after.Stime.Usec-before.Stime.Usec)*time.Microsecond
+		return userDelta + sysDelta
+	}
+
+	baseline := measure(false)
+	withClosed := measure(true)
+
+	if withClosed > baseline+50*time.Millisecond {
+		t.Fatalf("a closed voice-update channel must not busy-loop: baseline CPU %v, with-closed-channel CPU %v (over a %v wall-clock window)",
+			baseline, withClosed, window)
+	}
+}
+
+// --- send failure ---------------------------------------------------------
+
+// TestVoiceUpdateChan_SendFailureEndsCallWithLoggedError pins observable
+// behaviour 6, the sibling of
+// TestClientEventChan_SendFailureEndsCallWithLoggedError: this transport's
+// writer poisons itself after one write error, so a failed voice-update send
+// is never transient. It is logged rather than silently swallowed, and the
+// call ends with a non-nil error rather than continuing against a connection
+// whose write half is dead forever.
+//
+// Mutation-verified: swallowing the send error (`return ch, nil` in place of
+// the wrapped return) left the whole telephony suite green before this test
+// existed.
+//
+// slopstop:test contract
+func TestVoiceUpdateChan_SendFailureEndsCallWithLoggedError(t *testing.T) {
+	var buf syncBuffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	hc, failWrites := faultyHTTPClient()
+	origDial := dialRealtime
+	dialRealtime = func(ctx context.Context, url string, opts ...realtime.DialOption) (*realtime.Client, error) {
+		return origDial(ctx, url, append(opts, realtime.WithHTTPClient(hc))...)
+	}
+	defer func() { dialRealtime = origDial }()
+
+	voices := make(chan string, 1)
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithVoiceUpdateChan(voices)))
+	waitBackendReady(t, be, h)
+
+	failWrites.Store(true)
+	voices <- "cedar"
+
+	err := h.waitDone(5 * time.Second)
+	if err == nil {
+		t.Fatal("a voice-update send failure must end the call with a non-nil error, not leave it running")
+	}
+	// Attribution, not merely "some error": the transport's write error reads
+	// identically whichever writer produced it.
+	if !strings.Contains(err.Error(), "twilio: realtime: voice update send") {
+		t.Fatalf("the call must end naming the voice-update send in its error, got: %v", err)
+	}
+	if !strings.Contains(buf.String(), "injected write failure") {
+		t.Fatalf("a failed voice-update send must be logged before the call ends; log output: %q", buf.String())
+	}
+}
+
+// --- the send bound -------------------------------------------------------
+
+// TestVoiceUpdateChan_SendThatNeverCompletesEndsCallOnItsBound pins
+// observable behaviour 7, the sibling of
+// TestClientEventChan_SendThatNeverCompletesEndsCallOnItsBound. The
+// voice-update write runs on HandleStreamRealtime's own select loop, so a
+// write that never returns parks the loop and silences backendDone,
+// carrierDone and the idle timer along with it. waitDone failing on timeout
+// is that hang; a non-nil error inside the window is
+// realtimeClientEventSendTimeout working.
+//
+// Mutation-verified: replacing the bounded context with a plain
+// context.WithCancel(ctx) left the whole telephony suite green before this
+// test existed.
+//
+// slopstop:test regression — guards: "a voice-update write that never completes is bounded, so it cannot park HandleStreamRealtime's select loop, and the call ends naming the voice-update send"
+func TestVoiceUpdateChan_SendThatNeverCompletesEndsCallOnItsBound(t *testing.T) {
+	hc, stall := stalledHTTPClient()
+	origDial := dialRealtime
+	dialRealtime = func(ctx context.Context, url string, opts ...realtime.DialOption) (*realtime.Client, error) {
+		return origDial(ctx, url, append(opts, realtime.WithHTTPClient(hc))...)
+	}
+	defer func() { dialRealtime = origDial }()
+
+	voices := make(chan string, 1)
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithVoiceUpdateChan(voices)))
+	waitBackendReady(t, be, h)
+
+	stall.Store(true)
+	voices <- "cedar"
+
+	// Generous slack over the bound itself: the assertion is that the call
+	// ends at all, not that it ends to the millisecond.
+	err := h.waitDone(realtimeClientEventSendTimeout + 5*time.Second)
+	if err == nil {
+		t.Fatal("a voice-update write that never completes must end the call with a non-nil error on its own bound")
+	}
+	if !strings.Contains(err.Error(), "twilio: realtime: voice update send") {
+		t.Fatalf("the call must end naming the voice-update send in its error, got: %v", err)
 	}
 }
