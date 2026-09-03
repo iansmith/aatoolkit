@@ -89,6 +89,9 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	// receive/send, so what gets recorded and what the session heard/said
 	// cannot diverge (SOP-152 Observable behavior 2 -- "byte-identical to
 	// the payloads delivered to the session").
+	// Duplex, by taking WithChannels' default: this session sees both
+	// directions, and pumpDataPlane's WriteIn/DrainOut pair below is the
+	// inbound frame clock that keeps the two recordings aligned.
 	tap := NewTap(tapDir, start.StreamSID, start.CallSID, tapLabelFromEnv(), startedAt)
 
 	dataOut := NewDataPlaneOutput(conn, start.StreamSID, tap)
