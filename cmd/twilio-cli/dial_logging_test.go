@@ -86,7 +86,14 @@ func TestIsCallEnded(t *testing.T) {
 	}
 }
 
-func TestMulawPlayoutDuration(t *testing.T) {
+// TestMuLawFrameSizesPlayOutAsExpected checks the CLI's own byte counts
+// against telephony.MuLawDuration -- muLawFrame20ms is 20ms of playout and
+// telephony.SampleRateHz is one second of it. It does not pin the
+// conversion itself: every n here is a multiple of 8, so a truncate-to-
+// whole-milliseconds reimplementation would still pass. That contract is
+// pinned by TestMuLawDuration in the telephony package, which owns the
+// function.
+func TestMuLawFrameSizesPlayOutAsExpected(t *testing.T) {
 	cases := []struct {
 		name  string
 		bytes int
