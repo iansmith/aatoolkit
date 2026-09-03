@@ -151,13 +151,14 @@ const earconRampMS = 20
 // earconDurationMS long, ramped in and out over earconRampMS at each end.
 func generateEarcon() []byte {
 	// One definition of the rate. `sampleRate` was a second, float copy used
-	// only by the phase term, so a change to sampleRateHz would have altered
-	// the tone's LENGTH without altering its PITCH -- silently, and only
-	// audibly wrong.
+	// only by the phase term, so a change to the rate would have altered the
+	// tone's LENGTH without altering its PITCH -- silently, and only audibly
+	// wrong. The rate itself is telephony.SampleRateHz, the module's one
+	// declaration of it.
 	const frequency = 400.0
-	sampleRate := float64(sampleRateHz)
-	samples := sampleRateHz * earconDurationMS / 1000
-	ramp := sampleRateHz * earconRampMS / 1000
+	sampleRate := float64(telephony.SampleRateHz)
+	samples := telephony.SampleRateHz * earconDurationMS / 1000
+	ramp := telephony.SampleRateHz * earconRampMS / 1000
 
 	earcon := make([]byte, samples)
 	for i := 0; i < samples; i++ {

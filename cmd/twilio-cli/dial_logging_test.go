@@ -86,7 +86,14 @@ func TestIsCallEnded(t *testing.T) {
 	}
 }
 
-func TestMulawPlayoutDuration(t *testing.T) {
+// TestMuLawFrameSizesPlayOutAsExpected checks the CLI's own byte counts
+// against telephony.MuLawDuration -- muLawFrame20ms is 20ms of playout and
+// telephony.SampleRateHz is one second of it. It does not pin the
+// conversion itself: every n here is a multiple of 8, so a truncate-to-
+// whole-milliseconds reimplementation would still pass. That contract is
+// pinned by TestMuLawDuration in the telephony package, which owns the
+// function.
+func TestMuLawFrameSizesPlayOutAsExpected(t *testing.T) {
 	cases := []struct {
 		name  string
 		bytes int
@@ -94,13 +101,13 @@ func TestMulawPlayoutDuration(t *testing.T) {
 	}{
 		{"nothing", 0, 0},
 		{"one Twilio frame", muLawFrame20ms, 20 * time.Millisecond},
-		{"one second", sampleRateHz, time.Second},
+		{"one second", telephony.SampleRateHz, time.Second},
 		{"two seconds", 16000, 2 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := mulawPlayoutDuration(tc.bytes); got != tc.want {
-				t.Errorf("mulawPlayoutDuration(%d) = %s, want %s", tc.bytes, got, tc.want)
+			if got := telephony.MuLawDuration(tc.bytes); got != tc.want {
+				t.Errorf("telephony.MuLawDuration(%d) = %s, want %s", tc.bytes, got, tc.want)
 			}
 		})
 	}
@@ -152,8 +159,8 @@ func TestHandleFrame_MarkLogsVolumeAndPlayout(t *testing.T) {
 	// the point of the change: bytes-since-mark counts what arrived, and the
 	// mark echo depends on what has not yet played, which are different numbers
 	// the moment the stream is not perfectly paced.
-	audio := &callAudio{bytesSinceMark: sampleRateHz, markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
-	audio.filler.fed(make([]byte, sampleRateHz), time.Now())
+	audio := &callAudio{bytesSinceMark: telephony.SampleRateHz, markWindowStart: time.Now(), filler: newPlayoutFiller(time.Now(), telephony.MuLawSilence)}
+	audio.filler.fed(make([]byte, telephony.SampleRateHz), time.Now())
 
 	out := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
