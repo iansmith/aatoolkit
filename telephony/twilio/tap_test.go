@@ -1317,7 +1317,7 @@ func TestTap_OutboundOnlyBatchesLongGapFills(t *testing.T) {
 	tap.wOut = w // as newTapWithOutWriter does, but this tap needs the options too
 
 	const gapFrames = 1500 // 30 seconds of silence
-	frameDur := mulawDuration(defaultFrameBytes)
+	frameDur := telephony.MuLawDuration(defaultFrameBytes)
 
 	tap.WriteOut(realFrame(0x01))
 	// The first frame put fedThrough one frame ahead, so advancing by one more

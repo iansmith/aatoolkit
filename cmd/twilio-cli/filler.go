@@ -1,6 +1,10 @@
 package main
 
-import "time"
+import (
+	"time"
+
+	"github.com/iansmith/aatoolkit/telephony"
+)
 
 // A call is a real-time stream; a pipe into ffplay is not.
 //
@@ -60,7 +64,7 @@ func (f *playoutFiller) fed(payload []byte, now time.Time) {
 	if f.fedThrough.Before(now) {
 		f.fedThrough = now
 	}
-	f.fedThrough = f.fedThrough.Add(mulawPlayoutDuration(len(payload)))
+	f.fedThrough = f.fedThrough.Add(telephony.MuLawDuration(len(payload)))
 }
 
 // fill writes silence frames until the player has been fed up to now, and
@@ -86,9 +90,9 @@ func (f *playoutFiller) fill(now time.Time, play func([]byte)) int {
 	}
 
 	n := 0
-	for f.fedThrough.Add(mulawPlayoutDuration(len(f.frame))).Compare(now) <= 0 {
+	for f.fedThrough.Add(telephony.MuLawDuration(len(f.frame))).Compare(now) <= 0 {
 		play(f.frame)
-		f.fedThrough = f.fedThrough.Add(mulawPlayoutDuration(len(f.frame)))
+		f.fedThrough = f.fedThrough.Add(telephony.MuLawDuration(len(f.frame)))
 		n++
 	}
 	return n

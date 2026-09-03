@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // This file is the file-backed frame source: an alternative to capture_darwin.go's
@@ -19,9 +21,10 @@ import (
 // frame's playout duration, so streaming any faster would hand the server a whole
 // utterance at once and break the VAD's silence accounting. Derived from the frame
 // size rather than written as a bare 20ms, so a frame-size retune cannot silently
-// desynchronize the two — and taken from dial.go's mulawPlayoutDuration rather than
-// restating its arithmetic, so μ-law bytes→duration has one definition here.
-var frameInterval = mulawPlayoutDuration(muLawFrame20ms)
+// desynchronize the two — and taken from telephony.MuLawDuration rather than
+// restating its arithmetic, which is the module's one definition of μ-law
+// bytes→duration.
+var frameInterval = telephony.MuLawDuration(muLawFrame20ms)
 
 // resolveAudioPath validates that path names a readable regular file and returns
 // the path to open. It is a pure validator in validateE164's shape (main.go) so

@@ -578,10 +578,10 @@ func TestLazyPlayer_DisablesAndReapsAfterMidCallWriteError(t *testing.T) {
 func TestGenerateEarcon_LongEnoughToHear(t *testing.T) {
 	tone := generateEarcon()
 
-	wantBytes := sampleRateHz * earconDurationMS / 1000
+	wantBytes := telephony.SampleRateHz * earconDurationMS / 1000
 	if len(tone) != wantBytes {
 		t.Errorf("earcon length: got %d bytes, want %d (%d ms at %d Hz)",
-			len(tone), wantBytes, earconDurationMS, sampleRateHz)
+			len(tone), wantBytes, earconDurationMS, telephony.SampleRateHz)
 	}
 	if earconDurationMS < 150 {
 		t.Errorf("earconDurationMS = %d, want >= 150: a shorter tone reads as a click", earconDurationMS)

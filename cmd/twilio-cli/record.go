@@ -6,6 +6,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // A stream recorder answers, for one direction of a call, a question nothing
@@ -119,7 +121,7 @@ func (r *streamRecorder) close(now time.Time) {
 	defer r.mu.Unlock()
 
 	wall := now.Sub(r.started)
-	audio := mulawPlayoutDuration(r.total)
+	audio := telephony.MuLawDuration(r.total)
 	ratio := 0.0
 	if wall > 0 {
 		ratio = audio.Seconds() / wall.Seconds()

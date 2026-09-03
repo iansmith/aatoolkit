@@ -26,7 +26,7 @@ func TestPlayoutFiller_SilentGapIsFilledAtRealTime(t *testing.T) {
 	// covers (see the test below).
 	var written int
 	frames := 0
-	step := mulawPlayoutDuration(muLawFrame20ms)
+	step := telephony.MuLawDuration(muLawFrame20ms)
 	for elapsed := step; elapsed <= 47*time.Second; elapsed += step {
 		frames += f.fill(base.Add(elapsed), func(b []byte) { written += len(b) })
 	}
@@ -35,7 +35,7 @@ func TestPlayoutFiller_SilentGapIsFilledAtRealTime(t *testing.T) {
 	if frames != wantFrames {
 		t.Errorf("frames written across a 47s gap: got %d, want %d", frames, wantFrames)
 	}
-	if got := mulawPlayoutDuration(written); got != 47*time.Second {
+	if got := telephony.MuLawDuration(written); got != 47*time.Second {
 		t.Errorf("silence written: %s, want 47s", got)
 	}
 }
@@ -76,7 +76,7 @@ func TestPlayoutFiller_NoSilenceWhileAudioFlows(t *testing.T) {
 	now := base
 	total := 0
 	for i := 0; i < 500; i++ { // 10 seconds of real-time media
-		now = now.Add(mulawPlayoutDuration(muLawFrame20ms))
+		now = now.Add(telephony.MuLawDuration(muLawFrame20ms))
 		f.fed(frame, now)
 		total += f.fill(now, func([]byte) {})
 	}
@@ -222,7 +222,7 @@ func TestPlayoutFiller_FlushDropsQueuedPlayout(t *testing.T) {
 			"charged against the next mark echo, so the server waits out a reply nobody hears", got)
 	}
 
-	step := mulawPlayoutDuration(muLawFrame20ms)
+	step := telephony.MuLawDuration(muLawFrame20ms)
 	if n := f.fill(clearAt.Add(step), func([]byte) {}); n != 1 {
 		t.Errorf("frames filled one tick after a clear: got %d, want 1 -- the player is "+
 			"being starved for as long as the flushed audio would have run", n)

@@ -36,18 +36,6 @@ const defaultFrameBytes = telephony.SampleRateHz * telephony.MuLawFrameMS / 1000
 // worst case at ~160 bytes/frame).
 const maxOutQueueFrames = 5 * 60 * 1000 / telephony.MuLawFrameMS // same bufferMS/frameMS derivation as telephony.ComputeDepth
 
-// mulawDuration is how long n bytes of mu-law audio take to play out: one byte
-// per sample at telephony.SampleRateHz. It is the pacing an outbound-only
-// recording is written against, so a gap in the writes becomes silence of the
-// same length rather than nothing at all.
-//
-// cmd/twilio-cli carries the same arithmetic as mulawPlayoutDuration for its
-// playout side. Collapsing the two means an exported helper on the telephony
-// package, which is a public-API change this ticket does not carry.
-func mulawDuration(n int) time.Duration {
-	return time.Duration(n) * time.Second / telephony.SampleRateHz
-}
-
 // silenceChunkFrames is how many silence frames fillOutGap hands to one Write.
 //
 // A gap in a one-directional recording is legitimately call-length: the engine
@@ -386,7 +374,7 @@ func (t *Tap) WriteOut(payload []byte) {
 		}
 		t.fillOutGap(t.now())
 		t.appendOut(payload)
-		t.fedThrough = t.fedThrough.Add(mulawDuration(len(payload)))
+		t.fedThrough = t.fedThrough.Add(telephony.MuLawDuration(len(payload)))
 		return
 	}
 
@@ -525,7 +513,7 @@ func (t *Tap) fillOutGap(now time.Time) {
 		return
 	}
 
-	frameDur := mulawDuration(defaultFrameBytes)
+	frameDur := telephony.MuLawDuration(defaultFrameBytes)
 	// Truncating division is the same "whole frames only" rule the loop below
 	// used to spell out one frame at a time, and it is <= 0 for both the
 	// sub-frame gap and a clock that went backwards.

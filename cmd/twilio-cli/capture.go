@@ -12,11 +12,10 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
-// sampleRateHz is Twilio's μ-law rate: 8000 samples/sec, 1 byte/sample.
-const sampleRateHz = 8000
-
-// muLawFrame20ms is 8000 Hz × 0.020 s × 1 byte/sample.
-const muLawFrame20ms = sampleRateHz * 20 / 1000
+// muLawFrame20ms is telephony.SampleRateHz × 0.020 s × 1 byte/sample. The rate
+// is read from telephony rather than restated here: it is the same 8000 the
+// engine already declares, and a private copy is a second definition of it.
+const muLawFrame20ms = telephony.SampleRateHz * 20 / 1000
 
 // mediaFrameEncoder tracks a monotonic chunk counter for one call's outgoing
 // media frames, starting at 1. seqNum points at the call's shared per-message

@@ -369,7 +369,7 @@ func dialReadLoop(readCtx context.Context, earconCh chan struct{}, readCh chan r
 	// The tick drives the silence filler. It is the only thing in this loop
 	// that must happen when NOTHING has arrived -- precisely the condition a
 	// select over reads alone can never notice.
-	fillTick := time.NewTicker(mulawPlayoutDuration(muLawFrame20ms))
+	fillTick := time.NewTicker(telephony.MuLawDuration(muLawFrame20ms))
 	defer fillTick.Stop()
 
 	for {
@@ -487,12 +487,6 @@ func callEndReason(err error) string {
 	default:
 		return err.Error()
 	}
-}
-
-// mulawPlayoutDuration is how long n bytes of μ-law audio take to play out:
-// 1 byte per sample at sampleRateHz.
-func mulawPlayoutDuration(n int) time.Duration {
-	return time.Duration(n) * time.Second / sampleRateHz
 }
 
 // handleFrame dispatches a decoded inbound frame: media plays out and feeds
