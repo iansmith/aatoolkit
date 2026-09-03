@@ -96,7 +96,7 @@ func (h *realtimeHarness) captureCarrierRaw(t *testing.T) func() []string {
 	}
 }
 
-// markRecords filters a carrier-wire capture down to the marks it saw, and
+// markIndexes filters a carrier-wire capture down to the marks it saw, and
 // reports each one's index in the full sequence — the ordering assertion needs
 // the position, not just the presence.
 func markIndexes(records []carrierWireRecord) []int {
@@ -238,10 +238,24 @@ func TestMarkEchoChan_UnrequestedEchoIsNotDeliveredAsAMatch(t *testing.T) {
 
 	waitFor(t, 5*time.Second, func() bool { return strings.Contains(buf.String(), "some-other-mark") })
 
-	select {
-	case rec := <-echoes:
-		t.Fatalf("an echo matching nothing outstanding must not be delivered as a match, got %+v", rec)
-	case <-time.After(250 * time.Millisecond):
+	// Every record that arrives in the window is inspected, and the assertion
+	// is on the NAME rather than on the channel merely being empty. "goodbye"
+	// is genuinely outstanding here — it has to be, or "matches nothing
+	// outstanding" would be vacuous — and nothing echoes it, so its own bound
+	// fires markEchoGrace after it was written and puts a legitimate
+	// {goodbye, TimedOut} record on this channel. That record is not the
+	// defect under test, and a bare "the channel stayed empty" assertion
+	// racing it would fail on a slow machine while the behavior was correct.
+	deadline := time.After(2 * telephony.MarkEchoGraceMS * time.Millisecond)
+	for done := false; !done; {
+		select {
+		case rec := <-echoes:
+			if rec.Name == "some-other-mark" {
+				t.Fatalf("an echo matching nothing outstanding must not be delivered as a match, got %+v", rec)
+			}
+		case <-deadline:
+			done = true
+		}
 	}
 
 	assertStillRunning(t, h, "an unmatched mark echo must not end the call")
