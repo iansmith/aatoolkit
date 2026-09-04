@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -12,10 +14,9 @@ import (
 	"github.com/iansmith/aatoolkit/internal/lifecycle"
 )
 
-// AATK-106. Nothing reaps a child that exits on its own: e.procs entries are
-// removed only by downOne, killForeignOrOwned, Build and TeardownAll. So
-// livePIDLocked keeps answering "ours" for a PID that is gone, and `up` on a
-// crashed server takes the already-ours branch — printing ok and launching
+// AATK-106. Nothing reaped a child that exited on its own, so the ownership
+// helper kept answering "ours" for a PID that was gone and `up` on a
+// crashed server took the already-ours branch — printing ok and launching
 // nothing, while Status (which observes ports, not the registry) correctly
 // says down. The tests below pin the two verbs to the same truth.
 
@@ -509,12 +510,16 @@ func TestRealEngine_Dead_DisabledServerAfterLeaderCrash_SweepsOrphanedGroup(t *t
 // AATK-106 review round 4, finding 1. `up` on a crashed server must sweep the
 // dead child's process group before launching its replacement.
 //
-// This is the third path in this branch to need the sweep, and the only one
-// where the handle is DESTROYED rather than merely unused: the cold launch
-// overwrites e.procs[name] with the new child's PID, and the old PID was the
-// group id. After the overwrite nothing can reach an orphan the crash left —
-// TeardownAll walks the registry, so not even quit gets it — and an orphan
-// holding no declared port is invisible to every port-based path as well.
+// The launch overwrites e.procs[name] with the new child's PID, and the old
+// PID was the group id. After the overwrite nothing can reach an orphan the
+// crash left — TeardownAll walks the registry, so not even quit gets it — and
+// an orphan holding no declared port is invisible to every port-based path.
+//
+// registerProc now retires the entry it replaces, so the overwrite cannot
+// lose the handle. This test covers the OTHER reason upOne retires early: the
+// sweep has to precede checkPortConflict, or an orphan still holding a
+// declared port makes `up` refuse to relaunch the server whose own remains
+// are holding it.
 //
 // Master did not have this hole, and got there by being wrong in the other
 // direction: `up` treated the dead child as ours and skipped, so the entry
@@ -523,6 +528,11 @@ func TestRealEngine_Up_AfterLeaderCrash_SweepsOrphanBeforeRelaunching(t *testing
 	s := orphanLeaderServer(t, "svc")
 	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
 	oldPID := launchOrphanLeader(t, eng, s)
+
+	// Registered before Up, not after: Up can fail with a child already
+	// launched and registered, and the t.Cleanup below is only reached if
+	// Up returns nil.
+	t.Cleanup(func() { eng.TeardownAll() })
 
 	if err := eng.Up("svc"); err != nil {
 		t.Fatalf("Up after a leader crash: %v", err)
@@ -537,4 +547,77 @@ func TestRealEngine_Up_AfterLeaderCrash_SweepsOrphanBeforeRelaunching(t *testing
 	waitForCondition(t, 5*time.Second,
 		fmt.Sprintf("the orphan in the crashed leader's pid group %d to be swept by up", oldPID),
 		func() bool { return !processGroupAlive(oldPID) })
+}
+
+// AATK-106, option A. The invariant that closes the whole defect class:
+// every write to e.procs goes through registerProc, which retires what it
+// replaces.
+//
+// This is a source-level guard, and it is deliberately that rather than a
+// behavioral one. The class was found four times by four review rounds, each
+// time as one site that overwrote or dropped a registration without sweeping
+// the process group its PID led. No behavioral test can cover the site nobody
+// thought of — but every one of them had to write to the map, so that is
+// where the check belongs. A new direct assignment fails this immediately,
+// with a pointer to the function to use instead.
+func TestEngine_EveryRegistryWriteGoesThroughRegisterProc(t *testing.T) {
+	src, err := os.ReadFile("engine.go")
+	if err != nil {
+		t.Fatalf("reading engine.go: %v", err)
+	}
+
+	assign := regexp.MustCompile(`e\.procs\[[^\]]*\]\s*=`)
+	var offenders []string
+	for i, line := range strings.Split(string(src), "\n") {
+		if assign.MatchString(line) {
+			offenders = append(offenders, fmt.Sprintf("engine.go:%d: %s", i+1, strings.TrimSpace(line)))
+		}
+	}
+
+	// Exactly one: registerProc's own. Everything else must call it.
+	if len(offenders) != 1 {
+		t.Fatalf("e.procs must be assigned in registerProc and nowhere else — found %d assignments:\n  %s\n\n"+
+			"A direct assignment silently discards the registration it replaces. The registered PID is the\n"+
+			"process-GROUP id of the child we launched, and it is the last handle on any orphan that child\n"+
+			"left behind; overwriting it strands that orphan for the rest of the session. Call registerProc.",
+			len(offenders), strings.Join(offenders, "\n  "))
+	}
+	if !strings.Contains(offenders[0], "e.procs[s.Name] = proc") {
+		t.Fatalf("the one permitted assignment is not the one expected (registerProc's): %s", offenders[0])
+	}
+}
+
+// AATK-106, option A. registerProc retires the entry it replaces — the
+// mechanism the guard test above protects, asserted behaviorally.
+//
+// Round 5 found the case this covers: upOne decides the child is ours, then
+// rebuildIfStaleOwned's Stop asks the liveness question a second time, gets
+// "not ours" because the child died in between, tears nothing down, and lets
+// Start overwrite the handle. Retiring at the point of the write closes that
+// without every caller having to remember the race exists.
+func TestRealEngine_RegisterProc_RetiresTheEntryItReplaces(t *testing.T) {
+	s := orphanLeaderServer(t, "svc")
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
+	oldPID := launchOrphanLeader(t, eng, s)
+
+	// A second child for the same server, registered the way every launch
+	// path does it.
+	replacement, err := eng.launch(s)
+	if err != nil {
+		t.Fatalf("launching the replacement: %v", err)
+	}
+	replacementPID := int32(replacement.Cmd.Process.Pid)
+	t.Cleanup(func() { _ = syscall.Kill(-int(replacementPID), syscall.SIGKILL) })
+
+	if err := eng.registerProc(s, replacement); err != nil {
+		t.Fatalf("registerProc: %v", err)
+	}
+
+	waitForCondition(t, 5*time.Second,
+		fmt.Sprintf("the replaced registration's pid group %d to be swept", oldPID),
+		func() bool { return !processGroupAlive(oldPID) })
+
+	if got := engineChildPID(t, eng, "svc"); got != replacementPID {
+		t.Fatalf("registry holds pid %d, want the replacement %d", got, replacementPID)
+	}
 }

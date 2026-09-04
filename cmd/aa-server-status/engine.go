@@ -114,28 +114,114 @@ func pidOf(p *lifecycle.Process) (int32, bool) {
 // not. It is ownedPIDLocked's structural counterpart: the question is "did we
 // launch something for this server", not "is it still running".
 //
-// This is what the SWEEP paths want — upOne before it overwrites the entry,
-// downOne before it prunes, and observedRunningPID on behalf of
-// killForeignOrOwned. Children are launched setpgid and signalled with
-// kill(-pid), so a dead leader's PID stays the only handle on an orphan still
-// running in its group, long after that leader stopped being "ours".
+// This is what the SWEEP paths want — retireRegistration, and
+// observedRunningPID on behalf of killForeignOrOwned. Children are launched
+// setpgid and signalled with kill(-pid), so a dead leader's PID stays the
+// only handle on an orphan still running in its group, long after that leader
+// stopped being "ours".
 //
-// Not every teardown path wants it: teardownOne deliberately asks
-// ownedPIDLocked, because both of its callers have already established
-// ownership and it must not act on a registration they rejected. Must be
-// called with e.mu held.
+// teardownOne asks ownedPIDLocked instead, and that IS a hazard rather than a
+// preference: it re-asks the liveness question its callers already asked, so
+// a child that dies in between makes it return nil having signalled nothing.
+// What makes that safe is not teardownOne — it is registerProc, which retires
+// the entry before any relaunch can overwrite it, so the handle survives a
+// stop that quietly did nothing. Must be called with e.mu held.
 func (e *RealEngine) registeredPIDLocked(name string) (int32, bool) {
 	return pidOf(e.procs[name])
 }
 
-// deleteProc forgets our registration for name. One definition of the
-// lock-delete-unlock idiom, for the verbs that finish with a single server.
-// TeardownAll keeps its own loop: it drops every entry it tore down under
-// one lock acquisition rather than reacquiring per name.
+// The registry has exactly two ways to stop honouring an entry, and the
+// difference between them is the whole subject of AATK-106's review history.
+//
+// deleteProc is the plain forget, for a caller that has ALREADY torn the
+// server down and is recording that fact. retireRegistration is for a caller
+// abandoning an entry it did not tear down — it sweeps first, because the
+// registered PID may be the last handle anyone has on a live process.
+//
+// Four review rounds each found one site that had quietly become the second
+// kind while still doing the first. The fix is not vigilance: it is
+// registerProc below, which every write to e.procs goes through and which
+// retires what it replaces, so the destroying variant cannot be reintroduced
+// by forgetting a call.
+
+// deleteProc forgets our registration for name, for a caller that has already
+// finished tearing the server down. TeardownAll keeps its own loop: it drops
+// every entry it tore down under one lock acquisition rather than reacquiring
+// per name.
 func (e *RealEngine) deleteProc(name string) {
 	e.mu.Lock()
 	delete(e.procs, name)
 	e.mu.Unlock()
+}
+
+// retireRegistration stops honouring our registration for s when nothing has
+// torn it down yet: it sweeps the process group the registered PID leads,
+// then forgets the entry. It is a no-op when we hold no registration.
+//
+// The sweep is the point. Children are launched setpgid and signalled with
+// kill(-pid), so the registered PID is the group id, and it stays the only
+// handle on an orphan the leader left behind — one holding no DECLARED port
+// is invisible to every port-based path, and to TeardownAll once the entry is
+// gone. Teardown short-circuits on an empty group, so the ordinary
+// crash-with-no-orphan case costs a signal and no waiting.
+//
+// A detached server is never signalled here. Its launcher exited by design,
+// possibly long ago, so that PID means nothing and may since have been
+// recycled; its container is stopped by teardownDetached, which belongs to
+// the caller's verb and not to bookkeeping.
+//
+// For a supervised child the PID is of unbounded age, so the same recycling
+// risk applies in principle: the OS could have reused it, and the signal
+// would then reach an unrelated group. That exposure is master's, not this
+// change's — `down` and `dead` have always signalled a registered PID of
+// whatever age — but `up` now joins them, so it is worth naming. Bounding it
+// would mean recording the launch time and refusing to signal a group whose
+// leader is younger than the registration, which is a real improvement and a
+// separate one.
+//
+// On failure the entry is KEPT and the error returned. Forgetting a
+// registration we could not finish sweeping is the one outcome worse than
+// either — it strands whatever we did not reach, with no handle left to try
+// again from.
+func (e *RealEngine) retireRegistration(s config.Server) error {
+	e.mu.Lock()
+	pid, registered := e.registeredPIDLocked(s.Name)
+	e.mu.Unlock()
+	if !registered {
+		return nil
+	}
+	if !s.Detached {
+		if err := e.teardownPID(s, pid); err != nil {
+			return err
+		}
+	}
+	e.deleteProc(s.Name)
+	return nil
+}
+
+// registerProc records proc as our child for s. Every write to e.procs goes
+// through here, and that is the invariant this function exists to enforce:
+// an entry can only ever be replaced by something that first retired it.
+//
+// Overwriting the map directly is what made `up` on a crashed server strand
+// its orphan — the registered PID was the group's last handle, and the
+// assignment destroyed it. Requiring the write to go through a retirement
+// makes that mistake unavailable rather than merely discouraged, which
+// matters because it was made, found, and remade across four review rounds.
+//
+// On every healthy path this costs nothing: either no entry exists, or the
+// caller's own teardown already emptied the group and Teardown short-circuits.
+// A failed retirement is reported, and the new child is registered anyway —
+// it is running, and refusing to record it would strand the process we just
+// started, which is the same class of bug one level up.
+func (e *RealEngine) registerProc(s config.Server, proc *lifecycle.Process) error {
+	retireErr := e.retireRegistration(s)
+
+	e.mu.Lock()
+	e.procs[s.Name] = proc
+	e.mu.Unlock()
+
+	return retireErr
 }
 
 // ownedPIDLocked returns the PID of the child we registered for s, and
@@ -718,27 +804,22 @@ func (e *RealEngine) upOne(s config.Server) verbOutcome {
 	}
 
 	// Not ours — but we may still hold the registration of a child that
-	// exited on its own. Sweep its process group before launching a
-	// replacement, because the launch overwrites e.procs[s.Name] and the
-	// registered PID is the group id: after the overwrite nothing, not even
-	// TeardownAll's walk of the registry, has a handle on an orphan the
-	// crash left behind, and one holding no declared port cannot be found
-	// any other way. This is the third path in this branch to need the
-	// sweep — downOne and observedRunningPID were the other two — and the
-	// only one where the handle is destroyed rather than merely unused.
+	// exited on its own. Retire it before going any further.
 	//
-	// A failed sweep is deliberately not fatal here. The likely cause is a
-	// foreign process holding a declared port, and checkPortConflict just
-	// below refuses with a message naming that holder, which is far more
-	// use to an operator than a teardown-verification failure. The entry is
-	// kept in that case so quit still has the PID to try again with.
-	e.mu.Lock()
-	stalePID, hadRegistration := e.registeredPIDLocked(s.Name)
-	e.mu.Unlock()
-	if hadRegistration {
-		if err := e.teardownPID(s, stalePID); err == nil {
-			e.deleteProc(s.Name)
-		}
+	// registerProc would retire it anyway, and that is the guarantee the
+	// handle is never destroyed. Doing it HERE as well is not belt-and-
+	// braces: the sweep has to happen before checkPortConflict, or an orphan
+	// still holding a declared port makes `up` refuse to relaunch the very
+	// server whose remains are holding the port. It must also precede
+	// rebuildIfStaleCold, which replaces the binary underneath a group we
+	// have not yet swept.
+	//
+	// Fatal on failure, unlike everything downstream of a successful launch:
+	// nothing has been started yet, so refusing is free, and launching a
+	// second copy while the first's group may still be alive is the outcome
+	// worth avoiding.
+	if err := e.retireRegistration(s); err != nil {
+		return verbOutcome{Name: s.Name, Err: fmt.Errorf("up %s: clearing the remains of a previous run: %w", s.Name, err)}
 	}
 
 	declared := lifecycle.DeclaredPorts(s)
@@ -764,9 +845,9 @@ func (e *RealEngine) upOne(s config.Server) verbOutcome {
 		return verbOutcome{Name: s.Name, Err: fmt.Errorf("launching %s: %w", s.Name, err)}
 	}
 
-	e.mu.Lock()
-	e.procs[s.Name] = proc
-	e.mu.Unlock()
+	if err := e.registerProc(s, proc); err != nil {
+		return verbOutcome{Name: s.Name, Err: fmt.Errorf("up %s: clearing the remains of a previous run: %w", s.Name, err), LogPath: proc.LogPath}
+	}
 
 	if err := e.buildProbeAndPollReady(s, proc); err != nil {
 		return verbOutcome{Name: s.Name, Err: err, LogPath: proc.LogPath}
@@ -858,9 +939,9 @@ func (e *RealEngine) rebuildIfStaleOwned(s config.Server) (outcome verbOutcome, 
 				return err
 			}
 			logPath = proc.LogPath
-			e.mu.Lock()
-			e.procs[s.Name] = proc
-			e.mu.Unlock()
+			if err := e.registerProc(s, proc); err != nil {
+				return err
+			}
 			return e.buildProbeAndPollReady(s, proc)
 		},
 	}
@@ -895,9 +976,9 @@ func (e *RealEngine) rebuildIfStaleCold(s config.Server) (outcome verbOutcome, h
 				return err
 			}
 			logPath = proc.LogPath
-			e.mu.Lock()
-			e.procs[s.Name] = proc
-			e.mu.Unlock()
+			if err := e.registerProc(s, proc); err != nil {
+				return err
+			}
 			return e.buildProbeAndPollReady(s, proc)
 		},
 	}
@@ -1367,40 +1448,24 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 			return verbOutcome{Name: name}
 		}
 		// We may still hold the registration of a child that exited on its
-		// own. Signal its process group before forgetting it: the child was
-		// launched setpgid and the group outlives its leader, so this is
-		// the only way to reach an orphan the crash left behind — one
-		// holding no DECLARED port is invisible to the host scan below.
-		//
-		// This is what `down` did before AATK-106, via the isOurs branch
-		// and teardownOne. The liveness check now routes around that, so
-		// the group-kill has to happen explicitly or it is simply lost.
+		// own — `down` is where the operator asks us to forget it, and it is
+		// what makes `down <name>` then `<name> up` relaunch a crashed
+		// server. Retiring rather than merely deleting is what sweeps the
+		// group the dead leader led; before AATK-106 that happened by
+		// accident, through the isOurs branch's teardownOne.
 		//
 		// With the group already empty and the declared ports free — the
-		// ordinary crash-with-no-orphan case — Teardown finds nothing to
-		// signal, verifies clean, and this returns ok. It does NOT return
-		// ok when something still holds a declared port: a foreign holder
-		// fails verification, and the entry is then deliberately left in
-		// place, because forgetting a server we could not finish tearing
-		// down would strand whatever we did not reach.
-		//
-		// The kill happens before the delete for readability only. Nothing
-		// depends on the order — teardownPID takes the PID by argument and
-		// never consults the registry — so do not read this as a sequencing
-		// invariant.
+		// ordinary crash-with-no-orphan case — this returns ok. It does NOT
+		// when something still holds a declared port: retireRegistration
+		// keeps the entry and reports, rather than forgetting a server it
+		// could not finish sweeping.
 		e.mu.Lock()
-		stalePID, hadRegistration := e.registeredPIDLocked(name)
+		_, hadRegistration := e.registeredPIDLocked(name)
 		e.mu.Unlock()
 		if hadRegistration {
-			if err := e.teardownPID(s, stalePID); err != nil {
+			if err := e.retireRegistration(s); err != nil {
 				return verbOutcome{Name: name, Err: err}
 			}
-			// Forgetting it is what makes `down <name>` then `<name> up`
-			// relaunch a crashed server — the workaround operators reached
-			// for before AATK-106 — and downOne is the right home for the
-			// prune, since ownedPIDLocked must leave the entry alone for
-			// TeardownAll's benefit.
-			e.deleteProc(name)
 			return verbOutcome{Name: name}
 		}
 
@@ -1567,9 +1632,9 @@ func (e *RealEngine) Build(name string) error {
 				if err != nil {
 					return err
 				}
-				e.mu.Lock()
-				e.procs[launchable.Name] = proc
-				e.mu.Unlock()
+				if err := e.registerProc(launchable, proc); err != nil {
+					return err
+				}
 				return e.pollReady(launchable, proc)
 			},
 		}
