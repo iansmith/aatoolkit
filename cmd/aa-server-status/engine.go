@@ -123,7 +123,9 @@ func (e *RealEngine) registeredPIDLocked(name string) (int32, bool) {
 }
 
 // deleteProc forgets our registration for name. One definition of the
-// lock-delete-unlock idiom every verb that finishes with a server uses.
+// lock-delete-unlock idiom, for the verbs that finish with a single server.
+// TeardownAll keeps its own loop: it drops every entry it tore down under
+// one lock acquisition rather than reacquiring per name.
 func (e *RealEngine) deleteProc(name string) {
 	e.mu.Lock()
 	delete(e.procs, name)
@@ -133,7 +135,15 @@ func (e *RealEngine) deleteProc(name string) {
 // ownedPIDLocked returns the PID of the child we registered for s, and
 // whether that registration still counts as ours. Must be called with e.mu
 // held. It is the one definition of "ours" every verb consults, so up, down,
-// build and status cannot disagree about the same server.
+// build and status all answer from the same state.
+//
+// That is not the same as their never disagreeing, and one gap is left open
+// on purpose: for a DETACHED server whose container has died, Status reports
+// down (it observes ports) while `up` still takes the already-ours skip — the
+// very shape AATK-106 fixed for supervised children. Closing it means basing
+// `up` on observed ports rather than on the registry for detached servers,
+// which is a different change with its own risks; AATK-106 does not attempt
+// it, and this comment exists so the gap is not mistaken for an oversight.
 //
 // For an ordinary supervised server, ours requires the child to still be
 // running. Nothing removes an entry when a child dies of its own accord — the
@@ -1267,9 +1277,19 @@ func (e *RealEngine) downOrDead(name string, killStrays bool) error {
 // observedRunningPID reports whether s currently appears to be running (any
 // declared port listening), and whose PID that is — our own registered
 // child, if we have one, else whatever the host-wide scan finds.
+//
+// The registry lookup here is deliberately STRUCTURAL, not liveness-aware.
+// Its caller of record is downOrDead's disabled-server arm, which feeds the
+// PID to killForeignOrOwned; for a registered child that has since exited,
+// that PID is the process-GROUP id, and signalling it is the only way to
+// sweep an orphan the crash left behind. Asking ownedPIDLocked instead
+// silently dropped that sweep for every disabled server — the same defect
+// AATK-106's review found on the enabled arm, one branch over. Reporting a
+// dead child as "running" is imprecise, but it is what master did and what
+// the sweep depends on; narrowing it is a separate change.
 func (e *RealEngine) observedRunningPID(s config.Server) (pid int32, isOurs bool, running bool) {
 	e.mu.Lock()
-	ownPID, haveOwn := e.ownedPIDLocked(s)
+	ownPID, haveOwn := e.registeredPIDLocked(s.Name)
 	e.mu.Unlock()
 	if haveOwn {
 		return ownPID, true, true
@@ -1316,8 +1336,19 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 		// This is what `down` did before AATK-106, via the isOurs branch
 		// and teardownOne. The liveness check now routes around that, so
 		// the group-kill has to happen explicitly or it is simply lost.
-		// Teardown on a group that is genuinely empty is a clean no-op, so
-		// the ordinary crash-with-no-orphan case still returns ok.
+		//
+		// With the group already empty and the declared ports free — the
+		// ordinary crash-with-no-orphan case — Teardown finds nothing to
+		// signal, verifies clean, and this returns ok. It does NOT return
+		// ok when something still holds a declared port: a foreign holder
+		// fails verification, and the entry is then deliberately left in
+		// place, because forgetting a server we could not finish tearing
+		// down would strand whatever we did not reach.
+		//
+		// The kill happens before the delete for readability only. Nothing
+		// depends on the order — teardownPID takes the PID by argument and
+		// never consults the registry — so do not read this as a sequencing
+		// invariant.
 		e.mu.Lock()
 		stalePID, hadRegistration := e.registeredPIDLocked(name)
 		e.mu.Unlock()

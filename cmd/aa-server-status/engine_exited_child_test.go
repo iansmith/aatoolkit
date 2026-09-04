@@ -240,16 +240,22 @@ func detachedMarkerServer(name, markerPath string) config.Server {
 // AATK-106: a detached server's launcher exits BY DESIGN, so that exit must
 // not be read as death. `down` must still route it to its teardown command.
 //
-// This pins the s.Detached exception in ownedPIDLocked, which nothing else
-// reaches: every other detached test hand-builds a lifecycle.Process, and
-// Exited() is only ever set by the Wait goroutine Launch starts — so those
-// fixtures report "still running" forever and cannot tell the branch apart.
-// Registering through the engine's real launch path is what makes the
-// exception load-bearing here.
+// What this pins is the ROUTING: bare `down` reaches downOne for a detached
+// server, and downOne sends it to its teardown command rather than to a PID
+// signal, even though the launcher is long gone.
 //
-// Deleting `if !s.Detached` from ownedPIDLocked's guard turns this red:
-// isOurs goes false, downOrDead's `s.Enabled && isOurs` gate skips the server
-// entirely, and no marker is written.
+// It no longer discriminates the s.Detached guard in ownedPIDLocked, and the
+// comment here used to claim it did. That stopped being true when the fleet
+// loop's gate moved from liveness to the registration (review round 2, F2):
+// the server now routes to downOne either way, so deleting the guard leaves
+// this test green. Verified by mutation, not assumed —
+// Up_DetachedLauncherExited_StaysIdempotent and
+// OwnedPID_ExitedLauncher_DependsOnDetached are what catch that mutant now.
+//
+// The fixture still has to register through the engine's real launch path:
+// Exited() is only ever set by the Wait goroutine Launch starts, so a
+// hand-built lifecycle.Process reports "still running" forever and cannot
+// reach the state this test is about.
 func TestRealEngine_Down_DetachedLauncherExited_StillRunsTeardownCommand(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "torn-down")
 	s := detachedMarkerServer("svc", marker)
@@ -356,6 +362,13 @@ func launchOrphanLeader(t *testing.T, eng *RealEngine, s config.Server) int32 {
 
 	waitForExited(t, proc, s.Name)
 	pid := int32(proc.Cmd.Process.Pid)
+
+	// Sweep the group however the test ends. Without this a test that fails
+	// before its own assertion — or one whose fix regressed — leaves the
+	// orphan running for its full five minutes, and the strays accumulate
+	// across runs of the very suite that exists to catch stray processes.
+	t.Cleanup(func() { _ = syscall.Kill(-int(pid), syscall.SIGKILL) })
+
 	if !processGroupAlive(pid) {
 		t.Fatalf("fixture did not leave an orphan alive in pid group %d", pid)
 	}
@@ -456,5 +469,37 @@ func TestRealEngine_Up_DetachedLauncherExited_StaysIdempotent(t *testing.T) {
 
 	if err := eng.Up("svc"); err != nil {
 		t.Fatalf("up on an already-running detached server should be an idempotent skip, got: %v", err)
+	}
+}
+
+// AATK-106 review round 3, finding 1. `dead` must sweep the orphaned process
+// group of a DISABLED server whose registered child exited.
+//
+// This is the same defect as round 2's F1, one branch over. downOrDead's
+// disabled-server arm reaches killForeignOrOwned through observedRunningPID,
+// which asks the registry for the PID to signal — so making that lookup
+// liveness-aware silently dropped the sweep for every disabled server, while
+// the enabled arm kept it. The lookup is structural for exactly this reason:
+// the registered PID is the group id, and an orphan holding no declared port
+// cannot be found any other way.
+func TestRealEngine_Dead_DisabledServerAfterLeaderCrash_SweepsOrphanedGroup(t *testing.T) {
+	s := orphanLeaderServer(t, "svc")
+	s.Enabled = false
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
+	pid := launchOrphanLeader(t, eng, s)
+
+	if err := eng.Dead(""); err != nil {
+		t.Fatalf("Dead on a disabled server after a leader crash: %v", err)
+	}
+
+	waitForCondition(t, 5*time.Second,
+		fmt.Sprintf("the orphan in pid group %d to be swept by dead", pid),
+		func() bool { return !processGroupAlive(pid) })
+
+	eng.mu.Lock()
+	_, still := eng.procs["svc"]
+	eng.mu.Unlock()
+	if still {
+		t.Fatalf("dead swept the group but left the registry entry behind")
 	}
 }
