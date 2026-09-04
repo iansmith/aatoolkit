@@ -114,10 +114,16 @@ func pidOf(p *lifecycle.Process) (int32, bool) {
 // not. It is ownedPIDLocked's structural counterpart: the question is "did we
 // launch something for this server", not "is it still running".
 //
-// This is what the teardown paths want. Children are launched setpgid and
-// signalled with kill(-pid), so a dead leader's PID stays the only handle on
-// an orphan still running in its group — long after that leader stopped
-// being "ours". Must be called with e.mu held.
+// This is what the SWEEP paths want — upOne before it overwrites the entry,
+// downOne before it prunes, and observedRunningPID on behalf of
+// killForeignOrOwned. Children are launched setpgid and signalled with
+// kill(-pid), so a dead leader's PID stays the only handle on an orphan still
+// running in its group, long after that leader stopped being "ours".
+//
+// Not every teardown path wants it: teardownOne deliberately asks
+// ownedPIDLocked, because both of its callers have already established
+// ownership and it must not act on a registration they rejected. Must be
+// called with e.mu held.
 func (e *RealEngine) registeredPIDLocked(name string) (int32, bool) {
 	return pidOf(e.procs[name])
 }
@@ -165,12 +171,21 @@ func (e *RealEngine) deleteProc(name string) {
 // A detached server is the deliberate exception. Its launcher is EXPECTED to
 // exit the moment the external service is running (`docker compose up -d`
 // returns immediately), so that exit carries no information about the service
-// and must not be read as death. Two callers would otherwise break outright:
-// downOrDead's all-servers loop gates on `s.Enabled && isOurs`, so a bare
-// `down` would skip every detached server, and upOne's already-ours skip is
-// what stops `up` on a healthy container falling through to checkPortConflict
-// and refusing on the port its own service is holding. The ports are the only
-// evidence of liveness there is (see statusForLocked).
+// and must not be read as death. The ports are the only evidence of liveness
+// there is (see statusForLocked).
+//
+// The caller that would break outright without it is upOne's already-ours
+// skip: `up` on a healthy container would fall through to checkPortConflict
+// and refuse on the port its own service is holding. teardownOne also asks
+// this question and would return nil for a detached server, never reaching
+// its own s.Detached branch — though downOne happens to cover that today by
+// routing detached servers to teardownDetached on its other branch too.
+//
+// downOrDead's fleet loop is NOT a dependent, though an earlier version of
+// this comment said it was: that loop gates on the registration rather than
+// on liveness (review round 2), so a detached server reaches downOne either
+// way. Mutation confirms it — removing the exception leaves the bare-`down`
+// detached test green.
 func (e *RealEngine) ownedPIDLocked(s config.Server) (int32, bool) {
 	p, ok := e.procs[s.Name]
 	if !ok {
@@ -700,6 +715,30 @@ func (e *RealEngine) upOne(s config.Server) verbOutcome {
 			}
 		}
 		return verbOutcome{Name: s.Name}
+	}
+
+	// Not ours — but we may still hold the registration of a child that
+	// exited on its own. Sweep its process group before launching a
+	// replacement, because the launch overwrites e.procs[s.Name] and the
+	// registered PID is the group id: after the overwrite nothing, not even
+	// TeardownAll's walk of the registry, has a handle on an orphan the
+	// crash left behind, and one holding no declared port cannot be found
+	// any other way. This is the third path in this branch to need the
+	// sweep — downOne and observedRunningPID were the other two — and the
+	// only one where the handle is destroyed rather than merely unused.
+	//
+	// A failed sweep is deliberately not fatal here. The likely cause is a
+	// foreign process holding a declared port, and checkPortConflict just
+	// below refuses with a message naming that holder, which is far more
+	// use to an operator than a teardown-verification failure. The entry is
+	// kept in that case so quit still has the PID to try again with.
+	e.mu.Lock()
+	stalePID, hadRegistration := e.registeredPIDLocked(s.Name)
+	e.mu.Unlock()
+	if hadRegistration {
+		if err := e.teardownPID(s, stalePID); err == nil {
+			e.deleteProc(s.Name)
+		}
 	}
 
 	declared := lifecycle.DeclaredPorts(s)

@@ -360,14 +360,16 @@ func launchOrphanLeader(t *testing.T, eng *RealEngine, s config.Server) int32 {
 	eng.procs[s.Name] = proc
 	eng.mu.Unlock()
 
-	waitForExited(t, proc, s.Name)
 	pid := int32(proc.Cmd.Process.Pid)
 
-	// Sweep the group however the test ends. Without this a test that fails
-	// before its own assertion — or one whose fix regressed — leaves the
-	// orphan running for its full five minutes, and the strays accumulate
-	// across runs of the very suite that exists to catch stray processes.
+	// Sweep the group however the test ends, registered before anything
+	// below can call t.Fatalf. Without this a test that fails — including
+	// the waitForExited timeout immediately after — leaves the orphan
+	// running for its full five minutes, and the strays accumulate across
+	// runs of the very suite that exists to catch stray processes.
 	t.Cleanup(func() { _ = syscall.Kill(-int(pid), syscall.SIGKILL) })
+
+	waitForExited(t, proc, s.Name)
 
 	if !processGroupAlive(pid) {
 		t.Fatalf("fixture did not leave an orphan alive in pid group %d", pid)
@@ -502,4 +504,37 @@ func TestRealEngine_Dead_DisabledServerAfterLeaderCrash_SweepsOrphanedGroup(t *t
 	if still {
 		t.Fatalf("dead swept the group but left the registry entry behind")
 	}
+}
+
+// AATK-106 review round 4, finding 1. `up` on a crashed server must sweep the
+// dead child's process group before launching its replacement.
+//
+// This is the third path in this branch to need the sweep, and the only one
+// where the handle is DESTROYED rather than merely unused: the cold launch
+// overwrites e.procs[name] with the new child's PID, and the old PID was the
+// group id. After the overwrite nothing can reach an orphan the crash left —
+// TeardownAll walks the registry, so not even quit gets it — and an orphan
+// holding no declared port is invisible to every port-based path as well.
+//
+// Master did not have this hole, and got there by being wrong in the other
+// direction: `up` treated the dead child as ours and skipped, so the entry
+// survived and quit swept it. Making `up` correct is what put the leak in.
+func TestRealEngine_Up_AfterLeaderCrash_SweepsOrphanBeforeRelaunching(t *testing.T) {
+	s := orphanLeaderServer(t, "svc")
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
+	oldPID := launchOrphanLeader(t, eng, s)
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("Up after a leader crash: %v", err)
+	}
+
+	newPID := engineChildPID(t, eng, "svc")
+	if newPID == 0 || newPID == oldPID {
+		t.Fatalf("Up should have relaunched; registry holds pid %d (crashed leader was %d)", newPID, oldPID)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-int(newPID), syscall.SIGKILL) })
+
+	waitForCondition(t, 5*time.Second,
+		fmt.Sprintf("the orphan in the crashed leader's pid group %d to be swept by up", oldPID),
+		func() bool { return !processGroupAlive(oldPID) })
 }
