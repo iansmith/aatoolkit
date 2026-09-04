@@ -1,13 +1,15 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/iansmith/aatoolkit/config"
-	"github.com/iansmith/aatoolkit/internal/observe"
+	"github.com/iansmith/aatoolkit/internal/lifecycle"
 )
 
 // AATK-106. Nothing reaps a child that exits on its own: e.procs entries are
@@ -22,11 +24,19 @@ import (
 // path runs and the e.procs entry is left behind. It returns the PID that
 // died.
 //
-// It does not return until that PID has been REAPED, not merely signalled:
-// signal 0 succeeds against a zombie, so polling for ESRCH is what proves
-// Launch's own Wait goroutine has run and the child is genuinely gone. A test
-// that asserted before the reap would be racing the very transition it exists
-// to observe.
+// It does not return until the engine can actually SEE the child as gone,
+// which takes two waits, not one:
+//
+//   - ESRCH from signal 0. Signal 0 succeeds against a zombie, so a plain
+//     "did the signal land" check proves nothing; ESRCH is what proves the
+//     child has been reaped.
+//   - proc.Exited(). Reaping happens inside cmd.Wait()'s wait4, but the flag
+//     is stored after Wait RETURNS, so there is a real window where ESRCH is
+//     already observable and Exited() is still false. Waiting on ESRCH alone
+//     would leave these tests passing on the timing of Wait's bookkeeping.
+//
+// A test that asserted before both would be racing the very transition it
+// exists to observe.
 func killEngineChildOutOfBand(t *testing.T, eng *RealEngine, name string) int32 {
 	t.Helper()
 
@@ -44,32 +54,23 @@ func killEngineChildOutOfBand(t *testing.T, eng *RealEngine, name string) int32 
 		t.Fatalf("killEngineChildOutOfBand: SIGKILL pid group %d: %v", pid, err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(int(pid), 0); err == syscall.ESRCH {
-			return pid
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("killEngineChildOutOfBand: pid %d was still reapable %s after SIGKILL", pid, 5*time.Second)
-	return 0
+	waitForCondition(t, 5*time.Second,
+		fmt.Sprintf("pid %d to be reaped and recorded as exited after SIGKILL", pid),
+		func() bool {
+			return syscall.Kill(int(pid), 0) == syscall.ESRCH && proc.Exited()
+		})
+	return pid
 }
 
-// waitForPortFree blocks until port is no longer listening, so a test that
-// relaunches cannot fail on a port the dying child has not released yet.
-func waitForPortFree(t *testing.T, port int) {
+// waitForExited blocks until proc's own Wait goroutine has recorded its exit.
+// For a launcher that is EXPECTED to exit immediately (a detached server's
+// `compose up -d`), there is no signal to send first — the only thing to wait
+// for is the engine noticing.
+func waitForExited(t *testing.T, proc *lifecycle.Process, name string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		holders, err := observe.SystemListenSet()
-		if err == nil {
-			if _, held := holders[port]; !held {
-				return
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("port %d was still listening %s after the child was reaped", port, 5*time.Second)
+	waitForCondition(t, 5*time.Second, "the launcher for "+name+" to be recorded as exited", func() bool {
+		return proc.Exited()
+	})
 }
 
 // engineChildPID reports the PID currently registered for name, or 0 if the
@@ -112,7 +113,7 @@ func TestRealEngine_Up_AfterChildExitsOnItsOwn_LaunchesReplacement(t *testing.T)
 	}
 
 	deadPID := killEngineChildOutOfBand(t, eng, "svc")
-	waitForPortFree(t, port)
+	waitForPortRelease(t, port)
 
 	if statuses := eng.Status(); len(statuses) != 1 || statuses[0].State != StateDown {
 		t.Fatalf("after the child exited, Status should report down, got %+v", statuses)
@@ -168,7 +169,7 @@ func TestRealEngine_Up_AfterSourceChildExits_TakesColdLaunchPath(t *testing.T) {
 	}
 
 	deadPID := killEngineChildOutOfBand(t, eng, "svc")
-	waitForPortFree(t, port)
+	waitForPortRelease(t, port)
 
 	if err := eng.Up("svc"); err != nil {
 		t.Fatalf("Up after the source child exited: %v", err)
@@ -202,7 +203,7 @@ func TestRealEngine_Down_AfterChildExitsOnItsOwn_ClearsRegistryEntry(t *testing.
 		t.Fatalf("Up: %v", err)
 	}
 	killEngineChildOutOfBand(t, eng, "svc")
-	waitForPortFree(t, port)
+	waitForPortRelease(t, port)
 
 	if err := eng.Down("svc"); err != nil {
 		t.Fatalf("Down on an exited child should be a no-op, got: %v", err)
@@ -213,5 +214,112 @@ func TestRealEngine_Down_AfterChildExitsOnItsOwn_ClearsRegistryEntry(t *testing.
 	eng.mu.Unlock()
 	if still {
 		t.Fatalf("Down on an exited child left its registry entry behind")
+	}
+}
+
+// detachedMarkerServer is a detached server whose launcher exits immediately
+// — the defining shape of `docker compose up -d`, reduced to the part that
+// matters here — and whose teardown_args touch markerPath, so "the teardown
+// command actually ran" is observable from outside the engine.
+//
+// It declares no ports on purpose. teardownDetached polls until the declared
+// set is free, and an empty set is free at once, which keeps the test about
+// routing rather than about container timing.
+func detachedMarkerServer(name, markerPath string) config.Server {
+	return config.Server{
+		Name:         name,
+		Type:         config.TypeExec,
+		Enabled:      true,
+		Detached:     true,
+		Command:      "/bin/sh",
+		Args:         []string{"-c", "exit 0"},
+		TeardownArgs: []string{"-c", "touch " + markerPath},
+	}
+}
+
+// AATK-106: a detached server's launcher exits BY DESIGN, so that exit must
+// not be read as death. `down` must still route it to its teardown command.
+//
+// This pins the s.Detached exception in ownedPIDLocked, which nothing else
+// reaches: every other detached test hand-builds a lifecycle.Process, and
+// Exited() is only ever set by the Wait goroutine Launch starts — so those
+// fixtures report "still running" forever and cannot tell the branch apart.
+// Registering through the engine's real launch path is what makes the
+// exception load-bearing here.
+//
+// Deleting `if !s.Detached` from ownedPIDLocked's guard turns this red:
+// isOurs goes false, downOrDead's `s.Enabled && isOurs` gate skips the server
+// entirely, and no marker is written.
+func TestRealEngine_Down_DetachedLauncherExited_StillRunsTeardownCommand(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "torn-down")
+	s := detachedMarkerServer("svc", marker)
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
+
+	proc, err := eng.launch(s)
+	if err != nil {
+		t.Fatalf("launching the detached fixture: %v", err)
+	}
+	eng.mu.Lock()
+	eng.procs["svc"] = proc
+	eng.mu.Unlock()
+
+	// The launcher is gone within milliseconds; wait until the engine can
+	// see that, so the assertion is about routing and not about timing.
+	waitForExited(t, proc, "svc")
+
+	if err := eng.Down(""); err != nil {
+		t.Fatalf("bare Down with a detached server: %v", err)
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("down did not run the detached server's teardown command: %v", err)
+	}
+}
+
+// AATK-106 companion to the test above: the same exited-launcher state on a
+// server that is NOT detached must go the other way. Without both halves,
+// ownedPIDLocked could satisfy either one by ignoring liveness or ignoring
+// Detached, and the pair is what forces it to distinguish them.
+func TestRealEngine_OwnedPID_ExitedLauncher_DependsOnDetached(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		detached bool
+		wantOurs bool
+	}{
+		{name: "detached launcher exiting is by design", detached: true, wantOurs: true},
+		{name: "supervised child exiting is death", detached: false, wantOurs: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := detachedMarkerServer("svc", filepath.Join(t.TempDir(), "unused"))
+			s.Detached = tc.detached
+			if !tc.detached {
+				s.TeardownArgs = nil // only valid with detached = true
+			}
+			eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
+
+			proc, err := eng.launch(s)
+			if err != nil {
+				t.Fatalf("launching fixture: %v", err)
+			}
+			eng.mu.Lock()
+			eng.procs["svc"] = proc
+			eng.mu.Unlock()
+			waitForExited(t, proc, "svc")
+
+			eng.mu.Lock()
+			_, isOurs := eng.ownedPIDLocked(s)
+			_, stillRegistered := eng.procs["svc"]
+			eng.mu.Unlock()
+
+			if isOurs != tc.wantOurs {
+				t.Fatalf("ownedPIDLocked ours = %v, want %v", isOurs, tc.wantOurs)
+			}
+			// Either way the entry survives the read: TeardownAll walks
+			// e.procs for the PIDs it group-kills, and a dead leader's PID
+			// is the only handle on an orphan left in its process group.
+			if !stillRegistered {
+				t.Fatalf("ownedPIDLocked pruned the registry entry; TeardownAll needs it to group-kill orphans")
+			}
+		})
 	}
 }

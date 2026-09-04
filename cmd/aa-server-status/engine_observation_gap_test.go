@@ -117,16 +117,7 @@ func TestStatusForLocked_TrackedButGenuinelyDeadChild_StillReportsDown(t *testin
 
 	// Confirm the port really is released before asserting, so a slow
 	// teardown cannot make this pass for the wrong reason.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		holders, err := observe.SystemListenSet()
-		if err == nil {
-			if _, held := holders[port]; !held {
-				break
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitForPortRelease(t, port)
 
 	statuses := eng.Status()
 	if len(statuses) != 1 || statuses[0].State != StateDown {

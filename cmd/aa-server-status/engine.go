@@ -117,30 +117,36 @@ func pidOf(p *lifecycle.Process) (int32, bool) {
 //
 // For an ordinary supervised server, ours requires the child to still be
 // running. Nothing removes an entry when a child dies of its own accord — the
-// registry is only ever pruned by an operator verb — so before AATK-106 a
-// crashed server stayed "ours" forever: `up` took the already-ours branch,
-// printed ok, and launched nothing, while Status (which observes ports, not
-// the registry) correctly showed it down. The stale entry is dropped here, on
-// discovery, which is also what keeps `down` on a crashed child the
-// entry-clearing no-op it has always been.
+// registry is pruned only by an operator verb — so before AATK-106 a crashed
+// server stayed "ours" forever: `up` took the already-ours branch, printed
+// ok, and launched nothing, while Status (which observes ports, not the
+// registry) correctly showed it down.
+//
+// This is a pure read: it reports that the registration no longer means
+// anything, and deliberately does NOT prune the entry. Pruning here was the
+// first shape of this fix and it was wrong — TeardownAll builds its kill list
+// by walking e.procs, and children are launched setpgid and torn down with
+// kill(-pid), so the dead leader's PID is the only handle we have on any
+// orphan still running in its process group. Dropping the entry the first
+// time anyone called Status would have silently disarmed quit's cleanup for
+// exactly that case. downOne does the pruning instead, which is the point at
+// which the operator has actually asked us to forget the server.
 //
 // A detached server is the deliberate exception. Its launcher is EXPECTED to
 // exit the moment the external service is running (`docker compose up -d`
 // returns immediately), so that exit carries no information about the service
-// and must not be read as death. Ownership there stays structural: the entry
-// means "we started this service this session", which is what teardownDetached
-// and TeardownAll need in order to stop it, and the ports are the only
+// and must not be read as death. Two callers would otherwise break outright:
+// downOrDead's all-servers loop gates on `s.Enabled && isOurs`, so a bare
+// `down` would skip every detached server, and upOne's already-ours skip is
+// what stops `up` on a healthy container falling through to checkPortConflict
+// and refusing on the port its own service is holding. The ports are the only
 // evidence of liveness there is (see statusForLocked).
 func (e *RealEngine) ownedPIDLocked(s config.Server) (int32, bool) {
 	p, ok := e.procs[s.Name]
 	if !ok {
 		return 0, false
 	}
-	if s.Detached {
-		return pidOf(p)
-	}
-	if p.Exited() {
-		delete(e.procs, s.Name)
+	if !s.Detached && p.Exited() {
 		return 0, false
 	}
 	return pidOf(p)
@@ -941,9 +947,9 @@ func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 // port, or because there is no live PID to check against at all.
 //
 // No process handle means there is no tree to observe — the same judgement
-// ownedPIDLocked's structural half makes about the same state, and not a new
-// error on top of stageErr. The three real launch paths cannot reach it: launch() returns an
-// error if the child never started and upOne returns on that before
+// pidOf makes about the same state, and not a new error on top of stageErr.
+// The three real launch paths cannot reach it: launch() returns an error if
+// the child never started and upOne returns on that before
 // pollReady runs, so a pid exists by construction here. It is reachable only
 // from a unit test that fabricates a Process to exercise the warm-up and
 // health stages without a subprocess (warm_order_test.go). Deciding it here
@@ -1274,11 +1280,21 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 			}
 			return verbOutcome{Name: name}
 		}
-		// Imperative down on a server we don't hold — nothing registered
-		// to tear down via our handle; fall back to a foreign-style kill
-		// by observed PID if it's actually running (e.g. imperative
-		// `<name> down` on a disabled-but-running stray we started in a
-		// prior session, or discovered on the host).
+		// Whatever we may still have registered for this server is not
+		// ours any more, so forget it. That is what makes `down <name>`
+		// then `<name> up` relaunch a crashed server — the workaround
+		// operators reached for before AATK-106, and the one place the
+		// prune belongs now that ownedPIDLocked leaves the entry alone for
+		// TeardownAll's benefit. Deleting an absent key is a no-op, which
+		// is the common case here.
+		e.mu.Lock()
+		delete(e.procs, name)
+		e.mu.Unlock()
+
+		// Nothing registered to tear down via our handle; fall back to a
+		// foreign-style kill by observed PID if it's actually running (e.g.
+		// imperative `<name> down` on a disabled-but-running stray we
+		// started in a prior session, or discovered on the host).
 		observedPID, observedIsOurs, running := e.observedRunningPID(s)
 		if !running {
 			return verbOutcome{Name: name}

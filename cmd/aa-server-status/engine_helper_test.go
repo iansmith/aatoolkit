@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -190,6 +191,39 @@ func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool, childPort
 func spawnForeignListenerWithChild(t *testing.T, port, childPort int) *foreignProc {
 	t.Helper()
 	return spawnForeignListenerOpts(t, port, false, childPort)
+}
+
+// waitForCondition polls want until it holds, or fails the test naming what
+// it was waiting for. The one polling loop this package's tests share: every
+// "kill something, then assert" test needs to wait for a transition it cannot
+// synchronise on, and a hand-rolled deadline/sleep per test is how those
+// waits drift apart in length and in whether they fail loudly or fall through
+// silently on timeout.
+func waitForCondition(t *testing.T, timeout time.Duration, what string, want func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if want() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s", timeout, what)
+}
+
+// waitForPortRelease blocks until port is no longer listening anywhere on the
+// host, so a test that asserts "down" — or relaunches onto the same port —
+// cannot pass or fail on a dying child's release lag.
+func waitForPortRelease(t *testing.T, port int) {
+	t.Helper()
+	waitForCondition(t, 5*time.Second, fmt.Sprintf("port %d to be released", port), func() bool {
+		holders, err := observe.SystemListenSet()
+		if err != nil {
+			return false
+		}
+		_, held := holders[port]
+		return !held
+	})
 }
 
 // waitForTreePort polls the real, unmocked TreeListenSet until wantPort shows
