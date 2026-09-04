@@ -5,9 +5,38 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// requestCounter counts handler invocations for the httptest servers below.
+// The handler runs on the server's goroutine and the test body reads on its
+// own, so the count needs synchronisation of its own: an httptest response
+// gives a happens-before edge only for a request the test waited for, and the
+// cancellation test deliberately returns while its handler is still sleeping.
+type requestCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *requestCounter) inc() {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+}
+
+func (c *requestCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+func (c *requestCounter) reset() {
+	c.mu.Lock()
+	c.n = 0
+	c.mu.Unlock()
+}
 
 func TestExtractClient_PostsFixtureRequestAndDecodesSpans(t *testing.T) {
 	// Load fixture for validation
@@ -15,12 +44,12 @@ func TestExtractClient_PostsFixtureRequestAndDecodesSpans(t *testing.T) {
 	expectedRequest := fixture["request_json"].(string)
 	expectedSpans := fixture["response"].(map[string]interface{})["spans"].([]interface{})
 
-	var requestCount int
+	var requests requestCounter
 	var recordedBody string
 	var recordedContentType string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requests.inc()
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
@@ -101,9 +130,9 @@ func TestExtractClient_ImplementsExtractor(t *testing.T) {
 }
 
 func TestExtractClient_NoRetryOnServerError(t *testing.T) {
-	var requestCount int
+	var requests requestCounter
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requests.inc()
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":"sidecar error"}`))
 	}))
@@ -124,8 +153,8 @@ func TestExtractClient_NoRetryOnServerError(t *testing.T) {
 		t.Errorf("error message should contain 'extract sidecar returned 500', got: %v", err)
 	}
 
-	if requestCount != 1 {
-		t.Errorf("expected exactly 1 request, got %d", requestCount)
+	if got := requests.count(); got != 1 {
+		t.Errorf("expected exactly 1 request, got %d", got)
 	}
 }
 
@@ -152,9 +181,9 @@ func TestExtractClient_TransportErrorNamesSidecar(t *testing.T) {
 }
 
 func TestExtractClient_GuardsRejectWithoutHTTPCall(t *testing.T) {
-	var requestCount int
+	var requests requestCounter
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requests.inc()
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"spans":[]}`))
 	}))
@@ -200,7 +229,7 @@ func TestExtractClient_GuardsRejectWithoutHTTPCall(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			requestCount = 0
+			requests.reset()
 			client := NewClient(server.URL)
 			spans, err := client.Extract(context.Background(), tt.req)
 
@@ -218,8 +247,8 @@ func TestExtractClient_GuardsRejectWithoutHTTPCall(t *testing.T) {
 				t.Error("expected non-nil spans")
 			}
 
-			if requestCount != 0 {
-				t.Errorf("expected 0 HTTP requests for guard, got %d", requestCount)
+			if got := requests.count(); got != 0 {
+				t.Errorf("expected 0 HTTP requests for guard, got %d", got)
 			}
 		})
 	}
@@ -253,9 +282,9 @@ func TestExtractClient_AllowsSlowSidecar(t *testing.T) {
 }
 
 func TestExtractClient_RespectsContextCancellation(t *testing.T) {
-	var requestCount int
+	var requests requestCounter
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requests.inc()
 		time.Sleep(500 * time.Millisecond)
 		fixture := loadFixture(t)
 		w.Header().Set("Content-Type", "application/json")
@@ -277,8 +306,8 @@ func TestExtractClient_RespectsContextCancellation(t *testing.T) {
 		t.Fatal("expected error for cancelled context")
 	}
 
-	if requestCount > 1 {
-		t.Errorf("expected at most 1 request, got %d", requestCount)
+	if got := requests.count(); got > 1 {
+		t.Errorf("expected at most 1 request, got %d", got)
 	}
 }
 
