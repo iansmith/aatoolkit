@@ -53,6 +53,67 @@ const FormatG711ULaw = "audio/pcmu"
 // definition rather than a literal at each site.
 const sessionTypeRealtime = "realtime"
 
+// ResponseEndedInFunctionCall reports whether a response.done frame's output
+// items include a function call — the case where the turn is NOT over and the
+// caller's wait continues into the tool round trip plus whatever the model
+// says afterwards.
+//
+// "Include", not "end with": a response carrying speech AND a function call
+// answers true. The question is whether anything more is coming, and a tool
+// call means it is, whatever else the model said on the way.
+//
+// Exported so that more than one thing can ask it and get the same answer.
+// Inside this module the relay's filler audio reads it to decide whether to
+// keep a hold loop running. It is exported for a consumer that has to place
+// the same boundary from the outside — one recording what the relay did, say.
+// A second implementation of this shape would drift silently: both answers
+// look plausible in isolation, and a disagreement surfaces only as one wait
+// reported as two, or a loop stopped in the middle of one.
+//
+// It lives here rather than in the transport package that first needed it
+// because it is protocol knowledge, not transport knowledge: it reads the
+// realtime response object, and ItemTypeFunctionCall is declared above.
+//
+// IT CHECKS THE FRAME'S OWN TYPE, so it is safe to hand every server event
+// rather than only the ones already known to be a response.done. Without that
+// check the exported contract would carry an unstated precondition, and the
+// caller most likely to miss it is exactly the one this is exported for: a
+// consumer piping every frame through it would get true for anything that
+// happened to nest response.output[].type == "function_call".
+//
+// Read from the raw frame rather than from a modelled field because this
+// package models only the subset of the protocol it acts on, and one bool
+// about one event type is not a reason to grow a decoded shape for the
+// response object. The depth is load-bearing and not incidental: the item
+// type is read at response.output[].type and nowhere else, so a frame merely
+// containing the token — inside a transcript, or at the wrong nesting —
+// answers false.
+//
+// A frame that does not parse, or that carries no output items, reports false.
+// The conservative answer is "the turn ended", which leaves a filler loop
+// stopped rather than playing over whatever comes next — a caller hearing
+// silence a moment early is a smaller fault than one hearing music over the
+// reply.
+func ResponseEndedInFunctionCall(raw json.RawMessage) bool {
+	var probe struct {
+		Type     string `json:"type"`
+		Response struct {
+			Output []struct {
+				Type string `json:"type"`
+			} `json:"output"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(raw, &probe) != nil || probe.Type != EventResponseDone {
+		return false
+	}
+	for _, item := range probe.Response.Output {
+		if item.Type == ItemTypeFunctionCall {
+			return true
+		}
+	}
+	return false
+}
+
 type audioFormat struct {
 	Type string `json:"type"`
 }

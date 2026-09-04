@@ -3,7 +3,6 @@ package twilio
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -154,7 +153,7 @@ func (f *filler) observe(ev ServerEvent) {
 		// the start of a second wait, the tool round trip plus the second
 		// LLM leg, which the caller hears as one continuous silence with the
 		// first. Any other response.done ends the turn, so the loop stops.
-		if responseEndedInFunctionCall(ev.Raw) {
+		if realtime.ResponseEndedInFunctionCall(ev.Raw) {
 			f.arm()
 		} else {
 			f.stop()
@@ -384,33 +383,4 @@ func (f *filler) frameLocked() []byte {
 		off += take
 	}
 	return frame
-}
-
-// responseEndedInFunctionCall reports whether a response.done frame's output
-// items include a function call — the case where the turn is not over and the
-// caller's wait continues into the tool round trip.
-//
-// Read from the raw frame rather than from a modelled field because this
-// package models only the subset of the protocol it acts on, and one bool
-// about one event type is not a reason to grow a decoded shape for the
-// response object. A frame that does not parse, or that carries no output
-// items, reports false: the conservative answer is "the turn ended", which
-// leaves the loop stopped rather than playing over whatever comes next.
-func responseEndedInFunctionCall(raw json.RawMessage) bool {
-	var probe struct {
-		Response struct {
-			Output []struct {
-				Type string `json:"type"`
-			} `json:"output"`
-		} `json:"response"`
-	}
-	if json.Unmarshal(raw, &probe) != nil {
-		return false
-	}
-	for _, item := range probe.Response.Output {
-		if item.Type == realtime.ItemTypeFunctionCall {
-			return true
-		}
-	}
-	return false
 }
