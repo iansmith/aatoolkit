@@ -373,3 +373,71 @@ func TestFiller_UnsetIsByteIdentical(t *testing.T) {
 		t.Fatalf("a call with no filler option must write nothing to the carrier while the backend is silent, got %+v", got)
 	}
 }
+
+// --- behaviour 7: a call's record says when the loop played ----------------
+
+// TestFiller_CarrierAudioRecordsAreMarkedFiller pins the observation half of
+// the ticket: a consumer watching what shipped to the carrier must be able to
+// tell the loop from the reply, and the run of filler-marked records is what
+// says exactly when the loop played.
+//
+// The ticket asks for this on the Tap. There is no Tap on the realtime path —
+// it is wired only by the classic session (session.go) — and this path's
+// equivalent seam is WithCarrierAudioChan, which already carries every record
+// the sink writes. So the flag goes there, where a consumer can actually read
+// it, rather than onto a recorder this transport does not construct.
+//
+// slopstop:test contract
+func TestFiller_CarrierAudioRecordsAreMarkedFiller(t *testing.T) {
+	ch := make(chan CarrierAudio, 128)
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, func(ctx context.Context, conn *websocket.Conn, start Frame) error {
+		return HandleStreamRealtime(ctx, conn, start, be.url(),
+			WithCarrierAudioChan(ch),
+			WithFillerAudio(FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay}))
+	})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	armFiller(t, be)
+	waitFillerPlaying(t, wire, 3)
+
+	reply := carrierPayloadB64()
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
+	waitFor(t, 5*time.Second, func() bool {
+		for _, r := range wire() {
+			if r.payload == reply {
+				return true
+			}
+		}
+		return false
+	})
+
+	var sawFiller, sawReply bool
+	deadline := time.After(5 * time.Second)
+	for !sawReply {
+		select {
+		case rec := <-ch:
+			switch {
+			case rec.Clear:
+				// The clear that ends the loop; carries no payload.
+			case rec.Payload == reply:
+				if rec.Filler {
+					t.Fatalf("the backend's own audio must not be marked as filler: %+v", rec)
+				}
+				sawReply = true
+			default:
+				if !rec.Filler {
+					t.Fatalf("a loop frame must be marked as filler: %+v", rec)
+				}
+				sawFiller = true
+			}
+		case <-deadline:
+			t.Fatal("the consumer never received the reply's record")
+		}
+	}
+	if !sawFiller {
+		t.Fatal("the consumer must receive the loop's frames as filler-marked records")
+	}
+}

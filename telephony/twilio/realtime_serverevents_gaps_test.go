@@ -208,7 +208,7 @@ func TestDeliver_DropLoggingIsRateBounded(t *testing.T) {
 	close(src)
 	out := make(chan ServerEvent, 1)
 
-	deliver(src, out, "server event")
+	deliver(src, out, "server event", nil)
 
 	// "dropped on this call" identifies one whole line; a bare "dropped"
 	// appears twice in each.

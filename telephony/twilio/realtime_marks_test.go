@@ -374,7 +374,7 @@ func TestMarkRequestChan_BoundCoversQueuedPlayout(t *testing.T) {
 	// bound that ignored it would be unmistakable.
 	const queued = telephony.SampleRateHz
 
-	sink := newCarrierMediaSink(&discardWSWriter{}, "SSbound", nil, nil)
+	sink := newCarrierMediaSink(&discardWSWriter{}, "SSbound", nil, nil, nil)
 	base := time.Now()
 	sink.playout.fed(queued, base)
 
