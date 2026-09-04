@@ -41,6 +41,53 @@ const (
 // actually ended.
 const ItemTypeFunctionCall = "function_call"
 
+// ResponseEndedInFunctionCall reports whether a response.done frame's output
+// items include a function call -- the case where the turn is NOT over and the
+// caller's wait continues into the tool round trip plus whatever the model
+// says afterwards.
+//
+// Exported because more than one thing needs the answer and they must not
+// disagree. Inside this module the relay's filler audio reads it to decide
+// whether to keep a hold loop running or stop it. Outside, a consumer
+// recording what the relay did reads it to decide where one wait ended and the
+// next began. A second implementation of this shape drifts silently: both
+// answers look plausible in isolation, and a disagreement surfaces only as one
+// wait reported as two, or a loop stopped in the middle of one.
+//
+// It lives here rather than in the transport package that first needed it
+// because it is protocol knowledge, not transport knowledge: it reads the
+// realtime response object, and the item type it looks for is declared
+// directly above.
+//
+// Read from the raw frame rather than from a modelled field because this
+// package models only the subset of the protocol it acts on, and one bool
+// about one event type is not a reason to grow a decoded shape for the
+// response object.
+//
+// A frame that does not parse, or that carries no output items, reports false.
+// The conservative answer is "the turn ended", which leaves a filler loop
+// stopped rather than playing over whatever comes next -- a caller hearing
+// silence a moment early is a smaller fault than one hearing music over the
+// reply.
+func ResponseEndedInFunctionCall(raw json.RawMessage) bool {
+	var probe struct {
+		Response struct {
+			Output []struct {
+				Type string `json:"type"`
+			} `json:"output"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(raw, &probe) != nil {
+		return false
+	}
+	for _, item := range probe.Response.Output {
+		if item.Type == ItemTypeFunctionCall {
+			return true
+		}
+	}
+	return false
+}
+
 // FormatG711ULaw is the session audio format for 8 kHz G.711 mu-law. The
 // format identifier carries no sample rate because the codec fixes it.
 const FormatG711ULaw = "audio/pcmu"
