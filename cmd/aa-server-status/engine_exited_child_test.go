@@ -323,3 +323,138 @@ func TestRealEngine_OwnedPID_ExitedLauncher_DependsOnDetached(t *testing.T) {
 		})
 	}
 }
+
+// orphanLeaderServer launches a leader that backgrounds a long-lived child
+// and exits immediately, leaving a live orphan in the leader's process group
+// — the shape a real crash leaves behind, and the one a PID-registry prune
+// can silently strand. The orphan holds no declared port, so nothing in the
+// host scan can find it: the registered leader PID is the only handle on it.
+func orphanLeaderServer(t *testing.T, name string) config.Server {
+	t.Helper()
+	return config.Server{
+		Name:    name,
+		Type:    config.TypeExec,
+		Enabled: true,
+		Command: "/bin/sh",
+		Args:    []string{"-c", "sleep 300 & exit 0"},
+	}
+}
+
+// launchOrphanLeader launches s through the engine's real launch path,
+// registers it, and returns once the leader has exited with its orphan still
+// running. The returned pid is the leader's, which is also the process-GROUP
+// id the orphan belongs to.
+func launchOrphanLeader(t *testing.T, eng *RealEngine, s config.Server) int32 {
+	t.Helper()
+	proc, err := eng.launch(s)
+	if err != nil {
+		t.Fatalf("launching orphan-leader fixture: %v", err)
+	}
+	eng.mu.Lock()
+	eng.procs[s.Name] = proc
+	eng.mu.Unlock()
+
+	waitForExited(t, proc, s.Name)
+	pid := int32(proc.Cmd.Process.Pid)
+	if !processGroupAlive(pid) {
+		t.Fatalf("fixture did not leave an orphan alive in pid group %d", pid)
+	}
+	return pid
+}
+
+// processGroupAlive reports whether any process remains in the group led by
+// pid. Signal 0 against a negative pid asks about the whole group, which is
+// what makes it able to see an orphan whose leader is already reaped.
+func processGroupAlive(pid int32) bool {
+	return syscall.Kill(-int(pid), 0) != syscall.ESRCH
+}
+
+// AATK-106 review round 2, F1. `down` on a server whose leader crashed must
+// still sweep the process group before forgetting the registration.
+//
+// The registered PID is the group id, and the group outlives its leader, so
+// it is the only handle on an orphan the crash left running — one holding no
+// declared port cannot be found by the host scan `down` falls back to. Before
+// this test the branch deleted the entry and returned ok, stranding the
+// orphan for the rest of the session: TeardownAll walks e.procs, so quit
+// could not reach it either. That was a regression against master, which
+// swept the group via the isOurs branch's teardownOne.
+func TestRealEngine_Down_AfterLeaderCrash_SweepsOrphanedProcessGroup(t *testing.T) {
+	s := orphanLeaderServer(t, "svc")
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
+	pid := launchOrphanLeader(t, eng, s)
+
+	if err := eng.Down("svc"); err != nil {
+		t.Fatalf("Down after a leader crash: %v", err)
+	}
+
+	waitForCondition(t, 5*time.Second,
+		fmt.Sprintf("the orphan in pid group %d to be swept by down", pid),
+		func() bool { return !processGroupAlive(pid) })
+
+	eng.mu.Lock()
+	_, still := eng.procs["svc"]
+	eng.mu.Unlock()
+	if still {
+		t.Fatalf("down swept the group but left the registry entry behind")
+	}
+}
+
+// AATK-106 review round 2, F2. Bare `down` (no server named) must not skip an
+// enabled server whose child exited.
+//
+// downOrDead's fleet loop gates on the registration rather than on liveness
+// precisely because of this case: an exited child is not "ours", so a
+// liveness gate matches neither that arm nor the !s.Enabled stray arm, and
+// the crashed server the operator is trying to clean up is passed over in
+// silence — orphan still running, entry still registered.
+func TestRealEngine_DownAll_AfterLeaderCrash_DoesNotSkipEnabledServer(t *testing.T) {
+	s := orphanLeaderServer(t, "svc")
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
+	pid := launchOrphanLeader(t, eng, s)
+
+	if err := eng.Down(""); err != nil {
+		t.Fatalf("bare Down after a leader crash: %v", err)
+	}
+
+	waitForCondition(t, 5*time.Second,
+		fmt.Sprintf("the orphan in pid group %d to be swept by bare down", pid),
+		func() bool { return !processGroupAlive(pid) })
+
+	eng.mu.Lock()
+	_, still := eng.procs["svc"]
+	eng.mu.Unlock()
+	if still {
+		t.Fatalf("bare down passed over an enabled server whose child had exited")
+	}
+}
+
+// AATK-106 review round 2, F8. The other half of the detached exception's
+// justification: `up` on a detached server whose launcher has exited must
+// stay the idempotent skip, not fall through to the port-conflict gate.
+//
+// The foreign listener stands in for the container. Without the exception
+// isOurs goes false, checkPortConflict finds the declared port held by a PID
+// it has no registration for, and `up` hard-refuses to start a server that is
+// already running — naming the operator's own container as a foreign holder.
+func TestRealEngine_Up_DetachedLauncherExited_StaysIdempotent(t *testing.T) {
+	port := freeTestPort(t)
+	spawnForeignListener(t, port) // the "container" the launcher started
+
+	s := detachedMarkerServer("svc", filepath.Join(t.TempDir(), "unused"))
+	s.Port = port
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
+
+	proc, err := eng.launch(s)
+	if err != nil {
+		t.Fatalf("launching the detached fixture: %v", err)
+	}
+	eng.mu.Lock()
+	eng.procs["svc"] = proc
+	eng.mu.Unlock()
+	waitForExited(t, proc, "svc")
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("up on an already-running detached server should be an idempotent skip, got: %v", err)
+	}
+}

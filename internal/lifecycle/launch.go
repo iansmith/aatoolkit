@@ -123,8 +123,6 @@ func Launch(spec LaunchSpec) (*Process, error) {
 	proc := &Process{Cmd: cmd, LogPath: logPath}
 	go func() {
 		cmd.Wait()
-		// Before closing the log: a reader that sees the log closed and then
-		// asks whether the child is gone must not be told "still running".
 		proc.exited.Store(true)
 		logFile.Close()
 	}()

@@ -110,6 +110,26 @@ func pidOf(p *lifecycle.Process) (int32, bool) {
 	return int32(p.Cmd.Process.Pid), true
 }
 
+// registeredPIDLocked returns the PID we last recorded for name, alive or
+// not. It is ownedPIDLocked's structural counterpart: the question is "did we
+// launch something for this server", not "is it still running".
+//
+// This is what the teardown paths want. Children are launched setpgid and
+// signalled with kill(-pid), so a dead leader's PID stays the only handle on
+// an orphan still running in its group — long after that leader stopped
+// being "ours". Must be called with e.mu held.
+func (e *RealEngine) registeredPIDLocked(name string) (int32, bool) {
+	return pidOf(e.procs[name])
+}
+
+// deleteProc forgets our registration for name. One definition of the
+// lock-delete-unlock idiom every verb that finishes with a server uses.
+func (e *RealEngine) deleteProc(name string) {
+	e.mu.Lock()
+	delete(e.procs, name)
+	e.mu.Unlock()
+}
+
 // ownedPIDLocked returns the PID of the child we registered for s, and
 // whether that registration still counts as ours. Must be called with e.mu
 // held. It is the one definition of "ours" every verb consults, so up, down,
@@ -195,9 +215,10 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 	// launcher's PID stops meaning anything the moment it returns; the ports
 	// are the only evidence there is.
 	//
-	// For every OTHER server type ownedPIDLocked does read an exit as death
-	// (AATK-106), which is why this gate must stay an explicit s.Detached
-	// test rather than leaning on isOurs to come out false on its own.
+	// The s.Detached term cannot be dropped in favour of !isOurs alone:
+	// ownedPIDLocked deliberately keeps answering "ours" for a detached
+	// server whose launcher has exited (AATK-106), so !isOurs stays false
+	// for exactly the servers this gate exists to route by host ports.
 	//
 	// This gate is why the s.Detached arm in the switch below is reachable at
 	// all. Without it every detached server the supervisor started took the
@@ -1201,11 +1222,17 @@ func (e *RealEngine) downOrDead(name string, killStrays bool) error {
 
 	var outcomes []verbOutcome
 	for _, s := range e.config().Servers {
+		// Gated on the REGISTRATION, not on liveness. downOne itself knows
+		// the difference between a live child and one that exited, and an
+		// enabled server whose child crashed still has an entry to prune
+		// and a process group to sweep. Gating on ownedPIDLocked here would
+		// silently skip exactly the crashed server the operator is trying
+		// to clean up (it matches neither this arm nor the !s.Enabled one).
 		e.mu.Lock()
-		_, isOurs := e.ownedPIDLocked(s)
+		_, registered := e.registeredPIDLocked(s.Name)
 		e.mu.Unlock()
 
-		if s.Enabled && isOurs {
+		if s.Enabled && registered {
 			outcomes = append(outcomes, e.downOne(s.Name))
 			continue
 		}
@@ -1280,16 +1307,32 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 			}
 			return verbOutcome{Name: name}
 		}
-		// Whatever we may still have registered for this server is not
-		// ours any more, so forget it. That is what makes `down <name>`
-		// then `<name> up` relaunch a crashed server — the workaround
-		// operators reached for before AATK-106, and the one place the
-		// prune belongs now that ownedPIDLocked leaves the entry alone for
-		// TeardownAll's benefit. Deleting an absent key is a no-op, which
-		// is the common case here.
+		// We may still hold the registration of a child that exited on its
+		// own. Signal its process group before forgetting it: the child was
+		// launched setpgid and the group outlives its leader, so this is
+		// the only way to reach an orphan the crash left behind — one
+		// holding no DECLARED port is invisible to the host scan below.
+		//
+		// This is what `down` did before AATK-106, via the isOurs branch
+		// and teardownOne. The liveness check now routes around that, so
+		// the group-kill has to happen explicitly or it is simply lost.
+		// Teardown on a group that is genuinely empty is a clean no-op, so
+		// the ordinary crash-with-no-orphan case still returns ok.
 		e.mu.Lock()
-		delete(e.procs, name)
+		stalePID, hadRegistration := e.registeredPIDLocked(name)
 		e.mu.Unlock()
+		if hadRegistration {
+			if err := e.teardownPID(s, stalePID); err != nil {
+				return verbOutcome{Name: name, Err: err}
+			}
+			// Forgetting it is what makes `down <name>` then `<name> up`
+			// relaunch a crashed server — the workaround operators reached
+			// for before AATK-106 — and downOne is the right home for the
+			// prune, since ownedPIDLocked must leave the entry alone for
+			// TeardownAll's benefit.
+			e.deleteProc(name)
+			return verbOutcome{Name: name}
+		}
 
 		// Nothing registered to tear down via our handle; fall back to a
 		// foreign-style kill by observed PID if it's actually running (e.g.
@@ -1306,9 +1349,7 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 		return verbOutcome{Name: name, Err: err}
 	}
 
-	e.mu.Lock()
-	delete(e.procs, name)
-	e.mu.Unlock()
+	e.deleteProc(name)
 	return verbOutcome{Name: name}
 }
 
@@ -1389,9 +1430,7 @@ func (e *RealEngine) killForeignOrOwned(s config.Server, pid int32, isOurs bool)
 	var err error
 	if isOurs {
 		err = e.teardownPID(s, pid)
-		e.mu.Lock()
-		delete(e.procs, s.Name)
-		e.mu.Unlock()
+		e.deleteProc(s.Name)
 	} else {
 		grace := lifecycle.ResolveGracePeriod(s, e.config().Supervisor)
 		_, err = lifecycle.TeardownForeign(context.Background(), s.Name, pid, lifecycle.DeclaredPorts(s), grace)
@@ -1425,9 +1464,7 @@ func (e *RealEngine) Build(name string) error {
 		lc = &lifecycle.BuildLifecycle{
 			Stop: func() error {
 				err := e.teardownPID(s, pid)
-				e.mu.Lock()
-				delete(e.procs, name)
-				e.mu.Unlock()
+				e.deleteProc(name)
 				return err
 			},
 			Start: func() error {
