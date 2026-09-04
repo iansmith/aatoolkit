@@ -252,6 +252,16 @@ func (b *fakeRealtimeBackend) handshakeCount() int {
 // has completed — see emitEvery's note on concurrent writers.
 func (b *fakeRealtimeBackend) emitOnce(t *testing.T, ev map[string]string) {
 	t.Helper()
+	b.emitAny(t, ev)
+}
+
+// emitAny is emitOnce for an event the flat string map cannot express — one
+// carrying a nested object or array, such as the response.done whose output
+// items decide whether a turn ended in a function call (AATK-108). emitOnce
+// delegates here rather than the two growing separate copies of the same
+// connection lookup and write.
+func (b *fakeRealtimeBackend) emitAny(t *testing.T, ev any) {
+	t.Helper()
 	b.mu.Lock()
 	c := b.conn
 	b.mu.Unlock()
@@ -259,7 +269,7 @@ func (b *fakeRealtimeBackend) emitOnce(t *testing.T, ev map[string]string) {
 		t.Fatal("backend has no connection to emit on — call waitBackendReady first")
 	}
 	if err := writeRealtimeJSON(context.Background(), c, ev); err != nil {
-		t.Fatalf("emit %s: %v", ev["type"], err)
+		t.Fatalf("emit %v: %v", ev, err)
 	}
 }
 

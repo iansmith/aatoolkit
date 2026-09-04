@@ -67,3 +67,46 @@ func TestNewStreamHandler_OptionsOnTheDefaultPathAreInert(t *testing.T) {
 		t.Fatalf("an option on the default path must not construct a realtime client, got %d dial(s)", got)
 	}
 }
+
+// --- WithFillerAudio's inert cases (AATK-108) ------------------------------
+//
+// The filler option carries a value rather than a channel, so its "asked for
+// nothing" cases are not a nil channel but a zero field: a Delay of zero, or
+// an empty Loop. Both must be byte-identical to never naming the option —
+// pinned here, beside the idle timeout's own zero case, rather than in the
+// filler suite, because what they pin is the option's reachability and not
+// the loop's behaviour.
+
+// TestWithFillerAudio_ZeroDelayPlaysNothing pins the documented off switch:
+// Delay zero means never start, not start immediately.
+func TestWithFillerAudio_ZeroDelayPlaysNothing(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop()})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	armFiller(t, be)
+	time.Sleep(fillerTestDelay * 3)
+
+	if got := wire(); len(got) != 0 {
+		t.Fatalf("a zero Delay must never start the loop, got %+v", got)
+	}
+}
+
+// TestWithFillerAudio_EmptyLoopPlaysNothing pins the other half: a delay with
+// nothing to play must not write empty frames, and must not wedge looking for
+// a frame in a zero-length ring.
+func TestWithFillerAudio_EmptyLoopPlaysNothing(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := fillerHarness(t, be.url(), FillerConfig{Delay: fillerTestDelay})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	armFiller(t, be)
+	time.Sleep(fillerTestDelay * 3)
+
+	if got := wire(); len(got) != 0 {
+		t.Fatalf("an empty Loop must never write to the carrier, got %+v", got)
+	}
+	assertStillRunning(t, h, "an empty Loop must not end the call")
+}

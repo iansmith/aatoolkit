@@ -157,6 +157,37 @@ type realtimeConfig struct {
 	// markEchoChanFor mirrors carrierAudioChanFor: the engine writes, the
 	// consumer reads, resolved per call for the same reason.
 	markEchoChanFor func(start Frame) chan<- MarkEcho
+
+	// fillerFor mirrors instructionsFor rather than the channel resolvers: it
+	// carries a value, not a seam. Resolved per call for the reason every
+	// other resolver here is — NewStreamHandler binds its options once at
+	// construction and reuses them for every call it serves, so a consumer
+	// that wants a different loop or a different delay per caller has no
+	// other way to say so.
+	fillerFor func(start Frame) FillerConfig
+}
+
+// FillerConfig is the audio the relay plays to the caller while the backend
+// is silent, and how long it waits before starting (AATK-108).
+//
+// Loop is 8 kHz G.711 μ-law, raw bytes — the same codec the carrier speaks,
+// so nothing here transcodes it. It is played as a ring: the relay emits one
+// MuLawFrameMS frame per MuLawFrameMS, wrapping at the end with no gap, until
+// the reply's first frame arrives. It must already be at the level the
+// consumer wants it heard at; this engine does no gain, no fade and no
+// mixing, because a relay that reached into the samples would be making an
+// editorial choice that belongs to whoever supplied the clip.
+//
+// Delay is how long after the caller's last word the loop may start. Zero
+// means never: the option is then inert, exactly as if it had not been
+// supplied. Choosing the value is a deployment question — long enough that a
+// fast turn stays silent, short enough that the caller does not think the
+// line died — and so it is the consumer's, not this engine's.
+//
+// An empty Loop is inert for the same reason a zero Delay is.
+type FillerConfig struct {
+	Loop  []byte
+	Delay time.Duration
 }
 
 // CarrierAudio is one record of what the engine sent to the carrier —
@@ -244,6 +275,16 @@ func (c realtimeConfig) markEchoChan(start Frame) chan<- MarkEcho {
 		return nil
 	}
 	return c.markEchoChanFor(start)
+}
+
+// filler resolves the loop and delay for one call, or the zero FillerConfig
+// when the consumer asked for none. Mirrors markEchoChan; the zero value is
+// inert, so "no option" and "an option carrying nothing" are one case.
+func (c realtimeConfig) filler(start Frame) FillerConfig {
+	if c.fillerFor == nil {
+		return FillerConfig{}
+	}
+	return c.fillerFor(start)
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -659,6 +700,42 @@ func WithMarkEchoChan(ch chan<- MarkEcho) RealtimeOption {
 // still written and still tracked, but its resolution goes nowhere.
 func WithMarkEchoChanFor(fn func(start Frame) chan<- MarkEcho) RealtimeOption {
 	return func(c *realtimeConfig) { c.markEchoChanFor = fn }
+}
+
+// WithFillerAudio plays cfg.Loop to the caller when the backend has produced
+// no audio for cfg.Delay after the caller stopped speaking, and stops it the
+// instant the reply's first frame arrives (AATK-108).
+//
+// The wait it fills is real: measured on a demo call, the median gap between
+// the caller's last word and the backend's first audio frame was 10.5 s and
+// the worst was 24.2 s. Across it the line is dead air, which a caller reads
+// as a dropped call rather than as thinking.
+//
+// It lives on the relay rather than anywhere else that can see the wait
+// because the relay is the only place that can act on it: it is the single
+// writer of outbound frames on the carrier socket, and it already sends the
+// carrier's clear for barge-in, which is what stopping the loop needs.
+//
+// Unset, or supplied with a zero Delay or an empty Loop, this is inert — no
+// goroutine, no timer, and a carrier wire byte-identical to a call that never
+// named the option. See FillerConfig for what the two fields mean.
+//
+// One config for every call this handler serves. A consumer that needs the
+// loop or the delay to vary by caller should use WithFillerAudioFor.
+func WithFillerAudio(cfg FillerConfig) RealtimeOption {
+	return WithFillerAudioFor(func(Frame) FillerConfig { return cfg })
+}
+
+// WithFillerAudioFor resolves the filler config when the call arrives, from
+// the start frame. Mirrors WithMarkEchoChanFor and every other per-call
+// resolver on this path: NewStreamHandler binds its options once and reuses
+// them for every call, so this is the only way to vary them per caller.
+//
+// fn is called once per call, on the goroutine that sets the call up, before
+// any audio flows. A resolver returning the zero FillerConfig is the same as
+// no option at all.
+func WithFillerAudioFor(fn func(start Frame) FillerConfig) RealtimeOption {
+	return func(c *realtimeConfig) { c.fillerFor = fn }
 }
 
 // WithInstructionsFor resolves the session persona when the call arrives, from
