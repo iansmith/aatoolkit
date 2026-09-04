@@ -1451,8 +1451,10 @@ func (s *carrierMediaSink) fillerMedia(ctx context.Context, next func() (string,
 //
 // The loop is stopped BEFORE the clear is written, not after, so no filler
 // frame can be admitted between the two — filler.writeFrame takes its decision
-// inside the write slot, and by the time this reaches the slot the decision
-// has already been made against a stopped machine.
+// inside the write slot, against a machine this method stopped before it began
+// queueing for that slot. Which of the two reaches the slot first does not
+// matter: a frame already ahead of the clear is discarded by it, and one
+// behind it runs its decision afterwards and finds the machine stopped.
 //
 // Whether the loop was playing is deliberately ignored here: on the barge-in
 // path this clear is the one the caller is owed, and asking for a second would

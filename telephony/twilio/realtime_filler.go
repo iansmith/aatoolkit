@@ -197,11 +197,10 @@ func (f *filler) arm() {
 		// it.
 		return
 	}
-	f.gen++
-	if f.timer != nil {
-		f.timer.Stop()
-		f.timer = nil
-	}
+	// After the guard above, never before it: cancelPendingLocked bumps the
+	// generation, and bumping it while a loop is playing is the round-1 defect
+	// this function's early return exists to prevent.
+	f.cancelPendingLocked()
 	gen := f.gen
 	f.timer = time.AfterFunc(f.delay, func() { f.start(gen) })
 }
@@ -336,17 +335,21 @@ func (f *filler) endEpisode(gen uint64) {
 }
 
 // writeFrame writes one frame of the loop, reporting whether it wrote. false
-// with a nil error means the machine has left this generation — the reply
-// arrived, the caller spoke, or the call ended — and play should return.
+// with a nil error means play should return. Usually that is because the
+// machine has left this generation — the reply arrived, the caller spoke, or
+// the call ended — but not always: fillerMedia also declines when its encode
+// fails, on a machine still in this generation, which is the case play's own
+// defer is written around.
 //
 // The generation check runs INSIDE the carrier's write slot, which is the
 // property the whole stop path rests on. carrierMediaSink.Media stops the
-// filler and then sends its clear, both of which take that slot; a frame whose
-// decision to write was taken outside it could be admitted after that clear
-// and land underneath the reply. Deciding inside the slot means the last word
-// belongs to whichever of the two got there first, and either order is
-// correct: a frame ahead of the clear is discarded by it, and a frame behind
-// it is never written at all.
+// filler and then sends its clear; the stop takes only f.mu, but the clear
+// takes the slot, and a frame whose decision to write was taken outside the
+// slot could be admitted after that clear and land underneath the reply.
+// Deciding inside it means the last word belongs to whichever of the two got
+// there first, and either order is correct: a frame ahead of the clear is
+// discarded by it, and a frame behind it finds playing already false and is
+// never written at all.
 func (f *filler) writeFrame(gen uint64) (bool, error) {
 	return f.sink.fillerMedia(f.ctx, func() (string, bool) {
 		f.mu.Lock()
