@@ -34,10 +34,16 @@ import (
 // buys is "the mark lands after the media already written", and a capture that
 // dropped marks could not see it. Recording it here rather than in a second
 // capture helper keeps one definition of what this suite saw on the wire.
+//
+// at was added by AATK-108 for the same reason one step further: filler audio
+// is paced, so its contract is about WHEN each frame arrived, not only in what
+// order. Stamped as the record is appended, on the reader goroutine, which is
+// the closest this suite can stand to the carrier's own clock.
 type carrierWireRecord struct {
 	payload  string
 	clear    bool
 	markName string
+	at       time.Time
 }
 
 // captureCarrierWire mirrors realtimeHarness.countMediaFrames
@@ -65,18 +71,19 @@ func (h *realtimeHarness) captureCarrierWire(t *testing.T) func() []carrierWireR
 			if err != nil {
 				continue
 			}
+			now := time.Now()
 			switch f.Event {
 			case EventMedia:
 				mu.Lock()
-				records = append(records, carrierWireRecord{payload: f.EncodedPayload})
+				records = append(records, carrierWireRecord{payload: f.EncodedPayload, at: now})
 				mu.Unlock()
 			case EventClear:
 				mu.Lock()
-				records = append(records, carrierWireRecord{clear: true})
+				records = append(records, carrierWireRecord{clear: true, at: now})
 				mu.Unlock()
 			case EventMark:
 				mu.Lock()
-				records = append(records, carrierWireRecord{markName: f.MarkName})
+				records = append(records, carrierWireRecord{markName: f.MarkName, at: now})
 				mu.Unlock()
 			}
 		}
@@ -87,6 +94,14 @@ func (h *realtimeHarness) captureCarrierWire(t *testing.T) func() []carrierWireR
 		defer mu.Unlock()
 		return append([]carrierWireRecord(nil), records...)
 	}
+}
+
+// sameMessage reports whether two records describe the same carrier message,
+// ignoring when it was observed. at is metadata about the OBSERVATION, not
+// part of the message, so a whole-struct comparison against a want literal
+// would compare an arrival instant no test can predict.
+func (r carrierWireRecord) sameMessage(other carrierWireRecord) bool {
+	return r.payload == other.payload && r.clear == other.clear && r.markName == other.markName
 }
 
 // distinctCarrierPayload builds a carrier-shaped base64 payload filled with a
@@ -536,7 +551,7 @@ func TestCarrierAudioChan_RecordsArriveInOrder(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return len(wire()) >= len(want) })
 	got := wire()
 	for i, w := range want {
-		if got[i] != w {
+		if !got[i].sameMessage(w) {
 			t.Fatalf("test setup: the carrier must receive media/clear/media in that order; wire[%d] = %+v, want %+v",
 				i, got[i], w)
 		}

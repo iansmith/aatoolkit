@@ -31,7 +31,15 @@ const (
 	EventTranscriptDelta = "conversation.item.input_audio_transcription.delta"
 	EventTranscriptDone  = "conversation.item.input_audio_transcription.completed"
 	EventAudioDelta      = "response.output_audio.delta"
+	EventResponseDone    = "response.done"
 )
+
+// ItemTypeFunctionCall is the "type" of a response output item that is a tool
+// call rather than speech. It is not an event type — it appears INSIDE a
+// response.done's output list — and it is named here beside the event types
+// because it is read for the same reason they are: to tell whether a turn has
+// actually ended.
+const ItemTypeFunctionCall = "function_call"
 
 // FormatG711ULaw is the session audio format for 8 kHz G.711 mu-law. The
 // format identifier carries no sample rate because the codec fixes it.

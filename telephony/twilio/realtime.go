@@ -157,6 +157,37 @@ type realtimeConfig struct {
 	// markEchoChanFor mirrors carrierAudioChanFor: the engine writes, the
 	// consumer reads, resolved per call for the same reason.
 	markEchoChanFor func(start Frame) chan<- MarkEcho
+
+	// fillerFor mirrors instructionsFor rather than the channel resolvers: it
+	// carries a value, not a seam. Resolved per call for the reason every
+	// other resolver here is — NewStreamHandler binds its options once at
+	// construction and reuses them for every call it serves, so a consumer
+	// that wants a different loop or a different delay per caller has no
+	// other way to say so.
+	fillerFor func(start Frame) FillerConfig
+}
+
+// FillerConfig is the audio the relay plays to the caller while the backend
+// is silent, and how long it waits before starting (AATK-108).
+//
+// Loop is 8 kHz G.711 μ-law, raw bytes — the same codec the carrier speaks,
+// so nothing here transcodes it. It is played as a ring: the relay emits one
+// MuLawFrameMS frame per MuLawFrameMS, wrapping at the end with no gap, until
+// the reply's first frame arrives. It must already be at the level the
+// consumer wants it heard at; this engine does no gain, no fade and no
+// mixing, because a relay that reached into the samples would be making an
+// editorial choice that belongs to whoever supplied the clip.
+//
+// Delay is how long after the caller's last word the loop may start. Zero
+// means never: the option is then inert, exactly as if it had not been
+// supplied. Choosing the value is a deployment question — long enough that a
+// fast turn stays silent, short enough that the caller does not think the
+// line died — and so it is the consumer's, not this engine's.
+//
+// An empty Loop is inert for the same reason a zero Delay is.
+type FillerConfig struct {
+	Loop  []byte
+	Delay time.Duration
 }
 
 // CarrierAudio is one record of what the engine sent to the carrier —
@@ -168,9 +199,18 @@ type realtimeConfig struct {
 // and Payload is empty. Clear == false means this record is one chunk of
 // synthesized audio (carrierMediaSink.Media), carried as the same base64
 // string the carrier received — never decoded, never re-encoded.
+//
+// Filler == true means the chunk is a frame of the consumer's own filler loop
+// (WithFillerAudio) rather than the backend's speech. It is a third field
+// rather than a third record kind because both are audio that shipped, which
+// is what this type reports; what a consumer needs is to be able to tell them
+// apart, and the run of Filler records is also the only place a call's history
+// says exactly when the loop played. Zero for every record on a call that
+// supplies no filler, which is what keeps this additive.
 type CarrierAudio struct {
 	Payload string
 	Clear   bool
+	Filler  bool
 }
 
 // Transcript is one transcription result from the backend, re-exported so a
@@ -244,6 +284,16 @@ func (c realtimeConfig) markEchoChan(start Frame) chan<- MarkEcho {
 		return nil
 	}
 	return c.markEchoChanFor(start)
+}
+
+// filler resolves the loop and delay for one call, or the zero FillerConfig
+// when the consumer asked for none. Mirrors markEchoChan; the zero value is
+// inert, so "no option" and "an option carrying nothing" are one case.
+func (c realtimeConfig) filler(start Frame) FillerConfig {
+	if c.fillerFor == nil {
+		return FillerConfig{}
+	}
+	return c.fillerFor(start)
 }
 
 func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
@@ -661,6 +711,42 @@ func WithMarkEchoChanFor(fn func(start Frame) chan<- MarkEcho) RealtimeOption {
 	return func(c *realtimeConfig) { c.markEchoChanFor = fn }
 }
 
+// WithFillerAudio plays cfg.Loop to the caller when the backend has produced
+// no audio for cfg.Delay after the caller stopped speaking, and stops it the
+// instant the reply's first frame arrives (AATK-108).
+//
+// The wait it fills is real: measured on a demo call, the median gap between
+// the caller's last word and the backend's first audio frame was 10.5 s and
+// the worst was 24.2 s. Across it the line is dead air, which a caller reads
+// as a dropped call rather than as thinking.
+//
+// It lives on the relay rather than anywhere else that can see the wait
+// because the relay is the only place that can act on it: it is the single
+// writer of outbound frames on the carrier socket, and it already sends the
+// carrier's clear for barge-in, which is what stopping the loop needs.
+//
+// Unset, or supplied with a zero Delay or an empty Loop, this is inert — no
+// goroutine, no timer, and a carrier wire byte-identical to a call that never
+// named the option. See FillerConfig for what the two fields mean.
+//
+// One config for every call this handler serves. A consumer that needs the
+// loop or the delay to vary by caller should use WithFillerAudioFor.
+func WithFillerAudio(cfg FillerConfig) RealtimeOption {
+	return WithFillerAudioFor(func(Frame) FillerConfig { return cfg })
+}
+
+// WithFillerAudioFor resolves the filler config when the call arrives, from
+// the start frame. Mirrors WithMarkEchoChanFor and every other per-call
+// resolver on this path: NewStreamHandler binds its options once and reuses
+// them for every call, so this is the only way to vary them per caller.
+//
+// fn is called once per call, on the goroutine that sets the call up, before
+// any audio flows. A resolver returning the zero FillerConfig is the same as
+// no option at all.
+func WithFillerAudioFor(fn func(start Frame) FillerConfig) RealtimeOption {
+	return func(c *realtimeConfig) { c.fillerFor = fn }
+}
+
 // WithInstructionsFor resolves the session persona when the call arrives, from
 // the start frame — which carries the caller identity, so a consumer can vary
 // the persona per caller.
@@ -768,7 +854,22 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// free to call marks.echo and be ignored.
 	defer marks.stop()
 
-	sink := newCarrierMediaSink(conn, start.StreamSID, cfg.carrierAudioChan(start), marks)
+	// Resolved here for the reason the mark channels above are: it runs
+	// consumer code, and it has to happen before the sink is built because the
+	// sink is what stops the loop.
+	//
+	// The filler and the sink point at each other — the sink stops the filler,
+	// the filler writes through the sink — so one of the two is completed
+	// after construction rather than in its constructor. attach does that, on
+	// this goroutine, before bridge.Run is spawned and therefore before
+	// anything else can see either of them. nil filler (no option, a zero
+	// Delay, or an empty Loop) makes every call below a no-op: no timer, no
+	// goroutine, and a carrier wire byte-identical to today's.
+	fill := newFiller(ctx, cfg.filler(start))
+	defer fill.shutdown()
+
+	sink := newCarrierMediaSink(conn, start.StreamSID, cfg.carrierAudioChan(start), marks, fill)
+	fill.attach(sink)
 	bridge := realtime.NewBridge(client, sink)
 
 	runCtx, cancelRun := context.WithCancel(ctx)
@@ -797,9 +898,12 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// to risk. Measured, with a serverEventChanFor that sleeps 3 s: resolved
 	// first, no media frame reaches the carrier for 3 s; resolved second, audio
 	// flows immediately and events drop instead.
-	go deliver(bridge.Transcripts(), cfg.transcriptChan(start), "transcript")
+	go deliver(bridge.Transcripts(), cfg.transcriptChan(start), "transcript", nil)
 
-	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event")
+	// The filler's arming half rides this drain: the events that arm it reach
+	// this package nowhere else. See filler's type comment for why arming and
+	// stopping are driven from two different places.
+	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event", fill.observe)
 
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge, marks) }()
@@ -1087,15 +1191,22 @@ func sendOrDrop[T any](out chan<- T, v T, dropped *int, what string) {
 //
 // With no consumer this is a bare drain: byte for byte the behaviour of a call
 // supplying no channel option at all.
-func deliver[T any](src <-chan T, out chan<- T, what string) {
-	if out == nil {
-		for range src {
-		}
-		return
-	}
-
+//
+// observe, when non-nil, is called for every value BEFORE the consumer send —
+// and on the no-consumer path too, which is the point of it being here rather
+// than in a wrapper: it is engine-internal work that must happen whether or
+// not anybody asked to watch the stream. It runs on this goroutine, so it must
+// not block; the filler's is the only one today (see filler.observe), and it
+// takes a mutex and returns.
+func deliver[T any](src <-chan T, out chan<- T, what string, observe func(T)) {
 	var dropped int
 	for v := range src {
+		if observe != nil {
+			observe(v)
+		}
+		if out == nil {
+			continue
+		}
 		sendOrDrop(out, v, &dropped, what)
 	}
 	// out is deliberately NOT closed: the engine did not create it, the consumer
@@ -1162,10 +1273,12 @@ type carrierMediaSink struct {
 	carrierAudioCh chan<- CarrierAudio
 
 	// carrierAudioDropped counts records dropped because carrierAudioCh was
-	// full. No lock: Bridge.Run calls Media and Clear from a single read
-	// loop, never concurrently — the same reasoning Bridge records for its
-	// own eventsDropped. Mark does NOT deliver a carrier-audio record, so the
-	// second writer this sink acquired in AATK-105 does not reach this field.
+	// full. No lock, and what makes that safe is WHERE it is touched: every
+	// delivery happens inside writeSem, as the afterWrite of the write it
+	// describes, so the one slot serialises the counter along with the writes.
+	// It has to, since AATK-108: the filler's play goroutine delivers records
+	// too, so the "only Bridge.Run's read loop touches this" reasoning this
+	// field carried before is no longer true of the callers, only of the slot.
 	carrierAudioDropped int
 
 	// writeSem serialises every write to the carrier connection through one
@@ -1195,18 +1308,26 @@ type carrierMediaSink struct {
 	// marks tracks the marks written and not yet echoed, nil when the consumer
 	// asked for none — see markTracker, whose methods all tolerate nil.
 	marks *markTracker
+
+	// filler is the loop played while the backend is silent, nil when the
+	// consumer asked for none — see filler, whose methods all tolerate nil.
+	// The sink holds it because the sink is where the loop has to STOP: Media
+	// and Clear are called for every audio delta and every speech_started,
+	// unconditionally, which no other seam on this path can promise.
+	filler *filler
 }
 
 // newCarrierMediaSink builds the sink with its write slot open. A constructor
 // rather than a struct literal because writeSem must exist: a nil channel
 // blocks forever in a send, so a sink assembled without it would hang on its
 // first write rather than fail visibly.
-func newCarrierMediaSink(conn wsWriter, streamSID string, carrierAudioCh chan<- CarrierAudio, marks *markTracker) *carrierMediaSink {
+func newCarrierMediaSink(conn wsWriter, streamSID string, carrierAudioCh chan<- CarrierAudio, marks *markTracker, fill *filler) *carrierMediaSink {
 	return &carrierMediaSink{
 		conn:           conn,
 		streamSID:      streamSID,
 		carrierAudioCh: carrierAudioCh,
 		marks:          marks,
+		filler:         fill,
 		writeSem:       make(chan struct{}, 1),
 	}
 }
@@ -1226,43 +1347,127 @@ var _ realtime.MediaSink = (*carrierMediaSink)(nil)
 // The wait for the slot is taken under ctx, so a caller's deadline covers the
 // whole write — the queueing behind the other writer as well as the write
 // itself. See writeSem for why that is not optional.
-func (s *carrierMediaSink) write(ctx context.Context, msg []byte, afterWrite func()) error {
+//
+// build produces the message, INSIDE the slot, and may decline: false means
+// the caller no longer wants this write and write returns (false, nil) having
+// written nothing. That is the seam filler audio needs and the reason building
+// is a callback rather than a parameter — a filler frame's right to be on the
+// wire expires the moment the reply's first frame stops the loop, and only a
+// decision taken inside the slot can be ordered against the clear that goes
+// with it. Every other caller builds its message up front and always writes.
+func (s *carrierMediaSink) write(ctx context.Context, build func() ([]byte, bool), afterWrite func()) (bool, error) {
 	select {
 	case s.writeSem <- struct{}{}:
 	case <-ctx.Done():
-		return fmt.Errorf("twilio: realtime: awaiting carrier write slot: %w", ctx.Err())
+		return false, fmt.Errorf("twilio: realtime: awaiting carrier write slot: %w", ctx.Err())
 	}
 	defer func() { <-s.writeSem }()
 
+	msg, ok := build()
+	if !ok {
+		return false, nil
+	}
 	if err := s.conn.Write(ctx, websocket.MessageText, msg); err != nil {
-		return err
+		return false, err
 	}
 	if afterWrite != nil {
 		afterWrite()
 	}
-	return nil
+	return true, nil
 }
 
+// staticMessage is the build callback for a caller that already has its bytes
+// and always means to write them — every caller but the filler.
+func staticMessage(msg []byte) func() ([]byte, bool) {
+	return func() ([]byte, bool) { return msg, true }
+}
+
+// Media delivers one chunk of the backend's audio to the carrier.
+//
+// It is also where filler audio stops, and the ORDER here is the ticket's
+// central promise: the loop is stopped, the carrier is cleared, and only then
+// is the reply's first frame written. A clear sent after that frame would
+// discard the reply itself; a clear not sent at all would leave the reply
+// queued behind however much of the loop the carrier has buffered, which is
+// the delay filler audio exists to hide rather than to cause.
+//
+// The clear goes out only when the loop was actually playing. A reply that
+// arrived inside Delay merely disarms, and a call with no filler configured
+// takes neither branch — s.filler is nil and both calls are no-ops, so this
+// method's wire output is byte-identical to what it was before AATK-108.
 func (s *carrierMediaSink) Media(ctx context.Context, payload string) error {
+	if s.filler.stop() {
+		if err := s.Clear(ctx); err != nil {
+			return err
+		}
+	}
 	msg, err := EncodeMediaB64(s.streamSID, payload)
 	if err != nil {
 		return err
 	}
-	if err := s.write(ctx, msg, func() {
+	_, err = s.write(ctx, staticMessage(msg), func() {
 		s.playout.fed(muLawBytesInB64(payload), time.Now())
-	}); err != nil {
-		return err
-	}
-	s.deliverCarrierAudio(CarrierAudio{Payload: payload})
-	return nil
+		s.deliverCarrierAudio(CarrierAudio{Payload: payload})
+	})
+	return err
 }
 
+// fillerMedia writes one frame of filler audio, built inside the write slot by
+// next, which returns false when the frame's right to be on the wire has
+// expired. It reports whether it wrote.
+//
+// Separate from Media rather than a flag on it, because the two differ in
+// every respect that matters here: this one may decline to write, it must not
+// re-enter the stop path Media owns, and the record it delivers is marked as
+// filler. What it shares with Media — the encoding, the playout accounting,
+// the delivery — it shares through the same slot and the same helpers.
+func (s *carrierMediaSink) fillerMedia(ctx context.Context, next func() (string, bool)) (bool, error) {
+	var payload string
+	return s.write(ctx, func() ([]byte, bool) {
+		p, ok := next()
+		if !ok {
+			return nil, false
+		}
+		msg, err := EncodeMediaB64(s.streamSID, p)
+		if err != nil {
+			// EncodeMediaB64 marshals a struct of two strings, so this is
+			// unreachable in practice; declining the write is the honest
+			// answer rather than inventing an error path the caller would
+			// treat as a carrier failure.
+			log.Printf("twilio: realtime: filler audio: encode: %v", err)
+			return nil, false
+		}
+		payload = p
+		return msg, true
+	}, func() {
+		s.playout.fed(muLawBytesInB64(payload), time.Now())
+		s.deliverCarrierAudio(CarrierAudio{Payload: payload, Filler: true})
+	})
+}
+
+// Clear discards what the carrier has buffered. It is the barge-in signal, and
+// it is also the clear Media sends ahead of a reply that interrupted the
+// filler loop.
+//
+// The loop is stopped BEFORE the clear is written, not after, so no filler
+// frame can be admitted between the two — filler.writeFrame takes its decision
+// inside the write slot, against a machine this method stopped before it began
+// queueing for that slot. Which of the two reaches the slot first does not
+// matter: a frame already ahead of the clear is discarded by it, and one
+// behind it runs its decision afterwards and finds the machine stopped.
+//
+// Whether the loop was playing is deliberately ignored here: on the barge-in
+// path this clear is the one the caller is owed, and asking for a second would
+// change barge-in semantics, which AATK-108 puts out of scope. On Media's path
+// this call IS that second clear, and Media has already tested the same thing
+// to decide whether to make it.
 func (s *carrierMediaSink) Clear(ctx context.Context) error {
+	s.filler.stop()
 	msg, err := EncodeClear(s.streamSID)
 	if err != nil {
 		return err
 	}
-	if err := s.write(ctx, msg, func() {
+	_, err = s.write(ctx, staticMessage(msg), func() {
 		// Barge-in: the carrier discards what it has buffered, so every
 		// quantity derived from the playout clock must stop describing audio
 		// nobody will hear. A mark written after this is owed the grace and
@@ -1280,11 +1485,9 @@ func (s *carrierMediaSink) Clear(ctx context.Context) error {
 		// clear immediately BEFORE the next clip and mark and so never holds
 		// one across a clear.
 		s.playout.flush(time.Now())
-	}); err != nil {
-		return err
-	}
-	s.deliverCarrierAudio(CarrierAudio{Clear: true})
-	return nil
+		s.deliverCarrierAudio(CarrierAudio{Clear: true})
+	})
+	return err
 }
 
 // Mark writes a Twilio mark named name to the carrier, after every media frame
@@ -1299,9 +1502,10 @@ func (s *carrierMediaSink) Mark(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	return s.write(ctx, msg, func() {
+	_, err = s.write(ctx, staticMessage(msg), func() {
 		s.marks.arm(name, s.markEchoBound(time.Now()))
 	})
+	return err
 }
 
 // markEchoBound is how long the carrier is given to echo a mark written now:
@@ -1327,10 +1531,15 @@ func (s *carrierMediaSink) markEchoBound(now time.Time) time.Duration {
 // deliverCarrierAudio hands rec to carrierAudioCh without ever blocking, via
 // the same sendOrDrop idiom deliver's stream drain uses. deliver drains a
 // source channel from a goroutine it spawns; there is no source channel here,
-// because rec originates inline inside Media/Clear on Bridge.Run's own
-// read-loop goroutine. Inventing a source channel to route through deliver
-// would reintroduce a per-call goroutine to drain it — the leak this ticket's
-// non-blocking, inline design exists to avoid.
+// because rec originates inline beside the write it describes — in Media and
+// Clear on Bridge.Run's read-loop goroutine, and since AATK-108 in fillerMedia
+// on the filler's play goroutine as well. Inventing a source channel to route
+// through deliver would reintroduce a per-call goroutine to drain it — the
+// leak this ticket's non-blocking, inline design exists to avoid.
+//
+// Every caller reaches this from inside writeSem, as the afterWrite of its own
+// write. That is what serialises carrierAudioDropped now that the callers are
+// on more than one goroutine; see the field.
 func (s *carrierMediaSink) deliverCarrierAudio(rec CarrierAudio) {
 	if s.carrierAudioCh == nil {
 		return
