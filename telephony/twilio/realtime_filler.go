@@ -34,6 +34,19 @@ import (
 // and every speech_started, unconditionally and without any drop in between,
 // so the sink is where the guarantee lives.
 //
+// The split has one seam worth naming, since the type comment would otherwise
+// read as though it had none. Bridge.Run publishes an event before it
+// dispatches it, so an arm running on the drain goroutine can land AFTER the
+// sink has already stopped the machine for a later event — leaving a pending
+// start that the sink is not going to cancel, because the event that would
+// have cancelled it has already gone by. It needs a wait whose only following
+// audio is a single delta, or a speech_started immediately after a
+// function-call response.done; a reply's continuing deltas each cancel it
+// again. The cost when it does happen is bounded — the loop starts once and is
+// stopped by the next delta or the next turn — which is why this is recorded
+// rather than defended against with the cross-goroutine sequencing that
+// closing it would take.
+//
 // observe therefore says NOTHING about audio deltas or speech_started, even
 // though it sees both. Acting on them there would be redundant with the sink
 // at best, and at worst wrong: observe runs on the drain goroutine while Media
@@ -166,9 +179,12 @@ func (f *filler) arm() {
 		// filling — so it would go silent for exactly the longest gap this
 		// ticket measured.
 		//
-		// Any timer still held here has already fired (start is what set
-		// playing), so leaving it alone costs nothing: start re-checks
-		// playing under the same lock.
+		// Any timer still held here has already fired — start is what set
+		// playing — so leaving it alone costs nothing. start's own playing
+		// check is defensive rather than load-bearing: AfterFunc fires once,
+		// and this early return neither bumps gen nor replaces the timer, so
+		// no second start carrying a live generation exists to be caught by
+		// it.
 		return
 	}
 	f.gen++
@@ -248,6 +264,17 @@ func (f *filler) start(gen uint64) {
 // begun playing. One frame per frame is what keeps the switch to the reply
 // inside a single frame's time.
 func (f *filler) play(gen uint64) {
+	// However this goroutine leaves, the episode leaves with it. That is not
+	// tidiness: playing is what arm reads to decide there is already a loop
+	// running, and what Media reads to decide the carrier is owed a clear. A
+	// goroutine that returned with playing still set would leave a machine
+	// with nothing running, nothing scheduled, and every later arm bailing out
+	// at its "already playing" guard — dead for the rest of the call — while
+	// the next reply sent a clear that discarded audio the carrier had every
+	// right to play. The frame-declined exit below reaches this already
+	// stopped, and endEpisode's generation check is what makes that a no-op.
+	defer f.endEpisode(gen)
+
 	ticker := time.NewTicker(telephony.MuLawFrameMS * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -257,9 +284,11 @@ func (f *filler) play(gen uint64) {
 		case <-ticker.C:
 			written, err := f.writeFrame(gen)
 			if err != nil {
-				// The carrier write failed. That ends the call by its own
-				// path — the bridge's next write reports it — so this
-				// goroutine only has to stop adding to the damage.
+				// The carrier write failed. Stop adding to the damage and
+				// leave the ending to whichever path observes it — but do not
+				// assume there is one: a filler frame fails precisely while
+				// the backend is SILENT, which is when no reply frame is
+				// coming to report anything. Hence the defer above.
 				log.Printf("twilio: realtime: filler audio: %v", err)
 				return
 			}
@@ -268,6 +297,21 @@ func (f *filler) play(gen uint64) {
 			}
 		}
 	}
+}
+
+// endEpisode marks the loop stopped, but only if the machine is still in the
+// generation the caller was playing under. The guard is what makes this safe
+// to defer unconditionally: a play goroutine that exits because stop() already
+// ran finds the generation moved on and changes nothing, so it cannot stomp a
+// wait that has since been re-armed or a loop that has since restarted.
+func (f *filler) endEpisode(gen uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.gen != gen {
+		return
+	}
+	f.playing = false
+	f.gen++
 }
 
 // writeFrame writes one frame of the loop, reporting whether it wrote. false

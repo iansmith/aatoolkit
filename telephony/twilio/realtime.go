@@ -1529,10 +1529,15 @@ func (s *carrierMediaSink) markEchoBound(now time.Time) time.Duration {
 // deliverCarrierAudio hands rec to carrierAudioCh without ever blocking, via
 // the same sendOrDrop idiom deliver's stream drain uses. deliver drains a
 // source channel from a goroutine it spawns; there is no source channel here,
-// because rec originates inline inside Media/Clear on Bridge.Run's own
-// read-loop goroutine. Inventing a source channel to route through deliver
-// would reintroduce a per-call goroutine to drain it — the leak this ticket's
-// non-blocking, inline design exists to avoid.
+// because rec originates inline beside the write it describes — in Media and
+// Clear on Bridge.Run's read-loop goroutine, and since AATK-108 in fillerMedia
+// on the filler's play goroutine as well. Inventing a source channel to route
+// through deliver would reintroduce a per-call goroutine to drain it — the
+// leak this ticket's non-blocking, inline design exists to avoid.
+//
+// Every caller reaches this from inside writeSem, as the afterWrite of its own
+// write. That is what serialises carrierAudioDropped now that the callers are
+// on more than one goroutine; see the field.
 func (s *carrierMediaSink) deliverCarrierAudio(rec CarrierAudio) {
 	if s.carrierAudioCh == nil {
 		return

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -367,13 +369,13 @@ func TestFiller_LoopBoundaryIsSeamless(t *testing.T) {
 
 // --- behaviour 1: unset is today's behaviour -------------------------------
 
-// TestFiller_UnsetIsByteIdentical pins the off case against the same script
+// TestFiller_UnsetWritesNothingWhileTheBackendIsSilent pins the off case against the same script
 // every test above drives: a call supplying no filler option writes nothing to
 // the carrier while the backend is silent, exactly as it did before the option
 // existed.
 //
 // slopstop:test contract
-func TestFiller_UnsetIsByteIdentical(t *testing.T) {
+func TestFiller_UnsetWritesNothingWhileTheBackendIsSilent(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url()))
 	waitBackendReady(t, be, h)
@@ -599,4 +601,319 @@ func TestWithFillerAudioFor_ResolvesFromTheStartFrame(t *testing.T) {
 		t.Fatalf("the resolver must be called once with the call's own start frame, got %q (want [%q])",
 			seen, h.streamSID)
 	}
+}
+
+// --- the write-error exit ---------------------------------------------------
+
+// scriptedWSWriter records every message written and can be told to fail one
+// of them, so a test can drive carrierMediaSink's error path deterministically
+// and then keep using the same sink afterwards.
+//
+// Distinct from failingWSWriter (realtime_carrieraudio_gaps_test.go), which
+// fails EVERY write: what this test needs is a carrier that fails once and
+// then works, because the property under test is what the machine does AFTER
+// a failed write. Recording the messages is the other half — the assertion is
+// about which frames reached the wire and in what order.
+type scriptedWSWriter struct {
+	mu     sync.Mutex
+	failAt int // 1-based index of the write that fails; 0 = never
+	n      int
+	msgs   [][]byte
+}
+
+func (w *scriptedWSWriter) Write(_ context.Context, _ websocket.MessageType, data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.n++
+	if w.failAt != 0 && w.n == w.failAt {
+		return errors.New("carrier write failed")
+	}
+	w.msgs = append(w.msgs, append([]byte(nil), data...))
+	return nil
+}
+
+// failNext arms the failure for the write after the ones already made, and
+// returns that write's index so a caller can wait for it to be ATTEMPTED.
+// Waiting on the recorded frames instead would not do: the failing write is by
+// definition the one that never gets recorded.
+func (w *scriptedWSWriter) failNext() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.failAt = w.n + 1
+	return w.failAt
+}
+
+// attempts is how many writes have been tried, recorded or not.
+func (w *scriptedWSWriter) attempts() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.n
+}
+
+// records decodes what the carrier received, reusing the same DecodeFrame the
+// wire capture trusts.
+func (w *scriptedWSWriter) records() []carrierWireRecord {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []carrierWireRecord
+	for _, m := range w.msgs {
+		f, err := DecodeFrame(m)
+		if err != nil {
+			continue
+		}
+		switch f.Event {
+		case EventMedia:
+			out = append(out, carrierWireRecord{payload: f.EncodedPayload})
+		case EventClear:
+			out = append(out, carrierWireRecord{clear: true})
+		}
+	}
+	return out
+}
+
+// TestFiller_SurvivesACarrierWriteFailure pins what the machine does after one
+// of its own frames fails to reach the carrier.
+//
+// The play goroutine returns on a write error, and the state it leaves behind
+// is the whole point: if it exits with the machine still marked as playing,
+// nothing is running, nothing is scheduled, and every later arm returns at the
+// "already playing" guard — the loop is dead for the rest of the call. Worse,
+// the next reply reads that stale flag and sends a clear the carrier is not
+// owed, discarding audio it had every right to play.
+//
+// The comment that used to sit on that exit said the failure "ends the call by
+// its own path — the bridge's next write reports it". That is only true if the
+// bridge writes again, and a filler frame fails precisely when the backend is
+// SILENT, which is when no reply frame is coming to report anything.
+//
+// Built against carrierMediaSink directly rather than through
+// HandleStreamRealtime, for the reason
+// TestCarrierMediaSink_WriteFailureNeverDeliversCarrierAudio states in full:
+// the sink's conn is the unexported wsWriter interface precisely so a test can
+// fail a write deterministically, while HandleStreamRealtime takes a concrete
+// *websocket.Conn.
+//
+// slopstop:test contract
+func TestFiller_SurvivesACarrierWriteFailure(t *testing.T) {
+	w := &scriptedWSWriter{}
+	fill := newFiller(context.Background(), FillerConfig{
+		Loop:  fillerTestLoop(),
+		Delay: 20 * time.Millisecond,
+	})
+	if fill == nil {
+		t.Fatal("test setup: the config must produce a live filler")
+	}
+	t.Cleanup(fill.shutdown)
+	sink := newCarrierMediaSink(w, "SSwritefail", nil, nil, fill)
+	fill.attach(sink)
+
+	countFiller := func() int { return len(fillerFrames(w.records())) }
+
+	fill.arm()
+	waitFor(t, 5*time.Second, func() bool { return countFiller() >= 2 })
+
+	// Fail the loop's next frame, and wait for that write to have been tried
+	// rather than for the frame count to settle: the failing write is the one
+	// that never gets recorded, so the count is not what moves.
+	failing := w.failNext()
+	waitFor(t, 5*time.Second, func() bool { return w.attempts() >= failing })
+
+	// And let the play goroutine act on the error it just got.
+	settled := countFiller()
+	waitFor(t, 5*time.Second, func() bool { return countFiller() == settled })
+
+	// The reply arrives. Nothing is queued that the caller has not already
+	// heard, so no clear is owed — a clear here would flush audio the carrier
+	// was entitled to play.
+	reply := carrierPayloadB64()
+	if err := sink.Media(context.Background(), reply); err != nil {
+		t.Fatalf("Media after a filler write failure: %v", err)
+	}
+	for _, r := range w.records() {
+		if r.clear {
+			t.Fatalf("a failed filler write must not leave a clear owed to the carrier:\n%+v", w.records())
+		}
+	}
+
+	// And the machine must still be usable: the next wait gets a loop.
+	before := countFiller()
+	fill.arm()
+	waitFor(t, 5*time.Second, func() bool { return countFiller() > before })
+}
+
+// --- the loop restarts at the top of the clip -------------------------------
+
+// TestFiller_EachEpisodeStartsAtTheTopOfTheLoop pins the read offset resetting
+// between waits. Two waits on one call is the ordinary shape of a
+// conversation, and a loop that resumed mid-clip on the second one would start
+// the caller somewhere arbitrary in the audio the consumer supplied — which is
+// exactly what a consumer supplying a clip with a deliberate beginning does
+// not expect.
+//
+// slopstop:test contract
+func TestFiller_EachEpisodeStartsAtTheTopOfTheLoop(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	// First wait: let the loop get past the wrap, so a machine that failed to
+	// reset would resume at a frame that is provably not the first.
+	armFiller(t, be)
+	waitFillerPlaying(t, wire, 4)
+
+	reply := carrierPayloadB64()
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
+	waitFor(t, 5*time.Second, func() bool {
+		for _, r := range wire() {
+			if r.payload == reply {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Second wait.
+	armFiller(t, be)
+	waitFor(t, 5*time.Second, func() bool { return len(secondEpisode(wire(), reply)) > 0 })
+
+	if got := secondEpisode(wire(), reply)[0]; got.payload != fillerFrameB64(0) {
+		t.Fatalf("the second wait must start at the top of the loop:\n got  %q\nwant %q",
+			got.payload, fillerFrameB64(0))
+	}
+}
+
+// secondEpisode returns the loop frames written after the record carrying
+// reply — that is, the frames belonging to the wait that followed it.
+func secondEpisode(recs []carrierWireRecord, reply string) []carrierWireRecord {
+	for i, r := range recs {
+		if r.payload == reply {
+			return fillerFrames(recs[i:])
+		}
+	}
+	return nil
+}
+
+// --- the call ending stops the loop -----------------------------------------
+
+// TestFiller_NoPlayGoroutineOutlivesTheCall pins the last of the ticket's stop
+// conditions: "also stop on backend error, or the call ending". The play
+// goroutine is the only thing on this path that keeps running with no event to
+// drive it, so a call that ended while the loop was playing is the one way
+// this option could leak a goroutine per call.
+//
+// Measured differentially, mirroring
+// TestCarrierAudioChan_NoEngineGoroutineOutlivesTheCall: each call leaves
+// fixed overhead behind (the httptest server and carrier conn live until
+// t.Cleanup), so an absolute count proves nothing.
+//
+// slopstop:test non-interference — paired: asserts the loop was actually
+// PLAYING on each call, so the measurement covers a live goroutine rather than
+// one that never started
+func TestFiller_NoPlayGoroutineOutlivesTheCall(t *testing.T) {
+	const calls = 5
+
+	run := func(withFiller bool) int {
+		runtime.GC()
+		time.Sleep(50 * time.Millisecond)
+		before := runtime.NumGoroutine()
+
+		for i := 0; i < calls; i++ {
+			be := newFakeRealtimeBackend(t)
+			var opts []RealtimeOption
+			if withFiller {
+				opts = append(opts, WithFillerAudio(FillerConfig{
+					Loop: fillerTestLoop(), Delay: 50 * time.Millisecond,
+				}))
+			}
+			h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(), opts...))
+			waitBackendReady(t, be, h)
+			wire := h.captureCarrierWire(t)
+			if withFiller {
+				armFiller(t, be)
+				waitFillerPlaying(t, wire, 3)
+			}
+			// End the call from the backend side, with the loop still running.
+			be.closeNow()
+			h.waitDone(5 * time.Second)
+		}
+
+		runtime.GC()
+		time.Sleep(200 * time.Millisecond)
+		return runtime.NumGoroutine() - before
+	}
+
+	base := run(false)
+	withFiller := run(true)
+
+	if withFiller > base+1 {
+		t.Fatalf("a call whose loop was playing when it ended must leave no goroutine behind: "+
+			"%d goroutines grew with filler audio, %d without", withFiller, base)
+	}
+}
+
+// TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot pins the one
+// thing shutdown does that nothing else on this path does.
+//
+// The play goroutine's other exits all depend on getting an answer from the
+// carrier: a frame declined, or a write that returns an error. Neither happens
+// while it is parked WAITING for the write slot, and that wait is real — Media
+// and Clear hold the slot on the call's own unbounded context, so a carrier
+// that has stopped draining parks whoever is behind them indefinitely. The
+// filler's private context is what bounds it, and shutdown is what cancels
+// that context.
+//
+// Measured against the parked goroutine directly rather than through a call,
+// because a call ending closes the carrier connection and the resulting write
+// error would end the loop by a different door — which is exactly why
+// TestFiller_NoPlayGoroutineOutlivesTheCall passes even with shutdown gutted,
+// and why this test exists beside it.
+//
+// slopstop:test contract
+func TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot(t *testing.T) {
+	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	fill := newFiller(context.Background(), FillerConfig{
+		Loop:  fillerTestLoop(),
+		Delay: 20 * time.Millisecond,
+	})
+	sink := newCarrierMediaSink(w, "SSpark", nil, nil, fill)
+	fill.attach(sink)
+
+	// Occupy the slot on an unbounded context, as Media does on a real call.
+	mediaDone := make(chan error, 1)
+	go func() { mediaDone <- sink.Media(context.Background(), carrierPayloadB64()) }()
+	select {
+	case <-w.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("test setup: the media write never reached the carrier connection")
+	}
+
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	parked := runtime.NumGoroutine()
+
+	// The loop starts and immediately parks behind that write.
+	fill.arm()
+	time.Sleep(300 * time.Millisecond)
+	if got := runtime.NumGoroutine(); got <= parked {
+		t.Fatalf("test setup: the play goroutine must be parked on the write slot (%d goroutines, was %d)",
+			got, parked)
+	}
+
+	fill.shutdown()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if runtime.NumGoroutine() <= parked {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("shutdown must release a play goroutine parked on the carrier write slot")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	close(w.release)
+	<-mediaDone
 }
