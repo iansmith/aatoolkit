@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,20 +135,32 @@ func TestFiller_StartsAfterDelayAndPaces(t *testing.T) {
 	}
 
 	// One frame per 20 ms, never ahead: over a 400 ms window the carrier may
-	// see about 20 frames, and a burst-written loop would show hundreds.
+	// see about 20 frames, and a burst-written loop would show thousands.
 	window := 400 * time.Millisecond
 	time.Sleep(window)
 	got := fillerFrames(wire())
-	elapsed := time.Since(first.at)
-	most := int(elapsed/(telephony.MuLawFrameMS*time.Millisecond)) + 2
-	if len(got) > most {
-		t.Fatalf("the loop must be paced at one frame per %d ms and never run ahead: %d frames in %v (at most %d)",
-			telephony.MuLawFrameMS, len(got), elapsed, most)
+
+	// Measured between the FIRST and LAST frame's own stamps rather than
+	// against this goroutine's clock. Both stamps come from the capture
+	// goroutine, so whatever lag it is running under cancels out of the
+	// difference; comparing a capture stamp against time.Now() here would
+	// count that lag as time the loop had no frames for, and fail a correctly
+	// paced loop on a loaded machine.
+	span := got[len(got)-1].at.Sub(first.at)
+	most := int(span/(telephony.MuLawFrameMS*time.Millisecond)) + 3
+	if len(got)-1 > most {
+		t.Fatalf("the loop must be paced at one frame per %d ms and never run ahead: %d frames across %v (at most %d)",
+			telephony.MuLawFrameMS, len(got), span, most+1)
 	}
-	least := int(window/(telephony.MuLawFrameMS*time.Millisecond)) / 2
+
+	// The floor only has to separate "playing" from "not playing at all" —
+	// zero is the failure this catches. A quarter of the nominal rate leaves
+	// room for a ticker that drops ticks under load, which Go's does rather
+	// than firing them late in a burst.
+	least := int(window/(telephony.MuLawFrameMS*time.Millisecond)) / 4
 	if len(got) < least {
-		t.Fatalf("the loop must keep playing while the backend is silent: only %d frames in %v (at least %d)",
-			len(got), elapsed, least)
+		t.Fatalf("the loop must keep playing while the backend is silent: only %d frames across %v (at least %d)",
+			len(got), span, least)
 	}
 }
 
@@ -439,5 +452,151 @@ func TestFiller_CarrierAudioRecordsAreMarkedFiller(t *testing.T) {
 	}
 	if !sawFiller {
 		t.Fatal("the consumer must receive the loop's frames as filler-marked records")
+	}
+}
+
+// --- behaviour 2, the ordering that actually happens on a call -------------
+
+// TestFiller_KeepsPlayingWhenRearmedMidLoop is the re-arm case in the order a
+// real call produces it, and the one TestFiller_RearmsAfterFunctionCall does
+// NOT reach: the loop is already playing when the tool call is announced.
+//
+// On a live call the function-call response.done arrives seconds into the
+// wait, long after the loop has started — the caller stopped speaking, the
+// loop began, and only then did the model finish deciding to call a tool. A
+// re-arm that stopped the loop instead of continuing it would go silent for
+// the whole tool round trip and second LLM leg, which is the longest wait this
+// ticket measured and the exact case the re-arm exists for.
+//
+// slopstop:test contract
+func TestFiller_KeepsPlayingWhenRearmedMidLoop(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	armFiller(t, be)
+	waitFillerPlaying(t, wire, 5)
+	before := len(fillerFrames(wire()))
+
+	be.emitAny(t, map[string]any{
+		"type": "response.done",
+		"response": map[string]any{
+			"output": []any{
+				map[string]any{"type": "function_call", "name": "lookup", "call_id": "c1"},
+			},
+		},
+	})
+
+	// Well under Delay: a machine that stopped and re-armed would be silent
+	// across this whole window, while one that kept playing adds ~10 frames.
+	time.Sleep(fillerTestDelay / 2)
+
+	after := len(fillerFrames(wire()))
+	if after <= before {
+		t.Fatalf("a function call announced mid-loop must not silence the loop: %d frames before, %d after",
+			before, after)
+	}
+
+	// And the machine must still be live afterwards: the second leg's first
+	// delta stops it, with the clear the carrier is owed.
+	reply := carrierPayloadB64()
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
+	waitFor(t, 5*time.Second, func() bool {
+		for _, r := range wire() {
+			if r.payload == reply {
+				return true
+			}
+		}
+		return false
+	})
+	got := wire()
+	replyAt := -1
+	for i, r := range got {
+		if r.payload == reply {
+			replyAt = i
+			break
+		}
+	}
+	if replyAt < 1 || !got[replyAt-1].clear {
+		t.Fatalf("the second leg's first frame must be preceded by the clear:\n%+v", got)
+	}
+}
+
+// --- behaviour 4: the turn ending stops the loop, without a clear ----------
+
+// TestFiller_StopsOnTurnEndingResponseDone pins the other half of the
+// response.done branch. A response that produced no audio still ends the turn,
+// and the loop must not outlive it waiting for a delta that is never coming.
+//
+// No clear goes with this one, deliberately: nothing is being interrupted, and
+// the frames already written are the caller's to hear out. The assertion that
+// no clear was sent is what distinguishes this stop from every other one.
+//
+// slopstop:test contract
+func TestFiller_StopsOnTurnEndingResponseDone(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	armFiller(t, be)
+	waitFillerPlaying(t, wire, 3)
+
+	be.emitAny(t, map[string]any{
+		"type":     "response.done",
+		"response": map[string]any{"output": []any{}},
+	})
+
+	// Let the stop take effect, then measure a window it must not write in.
+	time.Sleep(100 * time.Millisecond)
+	settled := len(fillerFrames(wire()))
+	time.Sleep(fillerTestDelay)
+
+	if got := len(fillerFrames(wire())); got != settled {
+		t.Fatalf("a turn-ending response.done must stop the loop: %d frames at rest, %d after a further %v",
+			settled, got, fillerTestDelay)
+	}
+	for _, r := range wire() {
+		if r.clear {
+			t.Fatalf("a turn-ending response.done must stop the loop without a clear:\n%+v", wire())
+		}
+	}
+}
+
+// --- behaviour 1: the per-call resolver -----------------------------------
+
+// TestWithFillerAudioFor_ResolvesFromTheStartFrame pins the "For" twin the
+// ticket names beside the value form. It is the only entry that can vary the
+// loop or the delay by caller, and what makes that possible is the start frame
+// it is handed — so the assertion is that the frame arrives, not merely that
+// something played.
+//
+// slopstop:test contract
+func TestWithFillerAudioFor_ResolvesFromTheStartFrame(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, func(ctx context.Context, conn *websocket.Conn, start Frame) error {
+		return HandleStreamRealtime(ctx, conn, start, be.url(),
+			WithFillerAudioFor(func(s Frame) FillerConfig {
+				mu.Lock()
+				seen = append(seen, s.StreamSID)
+				mu.Unlock()
+				return FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay}
+			}))
+	})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	armFiller(t, be)
+	waitFillerPlaying(t, wire, 3)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 || seen[0] != h.streamSID {
+		t.Fatalf("the resolver must be called once with the call's own start frame, got %q (want [%q])",
+			seen, h.streamSID)
 	}
 }

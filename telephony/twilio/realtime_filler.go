@@ -28,14 +28,21 @@ import (
 // caller a loop that does not play, which is exactly the silence this option
 // exists to replace and never worse than it.
 //
-// STOPPING a loop that is already playing is driven by carrierMediaSink,
-// because it must not be lossy in any direction. A stop the relay misses puts
-// loop frames on the wire underneath the reply. Media and Clear are called by
-// Bridge.Run for every audio delta and every speech_started, unconditionally
-// and without any drop in between, so the sink is where the guarantee lives.
-// observe deliberately only DISARMS on those two events (see disarmPending):
-// were it to stop a playing loop it could win the race against Media and
-// swallow the clear that Media owes the carrier.
+// STOPPING is driven by carrierMediaSink, because it must not be lossy in any
+// direction. A stop the relay misses puts loop frames on the wire underneath
+// the reply. Media and Clear are called by Bridge.Run for every audio delta
+// and every speech_started, unconditionally and without any drop in between,
+// so the sink is where the guarantee lives.
+//
+// observe therefore says NOTHING about audio deltas or speech_started, even
+// though it sees both. Acting on them there would be redundant with the sink
+// at best, and at worst wrong: observe runs on the drain goroutine while Media
+// runs on Bridge.Run's, so a stop issued from observe could win that race and
+// clear the machine's playing flag before Media reads it — and Media reads it
+// to decide whether the carrier is owed a clear. The loop would then stop with
+// frames still queued at the carrier and no clear to discard them, which is
+// the reply-behind-the-loop delay this option exists to hide. The only stop
+// observe issues is on a turn-ending response.done, where no clear is owed.
 //
 // Not reachable at all when the consumer supplied no usable FillerConfig:
 // newFiller returns nil and every method below tolerates a nil receiver, so an
@@ -129,11 +136,10 @@ func (f *filler) observe(ev ServerEvent) {
 		} else {
 			f.stop()
 		}
-	case realtime.EventAudioDelta, realtime.EventSpeechStarted:
-		// Disarm only. Stopping a PLAYING loop on these two is the sink's
-		// job, because the sink owns the clear that has to go with it.
-		f.disarmPending()
 	}
+	// Audio deltas and speech_started are deliberately absent: see the type
+	// comment. Both reach carrierMediaSink unconditionally, and the sink is
+	// what acts on them.
 }
 
 // arm starts, or restarts, the wait before the loop may play. A loop already
@@ -148,27 +154,30 @@ func (f *filler) arm() {
 	if f.stopped {
 		return
 	}
+	if f.playing {
+		// Already playing, so there is nothing to schedule and — this is the
+		// part that has to come first — nothing to invalidate. gen is the
+		// token the running play goroutine carries; bumping it here would
+		// make its next frame decline and the goroutine return, while playing
+		// stayed true and no timer was armed. The machine would be dead: no
+		// goroutine, no pending start, and every later arm returning at this
+		// same guard. That is precisely the case the re-arm exists for — the
+		// function call announced seconds into a wait the loop is already
+		// filling — so it would go silent for exactly the longest gap this
+		// ticket measured.
+		//
+		// Any timer still held here has already fired (start is what set
+		// playing), so leaving it alone costs nothing: start re-checks
+		// playing under the same lock.
+		return
+	}
 	f.gen++
 	if f.timer != nil {
 		f.timer.Stop()
 		f.timer = nil
 	}
-	if f.playing {
-		return
-	}
 	gen := f.gen
 	f.timer = time.AfterFunc(f.delay, func() { f.start(gen) })
-}
-
-// disarmPending cancels a start that has not happened yet and leaves a playing
-// loop alone. See the type comment for why the two are separated.
-func (f *filler) disarmPending() {
-	if f == nil {
-		return
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.cancelPendingLocked()
 }
 
 // stop ends the loop, whether it was pending or playing, and reports whether
