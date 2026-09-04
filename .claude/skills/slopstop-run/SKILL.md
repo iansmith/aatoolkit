@@ -3,7 +3,7 @@ description: The single lifecycle entry point — take one or more tickets and d
 disable-model-invocation: true
 ---
 
-<!-- GENERATED from slopstop b198ac6 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop ba63c04 by install-for-project.sh — do not edit.
      Edit skills/run/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-run
@@ -59,7 +59,6 @@ There is **one** switch, and it is this flag.
 |---|---|---|
 | adversary gap tests | add all | ask `add all / add selected <n,...> / skip` |
 | gap test that comes up green | stop the ticket | ask `revise / continue / abort` |
-| adversary still `FAIL` at round 3 | stop the ticket | present findings, ask |
 | `GOAL DEFECT` | stop the ticket | present verbatim, ask |
 | DoD item `not-met` / `unverifiable` | stop the ticket | present, ask |
 | CC breach | stop the ticket | present, ask |
@@ -110,6 +109,10 @@ a worker only as an explicit argument.
 | `$CC_REJECT` | `[complexity].cc_reject_threshold` | `10` |
 | `$CC_EXEMPT` | `[complexity].cc_exempt_pre_existing` | `true` |
 | `$FILE_NLOC_WARN` | `[complexity].file_nloc_warn_threshold` | `400` (`0` disables) |
+| `$CC_EXCLUDE_PATHS` | `[complexity].exclude_paths` | `[]` (empty — no filter) |
+| `$DUP_MIN_LINES` | `[duplication].min_lines` | `5` |
+| `$DUP_EXEMPT` | `[duplication].exempt_pre_existing` | `true` |
+| `$DUP_EXCLUDE_PATHS` | `[duplication].exclude_paths` | `[]` (empty — no filter) |
 | `$IN_PROGRESS_LABEL` | `[status_labels].in_progress` | required when `$SYSTEM = github` |
 | `$POST_MERGE_DONE` | `[workflow].post_merge_done` | `true` |
 | `$PUBLISH_ARTIFACTS` | `[workflow].publish_artifacts` | `false` |
@@ -147,11 +150,11 @@ Per ticket, in order. **W** = a worker launch (one `Agent()` per `worker-launch.
 | 4 | `red-tests` | W | **span** | returns test files, node-ids, `--command`, stub paths, observed failure output. `--backfill` when `$BACKFILL` — then it confirms **green**. Not launched when `$REFACTOR` |
 | 5 | `mutation-check` | W | **span** | `--tests --node-ids --command --targets --stubs` from stage 4. `--backfill` when `$BACKFILL` — then it is **the gate**, not a sanity check, and it **re-runs after stage 7** if stage 7 changed the tests. Not launched when `$REFACTOR` |
 | 6 | `phase0-commit` | I | **note** | commit the red tests + stubs. **Capture `$FROZEN` here.** Under `$BACKFILL` the commit holds green tests and no stubs — `$FROZEN` is captured the same way and means the same thing |
-| 7 | `adversary` | W+I | **span** | the loop, the add/skip decision, gap-test authoring, RED re-verify, gap commit — all yours. **One span per round**, never one span per loop |
+| 7 | `adversary` | W+I | **span** | **one round, not a loop.** The adversary runs once; on FAIL, work the findings (add gap tests, verify RED, commit) and advance. Review and handoff catch what the single round missed. **One span.** |
 | 8 | `implement` | W | **span** | the ticket, the plan, the failing tests. **It may add tests; it may never weaken, retarget or remove one** — `skills/implement/SKILL.md` is the definition. Under `--refactor` it may modify no test file at all. `--refactor` when `$REFACTOR`. **Not launched when `$BACKFILL`** — the tests are the deliverable and they already pass |
 | 8a | `tamper` | I | **span** | **mechanical, yours, before any checker is spawned**: the tamper diff against `$FROZEN` and the file-map violation check against `$OWN`. A FAIL stops the ticket here — no worker is bought. Under `$BACKFILL` the trigger is unchanged and the **resolution** is a mutation re-run, not a judgment — see below |
-| 9 | `gates` | W x 3, then W x 1-3 | **span** | `slop-check`, `vacuity-check`, `complexity-check` — launch together **on the READ-ONLY brief** (`worker-launch.md`), which detaches each at the tip so none holds the branch. **Then the pinning pass** — `mutation-check --implemented` against `$OWN`'s production diff, looping to a cap of 3, one span per round. It runs *after* the three, never beside them: it mutates, and a mutating worker never shares a tree. W x 2 when `$REFACTOR` or `$BACKFILL` |
-| 10 | `review` | W | **span** | loop until `REVIEW CLEAN`, cap 5 rounds |
+| 9 | `gates` | W x 4 parallel, then W x 1-3 | **span** | `slop-check`, `vacuity-check`, `complexity-check`, `duplication-check` — **launch as parallel agents** (all four `Agent()` calls in a single message) on the **READ-ONLY brief** (`worker-launch.md`), detached at `$TIP`. **Await all four**, then proceed to the pinning pass — `mutation-check --implemented` against `$OWN`'s production diff, looping to a cap of 3, one span per round. The pinning pass runs *after* the four, never beside them: it mutates, and a mutating worker never shares a tree. W x 2 when `$REFACTOR` or `$BACKFILL` |
+| 10 | `review` | W | **span** | **exit immediately on `REVIEW CLEAN`; only APPLIED rounds iterate.** Cap at 5 rounds |
 | 10a | `size` | I | **note** | once the diff exists: `git diff --numstat "$BASE"..HEAD`, then record **one entry per file** (path, added, removed, kind) plus the aggregates, the `test_globs` you classified by, and the provisional `tier` — an **enum**, computed from the counts the ticket's **mode** makes the deliverable (`run-jsonl.md` owns the table; backfill counts tests, not the production side its mode freezes to zero). **Nothing reads it** — it is the data that will later decide what is safe to skip, and `derive.py --check` validates its shape |
 | 10b | `handoff` | W x 2 | **span** | a **fresh** requirements adversary and code reviewer at the tier above, **launched SERIALLY — never in parallel** (both mutate production and contaminate each other). Fed artifacts only — never the agent's comments or the PR description. Applied fixes are committed before the round closes, then re-verified on the new tip. Produces a blessing bound to the **branch tip SHA**. **W x 1 for an invariant ticket**: requirements adversary only under `$BACKFILL`, code reviewer only under `$REFACTOR` — see `handoff-verification.md` |
 | 11 | `pr` | I | **span** | commit, push to `$PR_REMOTE`, open the PR against `$OWNER/$REPO` |
@@ -413,7 +416,7 @@ When `$REFACTOR` is set, five things change:
 1. **Stage 4 writes no tests.** Record `PHASE 0: none — refactor` yourself. Stages 5-7 skipped, `$FROZEN` absent.
 2. **`implement` is launched with `--refactor`.** Its Step 1.3 full-suite run becomes the baseline and the guard.
 3. **A red baseline stops the ticket.** `implement` returns `IMPLEMENT BLOCKED: refactor baseline not green`. You cannot prove you broke nothing against a broken suite.
-4. **`vacuity-check` is not launched.** Record `VACUITY SKIPPED: refactor ticket — no new tests`. A legitimate skip, **not** `BLOCKED`. `slop-check` and `complexity-check` run normally.
+4. **`vacuity-check` is not launched.** Record `VACUITY SKIPPED: refactor ticket — no new tests`. A legitimate skip, **not** `BLOCKED`. `slop-check`, `complexity-check`, and `duplication-check` run normally.
 5. **You check mechanically that no test file was touched**:
 
    ```bash
@@ -471,14 +474,14 @@ for its stages.
 ### Stages 4-7: red tests, mutation-check, phase-0 commit, adversary
 -> Read `.claude/skills/slopstop-run/references/stages-phase0.md`
 
-Covers: `$FROZEN` capture, adversary loop mechanics (verdict branching, cap-at-3,
-residue table, gap tests, commit format).
+Covers: `$FROZEN` capture, adversary round (verdict branching,
+gap tests, commit format).
 
 ### Stages 8-9: implement, tamper, gates, pinning
 -> Read `.claude/skills/slopstop-run/references/stages-implement.md`
 
 Covers: 8a tamper check, 10b handoff verification (three-way verdict, SALVAGE/DROP),
-stage 9 three gates + pinning pass (regression-tag handling, CC breach reduction,
+stage 9 four gates + pinning pass (regression-tag handling, CC breach reduction,
 mode variants).
 
 ### Stages 10-12: review, handoff, bot-read

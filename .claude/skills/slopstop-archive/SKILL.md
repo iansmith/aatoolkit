@@ -2,7 +2,7 @@
 description: Push every file in a ticket's tracking directory to the ticket — task plan, findings, the run.jsonl timing log, adversary rounds — so the local record survives where the ticket lives. Bytes move from disk to the backend without passing through the worker. Reports what it pushed; moves nothing and deletes nothing.
 ---
 
-<!-- GENERATED from slopstop b198ac6 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop ba63c04 by install-for-project.sh — do not edit.
      Edit skills/archive/ in the slopstop repo and re-run. (universal §5) -->
 
 # Archive — push the tracking directory to the ticket
