@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -17,6 +18,34 @@ import (
 type Process struct {
 	Cmd     *exec.Cmd
 	LogPath string
+
+	// exited is set by the Wait goroutine Launch starts, once the child has
+	// been reaped. It exists because exec.Cmd offers no race-free way to ask
+	// the question from another goroutine: Cmd.ProcessState is written by
+	// Wait and is only safe to read after Wait has returned, so a supervisor
+	// polling it would be reading it concurrently with that write.
+	//
+	// A Process built by any route other than Launch has no Wait goroutine
+	// behind it, so this stays false for its whole life and Exited reports
+	// "still running". That is the conservative answer — it preserves the
+	// behavior callers had before this field existed — but it does mean
+	// Exited is only load-bearing for processes this package actually
+	// launched.
+	exited atomic.Bool
+}
+
+// Exited reports whether this child has terminated and been reaped. It is
+// nil-safe, so callers holding an optional process handle can ask without
+// guarding first.
+//
+// False does not prove the child is alive: see the exited field's note on
+// Processes constructed outside Launch. True does prove it is dead — the flag
+// is only ever set after Wait has returned.
+func (p *Process) Exited() bool {
+	if p == nil {
+		return false
+	}
+	return p.exited.Load()
 }
 
 // LaunchSpec describes what to launch and how — a struct rather than a
@@ -55,9 +84,10 @@ type LaunchSpec struct {
 //   - stdout and stderr are both piped to the same resolved log file
 //     (see openLogForLaunch).
 //   - Wait() runs in a goroutine — Launch returns as soon as the process
-//     has started; reaping is fire-and-forget. A child that later dies
-//     simply shows as down at the next observation (observation is out of
-//     scope for this package).
+//     has started; reaping is fire-and-forget. That goroutine records the
+//     exit on the returned Process (see Exited), which is the only race-free
+//     way for a supervisor to learn a child died without being asked to kill
+//     it. Classifying that death is still out of scope for this package.
 func Launch(spec LaunchSpec) (*Process, error) {
 	dir := ""
 	if spec.Dir != "" {
@@ -90,12 +120,16 @@ func Launch(spec LaunchSpec) (*Process, error) {
 		return nil, fmt.Errorf("starting %q: %w", spec.Name, err)
 	}
 
+	proc := &Process{Cmd: cmd, LogPath: logPath}
 	go func() {
 		cmd.Wait()
+		// Before closing the log: a reader that sees the log closed and then
+		// asks whether the child is gone must not be told "still running".
+		proc.exited.Store(true)
 		logFile.Close()
 	}()
 
-	return &Process{Cmd: cmd, LogPath: logPath}, nil
+	return proc, nil
 }
 
 // launchWithCommand builds the common LaunchSpec shared by every
