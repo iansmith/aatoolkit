@@ -47,6 +47,16 @@ import (
 // rather than defended against with the cross-goroutine sequencing that
 // closing it would take.
 //
+// There is a second window of the same shape and the same cost, on the other
+// side: arm returns early when the loop is playing, deliberately leaving the
+// generation alone, so an arm that lands between a frame's write failing and
+// play's deferred endEpisode taking the lock is swallowed — endEpisode then
+// clears playing under a generation the arm did not change, and no timer was
+// ever set. Microseconds wide, and it needs a coincident carrier write
+// failure. Like the seam above it costs one wait its loop, which is the
+// silence this option replaces rather than anything worse, and it self-heals
+// at the next arm.
+//
 // observe therefore says NOTHING about audio deltas or speech_started, even
 // though it sees both. Acting on them there would be redundant with the sink
 // at best, and at worst wrong: observe runs on the drain goroutine while Media
@@ -271,8 +281,13 @@ func (f *filler) play(gen uint64) {
 	// with nothing running, nothing scheduled, and every later arm bailing out
 	// at its "already playing" guard — dead for the rest of the call — while
 	// the next reply sent a clear that discarded audio the carrier had every
-	// right to play. The frame-declined exit below reaches this already
-	// stopped, and endEpisode's generation check is what makes that a no-op.
+	// right to play. Most declines reach this already stopped — the three
+	// inside writeFrame's own closure do — and endEpisode's generation check
+	// is what makes those a no-op. One does not: fillerMedia declines when
+	// EncodeMediaB64 fails, on a machine that is still playing under a
+	// matching generation, and there endEpisode acts. That is the wanted
+	// answer, since nothing else would end the episode, but the two cases are
+	// worth telling apart rather than describing as one.
 	defer f.endEpisode(gen)
 
 	ticker := time.NewTicker(telephony.MuLawFrameMS * time.Millisecond)
@@ -304,6 +319,12 @@ func (f *filler) play(gen uint64) {
 // to defer unconditionally: a play goroutine that exits because stop() already
 // ran finds the generation moved on and changes nothing, so it cannot stomp a
 // wait that has since been re-armed or a loop that has since restarted.
+//
+// The bump is belt-and-braces rather than load-bearing, and is recorded as
+// such so it is not later mistaken for the guard: at the only point this
+// function acts, arm cannot have left a pending timer behind — it returns
+// early while playing is set, without arming one. Deleting the bump leaves
+// every test green.
 func (f *filler) endEpisode(gen uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

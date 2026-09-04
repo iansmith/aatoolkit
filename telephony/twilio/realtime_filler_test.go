@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"log"
 	"runtime"
 	"sync"
 	"testing"
@@ -879,6 +880,15 @@ func TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot(t *testing.T)
 	sink := newCarrierMediaSink(w, "SSpark", nil, nil, fill)
 	fill.attach(sink)
 
+	// Released through Cleanup rather than at the end of the body, so a
+	// t.Fatal on any assertion below still frees the parked media write. Left
+	// blocked, it would sit there for the life of the test binary and inflate
+	// every later goroutine count in this package — including the two other
+	// differentials in this file.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(w.release) }) }
+	t.Cleanup(release)
+
 	// Occupy the slot on an unbounded context, as Media does on a real call.
 	mediaDone := make(chan error, 1)
 	go func() { mediaDone <- sink.Media(context.Background(), carrierPayloadB64()) }()
@@ -914,6 +924,195 @@ func TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot(t *testing.T)
 		}
 	}
 
-	close(w.release)
+	release()
 	<-mediaDone
+}
+
+// --- the play goroutine's own exits -----------------------------------------
+
+// TestFiller_PlayGoroutineEndsWithTheEpisode pins the exit that runs on every
+// ordinary turn: the frame-declined return, taken when writeFrame reports that
+// the machine has left the generation this goroutine was playing under.
+//
+// Without it the goroutine keeps ticking at 50 Hz for the REST OF THE CALL,
+// taking the carrier write slot on every tick and contending with the reply's
+// own writes, while writing nothing — so no assertion about frames on the wire
+// can see it. TestFiller_ClearThenFirstDelta passes either way, because the
+// guard inside the slot still declines each frame. The goroutine is the only
+// observable, and it has to be measured WITHIN a live call: measuring across a
+// call boundary lets the goroutine exit by teardown instead, which is what
+// TestFiller_NoPlayGoroutineOutlivesTheCall would let it do.
+//
+// slopstop:test contract
+func TestFiller_PlayGoroutineEndsWithTheEpisode(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	idle := runtime.NumGoroutine()
+
+	armFiller(t, be)
+	waitFillerPlaying(t, wire, 3)
+	if got := runtime.NumGoroutine(); got <= idle {
+		t.Fatalf("test setup: the play goroutine must be running (%d goroutines, was %d)", got, idle)
+	}
+
+	// The reply ends the episode. The call itself keeps running.
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": carrierPayloadB64()})
+
+	deadline := time.After(5 * time.Second)
+	for {
+		runtime.GC()
+		if runtime.NumGoroutine() <= idle {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("the play goroutine must end with its episode, not outlive it inside a live call "+
+				"(%d goroutines, idle was %d)", runtime.NumGoroutine(), idle)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	assertStillRunning(t, h, "the episode ending must not end the call")
+}
+
+// TestFiller_CallTeardownLogsNoCarrierError pins play's own context case.
+//
+// Its effect is an ABSENCE, which is why nothing caught it. The case is
+// redundant for TERMINATION — the frame-declined exit would end the goroutine
+// a tick later regardless — and what it buys is that the loop stops without
+// waiting for that tick. Remove it and a tick lands on a connection being torn
+// down, which fails the write and logs a carrier error on a call that ended
+// perfectly normally.
+//
+// It does NOT pin HandleStreamRealtime's `defer fill.shutdown()`; deleting
+// that call site leaves this green. TestFiller_ShutdownIsCalledWhenTheCallEnds
+// below is what covers it, and the reason it takes a different shape is stated
+// there.
+//
+// Five calls rather than one: the losing tick is a race against teardown, so a
+// single call can win it by luck. Each call ends with the loop mid-flight,
+// which is the only arrangement that can lose it at all.
+//
+// slopstop:test contract
+func TestFiller_CallTeardownLogsNoCarrierError(t *testing.T) {
+	var buf syncBuffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	for i := 0; i < 5; i++ {
+		be := newFakeRealtimeBackend(t)
+		h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: 50 * time.Millisecond})
+		waitBackendReady(t, be, h)
+		wire := h.captureCarrierWire(t)
+
+		armFiller(t, be)
+		waitFillerPlaying(t, wire, 2)
+
+		// End the call with the loop still playing.
+		be.closeNow()
+		h.waitDone(5 * time.Second)
+	}
+
+	// Let any tick that survived teardown land.
+	time.Sleep(200 * time.Millisecond)
+
+	if bytes.Contains(buf.Bytes(), []byte("filler audio")) {
+		t.Fatalf("a call ending while the loop plays must stop it before the carrier connection goes away, "+
+			"never write into a torn-down one; log output: %q", buf.String())
+	}
+}
+
+// TestFiller_ShutdownIsCalledWhenTheCallEnds pins the call site rather than the
+// method — HandleStreamRealtime's `defer fill.shutdown()`.
+//
+// It takes an unusual shape for a reason that is the finding itself. Normally
+// the filler's context descends from the handler's, so the play goroutine dies
+// with the request whether or not shutdown is ever called; deleting the defer
+// leaves every other test in this file green, because the parent context
+// covers for it within microseconds. That coverage is real but it is not the
+// engine's own doing, and a consumer entering by HandleStreamRealtime with a
+// long-lived context of its own — which the signature invites, and which
+// TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot's rationale
+// depends on — gets no such help.
+//
+// So these calls are given a context that OUTLIVES the handler. Nothing but the
+// deferred shutdown then stops the loop before the carrier connection is torn
+// down, and the observable is what a tick lands on afterwards: a write into a
+// closed connection, which fails and logs. The goroutine differential is the
+// second half — it still exits, by the error path, which is precisely why the
+// count alone cannot see this and the log can.
+//
+// slopstop:test contract
+func TestFiller_ShutdownIsCalledWhenTheCallEnds(t *testing.T) {
+	const calls = 3
+
+	var buf syncBuffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	run := func(withFiller bool) int {
+		// Deliberately not the harness's context: see above. One per batch,
+		// cancelled only after the measurement, so nothing but the deferred
+		// shutdown can end a loop.
+		callCtx, cancelCall := context.WithCancel(context.Background())
+		defer cancelCall()
+
+		runtime.GC()
+		time.Sleep(50 * time.Millisecond)
+		before := runtime.NumGoroutine()
+
+		for i := 0; i < calls; i++ {
+			be := newFakeRealtimeBackend(t)
+			var opts []RealtimeOption
+			if withFiller {
+				opts = append(opts, WithFillerAudio(FillerConfig{
+					Loop: fillerTestLoop(), Delay: 50 * time.Millisecond,
+				}))
+			}
+			h := newRealtimeHarnessWith(t, func(_ context.Context, conn *websocket.Conn, start Frame) error {
+				return HandleStreamRealtime(callCtx, conn, start, be.url(), opts...)
+			})
+			waitBackendReady(t, be, h)
+			wire := h.captureCarrierWire(t)
+			if withFiller {
+				armFiller(t, be)
+				waitFillerPlaying(t, wire, 3)
+			}
+			// End the call with the loop still playing. callCtx stays live.
+			be.closeNow()
+			h.waitDone(5 * time.Second)
+		}
+
+		runtime.GC()
+		time.Sleep(300 * time.Millisecond)
+		return runtime.NumGoroutine() - before
+	}
+
+	base := run(false)
+	withFiller := run(true)
+
+	if bytes.Contains(buf.Bytes(), []byte("filler audio")) {
+		t.Fatalf("the call ending must stop the loop before the carrier connection goes away, even when "+
+			"the caller's context outlives the call; log output: %q", buf.String())
+	}
+	if withFiller > base+1 {
+		t.Fatalf("the call ending must stop the loop even when the caller's context outlives it: "+
+			"%d goroutines grew with filler audio, %d without", withFiller, base)
+	}
 }
