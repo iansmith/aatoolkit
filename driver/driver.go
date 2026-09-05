@@ -40,6 +40,10 @@ type Tier struct {
 	URL, Model string
 	Reasoning  bool
 	MaxTokens  int
+	// APIKey, when non-empty, is sent as "Authorization: Bearer <APIKey>" on
+	// this tier's chat request (AATK-112) -- what a hosted OpenAI-compatible
+	// API needs and a local llama-server ignores. Empty sends no header.
+	APIKey string
 }
 
 // Host is the driver's concrete host.Host: it turns a (messages, tier) pair
@@ -85,8 +89,21 @@ func (c Config) StreamHandler() twilio.StreamHandler {
 // New builds a driver Host from cfg, wiring the serial speech queue internally.
 func New(cfg Config) *Host {
 	h := &Host{
-		tiers:       cfg.Tiers,
-		client:      &http.Client{},
+		tiers: cfg.Tiers,
+		// Redirects are NOT followed (AATK-112). A tier may carry an API key,
+		// and Go's client retains Authorization across a redirect to the same
+		// hostname, a subdomain of it, or a different port on it (only a
+		// hop to an unrelated host strips it); the fleet's standing rule is
+		// not to lean on that but to surface a 30x from an LLM upstream as
+		// the response it is, so the request is never replayed against a
+		// host the operator did not configure. The TTS request shares this
+		// client; a local sidecar does not redirect, and a
+		// remote one that did would now report the 30x rather than follow it.
+		client: &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		prompt:      cfg.Prompt,
 		tts:         cfg.TTS,
 		userContext: cfg.UserContext,
@@ -157,6 +174,11 @@ func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*ht
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if ep.APIKey != "" {
+		// The key reaches the wire and nowhere else: the error paths below
+		// print the URL and the response body, never the request headers.
+		req.Header.Set("Authorization", "Bearer "+ep.APIKey)
+	}
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("calling %s: %w", ep.URL, err)
