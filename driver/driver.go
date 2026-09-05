@@ -89,8 +89,19 @@ func (c Config) StreamHandler() twilio.StreamHandler {
 // New builds a driver Host from cfg, wiring the serial speech queue internally.
 func New(cfg Config) *Host {
 	h := &Host{
-		tiers:       cfg.Tiers,
-		client:      &http.Client{},
+		tiers: cfg.Tiers,
+		// Redirects are NOT followed (AATK-112). A tier may carry an API key,
+		// and Go's client strips Authorization only on a cross-host hop; the
+		// fleet's standing rule is not to lean on that but to surface a 30x
+		// from an LLM upstream as the response it is, so the request is never
+		// replayed against a host the operator did not configure. The TTS
+		// request shares this client and loses nothing: a local sidecar does
+		// not redirect.
+		client: &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		prompt:      cfg.Prompt,
 		tts:         cfg.TTS,
 		userContext: cfg.UserContext,
@@ -161,6 +172,11 @@ func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*ht
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if ep.APIKey != "" {
+		// The key reaches the wire and nowhere else: the error paths below
+		// print the URL and the response body, never the request headers.
+		req.Header.Set("Authorization", "Bearer "+ep.APIKey)
+	}
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("calling %s: %w", ep.URL, err)
