@@ -126,6 +126,8 @@ func pidOf(p *lifecycle.Process) (int32, bool) {
 // nil having signalled nothing, and the relaunch then overwrote the handle
 // (review round 5). It is gone — every stop routes through
 // retireRegistration, which asks this structural question exactly once.
+// (TeardownAll is the exception: it walks the whole registry under one lock
+// and tears down in reverse config order, so it reads pidOf directly.)
 // Must be called with e.mu held.
 func (e *RealEngine) registeredPIDLocked(name string) (int32, bool) {
 	return pidOf(e.procs[name])
@@ -142,8 +144,16 @@ func (e *RealEngine) registeredPIDLocked(name string) (int32, bool) {
 // Four review rounds each found one site that had quietly become the second
 // kind while still doing the first. The fix is not vigilance: it is
 // registerProc below, which refuses to write over a registration nobody
-// retired. A caller that forgets fails loudly instead of stranding a process
-// group in silence.
+// retired: a launch path that forgets gets a loud error naming the missing
+// call rather than stranding a process group in silence.
+//
+// That guard is real but partial, and it is worth being exact about its
+// limits rather than trusting it further than it reaches. It fires only on
+// paths that WRITE the registry, so it says nothing about a caller that
+// abandons an entry without launching a replacement — Build's replace-and-
+// stay-down path is exactly that, and it went unnoticed for six review
+// rounds. It also writes before it reports, so the handle is lost AND the
+// error raised, not one instead of the other.
 
 // deleteProc forgets our registration for name, for a caller that has already
 // finished tearing the server down. TeardownAll keeps its own loop: it drops
@@ -868,7 +878,10 @@ func (e *RealEngine) upOne(s config.Server) verbOutcome {
 	}
 
 	if err := e.registerProc(s, proc); err != nil {
-		return verbOutcome{Name: s.Name, Err: fmt.Errorf("up %s: clearing the remains of a previous run: %w", s.Name, err), LogPath: proc.LogPath}
+		// Not a teardown failure: the child launched and is registered. This
+		// is the invariant reporting that some path reached here without
+		// retiring first, which is a bug in this file, not in the server.
+		return verbOutcome{Name: s.Name, Err: fmt.Errorf("up %s: %w", s.Name, err), LogPath: proc.LogPath}
 	}
 
 	if err := e.buildProbeAndPollReady(s, proc); err != nil {
@@ -1568,10 +1581,16 @@ func (e *RealEngine) teardownDetached(s config.Server) error {
 	return fmt.Errorf("teardown %q: port(s) %v still listening after teardown command", s.Name, ports)
 }
 
-// killForeignOrOwned tears down a stray by PID: if it's a PID we happen to
-// have registered (owned-disabled server), goes through the normal
-// registered teardown path; otherwise it's a genuinely foreign process,
-// torn down via TeardownForeign (PID-matched only, per §6.4).
+// killForeignOrOwned tears down a stray: if it is one we have registered (an
+// owned-disabled server), it retires that registration — which sweeps the
+// group, runs a detached server's own teardown command rather than signalling
+// its meaningless launcher PID, and keeps the entry if the teardown could not
+// be verified. Otherwise it is a genuinely foreign process, torn down via
+// TeardownForeign (PID-matched only, per §6.4).
+//
+// pid is therefore used only on the foreign arm. On the owned arm the
+// registry is the authority, and consulting it again is what lets the
+// detached and keep-on-failure rules apply here as they do everywhere else.
 func (e *RealEngine) killForeignOrOwned(s config.Server, pid int32, isOurs bool) verbOutcome {
 	var err error
 	if isOurs {
@@ -1602,7 +1621,27 @@ func (e *RealEngine) Build(name string) error {
 
 	e.mu.Lock()
 	_, isOurs := e.ownedPIDLocked(s)
+	_, registered := e.registeredPIDLocked(name)
 	e.mu.Unlock()
+
+	// A registration that is no longer ours belongs to a child that exited on
+	// its own, and build is about to swap the binary underneath it. Retire it
+	// first, for the same reason upOne does before rebuildIfStaleCold: the
+	// group may still hold an orphan, and replacing the artifact under an
+	// unswept group leaves a process running from a binary that no longer
+	// exists on disk. Nothing else here would catch it — this path writes
+	// nothing, so registerProc's refusal never sees it, which is how it
+	// survived six review rounds.
+	//
+	// lc stays nil afterwards, so the build then replaces and leaves the
+	// server down. That is Build's documented contract for a server that
+	// isn't running ("was down -> replace, stay down"), and a crashed server
+	// is down however recently it was alive.
+	if !isOurs && registered {
+		if err := e.retireRegistration(s); err != nil {
+			return fmt.Errorf("build %s: clearing the remains of a previous run: %w", name, err)
+		}
+	}
 
 	var lc *lifecycle.BuildLifecycle
 	if isOurs {
