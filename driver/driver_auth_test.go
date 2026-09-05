@@ -62,8 +62,8 @@ func TestTierAPIKey_IsSentAsBearer(t *testing.T) {
 // to the same hostname, a subdomain, or another port, and strips it only for
 // an unrelated host; the fleet's standing rule is not to lean on that -- a
 // redirect is surfaced as the response it is, and the second host never sees
-// a request. Red today: the default client follows the 302 and the second
-// server records the hop.
+// a request. Before AATK-112 the default client followed the 302 and the
+// second server recorded the hop; that is what this test went red on.
 func TestTierAPIKey_DoesNotFollowARedirect(t *testing.T) {
 	var hops int32
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
