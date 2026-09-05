@@ -170,6 +170,12 @@ func buildStreamPayload(ep Tier, contextWindow []byte) map[string]any {
 	if !ep.Reasoning {
 		payload["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
 	}
+	if ep.NoTools {
+		// An explicit empty list, not an absent key: absent, a tool-trained
+		// hosted model invents a function to call and streams no content
+		// (AATK-113). tool_choice "none" was measured not to stop it.
+		payload["tools"] = []any{}
+	}
 	return payload
 }
 
@@ -203,7 +209,8 @@ func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*ht
 // stream.
 type sseChunk struct {
 	Choices []struct {
-		Delta sseDelta `json:"delta"`
+		Delta        sseDelta `json:"delta"`
+		FinishReason string   `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -215,6 +222,10 @@ type sseDelta struct {
 	Content          string `json:"content"`
 	ReasoningContent string `json:"reasoning_content"`
 	Reasoning        string `json:"reasoning"`
+	// finishReason is the chunk's finish_reason, carried beside the delta so
+	// an empty stream can say why it ended ("tool_calls", "length"). Not a
+	// JSON field of the delta itself.
+	finishReason string
 }
 
 // reasoningText returns the delta's reasoning, tolerating both spellings
@@ -248,7 +259,9 @@ func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 	if len(chunk.Choices) == 0 {
 		return sseDelta{}, false, nil
 	}
-	return chunk.Choices[0].Delta, true, nil
+	delta = chunk.Choices[0].Delta
+	delta.finishReason = chunk.Choices[0].FinishReason
+	return delta, true, nil
 }
 
 // isSegmentDelimiter reports whether b is one of the punctuation boundaries
@@ -308,6 +321,7 @@ type streamState struct {
 	contentBuf, reasoningBuf strings.Builder
 	acc                      *segmentAccumulator
 	hasContent               bool
+	finishReason             string // the last non-empty finish_reason seen
 }
 
 // processSSELine decodes one SSE line, folds it into st, and calls onSegment
@@ -326,6 +340,9 @@ func processSSELine(line string, st *streamState, onSegment func(string)) error 
 	st.reasoningBuf.WriteString(d.reasoningText())
 	if d.Content != "" {
 		st.hasContent = true
+	}
+	if d.finishReason != "" {
+		st.finishReason = d.finishReason
 	}
 	for _, b := range []byte(d.Content) {
 		if seg, ok := st.acc.write(b); ok {
@@ -370,6 +387,9 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 		return nil, nil, fmt.Errorf("reading SSE stream: %w", err)
 	}
 	if !st.hasContent {
+		if st.finishReason != "" {
+			return nil, nil, fmt.Errorf("no content in SSE stream (finish_reason %s)", st.finishReason)
+		}
 		return nil, nil, fmt.Errorf("no content in SSE stream")
 	}
 	// Flush any trailing text that didn't hit a boundary.
