@@ -91,12 +91,14 @@ func New(cfg Config) *Host {
 	h := &Host{
 		tiers: cfg.Tiers,
 		// Redirects are NOT followed (AATK-112). A tier may carry an API key,
-		// and Go's client strips Authorization only on a cross-host hop; the
-		// fleet's standing rule is not to lean on that but to surface a 30x
-		// from an LLM upstream as the response it is, so the request is never
-		// replayed against a host the operator did not configure. The TTS
-		// request shares this client and loses nothing: a local sidecar does
-		// not redirect.
+		// and Go's client retains Authorization across a redirect to the same
+		// hostname, a subdomain of it, or a different port on it (only a
+		// hop to an unrelated host strips it); the fleet's standing rule is
+		// not to lean on that but to surface a 30x from an LLM upstream as
+		// the response it is, so the request is never replayed against a
+		// host the operator did not configure. The TTS request shares this
+		// client; a local sidecar does not redirect, and a
+		// remote one that did would now report the 30x rather than follow it.
 		client: &http.Client{
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse

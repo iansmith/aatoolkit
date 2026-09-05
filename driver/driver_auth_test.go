@@ -58,8 +58,9 @@ func TestTierAPIKey_IsSentAsBearer(t *testing.T) {
 }
 
 // TestTierAPIKey_DoesNotFollowARedirect (AATK-112): a 30x from the tier's
-// upstream is not followed. Go's client would strip Authorization on a
-// cross-host hop, but the fleet's standing rule is not to lean on that -- a
+// upstream is not followed. Go's client keeps Authorization across a redirect
+// to the same hostname, a subdomain, or another port, and strips it only for
+// an unrelated host; the fleet's standing rule is not to lean on that -- a
 // redirect is surfaced as the response it is, and the second host never sees
 // a request. Red today: the default client follows the 302 and the second
 // server records the hop.
