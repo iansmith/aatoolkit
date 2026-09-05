@@ -394,7 +394,8 @@ func processGroupAlive(pid int32) bool {
 // this test the branch deleted the entry and returned ok, stranding the
 // orphan for the rest of the session: TeardownAll walks e.procs, so quit
 // could not reach it either. That was a regression against master, which
-// swept the group via the isOurs branch's teardownOne.
+// swept the group, because the dead child still counted as ours and took the
+// ordinary teardown path.
 func TestRealEngine_Down_AfterLeaderCrash_SweepsOrphanedProcessGroup(t *testing.T) {
 	s := orphanLeaderServer(t, "svc")
 	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
@@ -553,13 +554,16 @@ func TestRealEngine_Up_AfterLeaderCrash_SweepsOrphanBeforeRelaunching(t *testing
 // every write to e.procs goes through registerProc, which retires what it
 // replaces.
 //
-// This is a source-level guard, and it is deliberately that rather than a
-// behavioral one. The class was found four times by four review rounds, each
-// time as one site that overwrote or dropped a registration without sweeping
-// the process group its PID led. No behavioral test can cover the site nobody
-// thought of — but every one of them had to write to the map, so that is
-// where the check belongs. A new direct assignment fails this immediately,
-// with a pointer to the function to use instead.
+// This is the cheap half of the invariant, and the weaker one. It catches a
+// direct assignment on a path no test exercises, which is worth having, but
+// it is a regex over one file: a write through a local alias, from another
+// file in the package, or under a different receiver name all evade it, and
+// it says nothing about DELETES — two of the four historical instances were a
+// delete and a read, not a write.
+//
+// The load-bearing half is registerProc's own refusal, which is a runtime
+// check and fires on any path a test actually runs. Treat this as a lint, not
+// as the guarantee.
 func TestEngine_EveryRegistryWriteGoesThroughRegisterProc(t *testing.T) {
 	src, err := os.ReadFile("engine.go")
 	if err != nil {
@@ -587,21 +591,20 @@ func TestEngine_EveryRegistryWriteGoesThroughRegisterProc(t *testing.T) {
 	}
 }
 
-// AATK-106, option A. registerProc retires the entry it replaces — the
-// mechanism the guard test above protects, asserted behaviorally.
+// AATK-106, option A. registerProc REFUSES to overwrite a registration nobody
+// retired — the runtime half of the invariant, and the stronger half: it
+// fires on any path a test exercises, whether or not anyone thought to look
+// there.
 //
-// Round 5 found the case this covers: upOne decides the child is ours, then
-// rebuildIfStaleOwned's Stop asks the liveness question a second time, gets
-// "not ours" because the child died in between, tears nothing down, and lets
-// Start overwrite the handle. Retiring at the point of the write closes that
-// without every caller having to remember the race exists.
-func TestRealEngine_RegisterProc_RetiresTheEntryItReplaces(t *testing.T) {
+// It must still record the new child. The process is already running, and
+// declining to register it would strand exactly the thing the invariant
+// exists to protect, one level up.
+func TestRealEngine_RegisterProc_RefusesToOverwriteAnUnretiredEntry(t *testing.T) {
 	s := orphanLeaderServer(t, "svc")
 	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
 	oldPID := launchOrphanLeader(t, eng, s)
+	t.Cleanup(func() { _ = syscall.Kill(-int(oldPID), syscall.SIGKILL) })
 
-	// A second child for the same server, registered the way every launch
-	// path does it.
 	replacement, err := eng.launch(s)
 	if err != nil {
 		t.Fatalf("launching the replacement: %v", err)
@@ -609,15 +612,67 @@ func TestRealEngine_RegisterProc_RetiresTheEntryItReplaces(t *testing.T) {
 	replacementPID := int32(replacement.Cmd.Process.Pid)
 	t.Cleanup(func() { _ = syscall.Kill(-int(replacementPID), syscall.SIGKILL) })
 
-	if err := eng.registerProc(s, replacement); err != nil {
-		t.Fatalf("registerProc: %v", err)
+	err = eng.registerProc(s, replacement)
+	if err == nil {
+		t.Fatal("registerProc silently overwrote a registration nobody retired; that discards the group handle")
+	}
+	if !strings.Contains(err.Error(), "nobody retired") {
+		t.Fatalf("refusal should say what went wrong, got: %v", err)
 	}
 
-	waitForCondition(t, 5*time.Second,
-		fmt.Sprintf("the replaced registration's pid group %d to be swept", oldPID),
-		func() bool { return !processGroupAlive(oldPID) })
-
 	if got := engineChildPID(t, eng, "svc"); got != replacementPID {
-		t.Fatalf("registry holds pid %d, want the replacement %d", got, replacementPID)
+		t.Fatalf("the running replacement must still be registered; registry holds %d, want %d", got, replacementPID)
+	}
+}
+
+// AATK-106, option A. The regression that option A's first shape caused, and
+// the reason retirement belongs at the stop rather than at the write.
+//
+// This is the edit-then-`up` workflow: a source server is running, its binary
+// goes stale, and `up` rebuilds it in place. rebuildIfStaleOwned's Stop
+// retires the old child, Start launches the replacement.
+//
+// Retiring inside registerProc instead broke it. Teardown verifies by
+// scanning host ports and probing health, and by the time Start registers the
+// replacement the REPLACEMENT may already be listening on that port and
+// answering /healthz — so the verification concluded the old child had
+// survived SIGKILL and `up` failed with "kill not achieved". The declared
+// port and health spec are what make that reachable at all; a port-less
+// fixture verifies nothing.
+//
+// Be precise about what this test does and does not pin. It does NOT reliably
+// reproduce that failure: whether the replacement has bound its port when the
+// verification runs is a race, and against the broken commit this same test
+// passed five times running before failing. What it pins deterministically is
+// the fix's actual shape — Stop must retire, so registerProc never meets an
+// entry. Take the retire out of Stop and this fails 5 times in 5, on
+// registerProc's refusal rather than on the race.
+//
+// That is the substance of the change, not an artifact of it: a timing-
+// dependent corruption that showed up as a nonsense teardown error is now a
+// deterministic error that names the missing call.
+func TestRealEngine_Up_RunningStaleSourceServer_RebuildsInPlace(t *testing.T) {
+	port := freeTestPort(t)
+	binPath := filepath.Join(t.TempDir(), "tdlistener-source")
+	s := tdlistenerSourceServer(t, "svc", port, binPath)
+	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
+	t.Cleanup(func() { eng.TeardownAll() })
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("first Up: %v", err)
+	}
+	firstPID := engineChildPID(t, eng, "svc")
+
+	// Stale the binary the way an edit-and-rebuild would.
+	if err := os.WriteFile(binPath, []byte("stale"), 0o755); err != nil {
+		t.Fatalf("staling the binary: %v", err)
+	}
+
+	if err := eng.Up("svc"); err != nil {
+		t.Fatalf("up on a running, stale source server should rebuild in place: %v", err)
+	}
+
+	if got := engineChildPID(t, eng, "svc"); got == 0 || got == firstPID {
+		t.Fatalf("rebuild should have replaced the child; registry holds %d, first was %d", got, firstPID)
 	}
 }
