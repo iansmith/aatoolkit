@@ -44,6 +44,14 @@ type Tier struct {
 	// this tier's chat request (AATK-112) -- what a hosted OpenAI-compatible
 	// API needs and a local llama-server ignores. Empty sends no header.
 	APIKey string
+	// NoTools, when true, declares an empty tools list on this tier's chat
+	// request (AATK-113). This driver is text-only -- it reads content and
+	// reasoning and drops tool_calls -- and a tool-trained hosted model that
+	// is merely TOLD about capabilities in the prompt will invent a function
+	// call and answer nothing. An explicit "tools": [] is what stops it;
+	// tool_choice "none" was measured not to. Off by default: the local
+	// servers have not been exercised against an empty tools array.
+	NoTools bool
 }
 
 // Host is the driver's concrete host.Host: it turns a (messages, tier) pair
