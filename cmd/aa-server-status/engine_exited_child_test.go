@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -15,10 +13,10 @@ import (
 )
 
 // AATK-106. Nothing reaped a child that exited on its own, so the ownership
-// helper kept answering "ours" for a PID that was gone and `up` on a
-// crashed server took the already-ours branch — printing ok and launching
-// nothing, while Status (which observes ports, not the registry) correctly
-// says down. The tests below pin the two verbs to the same truth.
+// helper kept answering "ours" for a PID that was gone and `up` on a crashed
+// server took the already-ours branch — printing ok and launching nothing,
+// while Status, which observes ports rather than the registry, correctly said
+// down. These tests pin the two verbs to the same truth.
 
 // killEngineChildOutOfBand kills the child RealEngine launched for name the
 // way a crash does — the supervisor never asked for it, so no engine code
@@ -245,14 +243,6 @@ func detachedMarkerServer(name, markerPath string) config.Server {
 // server, and downOne sends it to its teardown command rather than to a PID
 // signal, even though the launcher is long gone.
 //
-// It no longer discriminates the s.Detached guard in ownedPIDLocked, and the
-// comment here used to claim it did. That stopped being true when the fleet
-// loop's gate moved from liveness to the registration (review round 2, F2):
-// the server now routes to downOne either way, so deleting the guard leaves
-// this test green. Verified by mutation, not assumed —
-// Up_DetachedLauncherExited_StaysIdempotent and
-// OwnedPID_ExitedLauncher_DependsOnDetached are what catch that mutant now.
-//
 // The fixture still has to register through the engine's real launch path:
 // Exited() is only ever set by the Wait goroutine Launch starts, so a
 // hand-built lifecycle.Process reports "still running" forever and cannot
@@ -321,134 +311,19 @@ func TestRealEngine_OwnedPID_ExitedLauncher_DependsOnDetached(t *testing.T) {
 			if isOurs != tc.wantOurs {
 				t.Fatalf("ownedPIDLocked ours = %v, want %v", isOurs, tc.wantOurs)
 			}
-			// Either way the entry survives the read: TeardownAll walks
-			// e.procs for the PIDs it group-kills, and a dead leader's PID
-			// is the only handle on an orphan left in its process group.
+			// Either way the entry survives: ownedPIDLocked is a pure
+			// read. `down` is where the operator asks us to forget a
+			// crashed server, and that is the one place the prune lives.
 			if !stillRegistered {
-				t.Fatalf("ownedPIDLocked pruned the registry entry; TeardownAll needs it to group-kill orphans")
+				t.Fatalf("ownedPIDLocked pruned the registry entry; it must be a pure read")
 			}
 		})
 	}
 }
 
-// orphanLeaderServer launches a leader that backgrounds a long-lived child
-// and exits immediately, leaving a live orphan in the leader's process group
-// — the shape a real crash leaves behind, and the one a PID-registry prune
-// can silently strand. The orphan holds no declared port, so nothing in the
-// host scan can find it: the registered leader PID is the only handle on it.
-func orphanLeaderServer(t *testing.T, name string) config.Server {
-	t.Helper()
-	return config.Server{
-		Name:    name,
-		Type:    config.TypeExec,
-		Enabled: true,
-		Command: "/bin/sh",
-		Args:    []string{"-c", "sleep 300 & exit 0"},
-	}
-}
-
-// launchOrphanLeader launches s through the engine's real launch path,
-// registers it, and returns once the leader has exited with its orphan still
-// running. The returned pid is the leader's, which is also the process-GROUP
-// id the orphan belongs to.
-func launchOrphanLeader(t *testing.T, eng *RealEngine, s config.Server) int32 {
-	t.Helper()
-	proc, err := eng.launch(s)
-	if err != nil {
-		t.Fatalf("launching orphan-leader fixture: %v", err)
-	}
-	eng.mu.Lock()
-	eng.procs[s.Name] = proc
-	eng.mu.Unlock()
-
-	pid := int32(proc.Cmd.Process.Pid)
-
-	// Sweep the group however the test ends, registered before anything
-	// below can call t.Fatalf. Without this a test that fails — including
-	// the waitForExited timeout immediately after — leaves the orphan
-	// running for its full five minutes, and the strays accumulate across
-	// runs of the very suite that exists to catch stray processes.
-	t.Cleanup(func() { _ = syscall.Kill(-int(pid), syscall.SIGKILL) })
-
-	waitForExited(t, proc, s.Name)
-
-	if !processGroupAlive(pid) {
-		t.Fatalf("fixture did not leave an orphan alive in pid group %d", pid)
-	}
-	return pid
-}
-
-// processGroupAlive reports whether any process remains in the group led by
-// pid. Signal 0 against a negative pid asks about the whole group, which is
-// what makes it able to see an orphan whose leader is already reaped.
-func processGroupAlive(pid int32) bool {
-	return syscall.Kill(-int(pid), 0) != syscall.ESRCH
-}
-
-// AATK-106 review round 2, F1. `down` on a server whose leader crashed must
-// still sweep the process group before forgetting the registration.
-//
-// The registered PID is the group id, and the group outlives its leader, so
-// it is the only handle on an orphan the crash left running — one holding no
-// declared port cannot be found by the host scan `down` falls back to. Before
-// this test the branch deleted the entry and returned ok, stranding the
-// orphan for the rest of the session: TeardownAll walks e.procs, so quit
-// could not reach it either. That was a regression against master, which
-// swept the group, because the dead child still counted as ours and took the
-// ordinary teardown path.
-func TestRealEngine_Down_AfterLeaderCrash_SweepsOrphanedProcessGroup(t *testing.T) {
-	s := orphanLeaderServer(t, "svc")
-	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
-	pid := launchOrphanLeader(t, eng, s)
-
-	if err := eng.Down("svc"); err != nil {
-		t.Fatalf("Down after a leader crash: %v", err)
-	}
-
-	waitForCondition(t, 5*time.Second,
-		fmt.Sprintf("the orphan in pid group %d to be swept by down", pid),
-		func() bool { return !processGroupAlive(pid) })
-
-	eng.mu.Lock()
-	_, still := eng.procs["svc"]
-	eng.mu.Unlock()
-	if still {
-		t.Fatalf("down swept the group but left the registry entry behind")
-	}
-}
-
-// AATK-106 review round 2, F2. Bare `down` (no server named) must not skip an
-// enabled server whose child exited.
-//
-// downOrDead's fleet loop gates on the registration rather than on liveness
-// precisely because of this case: an exited child is not "ours", so a
-// liveness gate matches neither that arm nor the !s.Enabled stray arm, and
-// the crashed server the operator is trying to clean up is passed over in
-// silence — orphan still running, entry still registered.
-func TestRealEngine_DownAll_AfterLeaderCrash_DoesNotSkipEnabledServer(t *testing.T) {
-	s := orphanLeaderServer(t, "svc")
-	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
-	pid := launchOrphanLeader(t, eng, s)
-
-	if err := eng.Down(""); err != nil {
-		t.Fatalf("bare Down after a leader crash: %v", err)
-	}
-
-	waitForCondition(t, 5*time.Second,
-		fmt.Sprintf("the orphan in pid group %d to be swept by bare down", pid),
-		func() bool { return !processGroupAlive(pid) })
-
-	eng.mu.Lock()
-	_, still := eng.procs["svc"]
-	eng.mu.Unlock()
-	if still {
-		t.Fatalf("bare down passed over an enabled server whose child had exited")
-	}
-}
-
-// AATK-106 review round 2, F8. The other half of the detached exception's
-// justification: `up` on a detached server whose launcher has exited must
-// stay the idempotent skip, not fall through to the port-conflict gate.
+// AATK-106. The caller the detached exception exists for: `up` on a detached
+// server whose launcher has exited must stay the idempotent skip, not fall
+// through to the port-conflict gate.
 //
 // The foreign listener stands in for the container. Without the exception
 // isOurs goes false, checkPortConflict finds the declared port held by a PID
@@ -476,189 +351,14 @@ func TestRealEngine_Up_DetachedLauncherExited_StaysIdempotent(t *testing.T) {
 	}
 }
 
-// AATK-106 review round 3, finding 1. `dead` must sweep the orphaned process
-// group of a DISABLED server whose registered child exited.
+// AATK-106 non-interference. `up` on a RUNNING source server whose binary has
+// gone stale must still rebuild it in place — the edit-then-`up` workflow.
 //
-// This is the same defect as round 2's F1, one branch over. downOrDead's
-// disabled-server arm reaches killForeignOrOwned through observedRunningPID,
-// which asks the registry for the PID to signal — so making that lookup
-// liveness-aware silently dropped the sweep for every disabled server, while
-// the enabled arm kept it. The lookup is structural for exactly this reason:
-// the registered PID is the group id, and an orphan holding no declared port
-// cannot be found any other way.
-func TestRealEngine_Dead_DisabledServerAfterLeaderCrash_SweepsOrphanedGroup(t *testing.T) {
-	s := orphanLeaderServer(t, "svc")
-	s.Enabled = false
-	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
-	pid := launchOrphanLeader(t, eng, s)
-
-	if err := eng.Dead(""); err != nil {
-		t.Fatalf("Dead on a disabled server after a leader crash: %v", err)
-	}
-
-	waitForCondition(t, 5*time.Second,
-		fmt.Sprintf("the orphan in pid group %d to be swept by dead", pid),
-		func() bool { return !processGroupAlive(pid) })
-
-	eng.mu.Lock()
-	_, still := eng.procs["svc"]
-	eng.mu.Unlock()
-	if still {
-		t.Fatalf("dead swept the group but left the registry entry behind")
-	}
-}
-
-// AATK-106 review round 4, finding 1. `up` on a crashed server must sweep the
-// dead child's process group before launching its replacement.
-//
-// The launch overwrites e.procs[name] with the new child's PID, and the old
-// PID was the group id. After the overwrite nothing can reach an orphan the
-// crash left — TeardownAll walks the registry, so not even quit gets it — and
-// an orphan holding no declared port is invisible to every port-based path.
-//
-// upOne retires early for two reasons, and this test covers both: the handle
-// must be swept before the launch overwrites it, and the sweep has to precede
-// checkPortConflict, or an orphan still holding a declared port makes `up`
-// refuse to relaunch the server whose own remains are holding it.
-//
-// registerProc does NOT retire on upOne's behalf — it refuses to overwrite an
-// unretired entry, which reports the mistake rather than repairing it, and
-// only after the write. The retire above is what actually saves the handle.
-//
-// Master did not have this hole, and got there by being wrong in the other
-// direction: `up` treated the dead child as ours and skipped, so the entry
-// survived and quit swept it. Making `up` correct is what put the leak in.
-func TestRealEngine_Up_AfterLeaderCrash_SweepsOrphanBeforeRelaunching(t *testing.T) {
-	s := orphanLeaderServer(t, "svc")
-	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
-	oldPID := launchOrphanLeader(t, eng, s)
-
-	// Registered before Up, not after: Up can fail with a child already
-	// launched and registered, and the t.Cleanup below is only reached if
-	// Up returns nil.
-	t.Cleanup(func() { eng.TeardownAll() })
-
-	if err := eng.Up("svc"); err != nil {
-		t.Fatalf("Up after a leader crash: %v", err)
-	}
-
-	newPID := engineChildPID(t, eng, "svc")
-	if newPID == 0 || newPID == oldPID {
-		t.Fatalf("Up should have relaunched; registry holds pid %d (crashed leader was %d)", newPID, oldPID)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(-int(newPID), syscall.SIGKILL) })
-
-	waitForCondition(t, 5*time.Second,
-		fmt.Sprintf("the orphan in the crashed leader's pid group %d to be swept by up", oldPID),
-		func() bool { return !processGroupAlive(oldPID) })
-}
-
-// AATK-106. A lint over the registry writes: e.procs is assigned in
-// registerProc and nowhere else, so no launch path can overwrite a
-// registration without meeting registerProc's refusal.
-//
-// This does NOT close the defect class, and earlier versions of this comment
-// claimed it did. Round 7 found the counterexample: Build's
-// replace-and-stay-down path abandons a registration without writing one, so
-// neither this check nor registerProc's refusal ever sees it.
-//
-// This is the cheap half of the invariant, and the weaker one. It catches a
-// direct assignment on a path no test exercises, which is worth having, but
-// it is a regex over one file: a write through a local alias, from another
-// file in the package, or under a different receiver name all evade it, and
-// it says nothing about DELETES — two of the four historical instances were a
-// delete and a read, not a write.
-//
-// The load-bearing half is registerProc's own refusal, which is a runtime
-// check and fires on any path a test actually runs. Treat this as a lint, not
-// as the guarantee.
-func TestEngine_EveryRegistryWriteGoesThroughRegisterProc(t *testing.T) {
-	src, err := os.ReadFile("engine.go")
-	if err != nil {
-		t.Fatalf("reading engine.go: %v", err)
-	}
-
-	assign := regexp.MustCompile(`e\.procs\[[^\]]*\]\s*=`)
-	var offenders []string
-	for i, line := range strings.Split(string(src), "\n") {
-		if assign.MatchString(line) {
-			offenders = append(offenders, fmt.Sprintf("engine.go:%d: %s", i+1, strings.TrimSpace(line)))
-		}
-	}
-
-	// Exactly one: registerProc's own. Everything else must call it.
-	if len(offenders) != 1 {
-		t.Fatalf("e.procs must be assigned in registerProc and nowhere else — found %d assignments:\n  %s\n\n"+
-			"A direct assignment silently discards the registration it replaces. The registered PID is the\n"+
-			"process-GROUP id of the child we launched, and it is the last handle on any orphan that child\n"+
-			"left behind; overwriting it strands that orphan for the rest of the session. Call registerProc.",
-			len(offenders), strings.Join(offenders, "\n  "))
-	}
-	if !strings.Contains(offenders[0], "e.procs[s.Name] = proc") {
-		t.Fatalf("the one permitted assignment is not the one expected (registerProc's): %s", offenders[0])
-	}
-}
-
-// AATK-106, option A. registerProc REFUSES to overwrite a registration nobody
-// retired — the runtime half of the invariant, and the stronger half: it
-// fires on any path a test exercises, whether or not anyone thought to look
-// there.
-//
-// It must still record the new child. The process is already running, and
-// declining to register it would strand exactly the thing the invariant
-// exists to protect, one level up.
-func TestRealEngine_RegisterProc_RefusesToOverwriteAnUnretiredEntry(t *testing.T) {
-	s := orphanLeaderServer(t, "svc")
-	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
-	oldPID := launchOrphanLeader(t, eng, s)
-	t.Cleanup(func() { _ = syscall.Kill(-int(oldPID), syscall.SIGKILL) })
-
-	replacement, err := eng.launch(s)
-	if err != nil {
-		t.Fatalf("launching the replacement: %v", err)
-	}
-	replacementPID := int32(replacement.Cmd.Process.Pid)
-	t.Cleanup(func() { _ = syscall.Kill(-int(replacementPID), syscall.SIGKILL) })
-
-	err = eng.registerProc(s, replacement)
-	if err == nil {
-		t.Fatal("registerProc silently overwrote a registration nobody retired; that discards the group handle")
-	}
-	if !strings.Contains(err.Error(), "nobody retired") {
-		t.Fatalf("refusal should say what went wrong, got: %v", err)
-	}
-
-	if got := engineChildPID(t, eng, "svc"); got != replacementPID {
-		t.Fatalf("the running replacement must still be registered; registry holds %d, want %d", got, replacementPID)
-	}
-}
-
-// AATK-106, option A. The regression that option A's first shape caused, and
-// the reason retirement belongs at the stop rather than at the write.
-//
-// This is the edit-then-`up` workflow: a source server is running, its binary
-// goes stale, and `up` rebuilds it in place. rebuildIfStaleOwned's Stop
-// retires the old child, Start launches the replacement.
-//
-// Retiring inside registerProc instead broke it. Teardown verifies by
-// scanning host ports and probing health, and by the time Start registers the
-// replacement the REPLACEMENT may already be listening on that port and
-// answering /healthz — so the verification concluded the old child had
-// survived SIGKILL and `up` failed with "kill not achieved". The declared
-// port and health spec are what make that reachable at all; a port-less
-// fixture verifies nothing.
-//
-// Be precise about what this test does and does not pin. It does NOT reliably
-// reproduce that failure: whether the replacement has bound its port when the
-// verification runs is a race, and against the broken commit this same test
-// passed five times running before failing. What it pins deterministically is
-// the fix's actual shape — Stop must retire, so registerProc never meets an
-// entry. Take the retire out of Stop and this fails 5 times in 5, on
-// registerProc's refusal rather than on the race.
-//
-// That is the substance of the change, not an artifact of it: a timing-
-// dependent corruption that showed up as a nonsense teardown error is now a
-// deterministic error that names the missing call.
+// It is here because the ownership change runs straight through this path:
+// upOne asks ownedPIDLocked, and a live child must still come back "ours" so
+// the rebuild happens rather than a cold launch over a running server. Green
+// before and after; the declared port and health spec are what make the
+// rebuild's own teardown verification real rather than vacuous.
 func TestRealEngine_Up_RunningStaleSourceServer_RebuildsInPlace(t *testing.T) {
 	port := freeTestPort(t)
 	binPath := filepath.Join(t.TempDir(), "tdlistener-source")
@@ -682,94 +382,5 @@ func TestRealEngine_Up_RunningStaleSourceServer_RebuildsInPlace(t *testing.T) {
 
 	if got := engineChildPID(t, eng, "svc"); got == 0 || got == firstPID {
 		t.Fatalf("rebuild should have replaced the child; registry holds %d, first was %d", got, firstPID)
-	}
-}
-
-// AATK-106 review round 7, F1. `build` on a source server whose child crashed
-// must sweep the group before it replaces the binary.
-//
-// This is the fifth site of the same defect, and the one that shows what the
-// registerProc guard does NOT cover: Build's replace-and-stay-down path
-// abandons a registration without ever writing one, so the refusal never
-// fires. Replacing the artifact underneath an unswept group leaves a process
-// running from a binary that no longer exists on disk.
-func TestRealEngine_Build_AfterLeaderCrash_SweepsBeforeReplacingBinary(t *testing.T) {
-	port := freeTestPort(t)
-	binPath := filepath.Join(t.TempDir(), "tdlistener-source")
-
-	// The CONFIGURED server is a source server, so `build` applies to it and
-	// will replace the artifact on disk — the step that must not happen over
-	// an unswept process group.
-	s := tdlistenerSourceServer(t, "svc", port, binPath)
-	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
-
-	// The registered child is launched from an exec fixture — the registry
-	// records a *lifecycle.Process, not a server type — so it can leave a
-	// real orphan behind the way a crashed source server would.
-	pid := launchOrphanLeader(t, eng, orphanLeaderServer(t, "svc"))
-
-	if err := eng.Build("svc"); err != nil {
-		t.Fatalf("Build after a leader crash: %v", err)
-	}
-
-	waitForCondition(t, 5*time.Second,
-		fmt.Sprintf("the orphan in pid group %d to be swept by build", pid),
-		func() bool { return !processGroupAlive(pid) })
-
-	eng.mu.Lock()
-	_, still := eng.procs["svc"]
-	eng.mu.Unlock()
-	if still {
-		t.Fatalf("build swept the group but left the dead child's registration behind")
-	}
-}
-
-// AATK-106 review round 7, F3. retireRegistration KEEPS the entry when the
-// teardown cannot be verified — the one behavioral claim its doc comment
-// makes that nothing checked.
-//
-// Forgetting a registration we could not finish tearing down is worse than
-// either alternative: it strands whatever we did not reach with no handle
-// left to retry from. A foreign process on the declared port is the realistic
-// way to reach it — the group sweep succeeds, then verification finds the
-// port still held and refuses to call the teardown clean.
-func TestRealEngine_Down_TeardownUnverified_KeepsTheRegistration(t *testing.T) {
-	port := freeTestPort(t)
-
-	// Our own child for this server, crashed. Its declared port is then
-	// occupied by something we cannot account for.
-	s := config.Server{
-		Name:    "svc",
-		Type:    config.TypeExec,
-		Enabled: true,
-		Host:    "127.0.0.1",
-		Port:    port,
-		Command: "/bin/sh",
-		Args:    []string{"-c", "exit 0"},
-	}
-	eng := NewEngine(config.Config{Supervisor: testSupervisor(t), Servers: []config.Server{s}}, nil, nil)
-
-	proc, err := eng.launch(s)
-	if err != nil {
-		t.Fatalf("launching the fixture: %v", err)
-	}
-	eng.mu.Lock()
-	eng.procs["svc"] = proc
-	eng.mu.Unlock()
-	waitForExited(t, proc, "svc")
-
-	// The foreign holder arrives after our child is gone, so the sweep has
-	// nothing to kill and the verification still cannot come back clean.
-	spawnForeignListener(t, port)
-
-	if err := eng.Down("svc"); err == nil {
-		t.Fatal("down should fail loudly when the declared port is still held after teardown")
-	}
-
-	eng.mu.Lock()
-	_, still := eng.procs["svc"]
-	eng.mu.Unlock()
-	if !still {
-		t.Fatal("down forgot a registration it could not finish tearing down; nothing can retry it now")
 	}
 }

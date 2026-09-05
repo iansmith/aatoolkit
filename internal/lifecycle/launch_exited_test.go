@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// AATK-106 review round 2, F7: Exited's contract is pinned in the package
-// that owns it, not only through its supervisor caller. Both halves matter —
+// AATK-106: Exited's contract is pinned in the package that owns it, not only
+// through its supervisor caller. Both halves matter —
 // the false answer is the one a Process built outside Launch always gives,
 // and callers are entitled to rely on it never becoming a spurious true.
 func TestProcess_Exited(t *testing.T) {
