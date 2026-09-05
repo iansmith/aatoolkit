@@ -95,9 +95,14 @@ func (e *RealEngine) serverByName(name string) (config.Server, bool) {
 	return config.Server{}, false
 }
 
-// pidOf returns p's OS pid and true when p is a live child we can observe,
-// else 0, false. One definition of what "we hold a live process" means, so a
+// pidOf returns p's OS pid and true when we hold a usable handle on it, else
+// 0, false. One definition of what "we hold a process handle" means, so a
 // change to lifecycle.Process's nil-safety contract lands in one place.
+//
+// This is a structural question, not a liveness one: it answers "is there a
+// process here to talk about", and says nothing about whether that process is
+// still running. Callers deciding whether a registration still MEANS anything
+// want ownedPIDLocked.
 func pidOf(p *lifecycle.Process) (int32, bool) {
 	if p == nil || p.Cmd == nil || p.Cmd.Process == nil {
 		return 0, false
@@ -105,12 +110,42 @@ func pidOf(p *lifecycle.Process) (int32, bool) {
 	return int32(p.Cmd.Process.Pid), true
 }
 
-// livePID returns the PID and true if we currently hold a live child
-// process for name (registered by a prior Up), else 0, false. Must be
-// called with e.mu held.
-func (e *RealEngine) livePIDLocked(name string) (int32, bool) {
-	p, ok := e.procs[name]
+// ownedPIDLocked returns the PID of the child we registered for s, and
+// whether that registration still counts as ours. Must be called with e.mu
+// held. It is the one definition of "ours" every verb consults, so up, down,
+// build and status all answer from the same state.
+//
+// For an ordinary supervised server, ours requires the child to still be
+// running. Nothing removes an entry when a child dies of its own accord — the
+// registry is pruned only by an operator verb — so before AATK-106 a crashed
+// server stayed "ours" forever: `up` took the already-ours branch, printed
+// ok, and launched nothing, while Status (which observes ports, not the
+// registry) correctly showed it down. This is a pure read; downOne does the
+// pruning, at the point the operator asks us to forget the server.
+//
+// A detached server is the deliberate exception. Its launcher is EXPECTED to
+// exit the moment the external service is running (`docker compose up -d`
+// returns immediately), so that exit carries no information about the service
+// and must not be read as death. The caller that would break outright without
+// it is upOne's already-ours skip: `up` on a healthy container would fall
+// through to checkPortConflict and refuse on the port its own service is
+// holding. The ports are the only evidence of liveness there is (see
+// statusForLocked).
+//
+// Answering from the same state is not the same as never disagreeing, and one
+// gap is left open on purpose: for a detached server whose container has
+// died, Status reports down while `up` still takes the already-ours skip —
+// the very shape AATK-106 fixes for supervised children. Closing it means
+// basing `up` on observed ports rather than on the registry for detached
+// servers, which is a different change with its own risks; it is tracked
+// separately, and this comment exists so the gap is not mistaken for an
+// oversight.
+func (e *RealEngine) ownedPIDLocked(s config.Server) (int32, bool) {
+	p, ok := e.procs[s.Name]
 	if !ok {
+		return 0, false
+	}
+	if !s.Detached && p.Exited() {
 		return 0, false
 	}
 	return pidOf(p)
@@ -139,7 +174,7 @@ func (e *RealEngine) Status() []ServerStatus {
 // e.mu held.
 func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 	declared := lifecycle.DeclaredPorts(s)
-	pid, isOurs := e.livePIDLocked(s.Name)
+	pid, isOurs := e.ownedPIDLocked(s)
 
 	status := ServerStatus{
 		Name:    s.Name,
@@ -152,12 +187,17 @@ func (e *RealEngine) statusForLocked(s config.Server) ServerStatus {
 	// even though we launched it and e.procs still holds its entry.
 	//
 	// Its launcher exits by design -- `docker compose up -d` starts a
-	// container and returns -- and nothing removes a dead entry from e.procs
-	// (see engine_observation_gap_test.go, where that is deliberate). So
-	// isOurs stays true for a PID that is gone, and observing that PID's tree
-	// yields nothing: the server rendered DOWN while its container was
-	// listening and serving. The launcher's PID stops meaning anything the
-	// moment it returns; the ports are the only evidence there is.
+	// container and returns -- and ownedPIDLocked deliberately does not read
+	// that exit as death for a detached server, so isOurs stays true for a
+	// PID that is gone. Observing that PID's tree yields nothing: the server
+	// rendered DOWN while its container was listening and serving. The
+	// launcher's PID stops meaning anything the moment it returns; the ports
+	// are the only evidence there is.
+	//
+	// The s.Detached term cannot be dropped in favour of !isOurs alone:
+	// ownedPIDLocked keeps answering "ours" for exactly these servers, so
+	// !isOurs stays false for the ones this gate exists to route by host
+	// ports.
 	//
 	// This gate is why the s.Detached arm in the switch below is reachable at
 	// all. Without it every detached server the supervisor started took the
@@ -616,7 +656,7 @@ func (e *RealEngine) resolveUpTargets(name string) ([]config.Server, error) {
 // health-readiness poll.
 func (e *RealEngine) upOne(s config.Server) verbOutcome {
 	e.mu.Lock()
-	pid, isOurs := e.livePIDLocked(s.Name)
+	pid, isOurs := e.ownedPIDLocked(s)
 	e.mu.Unlock()
 
 	if isOurs {
@@ -906,9 +946,8 @@ func (e *RealEngine) pollReady(s config.Server, proc *lifecycle.Process) error {
 // passes, so the failure genuinely was the earlier stage's and not a missing
 // port, or because there is no live PID to check against at all.
 //
-// No live child means there is no tree to observe — the same judgement
-// livePIDLocked makes about the same state, and not a new error on top of
-// stageErr. The three real launch paths cannot reach it: launch() returns an
+// No process handle means there is no tree to observe — the same judgement
+// pidOf makes about the same state, and not a new error on top of stageErr. The three real launch paths cannot reach it: launch() returns an
 // error if the child never started and upOne returns on that before
 // pollReady runs, so a pid exists by construction here. It is reachable only
 // from a unit test that fabricates a Process to exercise the warm-up and
@@ -1162,7 +1201,7 @@ func (e *RealEngine) downOrDead(name string, killStrays bool) error {
 	var outcomes []verbOutcome
 	for _, s := range e.config().Servers {
 		e.mu.Lock()
-		_, isOurs := e.livePIDLocked(s.Name)
+		_, isOurs := e.ownedPIDLocked(s)
 		e.mu.Unlock()
 
 		if s.Enabled && isOurs {
@@ -1202,7 +1241,7 @@ func (e *RealEngine) downOrDead(name string, killStrays bool) error {
 // child, if we have one, else whatever the host-wide scan finds.
 func (e *RealEngine) observedRunningPID(s config.Server) (pid int32, isOurs bool, running bool) {
 	e.mu.Lock()
-	ownPID, haveOwn := e.livePIDLocked(s.Name)
+	ownPID, haveOwn := e.ownedPIDLocked(s)
 	e.mu.Unlock()
 	if haveOwn {
 		return ownPID, true, true
@@ -1231,7 +1270,7 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 	}
 
 	e.mu.Lock()
-	_, isOurs := e.livePIDLocked(name)
+	_, isOurs := e.ownedPIDLocked(s)
 	e.mu.Unlock()
 	if !isOurs {
 		if s.Detached {
@@ -1240,11 +1279,20 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 			}
 			return verbOutcome{Name: name}
 		}
-		// Imperative down on a server we don't hold — nothing registered
-		// to tear down via our handle; fall back to a foreign-style kill
-		// by observed PID if it's actually running (e.g. imperative
-		// `<name> down` on a disabled-but-running stray we started in a
-		// prior session, or discovered on the host).
+		// Whatever we may still have registered for this server is not
+		// ours any more, so forget it. That is what makes `down <name>`
+		// then `<name> up` relaunch a crashed server — the workaround
+		// operators reached for before AATK-106 — and downOne is where the
+		// prune belongs, since ownedPIDLocked is a pure read. Deleting an
+		// absent key is a no-op, which is the common case here.
+		e.mu.Lock()
+		delete(e.procs, name)
+		e.mu.Unlock()
+
+		// Nothing registered to tear down via our handle; fall back to a
+		// foreign-style kill by observed PID if it's actually running (e.g.
+		// imperative `<name> down` on a disabled-but-running stray we
+		// started in a prior session, or discovered on the host).
 		observedPID, observedIsOurs, running := e.observedRunningPID(s)
 		if !running {
 			return verbOutcome{Name: name}
@@ -1267,7 +1315,7 @@ func (e *RealEngine) downOne(name string) verbOutcome {
 // For detached servers, it runs the teardown command instead of signaling a PID.
 func (e *RealEngine) teardownOne(s config.Server) error {
 	e.mu.Lock()
-	pid, isOurs := e.livePIDLocked(s.Name)
+	pid, isOurs := e.ownedPIDLocked(s)
 	e.mu.Unlock()
 	if !isOurs {
 		return nil
@@ -1367,7 +1415,7 @@ func (e *RealEngine) Build(name string) error {
 	}
 
 	e.mu.Lock()
-	pid, isOurs := e.livePIDLocked(name)
+	pid, isOurs := e.ownedPIDLocked(s)
 	e.mu.Unlock()
 
 	var lc *lifecycle.BuildLifecycle
