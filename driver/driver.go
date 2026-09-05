@@ -40,6 +40,10 @@ type Tier struct {
 	URL, Model string
 	Reasoning  bool
 	MaxTokens  int
+	// APIKey, when non-empty, is sent as "Authorization: Bearer <APIKey>" on
+	// this tier's chat request (AATK-112) -- what a hosted OpenAI-compatible
+	// API needs and a local llama-server ignores. Empty sends no header.
+	APIKey string
 }
 
 // Host is the driver's concrete host.Host: it turns a (messages, tier) pair
