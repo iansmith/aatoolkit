@@ -2,7 +2,7 @@
 description: One round of clean-context code review of a diff — find, verify each finding against the real code, apply what survives, report a verdict. Runs in its own forked context so the session that wrote the code never reviews it.
 ---
 
-<!-- GENERATED from slopstop ba63c04 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 48d1fbd by install-for-project.sh — do not edit.
      Edit skills/review/ in the slopstop repo and re-run. (universal §5) -->
 
 # One round of clean-context review
@@ -69,7 +69,9 @@ Read every hunk in `--scope` as a careful senior engineer would:
 - **Correctness** — inverted conditions, off-by-one, null dereference, missing `await`,
   dropped error handling, removed guards, broken callers of a changed signature, races.
 - **Reuse** — code re-implementing something the repo already has. Grep the shared and
-  utility modules before concluding something is new.
+  utility modules before concluding something is new. → When `codebase-memory-mcp` is
+  available, `search_graph` finds existing implementations faster than grep; `trace_path`
+  identifies callers of changed functions. Read `.claude/skills/slopstop-run/references/graph-tools.md`.
 - **Simplification** — redundant or derivable state, copy-paste with slight variation, dead
   code, conditions that cannot fire.
 - **Efficiency** — repeated I/O, work in a hot path, a closure holding a large scope alive.

@@ -2,7 +2,7 @@
 description: Map the codebase for one ticket and return structured investigation findings — relevant modules, entry points, dependencies, conventions to honor, risks, and a predicted file map — as the worker's result, writing nothing to disk.
 ---
 
-<!-- GENERATED from slopstop ba63c04 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 48d1fbd by install-for-project.sh — do not edit.
      Edit skills/investigate/ in the slopstop repo and re-run. (universal §5) -->
 
 # Investigate one ticket
@@ -54,8 +54,12 @@ constrains this ticket under **Constraints to honor**.
 
 ## Step 3 — Map the code
 
-Use `Grep`, `Glob`, and `Read` directly. Work the five questions below; do not stop at the
-first plausible file.
+→ Read `.claude/skills/slopstop-run/references/graph-tools.md`. When `codebase-memory-mcp` tools are
+available, prefer `get_architecture` for question 1, `search_graph` for question 2,
+`trace_path` for question 3, and `search_code` for questions 4–5. Fall back to
+grep/Read when the graph does not cover the area or for non-code files.
+
+Work the five questions below; do not stop at the first plausible file.
 
 1. **Relevant modules** — which packages, directories, and file boundaries the ticket
    lives inside.

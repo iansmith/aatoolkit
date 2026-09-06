@@ -2,7 +2,7 @@
 description: Implement a ticket's plan until its failing phase-0 tests pass — writes source code, may add tests but never weakens, retargets or removes one, and returns the changes made, before/after test results, and any findings it is reporting rather than fixing.
 ---
 
-<!-- GENERATED from slopstop ba63c04 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 48d1fbd by install-for-project.sh — do not edit.
      Edit skills/implement/ in the slopstop repo and re-run. (universal §5) -->
 
 # Implement the plan until the red tests are green
@@ -105,6 +105,11 @@ exactly as green as it was. Everything above still binds; these three rules are 
 
 You are still forbidden to add scope. A refactor ticket names the functions to work on; a
 behaviour change you slip in alongside is exactly the thing this mode is not for.
+
+→ Read `.claude/skills/slopstop-run/references/graph-tools.md`. When `codebase-memory-mcp` tools are
+available, use `search_graph` to find symbols to extend, `trace_path` to identify callers
+that need updating when you change a signature, and `get_architecture` for orientation in
+unfamiliar areas.
 
 ## Step 1 — Establish the baseline
 
