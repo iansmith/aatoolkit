@@ -67,9 +67,9 @@ func resolveAudioPath(path string) (string, error) {
 // frame, with capHit=false — the file source has no discard cap to hit. An input
 // carrying no complete frame sends nothing and fires no warm signal.
 //
-// Unlike the mic path it does NOT discard leading silence: a fixture streams
-// verbatim so replays stay deterministic. That is why it builds on drainFrames
-// rather than drainFramesWithDiscard.
+// It streams leading silence verbatim so replays stay deterministic — the same
+// continuous-from-frame-one behaviour the mic path now shares (both build on
+// drainFrames; neither discards leading silence any more).
 //
 // It runs entirely on the caller's goroutine: when it returns, no frame is still
 // in flight. A clean EOF returns nil, which is what dial's naturalEnd branch

@@ -79,12 +79,20 @@ func normalizeMicSpec(v string) string {
 }
 
 // streamMicFrames captures mic input via ffmpeg, slices it into 8 kHz μ-law
-// 20 ms frames (160 bytes each), discards leading all-0xFF silence frames
-// (bounded at 75 frames / 1500 ms), and sends each frame to conn as a Twilio
-// media event. onMicWarm fires exactly once when the first real frame is emitted
-// (capHit=false) or the discard cap is hit (capHit=true). rec is nil unless
-// -record-sent named a file. Returns when ctx is cancelled or the connection
-// closes.
+// 20 ms frames (160 bytes each), and sends EVERY frame to conn as a Twilio media
+// event from the first one — including leading silence, exactly as the file
+// source does and exactly as a real carrier does (Twilio streams continuous
+// frames for the whole call, silence included).
+//
+// It used to discard leading silence (up to 1.5s), and that was a footgun: a
+// server-side prologue that paces on inbound carrier frames and gives up after
+// ~2s of none would end the call before the caller ever spoke, since the CLI
+// sent nothing while the caller listened. Streaming from frame one removes the
+// mismatch — the CLI is now a faithful stand-in for a real call.
+//
+// onMicWarm fires exactly once, at the first frame (always capHit=false; there
+// is no silence-discard cap to hit any more). rec is nil unless -record-sent
+// named a file. Returns when ctx is cancelled or the connection closes.
 func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, onMicWarm func(bool)) error {
 	cmd := newFFmpegCmd(ctx, os.Getenv("AATOOLKIT_STT_MIC"))
 
@@ -104,7 +112,17 @@ func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string
 	// Termination is EOF-driven (ffmpeg's close), bounded by cmd.WaitDelay. Each frame
 	// is sent with a fresh short-lived write context (connFrameWriter) so the now-dead
 	// ctx can't abort the trailing writes.
-	_, drainErr := drainFramesWithDiscard(context.Background(), stdout, muLawFrame20ms, send, onMicWarm)
+	// Fire onMicWarm at the first frame, then stream every frame continuously
+	// (no leading-silence discard) — the same shape streamFileFramesFrom uses.
+	frame := 0
+	warmSend := func(f []byte) error {
+		if frame == 0 && onMicWarm != nil {
+			onMicWarm(false)
+		}
+		frame++
+		return send(f)
+	}
+	drainErr := drainFrames(context.Background(), stdout, muLawFrame20ms, warmSend)
 	// If drainFrames exited due to a send error (not context cancellation),
 	// ffmpeg may still be running and will fill the pipe buffer, blocking
 	// cmd.Wait indefinitely. Kill it now so Wait returns promptly.
