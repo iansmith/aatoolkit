@@ -164,9 +164,14 @@ func (f *filler) observe(ev ServerEvent) {
 	// what acts on them.
 }
 
-// arm starts, or restarts, the wait before the loop may play. A loop already
-// playing keeps playing: re-arming mid-loop (the function-call case above)
-// means the wait continues, not that it begins again.
+// arm starts the wait before the loop may play, and — this is the fix for the
+// "reset on a tool call" defect — leaves an already-running wait alone rather
+// than restarting it. A loop already PLAYING keeps playing; a countdown already
+// PENDING keeps counting from its first arm. Re-arming (the function-call
+// response.done announcing the tool round trip, or a second speech_stopped when
+// a noisy room makes the VAD reopen the turn) means the wait CONTINUES, never
+// that it begins again — restarting a pending countdown was what pushed the
+// loop's start a whole Delay later than the caller's silence began.
 func (f *filler) arm() {
 	if f == nil {
 		return
@@ -174,6 +179,14 @@ func (f *filler) arm() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.stopped {
+		return
+	}
+	if f.timer != nil {
+		// A countdown is already pending, so the wait is already being timed;
+		// re-arming must not push its start back. start nils f.timer the moment
+		// it fires, so a non-nil timer here means genuinely still-pending, never
+		// a stale fired one. (Playing is handled by the guard below, where the
+		// timer is already nil.)
 		return
 	}
 	if f.playing {
@@ -255,6 +268,11 @@ func (f *filler) start(gen uint64) {
 		f.mu.Unlock()
 		return
 	}
+	// This timer has fired (start IS its function), so clear the handle: arm
+	// distinguishes a genuinely-pending countdown (f.timer != nil) from a
+	// playing or idle machine by it, and a stale fired timer left here would
+	// make the next arm mistake "idle" for "pending" and never start the loop.
+	f.timer = nil
 	f.playing = true
 	f.off = 0
 	f.mu.Unlock()
