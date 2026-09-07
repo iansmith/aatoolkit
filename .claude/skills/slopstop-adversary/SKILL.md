@@ -2,7 +2,7 @@
 description: One adversarial round against a target artifact — attack it for gaps against its stated goals, verify every claim in it against the real repo, and return numbered findings with severity plus a PASS / FAIL / GOAL DEFECT verdict the caller can branch on.
 ---
 
-<!-- GENERATED from slopstop 48d1fbd by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
      Edit skills/adversary/ in the slopstop repo and re-run. (universal §5) -->
 
 # One adversarial round
@@ -51,10 +51,14 @@ beats anything you would otherwise call a defect.
 You may inspect the repo **read-only**. Modify nothing, write nothing, commit nothing. You
 do not resolve or touch a tracking directory; your findings are your result.
 
-→ Read `.claude/skills/slopstop-run/references/graph-tools.md`. When `codebase-memory-mcp` tools are
-available, prefer `search_graph` and `get_code_snippet` for face-value verification,
-`trace_path` for dependency and caller claims, and `get_architecture` for structural
-claims. Fall back to grep/Read when the graph does not cover the area.
+Use graph tools for verification — they return typed, ranked results and replace
+grep-then-Read chains that cost 5–10× the tokens:
+- `search_graph` and `get_code_snippet` for face-value verification
+- `trace_path` for dependency and caller claims
+- `get_architecture` for structural claims
+- `search_code` for text search with structural context
+Fall back to grep/Read only for literal text in non-code files, or when
+`check_index_coverage` shows the file is not indexed.
 
 ## Check families
 

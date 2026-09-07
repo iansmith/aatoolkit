@@ -2,7 +2,7 @@
 description: Interview the user relentlessly about a plan or design until reaching shared understanding, resolving each branch of the decision tree. Use /slopstop-grill to stress-test a plan — typically before breaking it into tickets.
 ---
 
-<!-- GENERATED from slopstop 48d1fbd by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
      Edit skills/grill/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-grill
@@ -33,9 +33,9 @@ grill is invoked inline, has no access to `.project-conf.toml`, and a caller oth
 - For each question, work out your **recommended answer** and the reasoning for it
   first — before deciding, in autonomous mode, whether there's anyone to ask.
 - If a question can be answered by exploring the codebase, **explore the codebase
-  instead of asking**. → When `codebase-memory-mcp` tools are available, prefer
-  `get_architecture` for orientation and `search_graph` / `trace_path` for structural
-  queries (read `.claude/skills/slopstop-run/references/graph-tools.md`).
+  instead of asking**. Use `get_architecture` for orientation, `search_graph` /
+  `trace_path` for structural queries, and `search_code` for text with context.
+  Fall back to grep only for non-code files or uncovered areas (`check_index_coverage`).
 - Record each resolved decision as you go, tagged as below; when every branch is
   resolved, close with a consolidated summary of the shared understanding — this is the
   raw material for a PRD.

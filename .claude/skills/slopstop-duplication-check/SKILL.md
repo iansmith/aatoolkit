@@ -2,7 +2,7 @@
 description: Run the duplication-check gate over a branch diff with ast-grep and return every clone group at or over the configured min-lines threshold — file, lines, SLOC, hash, scope (intra/cross-file), whether the clone group was pre-existing at the base commit, and a suggested helper signature showing which identifiers vary across instances — plus one overall verdict. Mechanical measurement only; never fixes anything.
 ---
 
-<!-- GENERATED from slopstop 48d1fbd by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
      Edit skills/duplication-check/ in the slopstop repo and re-run. (universal §5) -->
 
 # Duplication check — detect code clones over a branch diff
@@ -48,7 +48,7 @@ stop.
 ## Step 3 — Run the detector
 
 ```bash
-python3 "$REPO/tools/duplication-check.py" \
+python3 "$REPO/.slopstop/tools/duplication-check.py" \
   --repo "$REPO" --min-lines "$MIN_LINES" --json-output \
   $CHANGED_CODE
 ```

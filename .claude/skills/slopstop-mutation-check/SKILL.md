@@ -2,7 +2,7 @@
 description: Verify that a set of freshly-written tests is pinned to the behavior it names — that a failing test is red for the RIGHT reason, or, under --backfill, that a passing test goes red when the behavior it claims to cover is broken. Returns a per-test verdict with evidence plus one overall PASS / FAIL / PINNED / NOT PINNED.
 ---
 
-<!-- GENERATED from slopstop 48d1fbd by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
      Edit skills/mutation-check/ in the slopstop repo and re-run. (universal §5) -->
 
 # Mutation check — prove the result is meaningful
@@ -42,6 +42,16 @@ verdict about a target set nobody chose.
 
 Any of `--tests`, `--node-ids`, or `--command` missing or empty → report
 `MUTATION CHECK BLOCKED: <what is missing>` and stop.
+
+## Code discovery
+
+When you need to understand targets — finding the production function a test exercises,
+identifying what to mutate, or tracing a call chain — use graph tools:
+- `get_code_snippet` to read a symbol's source by qualified name
+- `trace_path` to find what a function calls or what calls it
+- `search_graph` to locate a symbol when you have a name but not a path
+Fall back to grep/Read only for literal text in non-code files, or when
+`check_index_coverage` shows the file is not indexed.
 
 ## Step 1 — Capture the baseline failure
 

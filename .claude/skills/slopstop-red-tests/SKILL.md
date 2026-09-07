@@ -2,7 +2,7 @@
 description: Write the phase-0 failing tests that define a ticket's contract before any implementation exists, run them, and return the test files, node-ids, test command, and the observed failure output proving they are red.
 ---
 
-<!-- GENERATED from slopstop 48d1fbd by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
      Edit skills/red-tests/ in the slopstop repo and re-run. (universal §5) -->
 
 # Phase 0 — write the red tests
@@ -107,10 +107,14 @@ capture it on untouched code.
 
 ## Step 4 — Write the tests
 
-→ Read `.claude/skills/slopstop-run/references/graph-tools.md`. When `codebase-memory-mcp` tools are
-available, use `search_graph` to find the types and functions the tests will target,
-`trace_path` to identify call chains to exercise, and `search_code` to find existing
-test patterns to mirror.
+Use graph tools for code discovery — they return typed, ranked results and replace
+grep-then-Read chains that cost 5–10× the tokens:
+- `search_graph` to find the types and functions the tests will target
+- `trace_path` to identify call chains to exercise
+- `search_code` to find existing test patterns to mirror
+- `get_code_snippet` to read a symbol's source (replaces Read with offset guessing)
+Fall back to grep/Read only for literal text in non-code files, or when
+`check_index_coverage` shows the file is not indexed.
 
 Follow the layout, framework, and fixtures of the existing tests. Derive expected behaviors
 from the ticket description and DoD, transcribing any test expectations the ticket states

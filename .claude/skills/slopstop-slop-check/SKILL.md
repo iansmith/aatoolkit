@@ -2,7 +2,7 @@
 description: Inspect a branch diff for AI slop — tests rewritten to pass, assertions inverted, vacuous or tautological tests, swallowed errors — and return each finding with its location, the signal that identified it, a severity, and one overall verdict. Reports only; never fixes.
 ---
 
-<!-- GENERATED from slopstop 48d1fbd by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
      Edit skills/slop-check/ in the slopstop repo and re-run. (universal §5) -->
 
 # Slop check — the judgment pass over a diff
@@ -52,9 +52,10 @@ manufactures a green result. Read every untracked test file in full; they are in
 Read the repository's `CLAUDE.md`, any `CLAUDE-universal.md` it imports, and
 `.claude/rules/*.md`. They bind the code you are judging.
 
-→ Read `.claude/skills/slopstop-run/references/graph-tools.md`. When `codebase-memory-mcp` tools are
-available, use `trace_path` to trace imports and fixtures into the diff, and
-`search_graph` to find where helpers and fixtures are defined.
+Use graph tools for code discovery — `trace_path` to trace imports and fixtures into the
+diff, `search_graph` to find where helpers and fixtures are defined, and `get_code_snippet`
+to read their source. Fall back to grep only for non-code files or uncovered areas
+(`check_index_coverage`).
 
 ## Step 2 — Tamper signals (🔴)
 
