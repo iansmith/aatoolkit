@@ -2,7 +2,7 @@
 description: Write the phase-0 failing tests that define a ticket's contract before any implementation exists, run them, and return the test files, node-ids, test command, and the observed failure output proving they are red.
 ---
 
-<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 096d061 by install-for-project.sh — do not edit.
      Edit skills/red-tests/ in the slopstop repo and re-run. (universal §5) -->
 
 # Phase 0 — write the red tests
@@ -115,6 +115,36 @@ grep-then-Read chains that cost 5–10× the tokens:
 - `get_code_snippet` to read a symbol's source (replaces Read with offset guessing)
 Fall back to grep/Read only for literal text in non-code files, or when
 `check_index_coverage` shows the file is not indexed.
+
+**Example — locating the function to test and existing test patterns:**
+```
+search_graph(project: "<project>", query: "updateProfile", label: "Function")
+→ qualified name, file, line range
+
+get_code_snippet(project: "<project>", qualified_name: "<qn from above>")
+→ full source — read the contract, identify inputs/outputs to assert on
+
+search_code(project: "<project>", pattern: "test.*updateProfile", regex: true, path_filter: "__tests__")
+→ existing test patterns to mirror
+
+trace_path(project: "<project>", function_name: "updateProfile", direction: "outbound", depth: 1)
+→ what it calls — the call chain to exercise
+```
+
+**Example — listing all test functions in a package:**
+```
+search_graph(project: "<project>", query: "Test", label: "Function", file_pattern: ".*_test\\.go$")
+→ every test function — replaces grep -n "^func Test" *_test.go
+```
+
+**Graph vs. grep — when to use which:**
+- **Graph tools:** finding the function to test, reading its source, finding existing test
+  patterns, tracing call chains to exercise, listing test functions in a package.
+- **grep/Read:** test fixture data files, config/YAML, `.env`, `go.mod`, and files
+  `check_index_coverage` reports as not indexed.
+
+If you are about to write `grep -rn "FunctionName"` or `grep -n "^func Test"`, stop —
+that is a graph query. Use `search_graph` or `search_code` instead.
 
 Follow the layout, framework, and fixtures of the existing tests. Derive expected behaviors
 from the ticket description and DoD, transcribing any test expectations the ticket states

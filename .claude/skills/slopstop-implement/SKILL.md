@@ -2,7 +2,7 @@
 description: Implement a ticket's plan until its failing phase-0 tests pass — writes source code, may add tests but never weakens, retargets or removes one, and returns the changes made, before/after test results, and any findings it is reporting rather than fixing.
 ---
 
-<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 096d061 by install-for-project.sh — do not edit.
      Edit skills/implement/ in the slopstop repo and re-run. (universal §5) -->
 
 # Implement the plan until the red tests are green
@@ -114,6 +114,64 @@ grep-then-Read chains that cost 5–10× the tokens:
 - `get_architecture` for orientation in unfamiliar areas
 Fall back to grep/Read only for literal text in non-code files, or when
 `check_index_coverage` shows the file is not indexed.
+
+**Example — finding a symbol to extend and its callers:**
+```
+search_graph(project: "<project>", query: "ProfileService", label: "Class")
+→ finds the class's qualified name, file, and line range
+
+get_code_snippet(project: "<project>", qualified_name: "<qn from above>", include_neighbors: true)
+→ full source plus direct relationships — what it calls and what calls it
+
+trace_path(project: "<project>", function_name: "updateProfile", direction: "inbound", depth: 2)
+→ all callers — know who breaks if you change the signature
+```
+
+**Example — checking for an existing implementation before writing a new one:**
+```
+search_code(project: "<project>", pattern: "formatDate", mode: "compact")
+→ every function touching date formatting — if one exists, call it instead of writing a new one
+```
+
+**Example — reading a function you are about to extend:**
+```
+get_code_snippet(project: "<project>", qualified_name: "pkg/handler.ServeHTTP")
+→ full source — understand the real code before modifying it, not a grep excerpt
+```
+
+**Graph vs. grep — when to use which:**
+- **Graph tools:** finding symbols to extend, reading function source, identifying callers
+  of a changed signature, checking for existing implementations (reuse ladder), tracing
+  dependencies.
+- **grep/Read:** config files, build files (`go.mod`, `package.json`), environment
+  variables, non-code text, and files `check_index_coverage` reports as not indexed.
+
+If you are about to write `grep -rn "FunctionName"` to find a definition or its callers,
+stop — that is a graph query. Use `search_graph` or `trace_path` instead.
+
+## The reuse ladder — check before you write
+
+For each plan item, before writing new code, stop at the first rung that holds:
+
+1. **Does the codebase already have this?** `search_graph` / `search_code` → call it.
+2. **Does the stdlib do it?** → use it.
+3. **Does the platform or framework provide it natively?** → use it.
+4. **Does an installed dependency already cover it?** → use it.
+5. **Can it be done in one expression?** → one expression.
+6. **Only then:** write the minimum new code that satisfies the tests.
+
+A new helper, class, or dependency that duplicates something on the ladder is a defect,
+not a style choice. The tests define the contract; the ladder decides how little code
+satisfies it.
+
+**Lazy about the solution, never about understanding.** The ladder runs *after* you have
+read the code the change touches and traced the real flow — not instead of it. Skipping
+a rung because you did not look is not the same as checking and finding nothing.
+
+**Safety is never on the ladder.** Trust-boundary validation, error handling, data-loss
+guards, security checks, and accessibility are never candidates for "does this need to
+exist?" They exist because they must, and cutting them is a defect regardless of line
+count.
 
 ## Step 1 — Establish the baseline
 

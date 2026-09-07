@@ -2,7 +2,7 @@
 description: Map the codebase for one ticket and return structured investigation findings — relevant modules, entry points, dependencies, conventions to honor, risks, and a predicted file map — as the worker's result, writing nothing to disk.
 ---
 
-<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 096d061 by install-for-project.sh — do not edit.
      Edit skills/investigate/ in the slopstop repo and re-run. (universal §5) -->
 
 # Investigate one ticket
@@ -58,6 +58,41 @@ Use graph tools for structural code discovery — they return typed, ranked resu
 replace the grep-then-Read-each-file chains that cost 5–10× the tokens. Fall back to
 grep/Read only for literal text in non-code files (config, YAML, markdown), or when
 `check_index_coverage` shows the file is not indexed.
+
+**Example — finding callers of a function:**
+```
+search_graph(project: "<project>", query: "openAppSettings", label: "Function")
+→ finds the function's qualified name and file
+
+trace_path(project: "<project>", function_name: "openAppSettings", direction: "inbound", depth: 2)
+→ returns every caller, two hops deep
+
+get_code_snippet(project: "<project>", qualified_name: "<qn from search_graph>")
+→ returns the full source of the function
+```
+These three calls replace a grep-for-definition, grep-for-callers, Read-each-file chain.
+
+**Example — listing symbols in a package:**
+```
+search_graph(project: "<project>", query: "sports", label: "Function", file_pattern: "internal/sports")
+→ every function in the package — replaces grep -n "^func " internal/sports/*.go
+```
+
+**Example — reading a function's source without guessing line numbers:**
+```
+get_code_snippet(project: "<project>", qualified_name: "cmd/server.handleRequest")
+→ full source — replaces grep -n "func handleRequest" -A 60
+```
+
+**Graph vs. grep — when to use which:**
+- **Graph tools:** function/type/symbol locations, callers and callees, reading function
+  source, finding implementations, dependency and import tracing, listing symbols in a
+  package. These are structural queries — the graph answers them in one call.
+- **grep/Read:** environment variables, config files (YAML, JSON, TOML), `go.mod`/`go.sum`,
+  `.env`, non-code text, and files `check_index_coverage` reports as not indexed.
+
+If you are about to write `grep -rn "FunctionName"` or `grep -n "^func "`, stop — that
+is a graph query. Use `search_graph` or `search_code` instead.
 
 Work the five questions below; do not stop at the first plausible file.
 

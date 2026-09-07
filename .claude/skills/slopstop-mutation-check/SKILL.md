@@ -2,7 +2,7 @@
 description: Verify that a set of freshly-written tests is pinned to the behavior it names — that a failing test is red for the RIGHT reason, or, under --backfill, that a passing test goes red when the behavior it claims to cover is broken. Returns a per-test verdict with evidence plus one overall PASS / FAIL / PINNED / NOT PINNED.
 ---
 
-<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 096d061 by install-for-project.sh — do not edit.
      Edit skills/mutation-check/ in the slopstop repo and re-run. (universal §5) -->
 
 # Mutation check — prove the result is meaningful
@@ -52,6 +52,33 @@ identifying what to mutate, or tracing a call chain — use graph tools:
 - `search_graph` to locate a symbol when you have a name but not a path
 Fall back to grep/Read only for literal text in non-code files, or when
 `check_index_coverage` shows the file is not indexed.
+
+**Example — finding the production function a test exercises:**
+```
+search_graph(project: "<project>", query: "TestUpdateProfile", label: "Function")
+→ finds the test's qualified name and file
+
+trace_path(project: "<project>", function_name: "TestUpdateProfile", direction: "outbound", depth: 2)
+→ shows what the test calls — the production functions to mutate
+
+get_code_snippet(project: "<project>", qualified_name: "<production qn from above>")
+→ full source of the mutation target — identify which lines to perturb
+```
+
+**Example — finding all callers of a function you are about to mutate:**
+```
+trace_path(project: "<project>", function_name: "validateInput", direction: "inbound", depth: 2)
+→ every caller — if a mutation survives, these callers are the ones with missing coverage
+```
+
+**Graph vs. grep — when to use which:**
+- **Graph tools:** finding production functions a test exercises, reading function source,
+  tracing callers to understand coverage gaps, locating symbols by name.
+- **grep/Read:** test output parsing, config files, non-code text, and files
+  `check_index_coverage` reports as not indexed.
+
+If you are about to write `grep -rn "FunctionName"` to find callers or definitions, stop —
+that is a graph query. Use `search_graph` or `trace_path` instead.
 
 ## Step 1 — Capture the baseline failure
 

@@ -2,7 +2,7 @@
 description: One adversarial round against a target artifact — attack it for gaps against its stated goals, verify every claim in it against the real repo, and return numbered findings with severity plus a PASS / FAIL / GOAL DEFECT verdict the caller can branch on.
 ---
 
-<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 096d061 by install-for-project.sh — do not edit.
      Edit skills/adversary/ in the slopstop repo and re-run. (universal §5) -->
 
 # One adversarial round
@@ -59,6 +59,39 @@ grep-then-Read chains that cost 5–10× the tokens:
 - `search_code` for text search with structural context
 Fall back to grep/Read only for literal text in non-code files, or when
 `check_index_coverage` shows the file is not indexed.
+
+**Example — verifying a claim about callers:**
+```
+search_graph(project: "<project>", query: "parseConfig", label: "Function")
+→ finds the symbol's qualified name and file
+
+trace_path(project: "<project>", function_name: "parseConfig", direction: "inbound", depth: 2)
+→ all callers, two hops — verify the target's claim about who uses this
+
+get_architecture(project: "<project>", aspects: ["dependencies"])
+→ structural overview — verify claims about module boundaries and layering
+```
+
+**Example — verifying a face-value claim about a function's behavior:**
+```
+get_code_snippet(project: "<project>", qualified_name: "internal/auth.ValidateToken")
+→ full source — read the real code, not the target's description of it
+```
+
+**Example — checking whether a claimed dependency exists:**
+```
+trace_path(project: "<project>", function_name: "ProcessPayment", direction: "outbound", depth: 2)
+→ what it actually calls — verify against the target's dependency claims
+```
+
+**Graph vs. grep — when to use which:**
+- **Graph tools:** verifying claims about callers, callees, and dependencies; reading
+  function source for face-value checks; checking module structure and boundaries.
+- **grep/Read:** config files, documentation claims, non-code text, and files
+  `check_index_coverage` reports as not indexed.
+
+If you are about to write `grep -rn "FunctionName"` to verify a claim, stop — that is a
+graph query. Use `search_graph`, `trace_path`, or `get_code_snippet` instead.
 
 ## Check families
 

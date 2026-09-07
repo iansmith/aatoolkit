@@ -2,7 +2,7 @@
 description: Interview the user relentlessly about a plan or design until reaching shared understanding, resolving each branch of the decision tree. Use /slopstop-grill to stress-test a plan — typically before breaking it into tickets.
 ---
 
-<!-- GENERATED from slopstop 2fa2b75 by install-for-project.sh — do not edit.
+<!-- GENERATED from slopstop 096d061 by install-for-project.sh — do not edit.
      Edit skills/grill/ in the slopstop repo and re-run. (universal §5) -->
 
 # /slopstop-grill
@@ -36,6 +36,34 @@ grill is invoked inline, has no access to `.project-conf.toml`, and a caller oth
   instead of asking**. Use `get_architecture` for orientation, `search_graph` /
   `trace_path` for structural queries, and `search_code` for text with context.
   Fall back to grep only for non-code files or uncovered areas (`check_index_coverage`).
+
+  **Example — exploring the codebase to answer a design question:**
+  ```
+  get_architecture(project: "<project>", aspects: ["structure", "dependencies"])
+  → module layout and dependency graph — answers "where does this belong?"
+
+  search_graph(project: "<project>", query: "notification", label: "Function")
+  → all functions matching the concept — answers "does this already exist?"
+
+  trace_path(project: "<project>", function_name: "sendNotification", direction: "both", depth: 2)
+  → callers and callees — answers "what would change if we modify this?"
+  ```
+
+  **Example — checking whether a proposed approach duplicates existing code:**
+  ```
+  search_code(project: "<project>", pattern: "validateEmail", mode: "compact")
+  → existing validators — if one exists, the design should reuse it, not propose a new one
+  ```
+
+  **Graph vs. grep — when to use which:**
+  - **Graph tools:** answering "does this exist?", "where does this belong?",
+    "what depends on this?", reading function source, tracing callers and callees.
+  - **grep/Read:** config files, documentation, non-code text, and files
+    `check_index_coverage` reports as not indexed.
+
+  If you are about to write `grep -rn "FunctionName"` to answer a design question,
+  stop — that is a graph query. Use `search_graph` or `trace_path` instead.
+
 - Record each resolved decision as you go, tagged as below; when every branch is
   resolved, close with a consolidated summary of the shared understanding — this is the
   raw material for a PRD.
