@@ -139,6 +139,7 @@ func TestHandleFrame_MediaIsNeverLogged(t *testing.T) {
 	if out != "" {
 		t.Errorf("media frames produced log output; want silence:\n%s", out)
 	}
+	player.settle() // writes are asynchronous now; wait for the queue to reach the sink
 	if sink.writes != frames {
 		t.Errorf("frames played: got %d, want %d — media must still reach the player", sink.writes, frames)
 	}
@@ -249,6 +250,11 @@ func TestHandleFrame_ClearFlushesQueuedPlayout(t *testing.T) {
 	if audio.filler.outstanding(time.Now()) == 0 {
 		t.Fatal("nothing queued before the clear — the test cannot tell a flush from a no-op")
 	}
+	// Settle before sampling and again before comparing: the player writes on
+	// its own goroutine now, so an unsynchronised read of sink.writes races
+	// the writer and measures scheduling rather than behaviour. What this test
+	// claims is that the clear itself plays nothing, and that survives.
+	player.settle()
 	playedBeforeClear := sink.writes
 
 	out := captureLog(t, func() {
@@ -263,6 +269,7 @@ func TestHandleFrame_ClearFlushesQueuedPlayout(t *testing.T) {
 		t.Errorf("bytesSinceMark after a clear: got %d, want 0 — the flushed audio is "+
 			"still counted as volume delivered since the last mark", audio.bytesSinceMark)
 	}
+	player.settle()
 	if sink.writes != playedBeforeClear {
 		t.Errorf("player writes across the clear: got %d, want %d — a clear plays nothing",
 			sink.writes, playedBeforeClear)

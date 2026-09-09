@@ -597,6 +597,12 @@ func handleFrame(f twilio.Frame, player *lazyPlayer, audio *callAudio, conn *web
 		now := time.Now()
 		flushed := audio.filler.outstanding(now)
 		audio.filler.flush(now)
+		// And the PLAYER's queue, which is the audio itself rather than the
+		// model of it. Before the player had a queue this branch could only
+		// update timing state -- the discarded reply was already inside
+		// ffplay's stdin pipe and kept playing at the caller. See
+		// audioPlayer.flush.
+		player.flush()
 		audio.bytesSinceMark = 0
 		log.Printf("twilio-cli: <- clear (flushed %s of queued playout)", flushed.Round(time.Millisecond))
 
