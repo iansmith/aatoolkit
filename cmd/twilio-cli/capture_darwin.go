@@ -10,8 +10,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/coder/websocket"
 )
 
 // newFFmpegCmd builds the avfoundation→μ-law ffmpeg capture command for mic,
@@ -91,9 +89,10 @@ func normalizeMicSpec(v string) string {
 // mismatch — the CLI is now a faithful stand-in for a real call.
 //
 // onMicWarm fires exactly once, at the first frame (always capHit=false; there
-// is no silence-discard cap to hit any more). rec is nil unless -record-sent
-// named a file. Returns when ctx is cancelled or the connection closes.
-func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, gate *micGate, onMicWarm func(bool)) error {
+// is no silence-discard cap to hit any more). send is dial's outbound frame
+// path -- encoding, gating and -record-sent all live behind it. Returns when
+// ctx is cancelled or the connection closes.
+func streamMicFrames(ctx context.Context, send func([]byte) error, onMicWarm func(bool)) error {
 	cmd := newFFmpegCmd(ctx, os.Getenv("AATOOLKIT_STT_MIC"))
 
 	stdout, err := cmd.StdoutPipe()
@@ -104,7 +103,6 @@ func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string
 		return fmt.Errorf("streamMicFrames: start ffmpeg (installed? `brew install ffmpeg`): %w", err)
 	}
 
-	send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, gate, connFrameWriter(conn))
 	// Drain on context.Background(), NOT ctx: on shutdown ctx is cancelled, which
 	// (via newFFmpegCmd's cmd.Cancel) sends ffmpeg a SIGINT so it flushes its buffer
 	// and closes stdout. drainFrames must read that flushed tail through to EOF rather

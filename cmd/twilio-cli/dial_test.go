@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
@@ -318,7 +317,7 @@ func TestDial_NoStopFrameOnServerClose(t *testing.T) {
 	// The read loop's cancelMic ends the mic on a server close; a fake mic that runs
 	// until its context is cancelled reproduces that (streamMic returns via
 	// cancellation, i.e. naturalEnd=false — NOT on its own).
-	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, _ *micGate, _ func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ func([]byte) error, _ func(bool)) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -350,7 +349,7 @@ func TestDial_NoStopFrameOnServerClose(t *testing.T) {
 
 // blockingMic simulates a long-running capture that only stops when ctx is
 // cancelled — mirrors real streamMicFrames' shape without touching hardware.
-func blockingMic(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, _ *micGate, _ func(bool)) error {
+func blockingMic(ctx context.Context, _ func([]byte) error, _ func(bool)) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -599,7 +598,7 @@ func TestCLI_ServerClose(t *testing.T) {
 // its own, dial() must send a stop frame before closing — not sit blocked
 // waiting for the next server message forever.
 func TestCLI_CallerHangup(t *testing.T) {
-	withFakeMic(t, func(ctx context.Context, conn *websocket.Conn, streamSID string, _ *int, _ *streamRecorder, _ *micGate, _ func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ func([]byte) error, _ func(bool)) error {
 		// Give the start frame a moment to go out before "capture" ends, so
 		// the wire order (start, then stop) is deterministic.
 		time.Sleep(50 * time.Millisecond)

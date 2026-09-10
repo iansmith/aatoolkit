@@ -22,19 +22,29 @@ import (
 // mic capture; main() reassigns it to a file-backed source when -audio is passed
 // (capture_file.go). It is also the seam tests override to simulate capture
 // completion (EOF) deterministically, since real mic capture has no natural EOF
-// to trigger from a test. Receives an onMicWarm callback that fires when the
-// first real frame is emitted or the discard cap is hit, with a bool indicating
-// whether the cap was hit.
+// to trigger from a test. Receives the send func dial built for this call, and
+// an onMicWarm callback that fires when the first real frame is emitted or the
+// discard cap is hit, with a bool indicating whether the cap was hit.
 //
 // This is the ONE frame-source seam — a second one (a dialOption, say) would
 // leave two mechanisms selecting the same thing.
 var streamMic micFrameSource = streamMicFrames
 
-// micFrameSource is the shape of a frame source. Named rather than spelled out
-// at each of the places that hold one, so adding to it is one edit here plus
-// the implementations, not a sweep over every declaration that happens to
-// mention it.
-type micFrameSource func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, gate *micGate, onMicWarm func(bool)) error
+// micFrameSource is the shape of a frame source: produce μ-law frames until
+// ctx is done or the source runs out, hand each to send, and signal onMicWarm
+// once at the first one.
+//
+// It used to carry the conn, the stream SID, the sequence counter, the
+// outbound recorder and the mic gate as well -- five values no source read for
+// itself. Each existed only so the source could build the same one-line
+// `send` that the other source was building from the same five, which is why
+// adding the gate meant editing eleven declarations that have nothing to do
+// with capturing audio. dial builds send once and passes it, so a source now
+// takes exactly what a source needs: somewhere to put a frame, and a way to
+// say the first one arrived. Everything about how a frame becomes a Twilio
+// media event, gets gated, and gets recorded belongs to mediaFrameSender,
+// which is the file that already claims it.
+type micFrameSource func(ctx context.Context, send func([]byte) error, onMicWarm func(bool)) error
 
 // frameSourceLabel names whatever streamMic currently is, for the connected log
 // line. Set alongside streamMic, never independently.
@@ -296,6 +306,12 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	// afterwards.
 	log.Printf("twilio-cli: connected to %s, streaming %s, %s (Ctrl-C to stop)", addr, frameSourceLabel, duplexMode(audio.gate))
 
+	// The outbound frame path, built once here rather than identically in each
+	// frame source. The encoder takes &seqNum, so the mic goroutine advances
+	// this call's single sequence counter as it sends -- see seqNum above for
+	// why a plain int is safe.
+	send := mediaFrameSender(newMediaFrameEncoder(streamSID, &seqNum), sentRecorder, audio.gate, connFrameWriter(conn))
+
 	micErrCh := make(chan error, 1)
 	go func() {
 		defer cancelMic() // goroutine exit cancels the read loop
@@ -316,7 +332,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 				// Earcon signal already pending; skip this one.
 			}
 		}
-		err := streamMic(micCtx, conn, streamSID, &seqNum, sentRecorder, audio.gate, onMicWarm)
+		err := streamMic(micCtx, send, onMicWarm)
 		// naturalEnd: streamMic returned on its OWN (mic EOF = caller hangup), not
 		// because something cancelled micCtx (Ctrl-C, or a server-initiated close via
 		// the read loop's cancelMic).

@@ -7,8 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/iansmith/aatoolkit/telephony"
 )
 
@@ -145,18 +143,17 @@ func installAudioFrameSource(audioPath string) error {
 }
 
 // streamFileFrames returns the frame source dial() calls through when -audio is
-// set: it opens path, wraps each frame with the call's mediaFrameEncoder, and
-// writes it to conn. The returned func matches the streamMic seam's signature
-// (dial.go), mirroring capture_darwin.go's streamMicFrames shape.
+// set: it opens path and streams its frames into dial's send, paced at real
+// time. It is a micFrameSource (dial.go), mirroring capture_darwin.go's
+// streamMicFrames shape -- both are now just "read frames, hand them to send".
 func streamFileFrames(path string) micFrameSource {
-	return func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, gate *micGate, onMicWarm func(bool)) error {
+	return func(ctx context.Context, send func([]byte) error, onMicWarm func(bool)) error {
 		f, err := os.Open(path)
 		if err != nil {
 			return fmt.Errorf("streamFileFrames: %w", err)
 		}
 		defer f.Close()
 
-		send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, gate, connFrameWriter(conn))
 		return streamFileFramesFrom(ctx, f, send, onMicWarm)
 	}
 }
