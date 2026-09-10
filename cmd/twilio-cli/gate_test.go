@@ -34,7 +34,7 @@ const micGateLoud = byte(0x00)
 // loudFrame is one 20 ms frame of audible mu-law, the thing a gated call must
 // never put on the wire while the server is speaking.
 func loudFrame() []byte {
-	return bytes.Repeat([]byte{micGateLoud}, muLawFrame20ms)
+	return loudMuLaw(telephony.MuLawDuration(muLawFrame20ms))
 }
 
 // isSilenceFrame reports whether payload is entirely mu-law silence. An empty
@@ -98,9 +98,13 @@ func TestMicGate_OpenPassesCapturedFrames(t *testing.T) {
 // TestMicGate_ReopensWhenTheDeadlinePasses: the gate is a deadline, not a
 // latch. Once the player's queued audio plus the hangover has elapsed, the mic
 // is live again without anyone having to reopen it.
+//
+// The horizon is two hangovers in the past, not one millisecond: shutUntil
+// adds the hangover to whatever horizon it is given, so a horizon that has
+// only just passed is still a gate that is legitimately shut.
 func TestMicGate_ReopensWhenTheDeadlinePasses(t *testing.T) {
 	gate := newMicGate()
-	gate.shutUntil(time.Now().Add(-time.Millisecond))
+	gate.shutUntil(time.Now().Add(-2 * micGateHangover))
 
 	if got := gate.gated(loudFrame()); !bytes.Equal(got, loudFrame()) {
 		t.Errorf("the gate stayed shut past its own deadline: got %x", head(got))
@@ -183,6 +187,13 @@ func withLoudFrameSource(t *testing.T, d time.Duration) {
 		t.Fatalf("write loud audio fixture: %v", err)
 	}
 	withFakeMic(t, streamFileFrames(path))
+}
+
+// earconPlayout is how long the capture-live tone occupies the player, and so
+// how long it holds the gate shut. Derived from the tone itself rather than
+// restating earconDurationMS, which is its one definition.
+func earconPlayout() time.Duration {
+	return telephony.MuLawDuration(len(generateEarcon()))
 }
 
 // sentFrame is one outbound media payload with the moment it was read.
@@ -272,6 +283,15 @@ func serverSpeaks(t *testing.T, conn net.Conn, streamSID string, d time.Duration
 // a prologue pacing on them is unaffected. After the audio has played out (plus
 // the hangover for room decay) the mic is live again.
 func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
+	// Every window below is derived from these two and from micGateHangover,
+	// never written out as an absolute. A test that hard-codes "silence until
+	// 1250ms" passes or fails on arithmetic done by hand at authoring time:
+	// retune the hangover and it goes red while the mechanism is perfectly
+	// correct, which is a test asserting on its own margins rather than on the
+	// gate.
+	const speech = time.Second
+	const margin = 100 * time.Millisecond
+
 	withLoudFrameSource(t, 5*time.Second)
 
 	const streamSID = "SS_gate"
@@ -280,27 +300,34 @@ func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
 	srv := silenceProbeServer(t, func(conn net.Conn) {
 		// Speak from a goroutine, and not immediately. Every call opens with
 		// the capture-live earcon, which is real bytes into the same player
-		// and so gates the mic for its own 240 ms; waiting that out first
-		// leaves the deadline this test measures derived from the second of
-		// speech alone. The delay runs on its own goroutine so the frame
+		// and so gates the mic for its own tone plus the hangover; waiting
+		// that out first leaves the deadline this test measures derived from
+		// the speech alone. The delay runs on its own goroutine so the frame
 		// reader starts now -- see silenceProbeServer.
 		go func() {
-			time.Sleep(600 * time.Millisecond)
-			spokeAt <- serverSpeaks(t, conn, streamSID, time.Second)
+			time.Sleep(earconPlayout() + micGateHangover + margin)
+			spokeAt <- serverSpeaks(t, conn, streamSID, speech)
 		}()
-	}, collected, 2600*time.Millisecond)
+	}, collected, earconPlayout()+micGateHangover+speech+2*micGateHangover+4*margin)
 
 	runGatedDial(t, srv)
 
 	spoke := <-spokeAt
 	frames := <-collected
 
-	// The window starts a beat after the audio was written so a frame already
-	// in flight when it arrived is not held against the gate, and ends a beat
-	// before playout completes.
-	gated := framesIn(frames, spoke.Add(100*time.Millisecond), spoke.Add(900*time.Millisecond))
-	if len(gated) < 30 {
-		t.Fatalf("frames sent during the server's second of speech: got %d, want >= 30 -- the cadence must be unchanged, only the content", len(gated))
+	// playoutEnd is when the handed-over audio runs out; reopenAt is when the
+	// gate is due to open. Everything else is one of the three intervals those
+	// two define.
+	playoutEnd := spoke.Add(speech)
+	reopenAt := playoutEnd.Add(micGateHangover)
+
+	// Shut for the speech. The window starts a beat after the audio was
+	// written, so a frame already in flight when it arrived is not held
+	// against the gate, and ends a beat before playout completes.
+	gated := framesIn(frames, spoke.Add(margin), playoutEnd.Add(-margin))
+	wantGated := int((speech - 2*margin) / telephony.MuLawDuration(muLawFrame20ms) * 3 / 4)
+	if len(gated) < wantGated {
+		t.Fatalf("frames sent during the server's speech: got %d, want >= %d -- the cadence must be unchanged, only the content", len(gated), wantGated)
 	}
 	for _, f := range gated {
 		if !isSilenceFrame(f.payload) {
@@ -310,24 +337,27 @@ func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
 		}
 	}
 
-	// The hangover: the audio has finished playing, but the room has not
-	// finished ringing. A gate that reopened the moment the queue emptied
-	// would let the tail of the last word through, which is enough for the
-	// server's STT to produce a turn -- the whole defect, quieter.
-	decaying := framesIn(frames, spoke.Add(1050*time.Millisecond), spoke.Add(1180*time.Millisecond))
+	// Still shut through the hangover. The audio has finished playing, but the
+	// room has not finished ringing and the player's own pipe is still behind.
+	// A gate that reopened the moment the queue emptied would let the tail of
+	// the last word through, which is enough for the server's STT to produce a
+	// turn -- the whole defect, quieter.
+	decaying := framesIn(frames, playoutEnd, reopenAt.Add(-margin/2))
 	if len(decaying) == 0 {
-		t.Fatal("no frames during the hangover window")
+		t.Fatalf("no frames in the %s hangover window", micGateHangover)
 	}
 	for _, f := range decaying {
 		if !isSilenceFrame(f.payload) {
-			t.Errorf("the mic reopened %s after the audio was handed over, before the %s hangover had run",
-				f.at.Sub(spoke).Round(time.Millisecond), micGateHangover)
+			t.Errorf("the mic reopened %s after playout ended, inside the %s hangover",
+				f.at.Sub(playoutEnd).Round(time.Millisecond), micGateHangover)
 			break
 		}
 	}
 
-	// Past the audio's playout plus the hangover, the mic comes back on its own.
-	after := framesIn(frames, spoke.Add(1400*time.Millisecond), spoke.Add(2*time.Second))
+	// Open once the hangover has run, and promptly: bounded on both sides, so
+	// a gate that reopened far too late fails here rather than passing because
+	// some later frame eventually came through.
+	after := framesIn(frames, reopenAt.Add(margin/2), reopenAt.Add(2*margin+2*micGateHangover))
 	if len(after) == 0 {
 		t.Fatal("no frames after the gate should have reopened")
 	}
@@ -336,7 +366,8 @@ func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
 			return
 		}
 	}
-	t.Errorf("the gate never reopened: all %d frames after playout were still silence", len(after))
+	t.Errorf("the gate did not reopen within %s of the hangover running out: all %d frames were still silence",
+		(2*margin + 2*micGateHangover).Round(time.Millisecond), len(after))
 }
 
 // TestDial_ClearReopensTheMicAtOnce is observable 2: on barge-in the server

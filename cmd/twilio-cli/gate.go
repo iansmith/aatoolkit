@@ -51,7 +51,14 @@ type micGate struct {
 }
 
 // micGateHangover is how long past the end of the player's queued audio the
-// mic stays shut, for the room to decay.
+// mic stays shut.
+//
+// It covers two things, which is why it is larger than a room-decay figure
+// alone. The room is one: a microphone hears the tail of a word after the
+// speaker has stopped moving. The other is that fedThrough counts bytes handed
+// to ffplay's stdin, not bytes rendered -- twilio-cli cannot observe the
+// player's own buffering and cannot flush that pipe (see playoutFiller.flush),
+// so the horizon it derives is an estimate that runs slightly early.
 //
 // Too short is the failure that matters: the tail of the last word gets
 // through, which is enough for the server's STT to produce a turn -- and one
@@ -60,17 +67,23 @@ const micGateHangover = 250 * time.Millisecond
 
 func newMicGate() *micGate { return &micGate{} }
 
-// shutUntil holds the mic shut through t.
+// shutUntil holds the mic shut through horizon -- the instant the player runs
+// out of audio -- plus the hangover.
+//
+// The hangover is added here rather than by the caller because how long the
+// room rings, and how far ahead of the speaker the player's pipe runs, are the
+// gate's business and nobody else's. A publisher that had to remember to add
+// it is a publisher that can forget.
 //
 // Nil-tolerant, like every method here: --full-duplex is a nil gate, and the
 // feed path publishes on every frame the player is handed. A caller that had
 // to check first would be one `if` away from the panic on whichever branch it
 // forgot -- and the branch it would forget is the earcon's.
-func (g *micGate) shutUntil(t time.Time) {
+func (g *micGate) shutUntil(horizon time.Time) {
 	if g == nil {
 		return
 	}
-	g.shutUntilNanos.Store(t.UnixNano())
+	g.shutUntilNanos.Store(horizon.Add(micGateHangover).UnixNano())
 }
 
 // open reopens the mic now, whatever deadline was standing.

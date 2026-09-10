@@ -86,6 +86,9 @@ type callAudio struct {
 // nothing for the microphone to echo. It advances fedThrough and publishes
 // nothing.
 //
+// The gate is told the horizon -- the instant the player runs out of audio --
+// and adds its own hangover; see micGate.shutUntil.
+//
 // The horizon reads through outstanding rather than fedThrough because
 // outstanding is the quantity the gate means -- how much handed-over audio has
 // not played yet -- and it is already the one every other downstream decision
@@ -93,7 +96,7 @@ type callAudio struct {
 // fedThrough forward to now, so there is no instant already past to gate from.
 func (a *callAudio) fed(payload []byte, now time.Time) {
 	a.filler.fed(payload, now)
-	a.gate.shutUntil(now.Add(a.filler.outstanding(now) + micGateHangover))
+	a.gate.shutUntil(now.Add(a.filler.outstanding(now)))
 }
 
 // flush drops the queued playout and reopens the mic at once -- what a Twilio
