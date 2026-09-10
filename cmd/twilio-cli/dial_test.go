@@ -237,6 +237,16 @@ func TestDial_StartEventSIDsAreDistinct(t *testing.T) {
 // TestDial_SendsStopFrameOnCancel asserts that cancelling ctx (as SIGINT
 // does) causes dial to send a stop frame before closing the WebSocket.
 func TestDial_SendsStopFrameOnCancel(t *testing.T) {
+	// On the fake mic, for the reason withFakeMic exists: this is a claim about
+	// frame ORDER -- the frame after cancel is the stop -- and the real mic
+	// makes that claim false without anything being wrong. ffmpeg's graceful
+	// stop flushes its capture buffer on the way out (AATK-2), so a cancel that
+	// lands after the device has warmed puts the drained media ahead of the
+	// stop, and the single read below picks up a media frame. Measured failing
+	// that way under load. blockingMic returns on cancel and sends nothing, so
+	// the next frame really is the stop.
+	withFakeMic(t, blockingMic)
+
 	startReceived := make(chan struct{})
 	stopReceived := make(chan []byte, 1)
 

@@ -168,8 +168,8 @@ That makes `-full-duplex` the flag chaining needs. Under it, recording a replay 
 the file it replayed byte for byte, as long as the recording goes to a different file — a
 run that would record over the audio it is replaying is refused before anything is
 opened, since recording truncates. Without it a replay is gated like any other source, so
-the second-generation file is silent wherever the server was speaking — including the
-first ~490 ms of every call, which the capture-live earcon holds shut.
+the second-generation file is silent wherever the server was speaking — and, on a call that
+opens quietly, for the ~490 ms the capture-live earcon holds the gate shut a few frames in.
 
 ### Streaming a file instead of the mic
 
@@ -190,10 +190,13 @@ as the mic path now is.
 
 **A replay is gated like any other source.** What the file holds and what goes on the wire are
 different things: the mic gate silences outbound frames while the player has audio queued, and
-that includes the capture-live earcon, which every call plays. So an `-audio` run loses roughly
-its first 490 ms and any stretch the server talks over. Pass `-full-duplex` when the point is
-to put a fixed byte stream in front of the server — a scripted run, a regression fixture, or
-the record-then-replay chain above.
+that includes the capture-live earcon, which plays on any call the server does not open by
+speaking. So an `-audio` run loses roughly 490 ms near the start and any stretch the server
+talks over. (The earcon is played by the read loop a beat after the first frame goes out, so
+the very first frames are ungated; and on a call the server opens by speaking, the tone is
+suppressed and the server's own audio gates the mic instead.) Pass `-full-duplex` when the
+point is to put a fixed byte stream in front of the server — a scripted run, a regression
+fixture, or the record-then-replay chain above.
 
 The earcon **does** still sound, once, as the first frame goes out. It is the same mic-warm
 signal, and there is nobody to cue on a file replay, so mute your output if you are running

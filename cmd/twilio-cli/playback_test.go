@@ -64,6 +64,23 @@ func (s *recordingSink) Close() error {
 	return nil
 }
 
+// withFakePlayer points the player seam at an in-memory sink for the duration
+// of the test, and restores it afterwards.
+//
+// Every dial()-driven test needs it. Without it `go test` starts a real ffplay
+// per call and plays the capture-live earcon and whatever the server sent out
+// of the machine's speakers, and dial's teardown then blocks until ffplay has
+// drained and exited -- seconds of wall clock, and audible, for a claim about
+// bytes on a socket.
+func withFakePlayer(t *testing.T) {
+	t.Helper()
+	original := newPlayerFunc
+	t.Cleanup(func() { newPlayerFunc = original })
+	newPlayerFunc = func(context.Context) (*audioPlayer, error) {
+		return newPlayerWithSink(&recordingSink{}), nil
+	}
+}
+
 // mkFrame returns a 160-byte μ-law frame filled with value v.
 func mkFrame(v byte) []byte {
 	f := make([]byte, muLawFrame20ms)

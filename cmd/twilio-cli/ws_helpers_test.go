@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -56,16 +57,23 @@ func readHandshake(t *testing.T, buf *bufio.ReadWriter) []byte {
 // before the handler has been scheduled: closing the server pulls the socket
 // out from under the handler, which surfaces as an intermittent "read
 // connected frame: use of closed network connection" -- an error that names
-// the handshake and means nothing of the kind -- and the readHandshake and
-// trackConn calls below, which take t, can reach a t whose test has already
-// finished, which panics the whole binary with "Log in goroutine after Test
-// has completed". Cleanups run LIFO, so trackConn's conn.Close (registered
-// later, from the handler) runs first and unblocks a handler parked in a read;
-// the wait then returns and the server closes.
+// the handshake and means nothing of the kind -- and the readHandshake call
+// below, which takes t, can reach a t whose test has already finished, which
+// panics the whole binary with "Log in goroutine after Test has completed".
 //
-// It exists because that prologue had been copied into a dozen servers across
-// four files, several of which had dropped trackConn along the way and leaked
-// the client's dial goroutine on any test that timed out.
+// The conn is closed by this cleanup rather than by trackConn, and only after
+// the join has given up. trackConn registers its close from inside the handler
+// -- so it is registered LAST and, cleanups being LIFO, would run FIRST, which
+// is precisely the close-out-from-under this join exists to prevent: a handler
+// still inside readHandshake does not merely unblock, it reports the closed
+// socket as a handshake failure. A handler behind on scheduling is waited for;
+// only one genuinely wedged past the timeout gets its socket pulled, which is
+// the leak trackConn was there to stop.
+//
+// It exists because that prologue had been copied into fifteen servers across
+// three files (dial_test.go x11, playback_test.go x3, record_test.go x1),
+// several of which had dropped trackConn along the way and leaked the client's
+// dial goroutine on any test that timed out.
 //
 // Five servers still build their own, each because it has to do something
 // before or instead of this prologue: stubWSServer checks the Upgrade header
@@ -79,6 +87,8 @@ func readHandshake(t *testing.T, buf *bufio.ReadWriter) []byte {
 func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWriter)) *httptest.Server {
 	t.Helper()
 	served := make(chan struct{})
+	var mu sync.Mutex
+	var hijacked net.Conn
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer close(served)
 		conn, buf, err := w.(http.Hijacker).Hijack()
@@ -86,7 +96,9 @@ func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWri
 			t.Errorf("hijack: %v", err)
 			return
 		}
-		trackConn(t, conn)
+		mu.Lock()
+		hijacked = conn
+		mu.Unlock()
 		defer conn.Close()
 		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
 		readHandshake(t, buf) // connected + start
@@ -99,7 +111,20 @@ func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWri
 		select {
 		case <-served:
 		case <-time.After(5 * time.Second):
-			t.Error("timed out waiting for the hijacked handler goroutine to finish")
+			// Wedged, not merely behind: pull the socket to unblock whatever
+			// read it is parked in, then give it a moment to unwind so it
+			// cannot log against a finished t.
+			mu.Lock()
+			conn := hijacked
+			mu.Unlock()
+			if conn != nil {
+				conn.Close()
+			}
+			select {
+			case <-served:
+			case <-time.After(time.Second):
+				t.Error("timed out waiting for the hijacked handler goroutine to finish")
+			}
 		}
 		srv.Close()
 	})

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -325,11 +324,7 @@ func framesIn(frames []sentFrame, from, to time.Time) []sentFrame {
 // call has ended.
 func runGatedDial(t *testing.T, srv *httptest.Server, opts ...dialOption) {
 	t.Helper()
-	origNewPlayerFunc := newPlayerFunc
-	t.Cleanup(func() { newPlayerFunc = origNewPlayerFunc })
-	newPlayerFunc = func(context.Context) (*audioPlayer, error) {
-		return newPlayerWithSink(&recordingSink{}), nil
-	}
+	withFakePlayer(t)
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 	if err := dial(dialCtx(t, 15*time.Second), newSID("CA"), addr, opts...); err != nil {
 		t.Errorf("dial: %v", err)
@@ -364,7 +359,17 @@ func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
 	// correct, which is a test asserting on its own margins rather than on the
 	// gate.
 	const speech = time.Second
-	const margin = 100 * time.Millisecond
+	// margin is the one free knob here, and what it is covering is the client's
+	// own latency: the server timestamps the instant it *wrote* the media,
+	// while the gate shuts only once the read loop has been scheduled, played
+	// the frame and published the deadline. Nothing in the mechanism bounds
+	// that, so the windows below are pulled in by margin at both ends. 100 ms
+	// was too thin -- a heavily contended machine was measured letting a frame
+	// through 112 ms in -- and the sibling test's non-vacuity check declines to
+	// assume any figure at all for the same latency (see
+	// TestDial_ClearReopensTheMicAtOnce). 250 ms is that measurement with room,
+	// and it costs only a shorter assertion window.
+	const margin = 250 * time.Millisecond
 
 	withLoudFrameSource(t, 5*time.Second)
 
@@ -372,8 +377,9 @@ func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
 	spokeAt := make(chan time.Time, 1)
 	collected := make(chan []sentFrame, 1)
 	srv := silenceProbeServer(t, func(conn net.Conn) {
-		// Speak from a goroutine, and not immediately. Every call opens with
-		// the capture-live earcon, which is real bytes into the same player
+		// Speak from a goroutine, and not immediately. This call opens with
+		// the capture-live earcon -- the server is quiet here, so nothing
+		// suppresses it -- which is real bytes into the same player
 		// and so gates the mic for its own tone plus the hangover; waiting
 		// that out first leaves the deadline this test measures derived from
 		// the speech alone. The delay runs on its own goroutine so the frame
@@ -529,18 +535,28 @@ func TestDial_FullDuplexSendsCapturedFrames(t *testing.T) {
 	const streamSID = "SS_fullduplex"
 	spokeAt := make(chan time.Time, 1)
 	collected := make(chan []sentFrame, 1)
+	// The window sits inside the speech by margin at each end, and the reader
+	// outlasts it by another margin -- a reader that stops level with the
+	// window would charge its own last-frame lag against the count.
+	const speech = time.Second
+	const margin = 100 * time.Millisecond
 	srv := silenceProbeServer(t, func(conn net.Conn) {
-		spokeAt <- serverSpeaks(t, conn, streamSID, time.Second)
-	}, collected, time.Second)
+		spokeAt <- serverSpeaks(t, conn, streamSID, speech)
+	}, collected, speech+2*margin)
 
 	runGatedDial(t, srv, withFullDuplex())
 
 	spoke := <-spokeAt
 	frames := <-collected
 
-	during := framesIn(frames, spoke.Add(100*time.Millisecond), spoke.Add(900*time.Millisecond))
-	if len(during) < 30 {
-		t.Fatalf("frames sent during the server's speech: got %d, want >= 30", len(during))
+	// Derived, not written out: the count is the window's own length in
+	// frames, less a quarter for scheduling -- the same arithmetic the gated
+	// test's wantGated does, for the same reason a hard-coded 30 would be an
+	// assertion about authoring-time margins rather than about full duplex.
+	during := framesIn(frames, spoke.Add(margin), spoke.Add(speech-margin))
+	want := int((speech - 2*margin) / telephony.MuLawDuration(muLawFrame20ms) * 3 / 4)
+	if len(during) < want {
+		t.Fatalf("frames sent during the server's speech: got %d, want >= %d", len(during), want)
 	}
 	for _, f := range during {
 		if isSilenceFrame(f.payload) {

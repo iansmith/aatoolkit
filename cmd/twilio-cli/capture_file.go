@@ -18,8 +18,8 @@ import (
 // The frames this source produces are fixed; what goes on the wire is not. Like
 // the mic, it sends through dial's mediaFrameSender, so the mic gate substitutes
 // silence for its frames while the player still has audio queued (gate.go) --
-// which every call does at the top, for the capture-live earcon. `-full-duplex`
-// is what makes a replay reproducible byte for byte.
+// which any call that plays the capture-live earcon does near the top.
+// `-full-duplex` is what makes a replay reproducible byte for byte.
 
 // frameInterval is the wall-clock spacing between consecutive frames: exactly one
 // frame's playout duration, so streaming any faster would hand the server a whole

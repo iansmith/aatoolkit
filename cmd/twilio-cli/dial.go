@@ -42,9 +42,9 @@ var streamMic micFrameSource = streamMicFrames
 // fifth: adding it under the old shape meant editing eleven declarations that
 // have nothing to do with capturing audio. dial builds send once and passes
 // it, so a source now takes exactly what a source needs: somewhere to put a
-// frame, and a way to say the first one arrived. Everything about how a frame becomes a Twilio
-// media event, gets gated, and gets recorded belongs to mediaFrameSender,
-// which is the file that already claims it.
+// frame, and a way to say the first one arrived. Everything about how a frame
+// becomes a Twilio media event, gets gated, and gets recorded belongs to
+// mediaFrameSender, in capture.go, which already claims it.
 type micFrameSource func(ctx context.Context, send func([]byte) error, onMicWarm func(bool)) error
 
 // frameSourceLabel names whatever streamMic currently is, for the connected log
@@ -91,7 +91,9 @@ type callAudio struct {
 // earcon is the case that proves it -- it is real bytes into the same ffplay
 // sink, so it is accounted to the filler and (correctly) holds the gate shut
 // for its own 240 ms -- plus the hangover shutUntil adds, so roughly half a
-// second at the top of every call.
+// second near the top of any call that plays one. (A call the server opens by
+// speaking plays no tone -- see playEarconUnlessServerSpoke -- and is gated by
+// the server's own audio instead.)
 //
 // playoutFiller.fill is the deliberate exception: it feeds the player too, but
 // what it feeds is silence covering a gap the server left, and silence is
@@ -339,7 +341,16 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		// because something cancelled micCtx (Ctrl-C, or a server-initiated close via
 		// the read loop's cancelMic).
 		naturalEnd := micCtx.Err() == nil
-		if errors.Is(err, context.Canceled) {
+		// A call that simply ended is not a mic failure. The peer closing its
+		// socket while we are still writing frames at it is the ordinary way a
+		// server hangs up (see isCallEnded, which names this exact race), and
+		// whether the frame source notices it as a broken pipe or the read loop
+		// notices it as EOF first is scheduling. Reported as an error it would
+		// reach main's log.Fatalf, so a normal hangup would exit twilio-cli
+		// with "write: broken pipe" perhaps one run in twenty. A hard mic
+		// failure -- ffmpeg missing, the device refusing -- is not call-ended
+		// and still propagates.
+		if err != nil && isCallEnded(err) {
 			err = nil
 		}
 		// Caller hangup: notify the server with a stop frame, here (synchronously,

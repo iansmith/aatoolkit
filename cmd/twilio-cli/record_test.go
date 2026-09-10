@@ -1,12 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
+	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -228,6 +229,7 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 	// returns.
 	run := func(t *testing.T, opts ...dialOption) {
 		t.Helper()
+		withFakePlayer(t)
 		withFakeMic(t, func(_ context.Context, send func([]byte) error, _ func(bool)) error {
 			for i := 0; i*muLawFrame20ms < len(spoken); i++ {
 				if err := send(spoken[i*muLawFrame20ms : (i+1)*muLawFrame20ms]); err != nil {
@@ -237,12 +239,7 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 			return nil
 		})
 
-		srv, served := mediaConsumingServer(t)
-		defer func() {
-			waitServed(t, served)
-			srv.Close()
-		}()
-
+		srv := mediaConsumingServer(t)
 		addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 		if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, opts...); err != nil {
 			t.Fatalf("dial: %v", err)
@@ -286,27 +283,17 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 // once the media it already wrote has been consumed; a server that stopped
 // reading after the handshake would leave the frames in the socket buffer.
 //
-// The returned channel closes when the handler has finished; a caller that
-// closes the server must wait on it first. httptest.Server.Close does not wait
-// for a hijacked connection's goroutine, so a test whose dial returns before
-// that goroutine is scheduled -- which a fake mic sending two frames and
-// hanging up does -- would close the socket underneath it and report the
-// handler's read error as a handshake failure. Intermittent, and it says
-// "read connected frame" about a connection that was fine.
-func mediaConsumingServer(t *testing.T) (*httptest.Server, <-chan struct{}) {
+// It is hijackedWSServer's shape plus that read loop, so it takes the shared
+// helper rather than restating the hijack prologue -- and with it the bounded
+// join hijackedWSServer already does in its own cleanup. That join is what
+// keeps httptest.Server.Close, which does not wait for a hijacked connection's
+// goroutine, from pulling the socket out from under a handler that has not
+// been scheduled yet -- which a fake mic sending two frames and hanging up
+// makes likely. Without it the handler's read error surfaces, intermittently,
+// as "read connected frame" about a connection that was fine.
+func mediaConsumingServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	served := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer close(served)
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // connected + start
+	return hijackedWSServer(t, func(_ net.Conn, buf *bufio.ReadWriter) {
 		for {
 			msg, err := readWSFrame(buf)
 			if err != nil {
@@ -317,19 +304,7 @@ func mediaConsumingServer(t *testing.T) (*httptest.Server, <-chan struct{}) {
 				return
 			}
 		}
-	}))
-	return srv, served
-}
-
-// waitServed blocks until a mediaConsumingServer handler has finished, or fails
-// the test rather than hanging forever on a genuine handler bug.
-func waitServed(t *testing.T, served <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-served:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the media-consuming server handler to finish")
-	}
+	})
 }
 
 // TestDial_RecordSentThroughTheAudioFrameSource pins the -audio half of the
@@ -343,9 +318,10 @@ func waitServed(t *testing.T, served <-chan struct{}) {
 // level below the wiring. Between them a build could route -audio around the
 // recorder entirely and stay green across the whole suite.
 //
-// Driven --full-duplex on purpose (AATK-127): every call opens with the
-// capture-live earcon, which is real bytes into the player, so on the default
-// gated path the opening frames are mu-law silence by design. This test's
+// Driven --full-duplex on purpose (AATK-127): this call opens with the
+// capture-live earcon -- the server here never speaks, so nothing suppresses it
+// -- which is real bytes into the player, so on the default gated path most of
+// the clip goes out as mu-law silence by design. This test's
 // claim is that the streamed frames reach the file, so it takes the gate out
 // of the way; the gated path's own claim -- that the tee records what went on
 // the wire rather than what was captured -- is
@@ -369,6 +345,7 @@ func TestDial_RecordSentThroughTheAudioFrameSource(t *testing.T) {
 // shape that gets fixed in one place and left broken in the other.
 func recordSentThroughFileSource(t *testing.T, frames int, opts ...dialOption) (spoken, recorded []byte) {
 	t.Helper()
+	withFakePlayer(t)
 
 	dir := t.TempDir()
 	spoken = framePattern(frames)
@@ -380,11 +357,7 @@ func recordSentThroughFileSource(t *testing.T, frames int, opts ...dialOption) (
 	// The real file frame source, installed on the seam -audio installs it on.
 	withFakeMic(t, streamFileFrames(src))
 
-	srv, served := mediaConsumingServer(t)
-	defer func() {
-		waitServed(t, served)
-		srv.Close()
-	}()
+	srv := mediaConsumingServer(t)
 
 	out := filepath.Join(dir, "sent.ulaw")
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -405,9 +378,10 @@ func recordSentThroughFileSource(t *testing.T, frames int, opts ...dialOption) (
 // the gate was shut would be a file of the server's own voice labelled as the
 // caller's -- the exact confusion the gate exists to end.
 //
-// The earcon is what holds the gate shut here: it plays into the same player
-// as the server's audio, is accounted to the filler, and so gates the mic for
-// its own tone plus the hangover, which outlasts the whole clip.
+// The earcon is what holds the gate shut here: this server never speaks, so
+// nothing suppresses the tone; it plays into the same player the server's audio
+// would, is accounted to the filler, and so gates the mic for its own tone plus
+// the hangover, which outlasts the whole clip.
 //
 // The assertion is on the shape, not on an offset. The leading frames carry
 // captured audio, and that is the gate being right rather than late: the tone
