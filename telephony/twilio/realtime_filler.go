@@ -104,6 +104,13 @@ type filler struct {
 	// playing is true between the delay elapsing and the loop being stopped.
 	// It is what Media reads to decide whether the carrier is owed a clear.
 	playing bool
+	// atOpen records that the countdown currently pending was started by the
+	// call opening rather than by a backend event, so start can name that
+	// condition in the log exactly once (AATK-128, observable behaviour 7).
+	// Set only where a timer is actually scheduled, which is what makes a
+	// re-arm during a call-open countdown keep the label: the countdown was
+	// never restarted, so it is still the one that began at call open.
+	atOpen bool
 	// off is the read position in loop, in bytes. It survives across frames
 	// within one episode and resets at the start of each, so the wrap is
 	// seamless and the loop always begins where the consumer's clip does.
@@ -173,6 +180,29 @@ func (f *filler) observe(ev ServerEvent) {
 // that it begins again — restarting a pending countdown was what pushed the
 // loop's start a whole Delay later than the caller's silence began.
 func (f *filler) arm() {
+	f.armWith(false)
+}
+
+// armAtOpen is the call opening, which AATK-128 adds as a third arming trigger
+// beside observe's two. Both of those mean "the caller has finished talking",
+// and at call open the caller has said nothing — so before this the machine was
+// never armed and the opening silence was the one gap the option could not
+// cover. A backend that completes the handshake and then produces nothing left
+// the caller on an open line until the idle guard dropped it.
+//
+// A new caller of arm, not a new state machine: the disarm is the one that
+// already exists, since carrierMediaSink.Media stops the loop on the backend's
+// first audio delta whatever armed it, and speech_started stops it through
+// Clear. Nil receiver — the consumer supplied no usable FillerConfig — is a
+// no-op like every other method here, which is what keeps a call that did not
+// opt in byte-identical on the carrier.
+func (f *filler) armAtOpen() {
+	f.armWith(true)
+}
+
+// armWith is arm's body, carrying which trigger asked for the countdown. The
+// flag is recorded only where a timer is genuinely scheduled; see filler.atOpen.
+func (f *filler) armWith(atOpen bool) {
 	if f == nil {
 		return
 	}
@@ -214,6 +244,7 @@ func (f *filler) arm() {
 	// this function's early return exists to prevent.
 	f.cancelPendingLocked()
 	gen := f.gen
+	f.atOpen = atOpen
 	f.timer = time.AfterFunc(f.delay, func() { f.start(gen) })
 }
 
@@ -275,7 +306,20 @@ func (f *filler) start(gen uint64) {
 	f.timer = nil
 	f.playing = true
 	f.off = 0
+	atOpen := f.atOpen
+	f.atOpen = false
 	f.mu.Unlock()
+
+	if atOpen {
+		// Once per call, and only when the condition actually happened: the
+		// backend completed its handshake and then produced no audio for the
+		// whole of Delay, with the caller never having spoken. Named so a call
+		// that sounded dead at the open is greppable afterwards — and
+		// deliberately NOT under the "filler audio:" prefix play's write-error
+		// line carries, which two tests in this package grep for as the
+		// signature of a frame that failed to reach the carrier.
+		log.Printf("twilio: realtime: silent backend at call open: playing the filler loop")
+	}
 
 	go f.play(gen)
 }

@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // Tests for the two halves of "is anyone there?" (AATK-128): the hold loop
@@ -262,6 +266,63 @@ func TestFarewell_FramesReachTheCarrierBeforeTheClose(t *testing.T) {
 	}
 }
 
+// TestFarewell_WaitsForTheCarrierToReportItPlayed pins the DRAIN, which is the
+// half of behaviour 4 the ordering assertion above cannot see. Frames written
+// and then immediately abandoned still show up on the wire ahead of the close —
+// they were written first — while the caller hears the line drop mid-word,
+// because Twilio buffers outbound media and CloseNow does not wait for it.
+//
+// The mark echo is the only honest report that the audio actually played, so
+// the assertion is in two directions: the call must NOT have ended once the
+// mark is on the wire, and it must end promptly once the carrier echoes it —
+// well inside the bound the engine would otherwise wait out.
+//
+// slopstop:test contract
+func TestFarewell_WaitsForTheCarrierToReportItPlayed(t *testing.T) {
+	const idleTimeout = 200 * time.Millisecond
+
+	be := newFakeRealtimeBackend(t)
+	h := silenceHarness(t, be.url(),
+		WithIdleTimeout(idleTimeout),
+		WithFarewellAudio(farewellTestClip()))
+	wire := h.captureCarrierWire(t)
+
+	waitFor(t, 5*time.Second, func() bool {
+		for _, r := range wire() {
+			if r.markName == farewellMarkName {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The mark is written after the clip and before the close; every farewell
+	// frame must already be behind it.
+	got := wire()
+	markAt := -1
+	for i, r := range got {
+		if r.markName == farewellMarkName {
+			markAt = i
+			break
+		}
+	}
+	if n := len(farewellFrames(got[:markAt])); n != len(farewellFills) {
+		t.Fatalf("the mark must be written after the whole clip: %d of %d frames precede it\n%+v",
+			n, len(farewellFills), got)
+	}
+
+	assertStillRunning(t, h, "the call must not end until the carrier reports the farewell played")
+
+	echoMarkFromCarrier(t, h, farewellMarkName)
+
+	// Comfortably inside the mark's own bound, which is the clip's playout plus
+	// telephony.MarkEchoGraceMS — so arriving this fast can only be the echo
+	// having released the wait, not the bound expiring.
+	if err := h.waitDone(telephony.MarkEchoGraceMS / 2 * time.Millisecond); err == nil {
+		t.Fatal("the idle ending must still be reported as an error after the farewell has played")
+	}
+}
+
 // --- behaviour 6: no farewell option, today's behaviour ---------------------
 
 // TestFarewell_AbsentWhenTheOptionIsNotSupplied pins the off case: the idle
@@ -311,6 +372,56 @@ func TestIdleTimeout_ErrorMatchesErrIdleTimeout(t *testing.T) {
 	err := h.waitDone(idleTimeout + 5*time.Second)
 	if !errors.Is(err, ErrIdleTimeout) {
 		t.Fatalf("the idle-timeout ending must be identifiable with errors.Is(err, ErrIdleTimeout), got: %v", err)
+	}
+}
+
+// --- behaviour 7: both conditions are named in the log ----------------------
+
+// TestSilentBackend_BothConditionsAreLoggedOnce pins observable behaviour 7:
+// each condition says its own name, once, so a call that sounded dead can be
+// found afterwards without replaying it.
+//
+// It is a real assertion rather than a comment because nothing else can see
+// these lines — the log is the whole observable. Both are checked in one call,
+// which is also the call a live deployment would see them on: the backend goes
+// silent at the open, the loop covers it, and the idle guard eventually ends
+// the call with the farewell.
+//
+// slopstop:test contract
+func TestSilentBackend_BothConditionsAreLoggedOnce(t *testing.T) {
+	const idleTimeout = 900 * time.Millisecond
+	const (
+		coverLine    = "twilio: realtime: silent backend at call open: playing the filler loop"
+		farewellLine = "twilio: realtime: idle timeout: playing the farewell before ending the call"
+	)
+
+	// syncBuffer, not a bare bytes.Buffer: these lines are written by the play
+	// goroutine and the select loop while this one reads them.
+	var buf syncBuffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	be := newFakeRealtimeBackend(t)
+	h := silenceHarness(t, be.url(),
+		WithIdleTimeout(idleTimeout),
+		WithFillerAudio(FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay}),
+		WithFarewellAudio(farewellTestClip()))
+
+	if err := h.waitDone(idleTimeout + 5*time.Second); err == nil {
+		t.Fatal("a silent backend must end the call with a non-nil error")
+	}
+
+	for _, want := range []string{coverLine, farewellLine} {
+		if n := strings.Count(buf.String(), want); n != 1 {
+			t.Fatalf("each condition must be named in the log exactly once: %q appeared %d times\nlog: %q",
+				want, n, buf.String())
+		}
 	}
 }
 

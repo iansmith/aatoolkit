@@ -2,6 +2,7 @@ package twilio
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -889,8 +890,14 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// nil tracker when the consumer asked for no marks, which is what keeps a
 	// call with neither option byte-identical to today: no mark is written,
 	// and an inbound mark frame is ignored without even a log line.
+	//
+	// A farewell also needs one, and for the engine's own use rather than the
+	// consumer's: playFarewell waits on the mark's echo to know the clip
+	// actually reached the caller before the socket closes (AATK-128). The
+	// tracker it gets has a nil echoCh unless the consumer asked for one, so
+	// nothing is delivered anywhere it was not already going.
 	var marks *markTracker
-	if markRequestCh != nil || markEchoCh != nil {
+	if markRequestCh != nil || markEchoCh != nil || len(cfg.farewell) > 0 {
 		marks = newMarkTracker(markEchoCh)
 	}
 	// Before conn.CloseNow's defer runs, so a bound firing during teardown
@@ -915,6 +922,17 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 
 	sink := newCarrierMediaSink(conn, start.StreamSID, cfg.carrierAudioChan(start), marks, fill)
 	fill.attach(sink)
+
+	// The call is now open on both sides, and nothing has been said on either.
+	// That is the third arming trigger (AATK-128): the two observe knows both
+	// mean "the caller has finished talking", so before this a backend that
+	// completed its handshake and then produced nothing left the opening
+	// silence uncovered until the idle guard dropped the line. Armed here
+	// rather than earlier because the loop writes through the sink, and after
+	// attach the sink exists; the countdown is Delay long, so the ordering
+	// against bridge.Run below is not tight either way.
+	fill.armAtOpen()
+
 	bridge := realtime.NewBridge(client, sink)
 
 	runCtx, cancelRun := context.WithCancel(ctx)
@@ -995,7 +1013,12 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 		case err := <-carrierDone:
 			return err
 		case <-idle.fired():
-			return fmt.Errorf("twilio: realtime: idle timeout: no backend activity for %s", cfg.idleTimeout)
+			// Before the return, and therefore before the CloseNow defer: this
+			// is the one ending that fires while the caller is still holding a
+			// live line expecting something, so it is the one that owes them a
+			// word. Inert when no clip was supplied.
+			playFarewell(ctx, sink, marks, cfg.farewell)
+			return fmt.Errorf("%w: no backend activity for %s", ErrIdleTimeout, cfg.idleTimeout)
 		case <-bridge.Activity():
 			idle.reset()
 		case ev, ok := <-clientEventCh:
@@ -1017,6 +1040,67 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 				return err
 			}
 		}
+	}
+}
+
+// farewellMarkName names the mark the engine writes after the farewell clip, so
+// it can recognise the echo that says the caller heard it.
+//
+// Distinctive rather than descriptive: a consumer's own mark names travel the
+// same wire, and an echo is matched by name alone. A consumer that uses this
+// exact string for a mark of its own would have that mark's echo resolve this
+// wait — which costs a farewell that is still playing its remaining bound, and
+// nothing worse, since the wait's only job is to decide when the socket may
+// close.
+const farewellMarkName = "aatoolkit-farewell"
+
+// playFarewell writes clip to the carrier and waits for the carrier to report
+// it played, so HandleStreamRealtime's CloseNow defer runs AFTER the caller has
+// actually heard it. A farewell cut off mid-word is worse than none.
+//
+// Nothing here is new machinery, which is the point: the frames go through
+// sink.Media — the same method the backend's own audio goes through — and the
+// wait is the mark protocol AATK-105 already built. Media is what makes this
+// correct beside the hold loop as well as beside the backend: it stops the
+// filler and clears whatever the carrier has buffered of it before the first
+// farewell frame, so the goodbye does not queue behind a loop the caller is
+// still hearing.
+//
+// The frames are written as fast as the carrier accepts them rather than paced
+// one per frame-time, and that differs from filler.play deliberately. Pacing
+// exists there so a reply cannot end up queued behind the loop; here nothing
+// follows the clip, and the mark's own bound — derived from the playout queued
+// ahead of it — is what waits out the real time the audio takes to play.
+//
+// An empty clip is inert: the branch then ends the call exactly as it did
+// before this option existed. A write failure ends the attempt rather than the
+// call, because the call is already ending; the error the caller returns is the
+// idle timeout either way.
+func playFarewell(ctx context.Context, sink *carrierMediaSink, marks *markTracker, clip []byte) {
+	if len(clip) == 0 {
+		return
+	}
+	log.Printf("twilio: realtime: idle timeout: playing the farewell before ending the call")
+
+	for off := 0; off < len(clip); off += defaultFrameBytes {
+		end := min(off+defaultFrameBytes, len(clip))
+		if err := sink.Media(ctx, base64.StdEncoding.EncodeToString(clip[off:end])); err != nil {
+			log.Printf("twilio: realtime: farewell audio: %v", err)
+			return
+		}
+	}
+
+	// Registered before the write, not after: the echo can arrive as soon as
+	// Mark returns, and a waiter registered afterwards would miss it and sit
+	// out the whole bound.
+	played := marks.await(farewellMarkName)
+	if err := sink.Mark(ctx, farewellMarkName); err != nil {
+		log.Printf("twilio: realtime: farewell audio: mark: %v", err)
+		return
+	}
+	select {
+	case <-played:
+	case <-ctx.Done():
 	}
 }
 

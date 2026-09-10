@@ -105,6 +105,41 @@ func armFiller(t *testing.T, be *fakeRealtimeBackend) {
 	be.emitOnce(t, map[string]string{"type": "input_audio_buffer.speech_stopped"})
 }
 
+// afterTheBackendHasSpoken makes explicit a precondition these tests used to
+// get for free. AATK-128 arms the machine at call open as well, so a test whose
+// subject is the speech_stopped trigger has to start from a call where the
+// call-open cover is already disarmed — and disarming it is what the backend's
+// first audio frame does, on a real call as much as here.
+//
+// It returns a wire query scoped to what followed that frame, so the assertion
+// sees only the episode the test is actually driving. Everything before it
+// belongs to the call opening, which the tests in realtime_silence_test.go
+// cover.
+func afterTheBackendHasSpoken(t *testing.T, be *fakeRealtimeBackend, wire func() []carrierWireRecord) func() []carrierWireRecord {
+	t.Helper()
+
+	first := distinctCarrierPayload(0x5b)
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": first})
+	waitFor(t, 5*time.Second, func() bool {
+		for _, r := range wire() {
+			if r.payload == first {
+				return true
+			}
+		}
+		return false
+	})
+
+	return func() []carrierWireRecord {
+		recs := wire()
+		for i, r := range recs {
+			if r.payload == first {
+				return recs[i+1:]
+			}
+		}
+		return nil
+	}
+}
+
 // waitFillerPlaying blocks until at least n loop frames have reached the
 // carrier, failing the test if they never do.
 func waitFillerPlaying(t *testing.T, wire func() []carrierWireRecord, n int) {
@@ -126,6 +161,7 @@ func TestFiller_StartsAfterDelayAndPaces(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
+	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	armedAt := time.Now()
 	armFiller(t, be)
@@ -179,6 +215,7 @@ func TestFiller_NoStartWhenBackendIsFast(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
+	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	armFiller(t, be)
 	time.Sleep(fillerTestDelay / 3)

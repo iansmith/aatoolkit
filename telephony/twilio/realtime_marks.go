@@ -114,6 +114,15 @@ type markTracker struct {
 	// See outstandingMark.
 	gen     uint64
 	dropped int
+	// awaitName and awaitCh are the ENGINE'S own wait on a mark, as opposed to
+	// the consumer's observation of one through echoCh. AATK-128 needs exactly
+	// one: the farewell must have reached the caller before the socket closes,
+	// and the echo is the only honest report that it did. One waiter per call
+	// rather than a map, because there is one engine-internal wait and it is
+	// the last thing the call does; a second would be a different feature and
+	// would say so by needing a different shape here.
+	awaitName string
+	awaitCh   chan struct{}
 	// stopped is set when the call ends. It is what keeps a timer that fires,
 	// or an echo that arrives, during teardown from delivering on a channel
 	// whose consumer has already been told the call is over.
@@ -170,6 +179,51 @@ func (t *markTracker) arm(name string, bound time.Duration) {
 	t.outstanding[name] = outstandingMark{timer: time.AfterFunc(bound, func() { t.expire(name, gen) }), gen: gen}
 }
 
+// await registers name as the mark the engine itself is waiting on and returns
+// the channel closed when that mark resolves — echoed by the carrier, expired
+// at its own bound, or cut short by the call ending. Every one of those three
+// is a "stop waiting", which is why one channel serves all of them: the caller
+// is deciding when it may close the socket, not judging the carrier.
+//
+// It is therefore already BOUNDED without a timer of its own: arm gives every
+// mark a bound derived from the playout queued ahead of it, and expire resolves
+// this wait when that bound fires. A nil tracker, or one whose call has already
+// ended, returns a channel that is already closed rather than one that never
+// fires — waiting on a tracker that cannot answer is the one outcome a caller
+// about to close a socket must not get.
+//
+// Call it BEFORE writing the mark: the echo can arrive as soon as the write
+// returns, and a waiter registered afterwards would miss it and wait out the
+// whole bound.
+func (t *markTracker) await(name string) <-chan struct{} {
+	ch := make(chan struct{})
+	if t == nil {
+		close(ch)
+		return ch
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped {
+		close(ch)
+		return ch
+	}
+	t.awaitName, t.awaitCh = name, ch
+	return ch
+}
+
+// resolveAwaitLocked ends the engine's wait if name is the mark it was waiting
+// on. An empty name resolves whatever is waiting, which is what stop needs: the
+// call is over and nothing is going to answer.
+//
+// Called with t.mu held, from every path that finishes a mark.
+func (t *markTracker) resolveAwaitLocked(name string) {
+	if t.awaitCh == nil || (name != "" && name != t.awaitName) {
+		return
+	}
+	close(t.awaitCh)
+	t.awaitCh = nil
+}
+
 // echo resolves an inbound mark echo from the carrier.
 //
 // An echo matching nothing outstanding is logged and NOT delivered — the
@@ -192,6 +246,7 @@ func (t *markTracker) echo(name string) {
 	}
 	m.timer.Stop()
 	delete(t.outstanding, name)
+	t.resolveAwaitLocked(name)
 	t.deliver(MarkEcho{Name: name})
 }
 
@@ -217,6 +272,7 @@ func (t *markTracker) expire(name string, gen uint64) {
 		return
 	}
 	delete(t.outstanding, name)
+	t.resolveAwaitLocked(name)
 	log.Printf("twilio: realtime: carrier did not honor mark protocol for %q within its bound", name)
 	t.deliver(MarkEcho{Name: name, TimedOut: true})
 }
@@ -232,6 +288,10 @@ func (t *markTracker) stop() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.stopped = true
+	// Whatever the engine was waiting on, it is not going to be answered now:
+	// release it rather than leaving a caller parked on a tracker that has
+	// stopped resolving anything.
+	t.resolveAwaitLocked("")
 	for name, m := range t.outstanding {
 		m.timer.Stop()
 		delete(t.outstanding, name)
