@@ -28,7 +28,7 @@ import (
 //
 // This is the ONE frame-source seam — a second one (a dialOption, say) would
 // leave two mechanisms selecting the same thing.
-var streamMic func(context.Context, *websocket.Conn, string, *int, *streamRecorder, func(bool)) error = streamMicFrames
+var streamMic func(context.Context, *websocket.Conn, string, *int, *streamRecorder, *micGate, func(bool)) error = streamMicFrames
 
 // frameSourceLabel names whatever streamMic currently is, for the connected log
 // line. Set alongside streamMic, never independently.
@@ -63,6 +63,7 @@ type dialOptions struct {
 	noEchoMarks    bool
 	recordPath     string
 	recordSentPath string
+	fullDuplex     bool
 }
 
 // dialOption configures dialOptions.
@@ -73,6 +74,12 @@ type dialOption func(*dialOptions)
 // instead of receiving an echo.
 func withNoEchoMarks() dialOption {
 	return func(o *dialOptions) { o.noEchoMarks = true }
+}
+
+// withFullDuplex turns the half-duplex mic gate off (see --full-duplex in
+// main.go), so captured frames go upstream even while the player is speaking.
+func withFullDuplex() dialOption {
+	return func(o *dialOptions) { o.fullDuplex = true }
 }
 
 // withRecording records every inbound media payload to path (see -record in
@@ -248,7 +255,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 				// Earcon signal already pending; skip this one.
 			}
 		}
-		err := streamMic(micCtx, conn, streamSID, &seqNum, sentRecorder, onMicWarm)
+		err := streamMic(micCtx, conn, streamSID, &seqNum, sentRecorder, nil, onMicWarm)
 		// naturalEnd: streamMic returned on its OWN (mic EOF = caller hangup), not
 		// because something cancelled micCtx (Ctrl-C, or a server-initiated close via
 		// the read loop's cancelMic).

@@ -224,7 +224,7 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 	// returns. Reports whether the frame source was handed a recorder at all.
 	run := func(t *testing.T, opts ...dialOption) (gotRecorder bool) {
 		t.Helper()
-		withFakeMic(t, func(_ context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, _ func(bool)) error {
+		withFakeMic(t, func(_ context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, _ *micGate, _ func(bool)) error {
 			gotRecorder = rec != nil
 			send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn))
 			for i := 0; i*muLawFrame20ms < len(spoken); i++ {

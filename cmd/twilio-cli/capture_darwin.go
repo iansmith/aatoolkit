@@ -93,7 +93,7 @@ func normalizeMicSpec(v string) string {
 // onMicWarm fires exactly once, at the first frame (always capHit=false; there
 // is no silence-discard cap to hit any more). rec is nil unless -record-sent
 // named a file. Returns when ctx is cancelled or the connection closes.
-func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, onMicWarm func(bool)) error {
+func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, gate *micGate, onMicWarm func(bool)) error {
 	cmd := newFFmpegCmd(ctx, os.Getenv("AATOOLKIT_STT_MIC"))
 
 	stdout, err := cmd.StdoutPipe()

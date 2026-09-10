@@ -148,8 +148,8 @@ func installAudioFrameSource(audioPath string) error {
 // set: it opens path, wraps each frame with the call's mediaFrameEncoder, and
 // writes it to conn. The returned func matches the streamMic seam's signature
 // (dial.go), mirroring capture_darwin.go's streamMicFrames shape.
-func streamFileFrames(path string) func(context.Context, *websocket.Conn, string, *int, *streamRecorder, func(bool)) error {
-	return func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, onMicWarm func(bool)) error {
+func streamFileFrames(path string) func(context.Context, *websocket.Conn, string, *int, *streamRecorder, *micGate, func(bool)) error {
+	return func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, gate *micGate, onMicWarm func(bool)) error {
 		f, err := os.Open(path)
 		if err != nil {
 			return fmt.Errorf("streamFileFrames: %w", err)
