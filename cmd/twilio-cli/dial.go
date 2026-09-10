@@ -196,8 +196,11 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	defer func() { audio.recorder.close(time.Now()) }()
 
 	// The outbound recorder is dial's to own for the same reason the inbound one
-	// is: it lives exactly as long as the call. The frame source only writes to
-	// it, so it is created and closed here and handed down to streamMic.
+	// is: it lives exactly as long as the call. It is created and closed here
+	// and handed to mediaFrameSender (below), not to the frame source: a source
+	// hands over payloads and never touches the recorder, and mediaFrameSender
+	// is the one place an outbound frame leaves the process, so it is the one
+	// place that can tee what was actually sent.
 	sentRecorder, err := newStreamRecorder(recordOutbound, cfg.recordSentPath, time.Now())
 	if err != nil {
 		return err

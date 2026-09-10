@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -305,6 +307,58 @@ func withFakeMic(t *testing.T, fn micFrameSource) {
 	original := streamMic
 	streamMic = fn
 	t.Cleanup(func() { streamMic = original })
+}
+
+// TestDial_MicErrorPropagatesUnlessTheCallSimplyEnded pins the mic goroutine's
+// error classification (AATK-127), which widened from `errors.Is(err,
+// context.Canceled)` to `isCallEnded(err)`.
+//
+// Both halves are the contract, and only together. The swallow exists because
+// the peer closing its socket while the frame source is still writing at it is
+// the ordinary way a server hangs up: reported as an error it reaches main's
+// log.Fatalf, so a normal call would exit twilio-cli with "write: broken pipe"
+// on whichever runs lost that race. The propagation exists because the swallow
+// must not grow into "the mic never fails": ffmpeg missing or the device
+// refusing is a call that captured nothing, and an operator told "call ended"
+// has no way to find that out.
+//
+// Asserted through dial() rather than on isCallEnded directly, because what
+// changed is which errors dial returns to main -- isCallEnded itself is
+// unchanged by that commit and was already true of these inputs.
+func TestDial_MicErrorPropagatesUnlessTheCallSimplyEnded(t *testing.T) {
+	hardFailure := errors.New("streamMicFrames: start ffmpeg (installed? `brew install ffmpeg`)")
+
+	for _, tc := range []struct {
+		name    string
+		micErr  error
+		wantErr error // nil means dial must swallow it
+	}{
+		{"peer closed while we were writing", syscall.EPIPE, nil},
+		{"peer reset the connection", syscall.ECONNRESET, nil},
+		{"frame source ran out", io.EOF, nil},
+		{"ffmpeg could not start", hardFailure, hardFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakePlayer(t)
+			withFakeMic(t, func(context.Context, func([]byte) error, func(bool)) error {
+				return tc.micErr
+			})
+
+			srv := mediaConsumingServer(t)
+			addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+			err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr)
+
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Errorf("dial returned %v for a mic error that means the call ended; main would log.Fatalf on a normal hangup", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("dial returned %v, want %v -- a hard capture failure must reach the operator, not read as a clean hangup", err, tc.wantErr)
+			}
+		})
+	}
 }
 
 // TestDial_NoStopFrameOnServerClose asserts that a SERVER-initiated close (the
