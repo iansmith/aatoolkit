@@ -3,6 +3,7 @@ package twilio
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -157,6 +158,13 @@ type realtimeConfig struct {
 	// markEchoChanFor mirrors carrierAudioChanFor: the engine writes, the
 	// consumer reads, resolved per call for the same reason.
 	markEchoChanFor func(start Frame) chan<- MarkEcho
+
+	// farewell is the clip played to the caller on the idle guard's own exit
+	// path, before the carrier is closed. A plain value rather than a per-call
+	// resolver, mirroring voice and tools: what a deployment says as it hangs
+	// up on a backend that stopped answering is a property of the deployment,
+	// and no stated need varies it by caller. nil is inert.
+	farewell []byte
 
 	// fillerFor mirrors instructionsFor rather than the channel resolvers: it
 	// carries a value, not a seam. Resolved per call for the reason every
@@ -321,6 +329,43 @@ func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
 // call.
 func WithIdleTimeout(d time.Duration) RealtimeOption {
 	return func(c *realtimeConfig) { c.idleTimeout = d }
+}
+
+// ErrIdleTimeout identifies the ending WithIdleTimeout produces, so a consumer
+// can recognise it with errors.Is rather than by matching the sentence the
+// error happens to be phrased in today (AATK-128).
+//
+// The returned error wraps this and adds how long the bound was, so the message
+// is unchanged from before this sentinel existed; what changed is that the
+// CONDITION now has a name. A consumer logging "the backend stopped answering"
+// wants this one ending and not the several other non-nil errors this path can
+// return, and a message is not an API.
+var ErrIdleTimeout = errors.New("twilio: realtime: idle timeout")
+
+// WithFarewellAudio plays clip to the caller on the idle guard's own exit path,
+// before the carrier connection is closed (AATK-128).
+//
+// The gap it fills is the one a caller reads as the line having died: the guard
+// fires while they are still holding an open line expecting something, and
+// today the call simply stops. This is the only exit path it covers, and
+// deliberately — every other ending either has the caller hanging up already or
+// has the backend still speaking.
+//
+// clip is 8 kHz G.711 μ-law raw bytes, the same codec and the same "no
+// transcoding, no gain, no fade" contract FillerConfig.Loop carries; see there
+// for why the engine does not touch the samples. Unlike the loop it is played
+// ONCE, start to finish, and the call ends when the carrier reports it has
+// played (or the engine's own bound for that report elapses) — so a farewell is
+// never cut off mid-word by the close.
+//
+// nil or empty is inert: the idle branch then behaves exactly as it did before
+// this option existed, ending the call at its bound with nothing written.
+//
+// One clip for every call this handler serves. There is no "For" twin, for the
+// reason WithVoice and WithTools have none: no stated need varies it per
+// caller.
+func WithFarewellAudio(clip []byte) RealtimeOption {
+	return func(c *realtimeConfig) { c.farewell = clip }
 }
 
 // WithInstructions sets one session persona for every call this option is

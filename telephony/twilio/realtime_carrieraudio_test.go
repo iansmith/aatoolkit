@@ -39,10 +39,19 @@ import (
 // is paced, so its contract is about WHEN each frame arrived, not only in what
 // order. Stamped as the record is appended, on the reader goroutine, which is
 // the closest this suite can stand to the carrier's own clock.
+//
+// closed was added by AATK-128, which needed the CLOSE to have a place in the
+// same sequence: the farewell's whole contract is that its frames precede the
+// socket going away, and a capture that ended silently at the close could only
+// show that frames arrived, never that they arrived first. It is the one record
+// kind that is not a message — the carrier's read failing is the observation —
+// so it carries no payload, no clear and no mark name, and every existing
+// predicate over this slice therefore ignores it.
 type carrierWireRecord struct {
 	payload  string
 	clear    bool
 	markName string
+	closed   bool
 	at       time.Time
 }
 
@@ -65,6 +74,12 @@ func (h *realtimeHarness) captureCarrierWire(t *testing.T) func() []carrierWireR
 		for {
 			_, data, err := h.conn.Read(context.Background())
 			if err != nil {
+				// The carrier connection ended. Recorded rather than merely
+				// returned, so a test can place the close in the sequence — see
+				// carrierWireRecord.closed.
+				mu.Lock()
+				records = append(records, carrierWireRecord{closed: true, at: time.Now()})
+				mu.Unlock()
 				return
 			}
 			f, err := DecodeFrame(data)
@@ -101,7 +116,8 @@ func (h *realtimeHarness) captureCarrierWire(t *testing.T) func() []carrierWireR
 // part of the message, so a whole-struct comparison against a want literal
 // would compare an arrival instant no test can predict.
 func (r carrierWireRecord) sameMessage(other carrierWireRecord) bool {
-	return r.payload == other.payload && r.clear == other.clear && r.markName == other.markName
+	return r.payload == other.payload && r.clear == other.clear &&
+		r.markName == other.markName && r.closed == other.closed
 }
 
 // distinctCarrierPayload builds a carrier-shaped base64 payload filled with a
