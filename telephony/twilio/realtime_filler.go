@@ -11,6 +11,29 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/realtime"
 )
 
+// armTrigger names what asked for a countdown, which is the whole of what the
+// machine needs to remember about its own cause: only one of the two is worth
+// a log line, and only start knows whether that countdown survived to play.
+//
+// A type rather than a bool because armedByCallOpen and armedByTurn read at the
+// call site, where a bare true/false would not — and because it is carried in
+// the pending start's closure rather than on the struct, so naming it costs
+// nothing that a field would have cost.
+type armTrigger int
+
+const (
+	// armedByTurn is observe's pair: the caller stopped speaking, or a
+	// response ended in a function call and the tool round trip begins. Both
+	// mean the caller has finished talking and is now waiting.
+	armedByTurn armTrigger = iota
+	// armedByCallOpen is the call itself opening, with nothing said on either
+	// side yet (AATK-128). Before it the machine was never armed until the
+	// caller spoke, so a backend that completed its handshake and then
+	// produced nothing left the caller on an open line, uncovered, until the
+	// idle guard dropped it.
+	armedByCallOpen
+)
+
 // filler plays the consumer's loop to the caller across the gap between the
 // caller's last word and the backend's first reply frame (AATK-108). It is one
 // state machine per call: armed by an event, started by a delay, stopped by
@@ -21,7 +44,10 @@ import (
 //
 // ARMING is driven by observe, on the server-event drain goroutine, because
 // the two events that arm it — speech_stopped, and the response.done that
-// ended in a function call — reach this package nowhere else. That stream is
+// ended in a function call — reach this package nowhere else. (AATK-128 adds a
+// third trigger, armedByCallOpen, from HandleStreamRealtime's own setup
+// goroutine before either loop is running; it is not an event and so has
+// nothing to do with this stream's losses.) That stream is
 // lossy by construction (Bridge.publishEvent drops rather than parking Run's
 // read loop), and it is lossy in the safe direction: a dropped arm costs the
 // caller a loop that does not play, which is exactly the silence this option
@@ -104,13 +130,6 @@ type filler struct {
 	// playing is true between the delay elapsing and the loop being stopped.
 	// It is what Media reads to decide whether the carrier is owed a clear.
 	playing bool
-	// atOpen records that the countdown currently pending was started by the
-	// call opening rather than by a backend event, so start can name that
-	// condition in the log exactly once (AATK-128, observable behaviour 7).
-	// Set only where a timer is actually scheduled, which is what makes a
-	// re-arm during a call-open countdown keep the label: the countdown was
-	// never restarted, so it is still the one that began at call open.
-	atOpen bool
 	// off is the read position in loop, in bytes. It survives across frames
 	// within one episode and resets at the start of each, so the wrap is
 	// seamless and the loop always begins where the consumer's clip does.
@@ -154,14 +173,14 @@ func (f *filler) observe(ev ServerEvent) {
 	case realtime.EventSpeechStopped:
 		// The caller has finished a sentence. Everything from here to the
 		// reply's first frame is the wait this option exists to fill.
-		f.arm()
+		f.arm(armedByTurn)
 	case realtime.EventResponseDone:
 		// A response that ended in a function call is not the reply: it is
 		// the start of a second wait, the tool round trip plus the second
 		// LLM leg, which the caller hears as one continuous silence with the
 		// first. Any other response.done ends the turn, so the loop stops.
 		if realtime.ResponseEndedInFunctionCall(ev.Raw) {
-			f.arm()
+			f.arm(armedByTurn)
 		} else {
 			f.stop()
 		}
@@ -179,30 +198,10 @@ func (f *filler) observe(ev ServerEvent) {
 // a noisy room makes the VAD reopen the turn) means the wait CONTINUES, never
 // that it begins again — restarting a pending countdown was what pushed the
 // loop's start a whole Delay later than the caller's silence began.
-func (f *filler) arm() {
-	f.armWith(false)
-}
-
-// armAtOpen is the call opening, which AATK-128 adds as a third arming trigger
-// beside observe's two. Both of those mean "the caller has finished talking",
-// and at call open the caller has said nothing — so before this the machine was
-// never armed and the opening silence was the one gap the option could not
-// cover. A backend that completes the handshake and then produces nothing left
-// the caller on an open line until the idle guard dropped it.
-//
-// A new caller of arm, not a new state machine: the disarm is the one that
-// already exists, since carrierMediaSink.Media stops the loop on the backend's
-// first audio delta whatever armed it, and speech_started stops it through
-// Clear. Nil receiver — the consumer supplied no usable FillerConfig — is a
-// no-op like every other method here, which is what keeps a call that did not
-// opt in byte-identical on the carrier.
-func (f *filler) armAtOpen() {
-	f.armWith(true)
-}
-
-// armWith is arm's body, carrying which trigger asked for the countdown. The
-// flag is recorded only where a timer is genuinely scheduled; see filler.atOpen.
-func (f *filler) armWith(atOpen bool) {
+// by names which of the two waits this is; it rides the pending start's own
+// closure, exactly as gen does, so a re-arm that finds a countdown already
+// pending leaves the original label alone along with the original countdown.
+func (f *filler) arm(by armTrigger) {
 	if f == nil {
 		return
 	}
@@ -244,8 +243,7 @@ func (f *filler) armWith(atOpen bool) {
 	// this function's early return exists to prevent.
 	f.cancelPendingLocked()
 	gen := f.gen
-	f.atOpen = atOpen
-	f.timer = time.AfterFunc(f.delay, func() { f.start(gen) })
+	f.timer = time.AfterFunc(f.delay, func() { f.start(gen, by) })
 }
 
 // stop ends the loop, whether it was pending or playing, and reports whether
@@ -293,7 +291,7 @@ func (f *filler) cancelPendingLocked() {
 // loop begins. gen is the generation the pending start was created under; a
 // mismatch means the machine moved on while the timer was already running its
 // function, which Stop cannot undo.
-func (f *filler) start(gen uint64) {
+func (f *filler) start(gen uint64, by armTrigger) {
 	f.mu.Lock()
 	if f.stopped || f.gen != gen || f.playing {
 		f.mu.Unlock()
@@ -306,11 +304,9 @@ func (f *filler) start(gen uint64) {
 	f.timer = nil
 	f.playing = true
 	f.off = 0
-	atOpen := f.atOpen
-	f.atOpen = false
 	f.mu.Unlock()
 
-	if atOpen {
+	if by == armedByCallOpen {
 		// Once per call, and only when the condition actually happened: the
 		// backend completed its handshake and then produced no audio for the
 		// whole of Delay, with the caller never having spoken. Named so a call

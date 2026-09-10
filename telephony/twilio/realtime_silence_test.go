@@ -1,11 +1,10 @@
 package twilio
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"log"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -32,46 +31,33 @@ import (
 // hold-loop frame or a backend delta.
 var farewellFills = []byte{0x11, 0x12}
 
-// farewellTestClip is the consumer-supplied farewell: two 20 ms μ-law frames.
-func farewellTestClip() []byte {
-	var out []byte
-	for _, f := range farewellFills {
-		out = append(out, bytes.Repeat([]byte{f}, defaultFrameBytes)...)
-	}
-	return out
-}
+// The four below are the filler suite's clip helpers applied to these fills;
+// see clipOfFills in realtime_filler_test.go for why they are parameterised
+// rather than copied.
 
-// farewellFrameB64 is the base64 the carrier must receive for the nth frame of
-// farewellTestClip, so a test compares wire bytes against the clip it supplied
-// rather than against a re-derivation of it.
-func farewellFrameB64(n int) string {
-	return base64.StdEncoding.EncodeToString(
-		bytes.Repeat([]byte{farewellFills[n]}, defaultFrameBytes))
-}
+// farewellTestClip is the consumer-supplied farewell: two 20 ms μ-law frames.
+func farewellTestClip() []byte { return clipOfFills(farewellFills) }
+
+// farewellFrameB64 is the base64 of the nth frame of that clip. Played once
+// rather than as a ring, so n does not wrap.
+func farewellFrameB64(n int) string { return frameB64OfFill(farewellFills[n]) }
 
 // isFarewellFrame reports whether a wire record is one of the clip's frames.
-func isFarewellFrame(rec carrierWireRecord) bool {
-	if rec.clear || rec.closed || rec.markName != "" {
-		return false
-	}
-	for i := range farewellFills {
-		if rec.payload == farewellFrameB64(i) {
-			return true
-		}
-	}
-	return false
+func isFarewellFrame(rec carrierWireRecord) bool { return isFrameOfFills(rec, farewellFills) }
+
+// farewellFrames returns only the clip's frames from a wire capture.
+func farewellFrames(recs []carrierWireRecord) []carrierWireRecord {
+	return framesOfFills(recs, farewellFills)
 }
 
-// farewellFrames returns only the clip's frames from a wire capture, preserving
-// order and arrival time.
-func farewellFrames(recs []carrierWireRecord) []carrierWireRecord {
-	var out []carrierWireRecord
-	for _, r := range recs {
-		if isFarewellFrame(r) {
-			out = append(out, r)
-		}
+// isClosed and isFarewellMark are the predicates this file waits on and scans
+// for, named so the assertions below read as sentences.
+func isClosed(r carrierWireRecord) bool { return r.closed }
+
+func isFarewellMark(h *realtimeHarness) func(carrierWireRecord) bool {
+	return func(r carrierWireRecord) bool {
+		return r.markName == realtimeFarewellMarkPrefix+h.streamSID
 	}
-	return out
 }
 
 // silenceTestIdleTimeout is the idle bound these tests configure. It is many
@@ -143,25 +129,12 @@ func TestCallOpen_CoverStopsWhenTheBackendFinallySpeaks(t *testing.T) {
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(reply))
 	// Let anything the relay wrongly wrote after the reply arrive too.
 	time.Sleep(100 * time.Millisecond)
 
 	got := wire()
-	replyAt := -1
-	for i, r := range got {
-		if r.payload == reply {
-			replyAt = i
-			break
-		}
-	}
+	replyAt := slices.IndexFunc(got, hasPayload(reply))
 	if replyAt < 1 {
 		t.Fatalf("the reply frame must arrive after the cover, got records %+v", got)
 	}
@@ -217,22 +190,21 @@ func TestFarewell_FramesReachTheCarrierBeforeTheClose(t *testing.T) {
 		WithFarewellAudio(farewellTestClip()))
 	wire := h.captureCarrierWire(t)
 
-	err := h.waitDone(idleTimeout + 5*time.Second)
-	if err == nil {
+	// Echoed as a live carrier would, so the call ends on the echo rather than
+	// waiting out the mark's full bound. The drain itself is
+	// TestFarewell_WaitsForTheCarrierToReportItPlayed's subject; here it is
+	// only in the way of the ordering.
+	waitForWireRecord(t, wire, isFarewellMark(h))
+	echoMarkFromCarrier(t, h, realtimeFarewellMarkPrefix+h.streamSID)
+
+	if err := h.waitDone(idleTimeout + 5*time.Second); err == nil {
 		t.Fatal("a silent backend must still end the call with a non-nil error when a farewell is configured")
 	}
 
 	// The close is observed by the capture goroutine, not by this one, so wait
 	// for it rather than assuming the handler's return already put it on the
 	// wire.
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.closed {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, isClosed)
 
 	got := wire()
 	farewell := farewellFrames(got)
@@ -247,22 +219,13 @@ func TestFarewell_FramesReachTheCarrierBeforeTheClose(t *testing.T) {
 		}
 	}
 
-	closedAt := -1
-	for i, r := range got {
-		if r.closed {
-			closedAt = i
-			break
-		}
-	}
-	for _, r := range got[closedAt:] {
-		if isFarewellFrame(r) {
-			t.Fatalf("no farewell frame may reach the carrier after the close:\n%+v", got)
-		}
-	}
-	last := farewell[len(farewell)-1]
-	if !last.at.Before(got[closedAt].at) {
-		t.Fatalf("the farewell must be written before the carrier is closed: last frame at %v, close at %v",
-			last.at, got[closedAt].at)
+	// Records are appended by one reader goroutine under one mutex, so index
+	// order IS arrival order: every farewell frame sitting before the close in
+	// this slice is the ordering the ticket asks for.
+	closedAt := slices.IndexFunc(got, isClosed)
+	if n := len(farewellFrames(got[:closedAt])); n != len(farewell) {
+		t.Fatalf("every farewell frame must reach the carrier before the close, %d of %d did:\n%+v",
+			n, len(farewell), got)
 	}
 }
 
@@ -287,25 +250,12 @@ func TestFarewell_WaitsForTheCarrierToReportItPlayed(t *testing.T) {
 		WithFarewellAudio(farewellTestClip()))
 	wire := h.captureCarrierWire(t)
 
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.markName == farewellMarkName {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, isFarewellMark(h))
 
 	// The mark is written after the clip and before the close; every farewell
 	// frame must already be behind it.
 	got := wire()
-	markAt := -1
-	for i, r := range got {
-		if r.markName == farewellMarkName {
-			markAt = i
-			break
-		}
-	}
+	markAt := slices.IndexFunc(got, isFarewellMark(h))
 	if n := len(farewellFrames(got[:markAt])); n != len(farewellFills) {
 		t.Fatalf("the mark must be written after the whole clip: %d of %d frames precede it\n%+v",
 			n, len(farewellFills), got)
@@ -313,13 +263,57 @@ func TestFarewell_WaitsForTheCarrierToReportItPlayed(t *testing.T) {
 
 	assertStillRunning(t, h, "the call must not end until the carrier reports the farewell played")
 
-	echoMarkFromCarrier(t, h, farewellMarkName)
+	echoMarkFromCarrier(t, h, realtimeFarewellMarkPrefix+h.streamSID)
 
 	// Comfortably inside the mark's own bound, which is the clip's playout plus
 	// telephony.MarkEchoGraceMS — so arriving this fast can only be the echo
 	// having released the wait, not the bound expiring.
 	if err := h.waitDone(telephony.MarkEchoGraceMS / 2 * time.Millisecond); err == nil {
 		t.Fatal("the idle ending must still be reported as an error after the farewell has played")
+	}
+}
+
+// TestFarewell_CarrierAudioRecordsAreMarkedFarewell pins the observation half,
+// mirroring TestFiller_CarrierAudioRecordsAreMarkedFiller. A consumer watching
+// what shipped to the carrier must be able to tell the goodbye from the
+// backend's speech — and on this call especially, since the error the same call
+// returns says the backend produced nothing at all.
+//
+// slopstop:test contract
+func TestFarewell_CarrierAudioRecordsAreMarkedFarewell(t *testing.T) {
+	const idleTimeout = 200 * time.Millisecond
+
+	ch := make(chan CarrierAudio, 128)
+	be := newFakeRealtimeBackend(t)
+	h := silenceHarness(t, be.url(),
+		WithIdleTimeout(idleTimeout),
+		WithCarrierAudioChan(ch),
+		WithFarewellAudio(farewellTestClip()))
+	wire := h.captureCarrierWire(t)
+
+	waitForWireRecord(t, wire, isFarewellMark(h))
+	echoMarkFromCarrier(t, h, realtimeFarewellMarkPrefix+h.streamSID)
+	if err := h.waitDone(idleTimeout + 5*time.Second); err == nil {
+		t.Fatal("a silent backend must end the call with a non-nil error")
+	}
+
+	var got int
+	for len(ch) > 0 {
+		rec := <-ch
+		if rec.Clear {
+			continue
+		}
+		if !rec.Farewell {
+			t.Fatalf("engine-originated farewell audio must not be reported as the backend's speech: %+v", rec)
+		}
+		if rec.Filler {
+			t.Fatalf("a farewell frame must not also be marked as filler: %+v", rec)
+		}
+		got++
+	}
+	if got != len(farewellFills) {
+		t.Fatalf("the consumer must receive every farewell frame as a farewell-marked record, got %d of %d",
+			got, len(farewellFills))
 	}
 }
 
@@ -339,20 +333,17 @@ func TestFarewell_AbsentWhenTheOptionIsNotSupplied(t *testing.T) {
 	h := silenceHarness(t, be.url(), WithIdleTimeout(idleTimeout))
 	wire := h.captureCarrierWire(t)
 
-	endedAt := time.Now()
+	startedAt := time.Now()
 	if err := h.waitDone(idleTimeout + 2*time.Second); err == nil {
 		t.Fatal("a silent backend must end the call with a non-nil error")
 	}
-	if took := time.Since(endedAt); took > idleTimeout*4 {
+	if took := time.Since(startedAt); took > idleTimeout*4 {
 		t.Fatalf("with no farewell configured the idle branch must end the call at its bound, took %v (bound %v)",
 			took, idleTimeout)
 	}
 
-	for _, r := range wire() {
-		if r.closed {
-			continue
-		}
-		t.Fatalf("a call with no farewell option must write nothing to the carrier on the idle path, got %+v", wire())
+	if got := wire(); slices.IndexFunc(got, func(r carrierWireRecord) bool { return !r.closed }) >= 0 {
+		t.Fatalf("a call with no farewell option must write nothing to the carrier on the idle path, got %+v", got)
 	}
 }
 
@@ -389,7 +380,8 @@ func TestIdleTimeout_ErrorMatchesErrIdleTimeout(t *testing.T) {
 //
 // slopstop:test contract
 func TestSilentBackend_BothConditionsAreLoggedOnce(t *testing.T) {
-	const idleTimeout = 900 * time.Millisecond
+	// Long enough that the cover starts first, and no longer.
+	const idleTimeout = fillerTestDelay + 100*time.Millisecond
 	const (
 		coverLine    = "twilio: realtime: silent backend at call open: playing the filler loop"
 		farewellLine = "twilio: realtime: idle timeout: playing the farewell before ending the call"
@@ -412,9 +404,30 @@ func TestSilentBackend_BothConditionsAreLoggedOnce(t *testing.T) {
 		WithIdleTimeout(idleTimeout),
 		WithFillerAudio(FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay}),
 		WithFarewellAudio(farewellTestClip()))
+	wire := h.captureCarrierWire(t)
+
+	waitForWireRecord(t, wire, isFarewellMark(h))
+	echoMarkFromCarrier(t, h, realtimeFarewellMarkPrefix+h.streamSID)
 
 	if err := h.waitDone(idleTimeout + 5*time.Second); err == nil {
 		t.Fatal("a silent backend must end the call with a non-nil error")
+	}
+
+	// This call is the one where both behaviours meet, so it is where the
+	// handover between them is asserted: the cover was playing when the guard
+	// fired, and the goodbye must not queue behind what the carrier still holds
+	// of it. Exactly one clear, immediately before the clip's first frame.
+	got := wire()
+	firstFarewell := slices.IndexFunc(got, isFarewellFrame)
+	if firstFarewell < 1 {
+		t.Fatalf("the farewell must follow the cover on this call:\n%+v", got)
+	}
+	if !got[firstFarewell-1].clear {
+		t.Fatalf("the record before the farewell's first frame must be the clear that discards the cover, got %+v",
+			got[firstFarewell-1])
+	}
+	if n := len(framesOfFills(got[firstFarewell:], fillerLoopFills)); n != 0 {
+		t.Fatalf("no cover frame may reach the carrier after the farewell begins, got %d:\n%+v", n, got)
 	}
 
 	for _, want := range []string{coverLine, farewellLine} {
@@ -434,7 +447,7 @@ func TestSilentBackend_BothConditionsAreLoggedOnce(t *testing.T) {
 //
 // slopstop:test contract
 func TestHealthyCall_WritesNeitherCoverNorFarewell(t *testing.T) {
-	const idleTimeout = 400 * time.Millisecond
+	const idleTimeout = 200 * time.Millisecond
 
 	be := newFakeRealtimeBackend(t)
 	be.emitInterval = idleTimeout / 8 // well inside both the idle bound and Delay

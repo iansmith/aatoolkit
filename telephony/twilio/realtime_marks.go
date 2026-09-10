@@ -106,6 +106,15 @@ type markTracker struct {
 	// request half). The engine NEVER closes it.
 	echoCh chan<- MarkEcho
 
+	// consumerMarks records whether the CONSUMER asked for marks, as opposed
+	// to the tracker existing only for the engine's own farewell wait
+	// (AATK-128). It gates one thing: the "matches no outstanding mark" line
+	// in echo. A call that named neither mark option ignored an inbound mark
+	// frame without even a log line before that ticket, and it must go on
+	// doing so — the tracker appearing under it is an implementation detail
+	// of the farewell, not a change to what a consumer asked for.
+	consumerMarks bool
+
 	mu sync.Mutex
 	// outstanding maps each written-but-unechoed mark name to the arming that
 	// wrote it.
@@ -144,8 +153,12 @@ type outstandingMark struct {
 	gen   uint64
 }
 
-func newMarkTracker(echoCh chan<- MarkEcho) *markTracker {
-	return &markTracker{echoCh: echoCh, outstanding: make(map[string]outstandingMark)}
+func newMarkTracker(echoCh chan<- MarkEcho, consumerMarks bool) *markTracker {
+	return &markTracker{
+		echoCh:        echoCh,
+		consumerMarks: consumerMarks,
+		outstanding:   make(map[string]outstandingMark),
+	}
 }
 
 // arm records name as outstanding and starts its bound.
@@ -241,7 +254,9 @@ func (t *markTracker) echo(name string) {
 	}
 	m, ok := t.outstanding[name]
 	if !ok {
-		log.Printf("twilio: realtime: mark echo %q matches no outstanding mark; not delivered as a match", name)
+		if t.consumerMarks {
+			log.Printf("twilio: realtime: mark echo %q matches no outstanding mark; not delivered as a match", name)
+		}
 		return
 	}
 	m.timer.Stop()

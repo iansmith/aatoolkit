@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -46,46 +47,78 @@ const fillerTestDelay = 300 * time.Millisecond
 // with a backend delta on the wire.
 var fillerLoopFills = []byte{0x01, 0x02, 0x03}
 
-// fillerTestLoop is the consumer-supplied loop: three 20 ms μ-law frames.
-func fillerTestLoop() []byte {
+// clipOfFills builds a μ-law clip: one 20 ms frame per fill byte, in order.
+//
+// One definition serving both engine-supplied clips this suite drives — the
+// filler's loop and AATK-128's farewell — because the two differ only in which
+// bytes they are made of (CLAUDE.md #4).
+func clipOfFills(fills []byte) []byte {
 	var out []byte
-	for _, f := range fillerLoopFills {
+	for _, f := range fills {
 		out = append(out, bytes.Repeat([]byte{f}, defaultFrameBytes)...)
 	}
 	return out
 }
 
-// fillerFrameB64 is the base64 the carrier must receive for the nth frame of
-// fillerTestLoop, so a test compares wire bytes against the loop it supplied
-// rather than against a re-derivation of it.
-func fillerFrameB64(n int) string {
-	return base64.StdEncoding.EncodeToString(
-		bytes.Repeat([]byte{fillerLoopFills[n%len(fillerLoopFills)]}, defaultFrameBytes))
+// frameB64OfFill is the base64 the carrier must receive for one frame of such a
+// clip, so a test compares wire bytes against the clip it supplied rather than
+// against a re-derivation of it.
+func frameB64OfFill(fill byte) string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{fill}, defaultFrameBytes))
 }
 
-// isFillerFrame reports whether a wire record is one of the loop's frames.
-func isFillerFrame(rec carrierWireRecord) bool {
-	if rec.clear || rec.markName != "" {
-		return false
-	}
-	for i := range fillerLoopFills {
-		if rec.payload == fillerFrameB64(i) {
+// isFrameOfFills reports whether a wire record is one of that clip's frames.
+// Non-media records — a clear, a mark, the close — carry no payload and are
+// never one.
+func isFrameOfFills(rec carrierWireRecord, fills []byte) bool {
+	for _, f := range fills {
+		if rec.payload != "" && rec.payload == frameB64OfFill(f) {
 			return true
 		}
 	}
 	return false
 }
 
-// fillerFrames returns only the loop frames from a wire capture, preserving
+// framesOfFills returns only that clip's frames from a wire capture, preserving
 // order and arrival time.
-func fillerFrames(recs []carrierWireRecord) []carrierWireRecord {
+func framesOfFills(recs []carrierWireRecord, fills []byte) []carrierWireRecord {
 	var out []carrierWireRecord
 	for _, r := range recs {
-		if isFillerFrame(r) {
+		if isFrameOfFills(r, fills) {
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+// fillerTestLoop is the consumer-supplied loop: three 20 ms μ-law frames.
+func fillerTestLoop() []byte { return clipOfFills(fillerLoopFills) }
+
+// fillerFrameB64 is the base64 of the nth frame of fillerTestLoop, wrapping as
+// the ring does.
+func fillerFrameB64(n int) string {
+	return frameB64OfFill(fillerLoopFills[n%len(fillerLoopFills)])
+}
+
+// isFillerFrame reports whether a wire record is one of the loop's frames.
+func isFillerFrame(rec carrierWireRecord) bool { return isFrameOfFills(rec, fillerLoopFills) }
+
+// fillerFrames returns only the loop frames from a wire capture.
+func fillerFrames(recs []carrierWireRecord) []carrierWireRecord {
+	return framesOfFills(recs, fillerLoopFills)
+}
+
+// waitForWireRecord blocks until the carrier capture holds a record matching
+// pred, failing the test if it never does. One definition for the poll every
+// wire assertion in this package opens with.
+func waitForWireRecord(t *testing.T, wire func() []carrierWireRecord, pred func(carrierWireRecord) bool) {
+	t.Helper()
+	waitFor(t, 5*time.Second, func() bool { return slices.IndexFunc(wire(), pred) >= 0 })
+}
+
+// hasPayload matches the media record carrying exactly payload.
+func hasPayload(payload string) func(carrierWireRecord) bool {
+	return func(r carrierWireRecord) bool { return r.payload == payload }
 }
 
 // fillerHarness wires HandleStreamRealtime directly with a filler config, which
@@ -120,21 +153,12 @@ func afterTheBackendHasSpoken(t *testing.T, be *fakeRealtimeBackend, wire func()
 
 	first := distinctCarrierPayload(0x5b)
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": first})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == first {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(first))
 
 	return func() []carrierWireRecord {
 		recs := wire()
-		for i, r := range recs {
-			if r.payload == first {
-				return recs[i+1:]
-			}
+		if i := slices.IndexFunc(recs, hasPayload(first)); i >= 0 {
+			return recs[i+1:]
 		}
 		return nil
 	}
@@ -247,25 +271,12 @@ func TestFiller_ClearThenFirstDelta(t *testing.T) {
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(reply))
 	// Let anything the relay wrongly wrote after the reply arrive too.
 	time.Sleep(100 * time.Millisecond)
 
 	got := wire()
-	replyAt := -1
-	for i, r := range got {
-		if r.payload == reply {
-			replyAt = i
-			break
-		}
-	}
+	replyAt := slices.IndexFunc(got, hasPayload(reply))
 	if replyAt < 1 {
 		t.Fatalf("the reply frame must arrive after the loop, got records %+v", got)
 	}
@@ -355,24 +366,11 @@ func TestFiller_RearmsAfterFunctionCall(t *testing.T) {
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(reply))
 	time.Sleep(100 * time.Millisecond)
 
 	got := wire()
-	replyAt := -1
-	for i, r := range got {
-		if r.payload == reply {
-			replyAt = i
-			break
-		}
-	}
+	replyAt := slices.IndexFunc(got, hasPayload(reply))
 	for _, r := range got[replyAt:] {
 		if isFillerFrame(r) {
 			t.Fatalf("the second leg's first delta must stop the loop:\n%+v", got)
@@ -458,14 +456,7 @@ func TestFiller_CarrierAudioRecordsAreMarkedFiller(t *testing.T) {
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(reply))
 
 	var sawFiller, sawReply bool
 	deadline := time.After(5 * time.Second)
@@ -542,22 +533,9 @@ func TestFiller_KeepsPlayingWhenRearmedMidLoop(t *testing.T) {
 	// delta stops it, with the clear the carrier is owed.
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(reply))
 	got := wire()
-	replyAt := -1
-	for i, r := range got {
-		if r.payload == reply {
-			replyAt = i
-			break
-		}
-	}
+	replyAt := slices.IndexFunc(got, hasPayload(reply))
 	if replyAt < 1 || !got[replyAt-1].clear {
 		t.Fatalf("the second leg's first frame must be preceded by the clear:\n%+v", got)
 	}
@@ -747,7 +725,7 @@ func TestFiller_SurvivesACarrierWriteFailure(t *testing.T) {
 
 	countFiller := func() int { return len(fillerFrames(w.records())) }
 
-	fill.arm()
+	fill.arm(armedByTurn)
 	waitFor(t, 5*time.Second, func() bool { return countFiller() >= 2 })
 
 	// Fail the loop's next frame, and wait for that write to have been tried
@@ -775,7 +753,7 @@ func TestFiller_SurvivesACarrierWriteFailure(t *testing.T) {
 
 	// And the machine must still be usable: the next wait gets a loop.
 	before := countFiller()
-	fill.arm()
+	fill.arm(armedByTurn)
 	waitFor(t, 5*time.Second, func() bool { return countFiller() > before })
 }
 
@@ -802,14 +780,7 @@ func TestFiller_EachEpisodeStartsAtTheTopOfTheLoop(t *testing.T) {
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(reply))
 
 	// Second wait.
 	armFiller(t, be)
@@ -940,7 +911,7 @@ func TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot(t *testing.T)
 	parked := runtime.NumGoroutine()
 
 	// The loop starts and immediately parks behind that write.
-	fill.arm()
+	fill.arm(armedByTurn)
 	time.Sleep(300 * time.Millisecond)
 	if got := runtime.NumGoroutine(); got <= parked {
 		t.Fatalf("test setup: the play goroutine must be parked on the write slot (%d goroutines, was %d)",

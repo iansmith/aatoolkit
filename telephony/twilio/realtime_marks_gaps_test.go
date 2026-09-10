@@ -34,7 +34,7 @@ import (
 // race makes it wrong.
 func TestMarkTracker_SpentBoundDoesNotResolveTheReArmThatReplacedIt(t *testing.T) {
 	echoes := make(chan MarkEcho, 4)
-	tr := newMarkTracker(echoes)
+	tr := newMarkTracker(echoes, true)
 
 	tr.arm("goodbye", time.Hour)
 	tr.mu.Lock()
@@ -70,7 +70,7 @@ func TestMarkTracker_SpentBoundDoesNotResolveTheReArmThatReplacedIt(t *testing.T
 // while removing the bound the ticket's fourth behavior turns on.
 func TestMarkTracker_BoundStillFiresForTheLiveArming(t *testing.T) {
 	echoes := make(chan MarkEcho, 4)
-	tr := newMarkTracker(echoes)
+	tr := newMarkTracker(echoes, true)
 
 	tr.arm("goodbye", time.Millisecond)
 
@@ -219,7 +219,7 @@ func (b *blockingWSWriter) writes() int {
 // the sink's writer"
 func TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight(t *testing.T) {
 	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
-	tr := newMarkTracker(make(chan MarkEcho, 4))
+	tr := newMarkTracker(make(chan MarkEcho, 4), true)
 	sink := newCarrierMediaSink(w, "SSslot", nil, tr, nil)
 
 	mediaDone := make(chan error, 1)
@@ -371,7 +371,7 @@ func TestCarrierMediaSink_MarkArmsTheDerivedBound(t *testing.T) {
 	const grace = telephony.MarkEchoGraceMS * time.Millisecond
 
 	echoes := make(chan MarkEcho, 4)
-	tr := newMarkTracker(echoes)
+	tr := newMarkTracker(echoes, true)
 	t.Cleanup(tr.stop)
 	sink := newCarrierMediaSink(&discardWSWriter{}, "SSderived", nil, tr, nil)
 
