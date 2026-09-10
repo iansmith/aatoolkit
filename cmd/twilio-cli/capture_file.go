@@ -7,15 +7,19 @@ import (
 	"os"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // This file is the file-backed frame source: an alternative to capture_darwin.go's
 // mic capture, selected by the -audio flag. It carries no build tag, so unlike mic
 // capture it is available on every platform — which is what lets the frame path
-// (VAD -> STT -> Turn) run headless, cross-platform, and deterministically.
+// (VAD -> STT -> Turn) run headless and cross-platform.
+//
+// The frames this source produces are fixed; what goes on the wire is not. Like
+// the mic, it sends through dial's mediaFrameSender, so the mic gate substitutes
+// silence for its frames while the player still has audio queued (gate.go) --
+// which any call that plays the capture-live earcon does near the top.
+// `-full-duplex` is what makes a replay reproducible byte for byte.
 
 // frameInterval is the wall-clock spacing between consecutive frames: exactly one
 // frame's playout duration, so streaming any faster would hand the server a whole
@@ -145,18 +149,17 @@ func installAudioFrameSource(audioPath string) error {
 }
 
 // streamFileFrames returns the frame source dial() calls through when -audio is
-// set: it opens path, wraps each frame with the call's mediaFrameEncoder, and
-// writes it to conn. The returned func matches the streamMic seam's signature
-// (dial.go), mirroring capture_darwin.go's streamMicFrames shape.
-func streamFileFrames(path string) func(context.Context, *websocket.Conn, string, *int, *streamRecorder, func(bool)) error {
-	return func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, onMicWarm func(bool)) error {
+// set: it opens path and streams its frames into dial's send, paced at real
+// time. It is a micFrameSource (dial.go), mirroring capture_darwin.go's
+// streamMicFrames shape -- both are now just "read frames, hand them to send".
+func streamFileFrames(path string) micFrameSource {
+	return func(ctx context.Context, send func([]byte) error, onMicWarm func(bool)) error {
 		f, err := os.Open(path)
 		if err != nil {
 			return fmt.Errorf("streamFileFrames: %w", err)
 		}
 		defer f.Close()
 
-		send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn))
 		return streamFileFramesFrom(ctx, f, send, onMicWarm)
 	}
 }
