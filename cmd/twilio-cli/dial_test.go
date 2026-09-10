@@ -300,7 +300,7 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 // the test, restoring the original afterward. Real mic capture (ffmpeg +
 // avfoundation) is environment-dependent (device permissions, hardware) —
 // these protocol-level tests should not depend on its timing.
-func withFakeMic(t *testing.T, fn func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, gate *micGate, onMicWarm func(bool)) error) {
+func withFakeMic(t *testing.T, fn micFrameSource) {
 	t.Helper()
 	original := streamMic
 	streamMic = fn

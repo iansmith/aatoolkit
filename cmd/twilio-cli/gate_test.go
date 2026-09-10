@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"net"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -66,21 +65,14 @@ func TestMicGate_ShutSubstitutesSilenceKeepingFrameCount(t *testing.T) {
 	gate := newMicGate()
 	gate.shutUntil(time.Now().Add(time.Second))
 
-	var sent [][]byte
-	send := gate.wrap(func(p []byte) error {
-		sent = append(sent, bytes.Clone(p))
-		return nil
-	})
-
 	const frames = 5
+	var sent [][]byte
 	for range frames {
-		if err := send(loudFrame()); err != nil {
-			t.Fatalf("send through a shut gate: %v", err)
-		}
+		sent = append(sent, gate.gated(loudFrame()))
 	}
 
 	if len(sent) != frames {
-		t.Fatalf("frames sent through a shut gate: got %d, want %d -- the gate must change what is sent, never whether", len(sent), frames)
+		t.Fatalf("frames out of a shut gate: got %d, want %d -- the gate must change what is sent, never whether", len(sent), frames)
 	}
 	for i, p := range sent {
 		if len(p) != muLawFrame20ms {
@@ -98,12 +90,7 @@ func TestMicGate_ShutSubstitutesSilenceKeepingFrameCount(t *testing.T) {
 func TestMicGate_OpenPassesCapturedFrames(t *testing.T) {
 	gate := newMicGate()
 
-	var got []byte
-	send := gate.wrap(func(p []byte) error { got = bytes.Clone(p); return nil })
-	if err := send(loudFrame()); err != nil {
-		t.Fatalf("send through an open gate: %v", err)
-	}
-	if !bytes.Equal(got, loudFrame()) {
+	if got := gate.gated(loudFrame()); !bytes.Equal(got, loudFrame()) {
 		t.Errorf("an open gate altered the captured frame: got %x", head(got))
 	}
 }
@@ -115,12 +102,7 @@ func TestMicGate_ReopensWhenTheDeadlinePasses(t *testing.T) {
 	gate := newMicGate()
 	gate.shutUntil(time.Now().Add(-time.Millisecond))
 
-	var got []byte
-	send := gate.wrap(func(p []byte) error { got = bytes.Clone(p); return nil })
-	if err := send(loudFrame()); err != nil {
-		t.Fatalf("send after the deadline: %v", err)
-	}
-	if !bytes.Equal(got, loudFrame()) {
+	if got := gate.gated(loudFrame()); !bytes.Equal(got, loudFrame()) {
 		t.Errorf("the gate stayed shut past its own deadline: got %x", head(got))
 	}
 }
@@ -134,12 +116,7 @@ func TestMicGate_OpenReopensAtOnce(t *testing.T) {
 	gate.shutUntil(time.Now().Add(time.Second))
 	gate.open()
 
-	var got []byte
-	send := gate.wrap(func(p []byte) error { got = bytes.Clone(p); return nil })
-	if err := send(loudFrame()); err != nil {
-		t.Fatalf("send after open: %v", err)
-	}
-	if !bytes.Equal(got, loudFrame()) {
+	if got := gate.gated(loudFrame()); !bytes.Equal(got, loudFrame()) {
 		t.Errorf("open did not reopen the gate: got %x", head(got))
 	}
 }
@@ -150,12 +127,7 @@ func TestMicGate_OpenReopensAtOnce(t *testing.T) {
 func TestMicGate_NilGateIsFullDuplex(t *testing.T) {
 	var gate *micGate
 
-	var got []byte
-	send := gate.wrap(func(p []byte) error { got = bytes.Clone(p); return nil })
-	if err := send(loudFrame()); err != nil {
-		t.Fatalf("send with no gate: %v", err)
-	}
-	if !bytes.Equal(got, loudFrame()) {
+	if got := gate.gated(loudFrame()); !bytes.Equal(got, loudFrame()) {
 		t.Errorf("a nil gate altered the captured frame: got %x", head(got))
 	}
 }
@@ -170,44 +142,47 @@ func TestMicGate_NilGateTakesTheWholeProtocol(t *testing.T) {
 
 	gate.shutUntil(time.Now().Add(time.Second))
 	gate.open()
-	if gate.shut(time.Now()) {
+	if gate.shut() {
 		t.Error("a nil gate reported itself shut -- there is no gate to shut")
 	}
 }
 
-// TestMicGate_SendErrorPropagates: the wrapper is a substitution, not a
-// swallow. A write failure still ends the drain loop.
-func TestMicGate_SendErrorPropagates(t *testing.T) {
+// TestMediaFrameSender_GatedSendErrorPropagates: gating substitutes a payload,
+// it does not swallow a failure. A write that fails on a gated frame still
+// ends the drain loop, exactly as an ungated one does.
+func TestMediaFrameSender_GatedSendErrorPropagates(t *testing.T) {
 	gate := newMicGate()
 	gate.shutUntil(time.Now().Add(time.Second))
 
 	want := os.ErrClosed
-	send := gate.wrap(func([]byte) error { return want })
+	seqNum := 1
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_gatederr", &seqNum), nil, gate, func([]byte) error { return want })
 	if err := send(loudFrame()); err != want {
-		t.Errorf("send error through a shut gate: got %v, want %v", err, want)
+		t.Errorf("write error on a gated frame: got %v, want %v", err, want)
 	}
 }
 
 // --- the gate through a real dial() ---
 
-// loudAudioFile writes seconds of audible mu-law and returns its path, for use
-// as the -audio frame source. The file source is the production path, so a
-// test driving it exercises the same wrapping a mic call gets.
-func loudAudioFile(t *testing.T, seconds float64) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "loud.ulaw")
-	n := int(seconds*float64(telephony.SampleRateHz)) / muLawFrame20ms * muLawFrame20ms
-	if err := os.WriteFile(path, bytes.Repeat([]byte{micGateLoud}, n), 0o600); err != nil {
-		t.Fatalf("write loud audio fixture: %v", err)
-	}
-	return path
+// loudMuLaw is d of audible mu-law, truncated to whole 20 ms frames. Both
+// directions of these tests want the same thing -- the caller's fixture file
+// and the server's spoken burst -- so the frame arithmetic has one spelling.
+func loudMuLaw(d time.Duration) []byte {
+	frames := int(d / telephony.MuLawDuration(muLawFrame20ms))
+	return bytes.Repeat([]byte{micGateLoud}, frames*muLawFrame20ms)
 }
 
 // withLoudFrameSource points the streamMic seam at a file of audible mu-law,
-// so every frame the client sends is loud unless something silenced it.
-func withLoudFrameSource(t *testing.T, seconds float64) {
+// so every frame the client sends is loud unless something silenced it. The
+// file source is the production path, so a test driving it gates exactly as a
+// mic call does.
+func withLoudFrameSource(t *testing.T, d time.Duration) {
 	t.Helper()
-	withFakeMic(t, streamFileFrames(loudAudioFile(t, seconds)))
+	path := filepath.Join(t.TempDir(), "loud.ulaw")
+	if err := os.WriteFile(path, loudMuLaw(d), 0o600); err != nil {
+		t.Fatalf("write loud audio fixture: %v", err)
+	}
+	withFakeMic(t, streamFileFrames(path))
 }
 
 // sentFrame is one outbound media payload with the moment it was read.
@@ -229,18 +204,7 @@ type sentFrame struct {
 // purpose -- the claim under test is about what goes on the wire.
 func silenceProbeServer(t *testing.T, speak func(conn net.Conn), collected chan<- []sentFrame, readFor time.Duration) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			collected <- nil
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // connected + start
-
+	return hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 		speak(conn)
 
 		var frames []sentFrame
@@ -258,9 +222,7 @@ func silenceProbeServer(t *testing.T, speak func(conn net.Conn), collected chan<
 			frames = append(frames, sentFrame{at: time.Now(), payload: f.Payload})
 		}
 		collected <- frames
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	})
 }
 
 // framesIn returns the collected frames whose arrival falls in (from, to].
@@ -293,8 +255,7 @@ func runGatedDial(t *testing.T, srv *httptest.Server, opts ...dialOption) {
 // when it went out.
 func serverSpeaks(t *testing.T, conn net.Conn, streamSID string, d time.Duration) time.Time {
 	t.Helper()
-	n := int(d.Seconds()*float64(telephony.SampleRateHz)) / muLawFrame20ms * muLawFrame20ms
-	msg, err := twilio.EncodeMedia(streamSID, bytes.Repeat([]byte{micGateLoud}, n))
+	msg, err := twilio.EncodeMedia(streamSID, loudMuLaw(d))
 	if err != nil {
 		t.Errorf("EncodeMedia: %v", err)
 		return time.Now()
@@ -311,7 +272,7 @@ func serverSpeaks(t *testing.T, conn net.Conn, streamSID string, d time.Duration
 // a prologue pacing on them is unaffected. After the audio has played out (plus
 // the hangover for room decay) the mic is live again.
 func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
-	withLoudFrameSource(t, 5)
+	withLoudFrameSource(t, 5*time.Second)
 
 	const streamSID = "SS_gate"
 	spokeAt := make(chan time.Time, 1)
@@ -384,7 +345,7 @@ func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
 // that is not going to happen -- otherwise the caller's barge-in is the one
 // thing the harness cannot record.
 func TestDial_ClearReopensTheMicAtOnce(t *testing.T) {
-	withLoudFrameSource(t, 5)
+	withLoudFrameSource(t, 5*time.Second)
 
 	const streamSID = "SS_gateclear"
 	spokeAt := make(chan time.Time, 1)
@@ -404,7 +365,7 @@ func TestDial_ClearReopensTheMicAtOnce(t *testing.T) {
 			}
 			clearedAt <- time.Now()
 		}()
-	}, collected, time.Second)
+	}, collected, 700*time.Millisecond)
 
 	runGatedDial(t, srv)
 
@@ -443,7 +404,7 @@ func TestDial_ClearReopensTheMicAtOnce(t *testing.T) {
 // speaking. Barge-in is a real behaviour the server has to be tested for, and
 // with the gate shut it cannot be exercised at all.
 func TestDial_FullDuplexSendsCapturedFrames(t *testing.T) {
-	withLoudFrameSource(t, 5)
+	withLoudFrameSource(t, 5*time.Second)
 
 	const streamSID = "SS_fullduplex"
 	spokeAt := make(chan time.Time, 1)
@@ -468,29 +429,55 @@ func TestDial_FullDuplexSendsCapturedFrames(t *testing.T) {
 	}
 }
 
+// TestDial_ConnectedLineNamesTheDuplexMode: a call's log has to say which mode
+// produced it. A gated call cannot exercise barge-in and an ungated one on
+// speakers is the server talking to itself, so a recording or transcript read
+// afterwards means different things in the two modes -- and the only place
+// that distinction is recorded is this line.
+func TestDial_ConnectedLineNamesTheDuplexMode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []dialOption
+		want string
+	}{
+		{"default", nil, "half duplex"},
+		{"--full-duplex", []dialOption{withFullDuplex()}, "full duplex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withLoudFrameSource(t, time.Second)
+			srv := hijackedWSServer(t, func(net.Conn, *bufio.ReadWriter) {})
+
+			out := captureLog(t, func() { runGatedDial(t, srv, tc.opts...) })
+
+			connected := ""
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, "connected to") {
+					connected = line
+					break
+				}
+			}
+			if connected == "" {
+				t.Fatalf("no connected line in the log:\n%s", out)
+			}
+			if !strings.Contains(connected, tc.want) {
+				t.Errorf("connected line does not name the duplex mode: got %q, want it to contain %q", connected, tc.want)
+			}
+		})
+	}
+}
+
 // TestDial_MarkEchoArrivesWithTheMicGated is observable 4 in miniature: the
 // server's paced write followed by a mark still gets its echo with the gate
 // shut for the whole clip. The gate changes the content of outbound media and
 // nothing else -- not the frame cadence the server paces on, and not the
 // control plane.
 func TestDial_MarkEchoArrivesWithTheMicGated(t *testing.T) {
-	withLoudFrameSource(t, 3)
+	withLoudFrameSource(t, 3*time.Second)
 
 	const streamSID = "SS_gatemark"
 	const markName = "gated-mark"
 	echoed := make(chan string, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			close(echoed)
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf)
-
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 		serverSpeaks(t, conn, streamSID, 300*time.Millisecond)
 		markMsg, err := twilio.EncodeMark(streamSID, markName)
 		if err != nil {
@@ -502,8 +489,7 @@ func TestDial_MarkEchoArrivesWithTheMicGated(t *testing.T) {
 			t.Errorf("write mark: %v", err)
 		}
 		waitForMarkEcho(t, buf, echoed)
-	}))
-	t.Cleanup(srv.Close)
+	})
 
 	runGatedDial(t, srv)
 

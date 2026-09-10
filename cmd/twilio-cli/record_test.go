@@ -47,7 +47,7 @@ func recordSentFrom(t *testing.T, path string, src io.Reader) []byte {
 		t.Fatalf("newStreamRecorder(%s): %v", path, err)
 	}
 	seqNum := 1
-	send := mediaFrameSender(newMediaFrameEncoder("MZ_recordsent", &seqNum), rec, func([]byte) error { return nil })
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_recordsent", &seqNum), rec, nil, func([]byte) error { return nil })
 	if err := streamFileFramesFrom(context.Background(), src, send, func(bool) {}); err != nil {
 		t.Fatalf("streamFileFramesFrom: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestRecordSent_WritesSentPayloads(t *testing.T) {
 	}
 	seqNum := 1
 	var wire [][]byte
-	send := mediaFrameSender(newMediaFrameEncoder("MZ_sent", &seqNum), rec, func(msg []byte) error {
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_sent", &seqNum), rec, nil, func(msg []byte) error {
 		wire = append(wire, append([]byte(nil), msg...))
 		return nil
 	})
@@ -108,7 +108,7 @@ func TestRecordSent_Off(t *testing.T) {
 	dir := t.TempDir()
 	seqNum := 1
 	sent := 0
-	send := mediaFrameSender(newMediaFrameEncoder("MZ_off", &seqNum), nil, func([]byte) error {
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_off", &seqNum), nil, nil, func([]byte) error {
 		sent++
 		return nil
 	})
@@ -174,7 +174,7 @@ func TestRecordSent_NotRecordedWhenTheSendFails(t *testing.T) {
 	seqNum := 1
 	attempt := 0
 	sendErr := errors.New("socket gone")
-	send := mediaFrameSender(newMediaFrameEncoder("MZ_failsend", &seqNum), rec, func([]byte) error {
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_failsend", &seqNum), rec, nil, func([]byte) error {
 		attempt++
 		if attempt == 2 {
 			return sendErr
@@ -226,7 +226,7 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 		t.Helper()
 		withFakeMic(t, func(_ context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, _ *micGate, _ func(bool)) error {
 			gotRecorder = rec != nil
-			send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn))
+			send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, nil, connFrameWriter(conn))
 			for i := 0; i*muLawFrame20ms < len(spoken); i++ {
 				if err := send(spoken[i*muLawFrame20ms : (i+1)*muLawFrame20ms]); err != nil {
 					return err

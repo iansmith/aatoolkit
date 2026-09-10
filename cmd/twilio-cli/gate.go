@@ -27,12 +27,17 @@ import (
 // already exists: playoutFiller.outstanding answers precisely "how much audio
 // has been handed to the player and not yet heard".
 //
-// So the gate is a deadline, not a switch. Whoever feeds the player publishes
-// the wall-clock instant through which the room will still be ringing, and the
-// frame source compares it against now. The two live on different goroutines
-// -- the filler is owned by dialReadLoop, the frame source runs off dial -- so
-// the crossing is one atomic, which leaves playoutFiller itself single-owner
-// and unsynchronised.
+// So the gate is a deadline, not a switch. Whoever hands the player audio a
+// microphone could hear publishes the wall-clock instant through which the
+// room will still be ringing, and the outbound frame path compares it against
+// now. The two live on different goroutines -- the filler is owned by
+// dialReadLoop, the frame source runs off dial -- so the crossing is one
+// atomic, which leaves playoutFiller itself single-owner and unsynchronised.
+//
+// "Audio a microphone could hear" excludes exactly one of the three feeders:
+// playoutFiller.fill writes silence into the gap when the server has gone
+// quiet, and silence is nothing to echo. The other two -- the server's media
+// and the earcon tone -- both publish, through callAudio.fed.
 //
 // What it does NOT do is stop sending. The server's prologue paces its writes
 // against inbound frames, so a client that goes quiet stalls the introduction
@@ -81,29 +86,24 @@ func (g *micGate) open() {
 	g.shutUntilNanos.Store(0)
 }
 
-// shut reports whether the mic is gated at now. A nil gate is never shut.
-func (g *micGate) shut(now time.Time) bool {
-	return g != nil && now.UnixNano() < g.shutUntilNanos.Load()
+// shut reports whether the mic is gated right now. A nil gate is never shut.
+func (g *micGate) shut() bool {
+	return g != nil && time.Now().UnixNano() < g.shutUntilNanos.Load()
 }
 
-// wrap returns send with the gate in front of it: while the gate is shut the
-// frame that goes out is mu-law silence of the same size, and the frame the
-// mic captured is dropped.
+// gated returns the frame that should go out in place of payload: mu-law
+// silence of the same size while the gate is shut, and payload itself
+// otherwise.
 //
-// The substitution happens outside mediaFrameSender, so -record-sent tees what
-// actually went on the wire rather than what the microphone heard -- the
-// recording's claim is about sending, and a file full of echo would not be it.
+// Same size, and always a frame: a server that paces its writes against
+// inbound frames stalls if the client stops sending, so the cadence is the
+// contract and only the content may change.
 //
 // A nil gate is full duplex: --full-duplex is the absence of a gate rather
 // than a flag the gate consults, so there is nothing to keep in step.
-func (g *micGate) wrap(send func([]byte) error) func([]byte) error {
-	if g == nil {
-		return send
+func (g *micGate) gated(payload []byte) []byte {
+	if !g.shut() {
+		return payload
 	}
-	return func(payload []byte) error {
-		if g.shut(time.Now()) {
-			return send(bytes.Repeat([]byte{telephony.MuLawSilence}, len(payload)))
-		}
-		return send(payload)
-	}
+	return bytes.Repeat([]byte{telephony.MuLawSilence}, len(payload))
 }

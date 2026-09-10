@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -40,6 +42,33 @@ func readHandshake(t *testing.T, buf *bufio.ReadWriter) []byte {
 		return nil
 	}
 	return start
+}
+
+// hijackedWSServer is the shape every twilio-cli protocol test's far end has:
+// hijack the connection, complete the upgrade, consume the opening handshake,
+// and hand the raw conn and buffer to serve. The conn is registered for close
+// at test end so a red test that times out cannot leak the client's dial
+// goroutine with it.
+//
+// It exists because that eight-line prologue had been copied into four servers
+// across three files, and each copy is a chance to forget trackConn or to read
+// a frame before the handshake.
+func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWriter)) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		trackConn(t, conn)
+		defer conn.Close()
+		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
+		readHandshake(t, buf) // connected + start
+		serve(conn, buf)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // wsHandshake must be called after hijacking the conn to complete the WebSocket upgrade.

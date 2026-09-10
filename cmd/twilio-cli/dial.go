@@ -28,7 +28,13 @@ import (
 //
 // This is the ONE frame-source seam — a second one (a dialOption, say) would
 // leave two mechanisms selecting the same thing.
-var streamMic func(context.Context, *websocket.Conn, string, *int, *streamRecorder, *micGate, func(bool)) error = streamMicFrames
+var streamMic micFrameSource = streamMicFrames
+
+// micFrameSource is the shape of a frame source. Named rather than spelled out
+// at each of the places that hold one, so adding to it is one edit here plus
+// the implementations, not a sweep over every declaration that happens to
+// mention it.
+type micFrameSource func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, gate *micGate, onMicWarm func(bool)) error
 
 // frameSourceLabel names whatever streamMic currently is, for the connected log
 // line. Set alongside streamMic, never independently.
@@ -68,16 +74,23 @@ type callAudio struct {
 // fed records payload as handed to the player and republishes the mic gate
 // from the filler's new playout horizon.
 //
-// The two belong together at every call site, not just most of them: a feed
-// that skips the gate is a stretch of playout the microphone talks over, and
-// a gate shut without a feed is a mic held closed over silence. The earcon is
-// the case that proves it -- it is real bytes into the same ffplay sink, so it
-// is accounted to the filler and (correctly) holds the gate shut for its own
-// 240 ms.
+// The two belong together wherever the player is handed audio a microphone
+// could hear: a feed that skips the gate is a stretch of playout the mic talks
+// over, and a gate shut without a feed is a mic held closed over silence. The
+// earcon is the case that proves it -- it is real bytes into the same ffplay
+// sink, so it is accounted to the filler and (correctly) holds the gate shut
+// for its own 240 ms.
 //
-// The horizon comes from outstanding rather than fedThrough directly, so the
-// idle case is right by construction: a player with nothing queued is gated
-// for the hangover from now, never from an instant already past.
+// playoutFiller.fill is the deliberate exception: it feeds the player too, but
+// what it feeds is silence covering a gap the server left, and silence is
+// nothing for the microphone to echo. It advances fedThrough and publishes
+// nothing.
+//
+// The horizon reads through outstanding rather than fedThrough because
+// outstanding is the quantity the gate means -- how much handed-over audio has
+// not played yet -- and it is already the one every other downstream decision
+// takes. The idle case is right before it gets here: filler.fed clamps
+// fedThrough forward to now, so there is no instant already past to gate from.
 func (a *callAudio) fed(payload []byte, now time.Time) {
 	a.filler.fed(payload, now)
 	a.gate.shutUntil(now.Add(a.filler.outstanding(now) + micGateHangover))
