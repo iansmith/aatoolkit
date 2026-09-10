@@ -22,13 +22,30 @@ import (
 // mic capture; main() reassigns it to a file-backed source when -audio is passed
 // (capture_file.go). It is also the seam tests override to simulate capture
 // completion (EOF) deterministically, since real mic capture has no natural EOF
-// to trigger from a test. Receives an onMicWarm callback that fires when the
-// first real frame is emitted or the discard cap is hit, with a bool indicating
-// whether the cap was hit.
+// to trigger from a test. Receives the send func dial built for this call, and
+// an onMicWarm callback that fires once, at the first frame. Its bool reports
+// whether a leading-silence discard cap was hit; neither source has such a cap
+// any more (see streamMicFrames), so both always pass false.
 //
 // This is the ONE frame-source seam — a second one (a dialOption, say) would
 // leave two mechanisms selecting the same thing.
-var streamMic func(context.Context, *websocket.Conn, string, *int, *streamRecorder, func(bool)) error = streamMicFrames
+var streamMic micFrameSource = streamMicFrames
+
+// micFrameSource is the shape of a frame source: produce μ-law frames until
+// ctx is done or the source runs out, hand each to send, and signal onMicWarm
+// once at the first one.
+//
+// It used to carry the conn, the stream SID, the sequence counter and the
+// outbound recorder as well -- four values no source read for itself. Each
+// existed only so the source could build the same one-line `send` that the
+// other source was building from the same four, and the gate would have been a
+// fifth: adding it under the old shape meant editing thirteen declarations
+// that have nothing to do with capturing audio. dial builds send once and passes
+// it, so a source now takes exactly what a source needs: somewhere to put a
+// frame, and a way to say the first one arrived. Everything about how a frame
+// becomes a Twilio media event, gets gated, and gets recorded belongs to
+// mediaFrameSender, in capture.go, which already claims it.
+type micFrameSource func(ctx context.Context, send func([]byte) error, onMicWarm func(bool)) error
 
 // frameSourceLabel names whatever streamMic currently is, for the connected log
 // line. Set alongside streamMic, never independently.
@@ -56,6 +73,52 @@ type callAudio struct {
 	// filler keeps the player's stream level with the wall clock across the
 	// silences a conversation is mostly made of.
 	filler *playoutFiller
+
+	// gate holds the mic shut while the filler says the player still has
+	// audio to render. nil under --full-duplex, and every method tolerates
+	// nil. It is the one field here the read loop does not own outright: the
+	// frame source's goroutine reads it, which is why it is an atomic and why
+	// nothing else about the playout crosses over.
+	gate *micGate
+}
+
+// fed records payload as handed to the player and republishes the mic gate
+// from the filler's new playout horizon.
+//
+// The two belong together wherever the player is handed audio a microphone
+// could hear: a feed that skips the gate is a stretch of playout the mic talks
+// over, and a gate shut without a feed is a mic held closed over silence. The
+// earcon is the case that proves it -- it is real bytes into the same ffplay
+// sink, so it is accounted to the filler and (correctly) holds the gate shut
+// for its own 240 ms -- plus the hangover shutUntil adds, so roughly half a
+// second near the top of any call that plays one. (A call the server opens by
+// speaking plays no tone -- see playEarconUnlessServerSpoke -- and is gated by
+// the server's own audio instead.)
+//
+// playoutFiller.fill is the deliberate exception: it feeds the player too, but
+// what it feeds is silence covering a gap the server left, and silence is
+// nothing for the microphone to echo. It advances fedThrough and publishes
+// nothing.
+//
+// The gate is told the horizon -- the instant the player runs out of audio --
+// and adds its own hangover; see micGate.shutUntil.
+//
+// The horizon reads through outstanding rather than fedThrough because
+// outstanding is the quantity the gate means -- how much handed-over audio has
+// not played yet -- and it is already the one every other downstream decision
+// takes. The idle case is right before it gets here: filler.fed clamps
+// fedThrough forward to now, so there is no instant already past to gate from.
+func (a *callAudio) fed(payload []byte, now time.Time) {
+	a.filler.fed(payload, now)
+	a.gate.shutUntil(now.Add(a.filler.outstanding(now)))
+}
+
+// flush drops the queued playout and reopens the mic at once -- what a Twilio
+// clear means on both sides of the gate. See playoutFiller.flush and
+// micGate.open.
+func (a *callAudio) flush(now time.Time) {
+	a.filler.flush(now)
+	a.gate.open()
 }
 
 // dialOptions configures optional dial() behavior.
@@ -63,6 +126,7 @@ type dialOptions struct {
 	noEchoMarks    bool
 	recordPath     string
 	recordSentPath string
+	fullDuplex     bool
 }
 
 // dialOption configures dialOptions.
@@ -73,6 +137,12 @@ type dialOption func(*dialOptions)
 // instead of receiving an echo.
 func withNoEchoMarks() dialOption {
 	return func(o *dialOptions) { o.noEchoMarks = true }
+}
+
+// withFullDuplex turns the half-duplex mic gate off (see --full-duplex in
+// main.go), so captured frames go upstream even while the player is speaking.
+func withFullDuplex() dialOption {
+	return func(o *dialOptions) { o.fullDuplex = true }
 }
 
 // withRecording records every inbound media payload to path (see -record in
@@ -107,9 +177,16 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	defer player.close()
 
 	// One bundle for the whole inbound frame path -- see callAudio.
+	//
+	// The gate is created here or not at all: --full-duplex is the absence of
+	// one, so there is no second place that could disagree about whether this
+	// call is gated.
 	audio := &callAudio{
 		markWindowStart: time.Now(),
 		filler:          newPlayoutFiller(time.Now(), telephony.MuLawSilence),
+	}
+	if !cfg.fullDuplex {
+		audio.gate = newMicGate()
 	}
 
 	audio.recorder, err = newStreamRecorder(recordInbound, cfg.recordPath, time.Now())
@@ -119,8 +196,11 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	defer func() { audio.recorder.close(time.Now()) }()
 
 	// The outbound recorder is dial's to own for the same reason the inbound one
-	// is: it lives exactly as long as the call. The frame source only writes to
-	// it, so it is created and closed here and handed down to streamMic.
+	// is: it lives exactly as long as the call. It is created and closed here
+	// and handed to mediaFrameSender (below), not to the frame source: a source
+	// hands over payloads and never touches the recorder, and mediaFrameSender
+	// is the one place an outbound frame leaves the process, so it is the one
+	// place that can tee what was actually sent.
 	sentRecorder, err := newStreamRecorder(recordOutbound, cfg.recordSentPath, time.Now())
 	if err != nil {
 		return err
@@ -226,7 +306,18 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	if err := writeHandshake(ctx, conn, startMsg); err != nil {
 		return ignoreHandshakeHangup(err)
 	}
-	log.Printf("twilio-cli: connected to %s, streaming %s (Ctrl-C to stop)", addr, frameSourceLabel)
+	// The duplex mode goes in the connected line because it decides what a
+	// call's recording and transcript are evidence of: a gated call cannot
+	// exercise barge-in, and an ungated one on speakers is the server talking
+	// to itself. A log that does not say which produced it cannot be read
+	// afterwards.
+	log.Printf("twilio-cli: connected to %s, streaming %s, %s (Ctrl-C to stop)", addr, frameSourceLabel, duplexMode(audio.gate))
+
+	// The outbound frame path, built once here rather than identically in each
+	// frame source. The encoder takes &seqNum, so the mic goroutine advances
+	// this call's single sequence counter as it sends -- see seqNum above for
+	// why a plain int is safe.
+	send := mediaFrameSender(newMediaFrameEncoder(streamSID, &seqNum), sentRecorder, audio.gate, connFrameWriter(conn))
 
 	micErrCh := make(chan error, 1)
 	go func() {
@@ -248,12 +339,21 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 				// Earcon signal already pending; skip this one.
 			}
 		}
-		err := streamMic(micCtx, conn, streamSID, &seqNum, sentRecorder, onMicWarm)
+		err := streamMic(micCtx, send, onMicWarm)
 		// naturalEnd: streamMic returned on its OWN (mic EOF = caller hangup), not
 		// because something cancelled micCtx (Ctrl-C, or a server-initiated close via
 		// the read loop's cancelMic).
 		naturalEnd := micCtx.Err() == nil
-		if errors.Is(err, context.Canceled) {
+		// A call that simply ended is not a mic failure. The peer closing its
+		// socket while we are still writing frames at it is the ordinary way a
+		// server hangs up (see isCallEnded, which names this exact race), and
+		// whether the frame source notices it as a broken pipe or the read loop
+		// notices it as EOF first is scheduling. Reported as an error it would
+		// reach main's log.Fatalf, so a normal hangup would exit twilio-cli
+		// with "write: broken pipe" perhaps one run in twenty. A hard mic
+		// failure -- ffmpeg missing, the device refusing -- is not call-ended
+		// and still propagates.
+		if err != nil && isCallEnded(err) {
 			err = nil
 		}
 		// Caller hangup: notify the server with a stop frame, here (synchronously,
@@ -337,7 +437,7 @@ func playEarconUnlessServerSpoke(player *lazyPlayer, audio *callAudio) {
 	// tone went from 20ms to 240ms.
 	tone := playEarcon(player)
 	if audio != nil {
-		audio.filler.fed(tone, time.Now())
+		audio.fed(tone, time.Now())
 	}
 }
 
@@ -552,7 +652,7 @@ func handleFrame(f twilio.Frame, player *lazyPlayer, audio *callAudio, conn *web
 		now := time.Now()
 		audio.recorder.write(f.Payload, now)
 		player.play(f.Payload)
-		audio.filler.fed(f.Payload, now)
+		audio.fed(f.Payload, now)
 		audio.bytesSinceMark += len(f.Payload)
 		audio.serverSpoke = true
 
@@ -596,7 +696,7 @@ func handleFrame(f twilio.Frame, player *lazyPlayer, audio *callAudio, conn *web
 		// stretch the caller is talking over.
 		now := time.Now()
 		flushed := audio.filler.outstanding(now)
-		audio.filler.flush(now)
+		audio.flush(now)
 		// And the PLAYER's queue, which is the audio itself rather than the
 		// model of it. Before the player had a queue this branch could only
 		// update timing state -- the discarded reply was already inside
@@ -630,6 +730,14 @@ func echoMark(conn *websocket.Conn, streamSID, markName string, delay time.Durat
 		return
 	}
 	logCtlFrame("->", echoMsg)
+}
+
+// duplexMode names the call's duplex arrangement for the connected log line.
+func duplexMode(gate *micGate) string {
+	if gate == nil {
+		return "full duplex (--full-duplex: the mic is never gated)"
+	}
+	return "half duplex (the mic is gated while the server speaks)"
 }
 
 func newSID(prefix string) string {

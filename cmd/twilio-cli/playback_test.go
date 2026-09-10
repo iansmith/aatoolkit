@@ -1,21 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/coder/websocket"
 
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
@@ -64,6 +62,23 @@ func (s *recordingSink) Write(p []byte) (int, error) {
 func (s *recordingSink) Close() error {
 	s.closes++
 	return nil
+}
+
+// withFakePlayer points the player seam at an in-memory sink for the duration
+// of the test, and restores it afterwards.
+//
+// Every dial()-driven test needs it. Without it `go test` starts a real ffplay
+// per call and plays the capture-live earcon and whatever the server sent out
+// of the machine's speakers, and dial's teardown then blocks until ffplay has
+// drained and exited -- seconds of wall clock, and audible, for a claim about
+// bytes on a socket.
+func withFakePlayer(t *testing.T) {
+	t.Helper()
+	original := newPlayerFunc
+	t.Cleanup(func() { newPlayerFunc = original })
+	newPlayerFunc = func(context.Context) (*audioPlayer, error) {
+		return newPlayerWithSink(&recordingSink{}), nil
+	}
 }
 
 // mkFrame returns a 160-byte μ-law frame filled with value v.
@@ -365,7 +380,7 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 
 	// Inject a fake mic that fires onMicWarm exactly once (capHit=false).
 	var onMicWarmCalled bool
-	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, onMicWarm func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ func([]byte) error, onMicWarm func(bool)) error {
 		// Before onMicWarm, no TONE has been played. Not "the sink is empty":
 		// the filler may already have written silence, and reading s.buf
 		// directly from this goroutine races the read loop's own Write --
@@ -384,17 +399,8 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 	})
 
 	// Call dial with a stub server.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // consume connected + start
-	}))
-	defer srv.Close()
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
@@ -432,24 +438,15 @@ func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
 	}
 
 	// Inject a fake mic that fires onMicWarm.
-	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, onMicWarm func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ func([]byte) error, onMicWarm func(bool)) error {
 		// Call onMicWarm to trigger the earcon.
 		onMicWarm(false)
 		return nil
 	})
 
 	// Call dial with a stub server.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // consume connected + start
-	}))
-	defer srv.Close()
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
@@ -817,7 +814,7 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 		}
 		return n
 	}
-	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, onMicWarm func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ func([]byte) error, onMicWarm func(bool)) error {
 		deadline := time.Now().Add(5 * time.Second)
 		for served() < len(serverAudio) && time.Now().Before(deadline) {
 			time.Sleep(5 * time.Millisecond)
@@ -831,15 +828,7 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 		return nil
 	})
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // consume connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 
 		media, err := twilio.EncodeMedia("MZearcontest", serverAudio)
 		if err != nil {
@@ -852,8 +841,7 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 		}
 		// Hold the connection open so the client's read loop stays alive.
 		io.Copy(io.Discard, buf)
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	if err := dial(context.Background(), newSID("CA"), addr); err != nil {

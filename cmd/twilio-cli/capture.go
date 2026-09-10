@@ -55,17 +55,24 @@ func connFrameWriter(conn *websocket.Conn) func([]byte) error {
 // once the write has succeeded -- tee the payload to rec.
 //
 // This is the one place an outbound frame leaves the process, which is why
-// -record-sent tees here rather than in either frame source. The mic and the
-// -audio file both send through it, so the recording is of the bytes sent and
-// cannot drift from one source's idea of them. Two details are load-bearing:
-// the payload is teed pre-encode, so the file is a plain μ-law stream that
-// -audio replays directly rather than the framed JSON that went on the wire;
-// and the tee runs after the write, so a frame whose write failed is not in the
-// file that claims to be what went out. That claim is about sending, not
-// delivery -- a write that succeeds has left this process, which is as much as
-// anything here can observe.
-func mediaFrameSender(enc *mediaFrameEncoder, rec *streamRecorder, write func([]byte) error) func([]byte) error {
+// -record-sent tees here rather than in either frame source -- and why the mic
+// gate applies here too, on the way in, rather than as a wrapper each source
+// has to remember. The mic and the -audio file both send through it, so the
+// recording is of the bytes sent and cannot drift from one source's idea of
+// them. Three details are load-bearing: the gate substitutes first, so a
+// gated frame is silence to the encoder, the socket and the recording alike --
+// -record-sent claims to be what went out, and a file of the echo the
+// microphone heard would not be that; the payload is teed pre-encode, so the
+// file is a plain μ-law stream that -audio replays directly rather than the
+// framed JSON that went on the wire; and the tee runs after the write, so a
+// frame whose write failed is not in the file that claims to be what went out.
+// That claim is about sending, not delivery -- a write that succeeds has left
+// this process, which is as much as anything here can observe.
+//
+// gate is nil under --full-duplex, and on every path that has no gate to apply.
+func mediaFrameSender(enc *mediaFrameEncoder, rec *streamRecorder, gate *micGate, write func([]byte) error) func([]byte) error {
 	return func(payload []byte) error {
+		payload = gate.gated(payload)
 		msg, err := enc.encode(payload)
 		if err != nil {
 			return err

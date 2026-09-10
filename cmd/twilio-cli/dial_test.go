@@ -1,17 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
@@ -237,19 +239,20 @@ func TestDial_StartEventSIDsAreDistinct(t *testing.T) {
 // TestDial_SendsStopFrameOnCancel asserts that cancelling ctx (as SIGINT
 // does) causes dial to send a stop frame before closing the WebSocket.
 func TestDial_SendsStopFrameOnCancel(t *testing.T) {
+	// On the fake mic, for the reason withFakeMic exists: this is a claim about
+	// frame ORDER -- the frame after cancel is the stop -- and the real mic
+	// makes that claim false without anything being wrong. ffmpeg's graceful
+	// stop flushes its capture buffer on the way out (AATK-2), so a cancel that
+	// lands after the device has warmed puts the drained media ahead of the
+	// stop, and the single read below picks up a media frame. Measured failing
+	// that way under load. blockingMic returns on cancel and sends nothing, so
+	// the next frame really is the stop.
+	withFakeMic(t, blockingMic)
+
 	startReceived := make(chan struct{})
 	stopReceived := make(chan []byte, 1)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-		readHandshake(t, buf) // connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 		close(startReceived)
 
 		msg, err := readWSFrame(buf)
@@ -258,8 +261,7 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 			return
 		}
 		stopReceived <- msg
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -300,11 +302,63 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 // the test, restoring the original afterward. Real mic capture (ffmpeg +
 // avfoundation) is environment-dependent (device permissions, hardware) —
 // these protocol-level tests should not depend on its timing.
-func withFakeMic(t *testing.T, fn func(ctx context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, onMicWarm func(bool)) error) {
+func withFakeMic(t *testing.T, fn micFrameSource) {
 	t.Helper()
 	original := streamMic
 	streamMic = fn
 	t.Cleanup(func() { streamMic = original })
+}
+
+// TestDial_MicErrorPropagatesUnlessTheCallSimplyEnded pins the mic goroutine's
+// error classification (AATK-127), which widened from `errors.Is(err,
+// context.Canceled)` to `isCallEnded(err)`.
+//
+// Both halves are the contract, and only together. The swallow exists because
+// the peer closing its socket while the frame source is still writing at it is
+// the ordinary way a server hangs up: reported as an error it reaches main's
+// log.Fatalf, so a normal call would exit twilio-cli with "write: broken pipe"
+// on whichever runs lost that race. The propagation exists because the swallow
+// must not grow into "the mic never fails": ffmpeg missing or the device
+// refusing is a call that captured nothing, and an operator told "call ended"
+// has no way to find that out.
+//
+// Asserted through dial() rather than on isCallEnded directly, because what
+// changed is which errors dial returns to main -- isCallEnded itself is
+// unchanged by that commit and was already true of these inputs.
+func TestDial_MicErrorPropagatesUnlessTheCallSimplyEnded(t *testing.T) {
+	hardFailure := errors.New("streamMicFrames: start ffmpeg (installed? `brew install ffmpeg`)")
+
+	for _, tc := range []struct {
+		name    string
+		micErr  error
+		wantErr error // nil means dial must swallow it
+	}{
+		{"peer closed while we were writing", syscall.EPIPE, nil},
+		{"peer reset the connection", syscall.ECONNRESET, nil},
+		{"frame source ran out", io.EOF, nil},
+		{"ffmpeg could not start", hardFailure, hardFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakePlayer(t)
+			withFakeMic(t, func(context.Context, func([]byte) error, func(bool)) error {
+				return tc.micErr
+			})
+
+			srv := mediaConsumingServer(t)
+			addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+			err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr)
+
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Errorf("dial returned %v for a mic error that means the call ended; main would log.Fatalf on a normal hangup", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("dial returned %v, want %v -- a hard capture failure must reach the operator, not read as a clean hangup", err, tc.wantErr)
+			}
+		})
+	}
 }
 
 // TestDial_NoStopFrameOnServerClose asserts that a SERVER-initiated close (the
@@ -318,7 +372,7 @@ func TestDial_NoStopFrameOnServerClose(t *testing.T) {
 	// The read loop's cancelMic ends the mic on a server close; a fake mic that runs
 	// until its context is cancelled reproduces that (streamMic returns via
 	// cancellation, i.e. naturalEnd=false — NOT on its own).
-	withFakeMic(t, func(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, _ func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ func([]byte) error, _ func(bool)) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -350,7 +404,7 @@ func TestDial_NoStopFrameOnServerClose(t *testing.T) {
 
 // blockingMic simulates a long-running capture that only stops when ctx is
 // cancelled — mirrors real streamMicFrames' shape without touching hardware.
-func blockingMic(ctx context.Context, _ *websocket.Conn, _ string, _ *int, _ *streamRecorder, _ func(bool)) error {
+func blockingMic(ctx context.Context, _ func([]byte) error, _ func(bool)) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -382,17 +436,7 @@ func TestCLI_MarkEcho(t *testing.T) {
 	withFakeMic(t, blockingMic)
 
 	echoReceived := make(chan []byte, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-		readHandshake(t, buf) // connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 
 		const streamSID = "SS_markecho"
 		mediaMsg, err := twilio.EncodeMedia(streamSID, make([]byte, muLawFrame20ms))
@@ -421,8 +465,7 @@ func TestCLI_MarkEcho(t *testing.T) {
 			return
 		}
 		echoReceived <- echoRaw
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx := dialCtx(t, 5*time.Second)
@@ -469,17 +512,7 @@ func TestCLI_MarkEchoRepeats(t *testing.T) {
 	withFakeMic(t, blockingMic)
 
 	echoReceived := make(chan []byte, 2)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-		readHandshake(t, buf) // connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 
 		const streamSID = "SS_repeatmark"
 		sendMarkedMedia := func(frames int, markName string) {
@@ -511,8 +544,7 @@ func TestCLI_MarkEchoRepeats(t *testing.T) {
 
 		sendMarkedMedia(1, "mark1")
 		sendMarkedMedia(2, "mark2")
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx := dialCtx(t, 5*time.Second)
@@ -599,7 +631,7 @@ func TestCLI_ServerClose(t *testing.T) {
 // its own, dial() must send a stop frame before closing — not sit blocked
 // waiting for the next server message forever.
 func TestCLI_CallerHangup(t *testing.T) {
-	withFakeMic(t, func(ctx context.Context, conn *websocket.Conn, streamSID string, _ *int, _ *streamRecorder, _ func(bool)) error {
+	withFakeMic(t, func(ctx context.Context, _ func([]byte) error, _ func(bool)) error {
 		// Give the start frame a moment to go out before "capture" ends, so
 		// the wire order (start, then stop) is deterministic.
 		time.Sleep(50 * time.Millisecond)
@@ -607,25 +639,14 @@ func TestCLI_CallerHangup(t *testing.T) {
 	})
 
 	stopReceived := make(chan []byte, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-		readHandshake(t, buf) // connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 		msg, err := readWSFrame(buf)
 		if err != nil {
 			t.Errorf("read stop frame: %v", err)
 			return
 		}
 		stopReceived <- msg
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx := dialCtx(t, 5*time.Second)
