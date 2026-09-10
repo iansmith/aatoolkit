@@ -314,7 +314,7 @@ func (f *filler) start(gen uint64, by armTrigger) {
 		// whole of Delay, with the caller never having spoken. Named so a call
 		// that sounded dead at the open is greppable afterwards — and
 		// deliberately NOT under the "filler audio:" prefix play's write-error
-		// line carries, which two tests in this package grep for as the
+		// line carries, which three tests in this package grep for as the
 		// signature of a frame that failed to reach the carrier.
 		log.Printf("twilio: realtime: silent backend at call open: playing the filler loop")
 	}

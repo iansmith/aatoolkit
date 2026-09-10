@@ -268,15 +268,23 @@ func TestFarewell_WaitsForTheCarrierToReportItPlayed(t *testing.T) {
 // backend's speech — and on this call especially, since the error the same call
 // returns says the backend produced nothing at all.
 //
+// The filler is configured too, and that is not incidental: CarrierAudio's doc
+// says the three record kinds are mutually exclusive, and a call carrying only
+// the farewell leaves Filler false by construction, so the assertion that they
+// do not overlap could never fire. This call puts both kinds on the channel.
+//
 // slopstop:test contract
 func TestFarewell_CarrierAudioRecordsAreMarkedFarewell(t *testing.T) {
-	const idleTimeout = 200 * time.Millisecond
+	// Long enough that the cover plays first, for the reason
+	// TestSilentBackend_BothConditionsAreLoggedOnce states in full.
+	const idleTimeout = fillerTestDelay * 2
 
 	ch := make(chan CarrierAudio, 128)
 	be := newFakeRealtimeBackend(t)
 	h := silenceHarness(t, be.url(),
 		WithIdleTimeout(idleTimeout),
 		WithCarrierAudioChan(ch),
+		WithFillerAudio(FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay}),
 		WithFarewellAudio(farewellTestClip()))
 	wire := h.captureCarrierWire(t)
 
@@ -286,19 +294,28 @@ func TestFarewell_CarrierAudioRecordsAreMarkedFarewell(t *testing.T) {
 		t.Fatal("a silent backend must end the call with a non-nil error")
 	}
 
-	var got int
+	var got, sawFiller int
 	for len(ch) > 0 {
 		rec := <-ch
 		if rec.Clear {
 			continue
 		}
+		if rec.Filler && rec.Farewell {
+			t.Fatalf("a frame must not be marked as both the cover and the goodbye: %+v", rec)
+		}
+		if rec.Filler {
+			// The cover, which this call also plays; its own contract is
+			// TestFiller_CarrierAudioRecordsAreMarkedFiller's.
+			sawFiller++
+			continue
+		}
 		if !rec.Farewell {
 			t.Fatalf("engine-originated farewell audio must not be reported as the backend's speech: %+v", rec)
 		}
-		if rec.Filler {
-			t.Fatalf("a farewell frame must not also be marked as filler: %+v", rec)
-		}
 		got++
+	}
+	if sawFiller == 0 {
+		t.Fatal("this call must also ship cover frames, or the mutual-exclusion assertion above cannot fire")
 	}
 	if got != len(farewellFills) {
 		t.Fatalf("the consumer must receive every farewell frame as a farewell-marked record, got %d of %d",
@@ -422,8 +439,13 @@ func TestIdleTimeout_ErrorMatchesErrIdleTimeout(t *testing.T) {
 //
 // slopstop:test contract
 func TestSilentBackend_BothConditionsAreLoggedOnce(t *testing.T) {
-	// Long enough that the cover starts first, and no longer.
-	const idleTimeout = fillerTestDelay + 100*time.Millisecond
+	// Long enough that the cover reliably starts first. Both countdowns begin at
+	// roughly call open, so this margin is the whole of what separates them: at
+	// +100 ms a scheduling slip puts the idle guard first, playFarewell latches
+	// the machine off before start runs, and the assertions below fail on a
+	// cover line that was never written — a flake, not a defect. A whole extra
+	// Delay costs 300 ms of runtime and removes it.
+	const idleTimeout = fillerTestDelay * 2
 	const (
 		coverLine    = "twilio: realtime: silent backend at call open: playing the filler loop"
 		farewellLine = "twilio: realtime: idle timeout: playing the farewell before ending the call"
