@@ -161,6 +161,12 @@ func TestMarkEchoBound_KeepsTheSubMillisecondRemainder(t *testing.T) {
 type blockingWSWriter struct {
 	entered chan struct{}
 	release chan struct{}
+	// passthrough is how many writes succeed immediately before the carrier
+	// wedges. Zero — the original behaviour — parks the very first one. A
+	// caller that makes SEVERAL writes in sequence needs to choose which of
+	// them is the one the carrier stops reading on, since a wedge at the first
+	// means every later write is never attempted and so never bounded.
+	passthrough int
 
 	mu   sync.Mutex
 	sent [][]byte
@@ -174,7 +180,11 @@ type blockingWSWriter struct {
 func (b *blockingWSWriter) Write(ctx context.Context, _ websocket.MessageType, msg []byte) error {
 	b.mu.Lock()
 	b.sent = append(b.sent, append([]byte(nil), msg...))
+	n := len(b.sent)
 	b.mu.Unlock()
+	if n <= b.passthrough {
+		return nil
+	}
 	select {
 	case b.entered <- struct{}{}:
 	default:

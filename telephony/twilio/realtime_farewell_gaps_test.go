@@ -279,18 +279,25 @@ func TestFarewell_ClearsTheCarrierEvenWhenAnotherWriterTookTheStopEdge(t *testin
 	}
 }
 
-// TestFarewell_AWedgedCarrierCannotParkTheIdleExit pins the per-write deadline
-// playFarewell's own doc calls the guarantee this exit path exists to make.
+// TestFarewell_AWedgedCarrierCannotParkTheIdleExit pins the deadline on the
+// goodbye's FIRST write, and specifically on the half of it no other case can
+// reach: the wait for the write SLOT.
 //
-// Every write there happens on HandleStreamRealtime's select loop, AHEAD of the
-// CloseNow that would otherwise unblock a stalled carrier write, and the slot
-// they queue behind is held by carrier audio written on the call's own unbounded
-// context. Written on that context too, a carrier that stopped reading would
-// park this branch forever and void the idle bound entirely — the call would
-// hang exactly where it was supposed to end.
+// That slot is held by carrier audio written on the call's own unbounded
+// context, so a carrier that stopped reading parks whoever is queueing behind
+// it — and playFarewell queues there from HandleStreamRealtime's select loop,
+// AHEAD of the CloseNow that would otherwise unblock the holder. Unbounded,
+// this branch would park forever and void the idle bound entirely: the call
+// would hang exactly where it was supposed to end.
 //
-// slopstop:test regression — guards: "a carrier that stops reading mid-goodbye
-// cannot park the idle guard's exit path"
+// Only the clear is exercised here, and unavoidably so: it never gets the slot,
+// so no later write of the goodbye is ever attempted. The bound on the clip's
+// frames and on the mark is
+// TestFarewell_AWedgedCarrierCannotParkTheIdleExitAtAnyWrite's, which wedges the
+// connection itself rather than the slot and can therefore choose where.
+//
+// slopstop:test regression — guards: "a carrier that stops reading cannot park
+// the idle guard's exit path on the write slot"
 func TestFarewell_AWedgedCarrierCannotParkTheIdleExit(t *testing.T) {
 	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
 	sink := newCarrierMediaSink(w, "SSwedged", nil, nil, nil)
@@ -326,6 +333,83 @@ func TestFarewell_AWedgedCarrierCannotParkTheIdleExit(t *testing.T) {
 
 	release()
 	<-inFlight
+}
+
+// TestFarewell_AWedgedCarrierCannotParkTheIdleExitAtAnyWrite pins the bound on
+// EVERY write playFarewell makes, which is what its own doc claims and what the
+// slot case above cannot see.
+//
+// A carrier that stops reading after accepting the clear is the ordinary shape
+// of the failure — buffers fill partway through the clip, not before it — and
+// the writes that follow the clear are on exactly the same select loop, ahead
+// of exactly the same CloseNow. Bound only the clear and a wedge at the first
+// frame, or at the mark, parks the idle exit forever with the socket still
+// open. Measured: with the clip's and the mark's writes moved back to the
+// call's own context and only the clear left bounded, the case above stays
+// green and the whole package with it.
+//
+// The wedge is at the CONNECTION here rather than at the slot, which is what
+// lets each row choose which write stops being read: nothing else holds the
+// slot, so every earlier write completes and the chosen one is genuinely
+// attempted.
+//
+// slopstop:test regression — guards: "each of the goodbye's writes — the clear,
+// the clip's frames and the mark — carries its own deadline"
+func TestFarewell_AWedgedCarrierCannotParkTheIdleExitAtAnyWrite(t *testing.T) {
+	clip := farewellTestClip()
+	frames := len(clip) / defaultFrameBytes
+
+	for _, tc := range []struct {
+		name string
+		// accepted is how many of the goodbye's writes the carrier reads
+		// before it wedges; the wedge is therefore on write accepted+1.
+		accepted int
+	}{
+		{"the clear", 0},
+		{"the clip's first frame", 1},
+		{"the mark", 1 + frames},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each row waits out the full bound, so they overlap rather than
+			// costing the package three of them.
+			t.Parallel()
+
+			w := &blockingWSWriter{
+				entered:     make(chan struct{}, 8),
+				release:     make(chan struct{}),
+				passthrough: tc.accepted,
+			}
+			t.Cleanup(func() { close(w.release) })
+			sink := newCarrierMediaSink(w, "SSwedgeat", nil, nil, nil)
+
+			done := make(chan struct{})
+			start := time.Now()
+			go func() {
+				defer close(done)
+				sink.playFarewell(context.Background(), clip)
+			}()
+
+			// Generously past the one bound that can release it, and far short
+			// of forever. Unbounded, this parks until the test binary is killed.
+			select {
+			case <-done:
+			case <-time.After(3 * realtimeClientEventSendTimeout):
+				t.Fatalf("the goodbye must give up at its own bound (%s per write) when the carrier stops reading "+
+					"at write %d, rather than parking the idle exit", realtimeClientEventSendTimeout, tc.accepted+1)
+			}
+
+			// Returning FAST would mean the wedge was never reached and the row
+			// proved nothing — an empty test rather than a passing one.
+			if took := time.Since(start); took < realtimeClientEventSendTimeout {
+				t.Fatalf("playFarewell returned after %v, before the bound could have fired: "+
+					"write %d was not the one that wedged", took, tc.accepted+1)
+			}
+			if n := w.writes(); n != tc.accepted+1 {
+				t.Fatalf("the goodbye must stop at the wedged write: %d writes reached the carrier, want %d",
+					n, tc.accepted+1)
+			}
+		})
+	}
 }
 
 // TestFarewell_MarkBoundDoesNotCarryTheBackendsBacklog pins the bound
