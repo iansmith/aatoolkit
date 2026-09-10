@@ -129,24 +129,11 @@ func TestCallOpen_CoverStopsWhenTheBackendFinallySpeaks(t *testing.T) {
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitForWireRecord(t, wire, hasPayload(reply))
-	// Let anything the relay wrongly wrote after the reply arrive too.
-	time.Sleep(100 * time.Millisecond)
 
-	got := wire()
-	replyAt := slices.IndexFunc(got, hasPayload(reply))
-	if replyAt < 1 {
-		t.Fatalf("the reply frame must arrive after the cover, got records %+v", got)
-	}
-	if !got[replyAt-1].clear {
-		t.Fatalf("the record immediately before the backend's first frame must be the clear, got %+v",
-			got[replyAt-1])
-	}
-	for _, r := range got[replyAt:] {
-		if isFillerFrame(r) {
-			t.Fatalf("a late backend must never be talked over by the cover:\n%+v", got)
-		}
-	}
+	// The same stop edge TestFiller_ClearThenFirstDelta asserts for the
+	// speech_stopped episode; what this test contributes is the episode, which
+	// no event armed.
+	assertClearThenReply(t, wire, reply)
 }
 
 // --- behaviour 1 & 6: no filler option, no cover ----------------------------

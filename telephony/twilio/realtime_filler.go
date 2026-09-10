@@ -198,7 +198,8 @@ func (f *filler) observe(ev ServerEvent) {
 // a noisy room makes the VAD reopen the turn) means the wait CONTINUES, never
 // that it begins again — restarting a pending countdown was what pushed the
 // loop's start a whole Delay later than the caller's silence began.
-// by names which of the two waits this is; it rides the pending start's own
+//
+// by names which of the two waits this is. It rides the pending start's own
 // closure, exactly as gen does, so a re-arm that finds a countdown already
 // pending leaves the original label alone along with the original countdown.
 func (f *filler) arm(by armTrigger) {

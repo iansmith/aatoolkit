@@ -201,8 +201,9 @@ type FillerConfig struct {
 
 // CarrierAudio is one record of what the engine sent to the carrier —
 // mirrors Transcript's shape (telephony/realtime/bridge.go): a payload field
-// plus a bool distinguishing the two record kinds this ticket names, rather
-// than a struct-per-kind or a separate enum.
+// plus a bool per record kind, rather than a struct-per-kind or a separate
+// enum. AATK-84 named two kinds; AATK-108 and AATK-128 added one each, in the
+// same shape and for the reasons the paragraphs below give.
 //
 // Clear == true means this record is a barge-in signal (carrierMediaSink.Clear)
 // and Payload is empty. Clear == false means this record is one chunk of
@@ -1546,10 +1547,8 @@ func staticMessage(msg []byte) func() ([]byte, bool) {
 // queued behind however much of the loop the carrier has buffered, which is
 // the delay filler audio exists to hide rather than to cause.
 //
-// The clear goes out only when the loop was actually playing. A reply that
-// arrived inside Delay merely disarms, and a call with no filler configured
-// takes neither branch — s.filler is nil and both calls are no-ops, so this
-// method's wire output is byte-identical to what it was before AATK-108.
+// When the clear goes out and when it does not is stopFillerAndClear's, which
+// owns that rule for both callers.
 func (s *carrierMediaSink) Media(ctx context.Context, payload string) error {
 	if err := s.stopFillerAndClear(ctx); err != nil {
 		return err
@@ -1562,9 +1561,10 @@ func (s *carrierMediaSink) Media(ctx context.Context, payload string) error {
 // calls the ticket's central promise, since playFarewell needs exactly the same
 // step ahead of its own first frame.
 //
-// The clear goes out only when the loop was playing: a reply that arrived
-// inside Delay merely disarms, and a call with no filler configured takes
-// neither branch, so this is a no-op on a call that never named the option.
+// The clear goes out only when the loop was actually PLAYING. A reply that
+// arrived inside Delay merely disarms, and a call with no filler configured
+// takes neither branch — s.filler is nil and both calls are no-ops, so a
+// caller's wire output is byte-identical to what it was before AATK-108.
 func (s *carrierMediaSink) stopFillerAndClear(ctx context.Context) error {
 	if !s.filler.stop() {
 		return nil
