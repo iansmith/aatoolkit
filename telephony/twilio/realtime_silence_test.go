@@ -359,8 +359,18 @@ func TestFarewell_LateBackendAudioNeverLandsOnTheGoodbye(t *testing.T) {
 	if got := wire(); slices.IndexFunc(got, hasPayload(late)) >= 0 {
 		t.Fatalf("a backend that speaks during the goodbye must not be written over it:\n%+v", got)
 	}
-	if got := wire(); slices.IndexFunc(got, isClear) >= 0 {
-		t.Fatalf("a barge-in during the goodbye must not clear it away:\n%+v", wire())
+	// Scoped to what followed the clip's first frame, the same way the sibling
+	// assertions in this file are. The goodbye sends a clear of its OWN before
+	// that frame — that is what stops it queueing behind whatever the carrier
+	// still holds — so a whole-wire scan would be asserting the absence of the
+	// wrong clear, and would fail on the right behaviour.
+	got := wire()
+	firstFarewell := slices.IndexFunc(got, isFarewellFrame)
+	if firstFarewell < 0 {
+		t.Fatalf("the goodbye must be on the wire before this assertion means anything:\n%+v", got)
+	}
+	if slices.IndexFunc(got[firstFarewell:], isClear) >= 0 {
+		t.Fatalf("a barge-in during the goodbye must not clear it away:\n%+v", got)
 	}
 
 	echoMarkFromCarrier(t, h, realtimeFarewellMarkPrefix+h.streamSID)

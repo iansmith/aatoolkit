@@ -327,3 +327,75 @@ func TestFarewell_AWedgedCarrierCannotParkTheIdleExit(t *testing.T) {
 	release()
 	<-inFlight
 }
+
+// TestFarewell_MarkBoundDoesNotCarryTheBackendsBacklog pins the bound
+// playFarewell's own doc claims for its wait: "the mark's own bound, derived
+// from the playout the clip queued".
+//
+// That claim only held when a filler was configured, because the clear that
+// flushes the playout clock was taken under `if s.filler != nil`. Without one,
+// whatever the backend burst-dumped before it went quiet was still queued, the
+// mark's bound was derived from THAT, and the goodbye shipped behind it — so
+// the clip was not what the caller heard next, and the select loop stayed
+// parked for the backlog rather than for the clip. Every teardown the loop owns
+// is behind that wait: marks.stop, the filler's shutdown, and the carrier's own
+// CloseNow. A caller who hangs up as the guard fires holds all of it open for
+// however much stale audio the carrier was still holding.
+//
+// Two seconds of backlog against a 40 ms clip, so the two answers are an order
+// of magnitude apart and no timing margin has to be guessed.
+//
+// slopstop:test regression — guards: "the farewell clears the carrier whether
+// or not a hold loop was configured, so its mark bound describes the clip
+// rather than the backend's backlog"
+func TestFarewell_MarkBoundDoesNotCarryTheBackendsBacklog(t *testing.T) {
+	const backlog = 100 // frames, 20 ms each: 2 s of playout
+
+	w := &scriptedWSWriter{}
+	tr := newMarkTracker(nil, false)
+	t.Cleanup(tr.stop)
+	// nil filler: the case the conditional clear left uncovered.
+	sink := newCarrierMediaSink(w, "SSbacklog", nil, tr, nil)
+
+	// The backend dumped a long reply far faster than real time and then went
+	// silent — which is what the idle guard fires on.
+	for range backlog {
+		if err := sink.Media(context.Background(), carrierPayloadB64()); err != nil {
+			t.Fatalf("test setup: writing the backend's burst: %v", err)
+		}
+	}
+	queued := sink.playout.outstanding(time.Now())
+	if queued < time.Second {
+		t.Fatalf("test setup: the carrier must still be holding the burst, got %v queued", queued)
+	}
+
+	// Nobody echoes the mark: the caller has hung up, so only the bound can
+	// release the wait.
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sink.playFarewell(context.Background(), farewellTestClip())
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(queued + 5*time.Second):
+		t.Fatal("playFarewell never returned")
+	}
+
+	if took := time.Since(start); took > queued/2 {
+		t.Fatalf("the goodbye's wait must be the clip's own bound, not the backend's backlog: "+
+			"returned after %v with %v of stale audio queued", took, queued)
+	}
+
+	got := w.records()
+	firstFarewell := slices.IndexFunc(got, isFarewellFrame)
+	if firstFarewell < 0 {
+		t.Fatalf("the farewell must have reached the carrier:\n%+v", got)
+	}
+	if slices.IndexFunc(got[:firstFarewell], isClear) < 0 {
+		t.Fatalf("the goodbye must be preceded by a clear even when no hold loop was configured, "+
+			"or it ships behind whatever the carrier still holds:\n%+v", got)
+	}
+}

@@ -525,11 +525,18 @@ func TestFiller_KeepsPlayingWhenRearmedMidLoop(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
-	// The subject is the function-call re-arm landing on a loop that the
-	// speech_stopped trigger started, so the call-open episode is disarmed
-	// first — otherwise armFiller below is a no-op and the episode under test is
-	// the wrong one. Mutation-confirmed: with the function-call arm removed,
-	// this passed 3/3.
+	// The call-open episode is disarmed first so the loop below is the one
+	// armFiller started: without this the countdown is already pending when
+	// armFiller runs, arm leaves it alone by the re-arm rule, and the episode
+	// watched is the call opening's.
+	//
+	// It does NOT make this test cover the function-call ARM, and the comment
+	// says so rather than claiming it: with that arm deleted this still passes
+	// 3/3, because a loop already playing keeps playing whether the branch arms
+	// or not. What this test binds is the other half of the branch — that a
+	// function-call response.done must not fall through to f.stop() and silence
+	// the loop across the tool round trip — which is red 3/3 under that
+	// mutation. The arm itself is TestFiller_RearmsAfterFunctionCall's.
 	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	armFiller(t, be)

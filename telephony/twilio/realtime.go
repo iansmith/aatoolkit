@@ -1131,26 +1131,35 @@ func (s *carrierMediaSink) playFarewell(ctx context.Context, clip []byte) {
 		return write(wctx)
 	}
 
-	// The hold loop may be playing, and the carrier may be holding frames of
-	// it that the goodbye must not sit behind. Before the flag below, since
-	// that flag is what makes Clear a no-op.
+	// The carrier may be holding audio the goodbye must not sit behind — the
+	// hold loop if one is playing, and equally whatever the backend dumped
+	// before it went quiet, which the guard fires on rather than waits out.
+	// Before the flag below, since that flag is what makes Clear a no-op.
 	//
-	// Deliberately NOT routed through stopFillerAndClear, which sends its clear
-	// only on the stop EDGE — and that edge belongs to whichever caller took it
+	// UNCONDITIONAL, and both halves of that are load-bearing.
+	//
+	// Not routed through stopFillerAndClear, which sends its clear only on the
+	// filler's stop EDGE — and that edge belongs to whichever caller took it
 	// first. Media and Clear run on Bridge.Run's read loop and call filler.stop
 	// too, so one of them arriving as the guard fires can consume the edge
 	// microseconds ahead of this, leaving stopFillerAndClear here with nothing
 	// to report and no clear to send; that caller's OWN clear is then dropped by
 	// the gate below, and the goodbye ships behind whatever the carrier still
-	// holds of the loop. Clearing on "a loop is configured" rather than on the
-	// edge is unconditional and so cannot be raced away. A call with no filler
-	// still writes nothing here, which is what keeps its wire what it was.
-	if s.filler != nil {
-		s.filler.stop()
-		if err := bounded(s.Clear); err != nil {
-			log.Printf("twilio: realtime: farewell audio: clear: %v", err)
-			return
-		}
+	// holds of the loop.
+	//
+	// Not gated on a filler being configured either. The stale audio the clear
+	// discards is not only the loop's: a backend that burst-dumped a long reply
+	// and then stopped answering leaves the rest of it queued, and the guard
+	// fires on the silence that followed rather than on the queue draining.
+	// Without the clear the goodbye ships behind it AND the mark's bound is
+	// derived from it, so the wait below — which every teardown this function's
+	// caller owns sits behind — lasts the backlog rather than the clip. A call
+	// that supplies no farewell never reaches here at all, so this writes
+	// nothing on any wire that was silent before.
+	s.filler.stop()
+	if err := bounded(s.Clear); err != nil {
+		log.Printf("twilio: realtime: farewell audio: clear: %v", err)
+		return
 	}
 
 	// From here the clip owns the carrier: a backend that finally speaks must
