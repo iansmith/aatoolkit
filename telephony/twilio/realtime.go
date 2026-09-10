@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -1095,22 +1096,44 @@ const realtimeFarewellMarkPrefix = "aatoolkit-farewell-"
 // before this option existed. A write failure ends the attempt rather than the
 // call, because the call is already ending; the error the caller returns is the
 // idle timeout either way.
+//
+// Every WRITE here is bounded, for the reason handleMarkRequest bounds its own:
+// this runs on the select loop that observes every way the call can end, and it
+// runs AHEAD of the CloseNow that would otherwise unblock a stalled carrier
+// write. On the call's own unbounded context a carrier that stopped reading
+// would park this branch forever and void the idle bound entirely — the one
+// guarantee this exit path exists to make. The WAIT for the echo is deliberately
+// not bounded here: it carries the mark's own bound, derived from the playout
+// the clip queued, which is the real time the audio takes to play.
 func (s *carrierMediaSink) playFarewell(ctx context.Context, clip []byte) {
 	if len(clip) == 0 {
 		return
 	}
 	log.Printf("twilio: realtime: idle timeout: playing the farewell before ending the call")
 
+	// bounded gives one carrier write its own deadline; see the paragraph above.
+	bounded := func(write func(context.Context) error) error {
+		wctx, cancel := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
+		defer cancel()
+		return write(wctx)
+	}
+
 	// The hold loop may be playing, and the carrier may be holding frames of
-	// it that the goodbye must not sit behind.
-	if err := s.stopFillerAndClear(ctx); err != nil {
+	// it that the goodbye must not sit behind. Before the flag below, since
+	// that flag is what makes Clear a no-op.
+	if err := bounded(s.stopFillerAndClear); err != nil {
 		log.Printf("twilio: realtime: farewell audio: clear: %v", err)
 		return
 	}
 
+	// From here the clip owns the carrier: a backend that finally speaks must
+	// not interleave with it, and a speech_started must not clear it away. Not
+	// unset — the call ends the moment this returns.
+	s.farewelling.Store(true)
+
 	for off := 0; off < len(clip); off += defaultFrameBytes {
-		end := min(off+defaultFrameBytes, len(clip))
-		if err := s.farewellMedia(ctx, base64.StdEncoding.EncodeToString(clip[off:end])); err != nil {
+		payload := base64.StdEncoding.EncodeToString(clip[off:min(off+defaultFrameBytes, len(clip))])
+		if err := bounded(func(c context.Context) error { return s.farewellMedia(c, payload) }); err != nil {
 			log.Printf("twilio: realtime: farewell audio: %v", err)
 			return
 		}
@@ -1121,7 +1144,7 @@ func (s *carrierMediaSink) playFarewell(ctx context.Context, clip []byte) {
 	// out the whole bound.
 	name := realtimeFarewellMarkPrefix + s.streamSID
 	played := s.marks.await(name)
-	if err := s.Mark(ctx, name); err != nil {
+	if err := bounded(func(c context.Context) error { return s.Mark(c, name) }); err != nil {
 		log.Printf("twilio: realtime: farewell audio: mark: %v", err)
 		return
 	}
@@ -1465,6 +1488,24 @@ type carrierMediaSink struct {
 	// asked for none — see markTracker, whose methods all tolerate nil.
 	marks *markTracker
 
+	// farewelling is set for as long as the farewell clip owns the carrier.
+	// While it is set, Media and Clear DROP the backend's audio and its
+	// barge-in signal instead of writing them.
+	//
+	// That is the point rather than a side effect. The bridge is still reading
+	// the backend when the idle guard fires, so a backend that finally speaks
+	// mid-goodbye would interleave frames with the clip, and a speech_started
+	// would send a clear that discards the queued goodbye outright — the
+	// farewell cut off mid-word that this whole exit path exists to prevent.
+	// Whatever the backend says now is arriving after the call has been
+	// decided to end, and the caller is owed the goodbye instead.
+	//
+	// atomic rather than mutex-guarded because the two sides are different
+	// goroutines and neither may wait on the other: playFarewell runs on
+	// HandleStreamRealtime's select loop, Media and Clear on Bridge.Run's read
+	// loop, which is also what feeds the carrier.
+	farewelling atomic.Bool
+
 	// filler is the loop played while the backend is silent, nil when the
 	// consumer asked for none — see filler, whose methods all tolerate nil.
 	// The sink holds it because the sink is where the loop has to STOP: Media
@@ -1550,6 +1591,10 @@ func staticMessage(msg []byte) func() ([]byte, bool) {
 // When the clear goes out and when it does not is stopFillerAndClear's, which
 // owns that rule for both callers.
 func (s *carrierMediaSink) Media(ctx context.Context, payload string) error {
+	if s.farewelling.Load() {
+		// The goodbye owns the carrier; see the field.
+		return nil
+	}
 	if err := s.stopFillerAndClear(ctx); err != nil {
 		return err
 	}
@@ -1653,6 +1698,12 @@ func (s *carrierMediaSink) fillerMedia(ctx context.Context, next func() (string,
 // this call IS that second clear, and Media has already tested the same thing
 // to decide whether to make it.
 func (s *carrierMediaSink) Clear(ctx context.Context) error {
+	if s.farewelling.Load() {
+		// The goodbye owns the carrier, and a clear here would discard it; see
+		// the field. playFarewell sends its OWN clear before setting the flag,
+		// so the hold loop is still flushed.
+		return nil
+	}
 	s.filler.stop()
 	msg, err := EncodeClear(s.streamSID)
 	if err != nil {

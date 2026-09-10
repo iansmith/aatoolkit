@@ -228,16 +228,24 @@ func (t *markTracker) await(name string) <-chan struct{} {
 }
 
 // resolveAwaitLocked ends the engine's wait if name is the mark it was waiting
-// on. An empty name resolves whatever is waiting, which is what stop needs: the
-// call is over and nothing is going to answer.
+// on, and reports whether it did. An empty name resolves whatever is waiting,
+// which is what stop needs: the call is over and nothing is going to answer.
+//
+// The report is what tells echo and expire that the mark they just finished was
+// the ENGINE'S own — written by playFarewell, never requested by the consumer —
+// so its resolution is not delivered on echoCh. Without that, a call supplying
+// both WithMarkEchoChan and WithFarewellAudio would hand the consumer an echo
+// (or a TimedOut record) for a mark name it never wrote, which is exactly the
+// unmatchable record markTracker's own doc says a consumer must not get.
 //
 // Called with t.mu held, from every path that finishes a mark.
-func (t *markTracker) resolveAwaitLocked(name string) {
+func (t *markTracker) resolveAwaitLocked(name string) bool {
 	if t.awaitCh == nil || (name != "" && name != t.awaitName) {
-		return
+		return false
 	}
 	close(t.awaitCh)
 	t.awaitName, t.awaitCh = "", nil
+	return true
 }
 
 // echo resolves an inbound mark echo from the carrier.
@@ -264,7 +272,10 @@ func (t *markTracker) echo(name string) {
 	}
 	m.timer.Stop()
 	delete(t.outstanding, name)
-	t.resolveAwaitLocked(name)
+	if t.resolveAwaitLocked(name) {
+		// The engine's own farewell mark: not the consumer's to hear about.
+		return
+	}
 	t.deliver(MarkEcho{Name: name})
 }
 
@@ -290,8 +301,12 @@ func (t *markTracker) expire(name string, gen uint64) {
 		return
 	}
 	delete(t.outstanding, name)
-	t.resolveAwaitLocked(name)
+	engineOwned := t.resolveAwaitLocked(name)
 	log.Printf("twilio: realtime: carrier did not honor mark protocol for %q within its bound", name)
+	if engineOwned {
+		// The engine's own farewell mark: not the consumer's to hear about.
+		return
+	}
 	t.deliver(MarkEcho{Name: name, TimedOut: true})
 }
 

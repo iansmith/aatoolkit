@@ -306,6 +306,52 @@ func TestFarewell_CarrierAudioRecordsAreMarkedFarewell(t *testing.T) {
 	}
 }
 
+// TestFarewell_LateBackendAudioNeverLandsOnTheGoodbye pins what happens when
+// the backend finally speaks while the goodbye is playing.
+//
+// The bridge is still reading the backend when the idle guard fires, so this is
+// reachable: a delta arriving now would interleave frames with the clip, and a
+// speech_started would send a clear that discards the queued goodbye outright.
+// Either is the farewell cut off mid-word that this exit path exists to
+// prevent, and the call has already been decided to end, so the caller is owed
+// the goodbye rather than a fragment of a reply that came too late.
+//
+// Driven in the window that actually exists on a real call: the clip is written
+// in microseconds and the engine then WAITS for the mark's echo, so that wait
+// is where a late backend lands.
+//
+// slopstop:test contract
+func TestFarewell_LateBackendAudioNeverLandsOnTheGoodbye(t *testing.T) {
+	const idleTimeout = 200 * time.Millisecond
+
+	be := newFakeRealtimeBackend(t)
+	h := silenceHarness(t, be.url(),
+		WithIdleTimeout(idleTimeout),
+		WithFarewellAudio(farewellTestClip()))
+	wire := h.captureCarrierWire(t)
+
+	// The mark is on the wire, so the whole clip is written and the engine is
+	// waiting for the echo.
+	waitForWireRecord(t, wire, isFarewellMark(h))
+
+	late := distinctCarrierPayload(0x6c)
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": late})
+	be.emitOnce(t, map[string]string{"type": "input_audio_buffer.speech_started"})
+	time.Sleep(150 * time.Millisecond)
+
+	if got := wire(); slices.IndexFunc(got, hasPayload(late)) >= 0 {
+		t.Fatalf("a backend that speaks during the goodbye must not be written over it:\n%+v", got)
+	}
+	if got := wire(); slices.IndexFunc(got, isClear) >= 0 {
+		t.Fatalf("a barge-in during the goodbye must not clear it away:\n%+v", wire())
+	}
+
+	echoMarkFromCarrier(t, h, realtimeFarewellMarkPrefix+h.streamSID)
+	if err := h.waitDone(idleTimeout + 5*time.Second); err == nil {
+		t.Fatal("a silent backend must end the call with a non-nil error")
+	}
+}
+
 // --- behaviour 6: no farewell option, today's behaviour ---------------------
 
 // TestFarewell_AbsentWhenTheOptionIsNotSupplied pins the off case: the idle
@@ -458,5 +504,41 @@ func TestHealthyCall_WritesNeitherCoverNorFarewell(t *testing.T) {
 	}
 	if n := len(farewellFrames(got)); n != 0 {
 		t.Fatalf("a healthy call must never hear the farewell, got %d farewell frames:\n%+v", n, got)
+	}
+}
+
+// TestFarewell_MarkIsNotReportedOnTheConsumersEchoChannel pins the boundary
+// between the engine's own use of the mark protocol and the consumer's.
+//
+// playFarewell writes a mark so the ENGINE can tell the clip reached the caller
+// before the socket closes. That mark is not one the consumer requested, so its
+// echo — and equally its TimedOut record, were the carrier not to honor it — is
+// not a record the consumer can match to anything it wrote. markTracker's own
+// doc calls an unmatchable record the thing a consumer with two marks in flight
+// must never get; a call supplying both options must not be handed one by the
+// engine itself.
+func TestFarewell_MarkIsNotReportedOnTheConsumersEchoChannel(t *testing.T) {
+	const idleTimeout = 200 * time.Millisecond
+
+	echoes := make(chan MarkEcho, 8)
+	be := newFakeRealtimeBackend(t)
+	h := silenceHarness(t, be.url(),
+		WithIdleTimeout(idleTimeout),
+		WithMarkEchoChan(echoes),
+		WithFarewellAudio(farewellTestClip()))
+	wire := h.captureCarrierWire(t)
+
+	name := realtimeFarewellMarkPrefix + h.streamSID
+	waitForWireRecord(t, wire, isFarewellMark(h))
+	echoMarkFromCarrier(t, h, name)
+
+	if err := h.waitDone(idleTimeout + 5*time.Second); err == nil {
+		t.Fatal("a silent backend must end the call with a non-nil error")
+	}
+
+	for len(echoes) > 0 {
+		if rec := <-echoes; rec.Name == name {
+			t.Fatalf("the engine's own farewell mark must not be delivered on the consumer's echo channel: %+v", rec)
+		}
 	}
 }
