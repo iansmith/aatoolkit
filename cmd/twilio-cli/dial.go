@@ -23,8 +23,9 @@ import (
 // (capture_file.go). It is also the seam tests override to simulate capture
 // completion (EOF) deterministically, since real mic capture has no natural EOF
 // to trigger from a test. Receives the send func dial built for this call, and
-// an onMicWarm callback that fires when the first real frame is emitted or the
-// discard cap is hit, with a bool indicating whether the cap was hit.
+// an onMicWarm callback that fires once, at the first frame. Its bool reports
+// whether a leading-silence discard cap was hit; neither source has such a cap
+// any more (see streamMicFrames), so both always pass false.
 //
 // This is the ONE frame-source seam — a second one (a dialOption, say) would
 // leave two mechanisms selecting the same thing.
@@ -34,14 +35,14 @@ var streamMic micFrameSource = streamMicFrames
 // ctx is done or the source runs out, hand each to send, and signal onMicWarm
 // once at the first one.
 //
-// It used to carry the conn, the stream SID, the sequence counter, the
-// outbound recorder and the mic gate as well -- five values no source read for
-// itself. Each existed only so the source could build the same one-line
-// `send` that the other source was building from the same five, which is why
-// adding the gate meant editing eleven declarations that have nothing to do
-// with capturing audio. dial builds send once and passes it, so a source now
-// takes exactly what a source needs: somewhere to put a frame, and a way to
-// say the first one arrived. Everything about how a frame becomes a Twilio
+// It used to carry the conn, the stream SID, the sequence counter and the
+// outbound recorder as well -- four values no source read for itself. Each
+// existed only so the source could build the same one-line `send` that the
+// other source was building from the same four, and the gate would have been a
+// fifth: adding it under the old shape meant editing eleven declarations that
+// have nothing to do with capturing audio. dial builds send once and passes
+// it, so a source now takes exactly what a source needs: somewhere to put a
+// frame, and a way to say the first one arrived. Everything about how a frame becomes a Twilio
 // media event, gets gated, and gets recorded belongs to mediaFrameSender,
 // which is the file that already claims it.
 type micFrameSource func(ctx context.Context, send func([]byte) error, onMicWarm func(bool)) error
@@ -89,7 +90,8 @@ type callAudio struct {
 // over, and a gate shut without a feed is a mic held closed over silence. The
 // earcon is the case that proves it -- it is real bytes into the same ffplay
 // sink, so it is accounted to the filler and (correctly) holds the gate shut
-// for its own 240 ms.
+// for its own 240 ms -- plus the hangover shutUntil adds, so roughly half a
+// second at the top of every call.
 //
 // playoutFiller.fill is the deliberate exception: it feeds the player too, but
 // what it feeds is silence covering a gap the server left, and silence is

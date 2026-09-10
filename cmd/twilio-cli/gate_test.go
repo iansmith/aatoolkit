@@ -65,14 +65,28 @@ func TestMicGate_ShutSubstitutesSilenceKeepingFrameCount(t *testing.T) {
 	gate := newMicGate()
 	gate.shutUntil(time.Now().Add(time.Second))
 
+	// Counted at the socket, not at the gate: `append` runs once per iteration
+	// whatever gated returns, so counting the slice would pass against a gate
+	// that returned nil. What the cadence claim is about is frames reaching
+	// write, which is what mediaFrameSender puts them through.
 	const frames = 5
 	var sent [][]byte
+	written := 0
+	seqNum := 1
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_cadence", &seqNum), nil, gate, func([]byte) error {
+		written++
+		return nil
+	})
 	for range frames {
-		sent = append(sent, gate.gated(loudFrame()))
+		payload := loudFrame()
+		sent = append(sent, gate.gated(payload))
+		if err := send(payload); err != nil {
+			t.Fatalf("send: %v", err)
+		}
 	}
 
-	if len(sent) != frames {
-		t.Fatalf("frames out of a shut gate: got %d, want %d -- the gate must change what is sent, never whether", len(sent), frames)
+	if written != frames {
+		t.Fatalf("frames written through a shut gate: got %d, want %d -- the gate must change what is sent, never whether", written, frames)
 	}
 	for i, p := range sent {
 		if len(p) != muLawFrame20ms {
@@ -164,6 +178,66 @@ func TestMediaFrameSender_GatedSendErrorPropagates(t *testing.T) {
 	if err := send(loudFrame()); err != want {
 		t.Errorf("write error on a gated frame: got %v, want %v", err, want)
 	}
+}
+
+// TestCallAudio_FedPublishesThePlayoutHorizon pins the join between the filler
+// and the gate in microseconds, from a supplied clock.
+//
+// Everything else about this decision is only observable through the
+// dial-level tests below, which take seconds of wall clock to say it and say
+// it about the whole call. The specific claims here are the ones dial.go's
+// callAudio.fed argues for at length and nothing asserts: the horizon is the
+// end of the queued playout plus exactly one hangover; a burst that arrives
+// faster than real time queues behind what is already there rather than
+// restarting from now; and an idle stretch is not charged against the gate,
+// because filler.fed clamps forward before the horizon is read.
+func TestCallAudio_FedPublishesThePlayoutHorizon(t *testing.T) {
+	// One second of playout, so the arithmetic below is readable.
+	const playout = time.Second
+	audio := &callAudio{gate: newMicGate()}
+
+	start := time.Now()
+	audio.filler = newPlayoutFiller(start, telephony.MuLawSilence)
+	audio.fed(loudMuLaw(playout), start)
+
+	if got, want := gateDeadline(audio.gate), start.Add(playout+micGateHangover); !got.Equal(want) {
+		t.Errorf("horizon after one feed: got %s, want %s (playout + one hangover)",
+			got.Sub(start).Round(time.Millisecond), want.Sub(start).Round(time.Millisecond))
+	}
+
+	// A second burst arriving mid-playout queues behind the first: the horizon
+	// moves by the new audio's length, not to now plus its length. A gate that
+	// took `now` as its base would reopen while the first burst was still
+	// playing -- the exact double-count filler.fed's clamp exists to prevent.
+	mid := start.Add(playout / 2)
+	audio.fed(loudMuLaw(playout), mid)
+	if got, want := gateDeadline(audio.gate), start.Add(2*playout+micGateHangover); !got.Equal(want) {
+		t.Errorf("horizon after a burst mid-playout: got %s, want %s (both bursts, then one hangover)",
+			got.Sub(start).Round(time.Millisecond), want.Sub(start).Round(time.Millisecond))
+	}
+
+	// A clear abandons all of it, whatever was standing.
+	audio.flush(mid)
+	if audio.gate.shut() {
+		t.Error("the gate was still shut after a clear: a flush must reopen the mic at once")
+	}
+
+	// And an idle stretch is not gated from an instant already past: after
+	// silence, the horizon is measured from the feed, not from the stale
+	// fedThrough the filler was carrying.
+	late := start.Add(10 * playout)
+	audio.fed(loudMuLaw(playout), late)
+	if got, want := gateDeadline(audio.gate), late.Add(playout+micGateHangover); !got.Equal(want) {
+		t.Errorf("horizon after an idle stretch: got %s, want %s (measured from the feed, not from fedThrough)",
+			got.Sub(late).Round(time.Millisecond), want.Sub(late).Round(time.Millisecond))
+	}
+}
+
+// gateDeadline reads back the instant a gate is shut until, so a test can
+// assert on the published horizon rather than on whether time.Now happens to
+// have passed it.
+func gateDeadline(g *micGate) time.Time {
+	return time.Unix(0, g.shutUntilNanos.Load())
 }
 
 // --- the gate through a real dial() ---
@@ -405,15 +479,30 @@ func TestDial_ClearReopensTheMicAtOnce(t *testing.T) {
 	frames := <-collected
 
 	// Non-vacuity: the gate really was shut before the clear arrived.
-	before := framesIn(frames, spoke.Add(100*time.Millisecond), cleared.Add(-40*time.Millisecond))
+	//
+	// On the shape, not on a margin. How soon after the server's write the
+	// read loop plays the audio and publishes the deadline is scheduling --
+	// measured at ~20 ms, but a window that demanded it inside 100 ms would
+	// fail on a loaded machine and blame the gate for the scheduler. What is a
+	// contract is that once the gate shuts it is still shut when the clear
+	// lands, which is the only thing the assertion after it needs.
+	before := framesIn(frames, spoke, cleared.Add(-2*frameInterval))
 	if len(before) == 0 {
 		t.Fatal("no frames between the server's audio and the clear")
 	}
+	shut := false
 	for _, f := range before {
-		if !isSilenceFrame(f.payload) {
-			t.Fatalf("the mic was already live %s before the clear -- this test proves nothing about clear",
+		switch {
+		case isSilenceFrame(f.payload):
+			shut = true
+		case shut:
+			t.Fatalf("the mic went live again %s before the clear, after the gate had shut -- this test proves nothing about clear",
 				cleared.Sub(f.at).Round(time.Millisecond))
 		}
+	}
+	if !shut {
+		t.Fatalf("the gate never shut in the %s between the server's audio and the clear -- this test proves nothing about clear",
+			cleared.Sub(spoke).Round(time.Millisecond))
 	}
 
 	// Two seconds of audio were queued; the clear discards them, so the mic is
@@ -502,12 +591,25 @@ func TestDial_ConnectedLineNamesTheDuplexMode(t *testing.T) {
 // shut for the whole clip. The gate changes the content of outbound media and
 // nothing else -- not the frame cadence the server paces on, and not the
 // control plane.
+//
+// The media count is not incidental to that claim, it is what makes it one.
+// "The echo arrived" is equally true of a build with no gate at all, so this
+// test also carries the media frames that went out alongside the mark, and
+// they have to be silence -- otherwise what it proves is only that mark echo
+// works.
+//
+// "Once it shuts", not "from frame one", for the same reason
+// TestDial_RecordSentTeesTheGatedFrames asserts on the shape: the server's
+// audio is played by the read loop on its own goroutine, so the opening frames
+// go out before there is anything for a microphone to have heard. How many
+// that takes is scheduling. What is a contract is that the gate does not let
+// captured audio back through afterwards.
 func TestDial_MarkEchoArrivesWithTheMicGated(t *testing.T) {
 	withLoudFrameSource(t, 3*time.Second)
 
 	const streamSID = "SS_gatemark"
 	const markName = "gated-mark"
-	echoed := make(chan string, 1)
+	echoed := make(chan markEcho, 1)
 	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 		serverSpeaks(t, conn, streamSID, 300*time.Millisecond)
 		markMsg, err := twilio.EncodeMark(streamSID, markName)
@@ -524,17 +626,35 @@ func TestDial_MarkEchoArrivesWithTheMicGated(t *testing.T) {
 
 	runGatedDial(t, srv)
 
-	name, ok := <-echoed
-	if !ok || name != markName {
-		t.Errorf("mark echo: got %q (ok=%v), want %q -- gating outbound media must not stop the control plane", name, ok, markName)
+	got, ok := <-echoed
+	if !ok || got.name != markName {
+		t.Errorf("mark echo: got %q (ok=%v), want %q -- gating outbound media must not stop the control plane", got.name, ok, markName)
+	}
+	if got.silent == 0 {
+		t.Errorf("no silent media frame reached the server before the echo: the gate was not shut, so this test proves nothing about gating")
+	}
+	if got.loudAfterShut != 0 {
+		t.Errorf("%d media frames went out as captured audio after the gate had shut: it must stay shut for the whole clip", got.loudAfterShut)
 	}
 }
 
+// markEcho is what waitForMarkEcho saw: the echoed mark name, how many gated
+// media frames preceded it, and how many carried captured audio after the
+// first gated one -- the count that has to be zero.
+type markEcho struct {
+	name          string
+	silent        int
+	loudAfterShut int
+}
+
 // waitForMarkEcho reads client frames until a mark echo arrives or the
-// connection is done, publishing the echoed name on echoed exactly once.
-func waitForMarkEcho(t *testing.T, buf *bufio.ReadWriter, echoed chan<- string) {
+// connection is done, publishing the result on echoed exactly once. Media
+// frames seen on the way are tallied rather than dropped -- the caller's claim
+// is about them as much as about the echo.
+func waitForMarkEcho(t *testing.T, buf *bufio.ReadWriter, echoed chan<- markEcho) {
 	t.Helper()
 	defer close(echoed)
+	var seen markEcho
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		msg, err := readWSFrame(buf)
@@ -545,8 +665,17 @@ func waitForMarkEcho(t *testing.T, buf *bufio.ReadWriter, echoed chan<- string) 
 		if err != nil {
 			continue
 		}
-		if f.Event == twilio.EventMark {
-			echoed <- f.MarkName
+		switch {
+		case f.Event == twilio.EventMedia && isSilenceFrame(f.Payload):
+			seen.silent++
+		case f.Event == twilio.EventMedia && seen.silent > 0:
+			seen.loudAfterShut++
+		case f.Event == twilio.EventMedia:
+			// Before the gate shut: the read loop has not played the server's
+			// audio yet, so there is nothing to echo. Not a finding.
+		case f.Event == twilio.EventMark:
+			seen.name = f.MarkName
+			echoed <- seen
 			return
 		}
 	}

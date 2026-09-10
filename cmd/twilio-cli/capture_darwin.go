@@ -77,8 +77,8 @@ func normalizeMicSpec(v string) string {
 }
 
 // streamMicFrames captures mic input via ffmpeg, slices it into 8 kHz μ-law
-// 20 ms frames (160 bytes each), and sends EVERY frame to conn as a Twilio media
-// event from the first one — including leading silence, exactly as the file
+// 20 ms frames (160 bytes each), and hands EVERY frame to send from the first
+// one — including leading silence, exactly as the file
 // source does and exactly as a real carrier does (Twilio streams continuous
 // frames for the whole call, silence included).
 //

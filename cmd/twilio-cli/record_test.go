@@ -264,11 +264,13 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 	}
 
 	// The other half: no flag, no recording. Same call, same frames.
-	off := filepath.Join(dir, "off.ulaw")
+	//
+	// The evidence has to be the directory. Stat'ing a path this test invented
+	// and never passed to anything would report "not there" against any build
+	// whatsoever, including one that records everything -- it names no file the
+	// code could have written. What a recording run leaves behind is files, so
+	// what an off run must leave behind is none of them.
 	run(t)
-	if _, err := os.Stat(off); !os.IsNotExist(err) {
-		t.Errorf("no -record-sent, but %s exists (stat err %v): recording must be off unless the flag names a file", off, err)
-	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read dir: %v", err)

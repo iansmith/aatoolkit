@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // readHandshake consumes twilio-cli's two opening frames -- connected, then
@@ -48,24 +49,38 @@ func readHandshake(t *testing.T, buf *bufio.ReadWriter) []byte {
 // far end: hijack the connection, complete the upgrade, consume the opening
 // handshake, and hand the raw conn and buffer to serve.
 //
-// It owns the server's lifetime as well as the connection's, both to test end.
-// That ordering is load-bearing, not tidiness: httptest.Server.Close does not
-// wait for a hijacked connection's goroutine, so a caller closing the server
-// the moment dial returns can pull the socket out from under a handler that
-// has not been scheduled yet -- which surfaces as an intermittent "read
-// connected frame: use of closed network connection", an error that names the
-// handshake and means nothing of the kind.
+// It owns the server's lifetime as well as the connection's, and joins the
+// handler goroutine before releasing either. That join is load-bearing, not
+// tidiness. httptest.Server.Close does not wait for a hijacked connection's
+// goroutine, so without it two things go wrong on a test whose dial returns
+// before the handler has been scheduled: closing the server pulls the socket
+// out from under the handler, which surfaces as an intermittent "read
+// connected frame: use of closed network connection" -- an error that names
+// the handshake and means nothing of the kind -- and the readHandshake and
+// trackConn calls below, which take t, can reach a t whose test has already
+// finished, which panics the whole binary with "Log in goroutine after Test
+// has completed". Cleanups run LIFO, so trackConn's conn.Close (registered
+// later, from the handler) runs first and unblocks a handler parked in a read;
+// the wait then returns and the server closes.
 //
 // It exists because that prologue had been copied into a dozen servers across
 // four files, several of which had dropped trackConn along the way and leaked
-// the client's dial goroutine on any test that timed out. Every copy that
-// matches this shape now calls it. Three deliberately do not and are the
-// reason the helper is not the only way to build one: stubWSServer checks the
-// Upgrade header before hijacking, TestCLI_ServerClose closes without reading
-// the handshake at all, and one test needs only the conn.
+// the client's dial goroutine on any test that timed out.
+//
+// Five servers still build their own, each because it has to do something
+// before or instead of this prologue: stubWSServer checks the Upgrade header
+// first and needs the start frame back, TestDial_SendsConnectedBeforeStart and
+// TestDial_PeerClosesBetweenHandshakeFrames read the handshake themselves
+// because asserting on it is the point, TestCLI_ServerClose closes without
+// reading it at all, and TestDial_ReturnsOnServerClose needs only the conn.
+// Three others -- TestDial_NoStopFrameOnServerClose, TestCLI_NoEchoMarks and
+// mediaConsumingServer -- do match this shape and have not been migrated; that
+// is worth doing, and is not this change.
 func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWriter)) *httptest.Server {
 	t.Helper()
+	served := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(served)
 		conn, buf, err := w.(http.Hijacker).Hijack()
 		if err != nil {
 			t.Errorf("hijack: %v", err)
@@ -77,7 +92,17 @@ func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWri
 		readHandshake(t, buf) // connected + start
 		serve(conn, buf)
 	}))
-	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		// Bounded, and it closes either way. A test that failed before it ever
+		// dialled has no handler to wait for, and a cleanup is the wrong place
+		// to turn that into a second failure on top of the real one.
+		select {
+		case <-served:
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for the hijacked handler goroutine to finish")
+		}
+		srv.Close()
+	})
 	return srv
 }
 

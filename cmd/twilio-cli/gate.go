@@ -28,9 +28,10 @@ import (
 // has been handed to the player and not yet heard".
 //
 // So the gate is a deadline, not a switch. Whoever hands the player audio a
-// microphone could hear publishes the wall-clock instant through which the
-// room will still be ringing, and the outbound frame path compares it against
-// now. The two live on different goroutines -- the filler is owned by
+// microphone could hear publishes the wall-clock instant the player runs dry;
+// shutUntil adds the allowance for the room still ringing, and the outbound
+// frame path compares the result against now. The two live on different
+// goroutines -- the filler is owned by
 // dialReadLoop, the frame source runs off dial -- so the crossing is one
 // atomic, which leaves playoutFiller itself single-owner and unsynchronised.
 //
@@ -92,6 +93,11 @@ func (g *micGate) shutUntil(horizon time.Time) {
 // reply, so the audio the deadline was derived from will never be heard, and
 // waiting it out would silence the caller through the one moment -- their
 // barge-in -- the harness most needs to record.
+//
+// It reopens over a residual echo window, deliberately. What playoutFiller.flush
+// cannot drop is the audio already inside ffplay's stdin pipe, so for as long as
+// that takes to drain the speaker is still playing the abandoned reply with the
+// mic live. Recording the barge-in is worth that; recording nothing is not.
 func (g *micGate) open() {
 	if g == nil {
 		return

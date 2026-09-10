@@ -13,7 +13,13 @@ import (
 // This file is the file-backed frame source: an alternative to capture_darwin.go's
 // mic capture, selected by the -audio flag. It carries no build tag, so unlike mic
 // capture it is available on every platform — which is what lets the frame path
-// (VAD -> STT -> Turn) run headless, cross-platform, and deterministically.
+// (VAD -> STT -> Turn) run headless and cross-platform.
+//
+// The frames this source produces are fixed; what goes on the wire is not. Like
+// the mic, it sends through dial's mediaFrameSender, so the mic gate substitutes
+// silence for its frames while the player still has audio queued (gate.go) --
+// which every call does at the top, for the capture-live earcon. `-full-duplex`
+// is what makes a replay reproducible byte for byte.
 
 // frameInterval is the wall-clock spacing between consecutive frames: exactly one
 // frame's playout duration, so streaming any faster would hand the server a whole
