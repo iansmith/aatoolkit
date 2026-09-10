@@ -162,7 +162,9 @@ func TestCallOpen_NoCoverWhenTheFillerOptionIsAbsent(t *testing.T) {
 	h := silenceHarness(t, be.url(), WithIdleTimeout(silenceTestIdleTimeout))
 	wire := h.captureCarrierWire(t)
 
-	time.Sleep(fillerTestDelay * 3)
+	// The call-open trigger needs no event, so the countdown would already have
+	// started: past Delay is past the only instant anything could be written.
+	time.Sleep(fillerTestDelay + 100*time.Millisecond)
 
 	if got := wire(); len(got) != 0 {
 		t.Fatalf("a call with no filler option must write nothing to the carrier while the backend is silent, got %+v", got)
@@ -459,7 +461,7 @@ func TestHealthyCall_WritesNeitherCoverNorFarewell(t *testing.T) {
 	wire := h.captureCarrierWire(t)
 
 	// Several multiples of both bounds, with the backend talking the whole time.
-	time.Sleep(idleTimeout * 4)
+	time.Sleep(idleTimeout * 2)
 
 	assertStillRunning(t, h, "a backend answering steadily must not trip the idle guard")
 

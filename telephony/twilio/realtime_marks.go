@@ -106,14 +106,12 @@ type markTracker struct {
 	// request half). The engine NEVER closes it.
 	echoCh chan<- MarkEcho
 
-	// consumerMarks records whether the CONSUMER asked for marks, as opposed
-	// to the tracker existing only for the engine's own farewell wait
-	// (AATK-128). It gates one thing: the "matches no outstanding mark" line
-	// in echo. A call that named neither mark option ignored an inbound mark
-	// frame without even a log line before that ticket, and it must go on
-	// doing so — the tracker appearing under it is an implementation detail
-	// of the farewell, not a change to what a consumer asked for.
-	consumerMarks bool
+	// logUnmatchedEchoes gates echo's "matches no outstanding mark" line. It
+	// is false when the tracker exists only for the engine's own farewell
+	// wait: a call that named neither mark option ignored an inbound mark
+	// frame without even a log line, and the tracker appearing underneath a
+	// farewell must not change that.
+	logUnmatchedEchoes bool
 
 	mu sync.Mutex
 	// outstanding maps each written-but-unechoed mark name to the arming that
@@ -155,9 +153,9 @@ type outstandingMark struct {
 
 func newMarkTracker(echoCh chan<- MarkEcho, consumerMarks bool) *markTracker {
 	return &markTracker{
-		echoCh:        echoCh,
-		consumerMarks: consumerMarks,
-		outstanding:   make(map[string]outstandingMark),
+		echoCh:             echoCh,
+		logUnmatchedEchoes: consumerMarks,
+		outstanding:        make(map[string]outstandingMark),
 	}
 }
 
@@ -194,20 +192,24 @@ func (t *markTracker) arm(name string, bound time.Duration) {
 
 // await registers name as the mark the engine itself is waiting on and returns
 // the channel closed when that mark resolves — echoed by the carrier, expired
-// at its own bound, or cut short by the call ending. Every one of those three
-// is a "stop waiting", which is why one channel serves all of them: the caller
-// is deciding when it may close the socket, not judging the carrier.
+// at its own bound, or cut short by the call ending. All three are "stop
+// waiting": the caller is deciding when it may close the socket, not judging
+// the carrier.
 //
 // It is therefore already BOUNDED without a timer of its own: arm gives every
 // mark a bound derived from the playout queued ahead of it, and expire resolves
 // this wait when that bound fires. A nil tracker, or one whose call has already
-// ended, returns a channel that is already closed rather than one that never
-// fires — waiting on a tracker that cannot answer is the one outcome a caller
-// about to close a socket must not get.
+// ended, returns an already-closed channel rather than one that never fires —
+// waiting on a tracker that cannot answer is the one outcome a caller about to
+// close a socket must not get.
 //
 // Call it BEFORE writing the mark: the echo can arrive as soon as the write
 // returns, and a waiter registered afterwards would miss it and wait out the
 // whole bound.
+//
+// One waiter at a time, and a second releases the first rather than orphaning
+// it — a channel nobody closes parks its caller until its context dies, which
+// on this path is the socket staying open past the call.
 func (t *markTracker) await(name string) <-chan struct{} {
 	ch := make(chan struct{})
 	if t == nil {
@@ -220,6 +222,7 @@ func (t *markTracker) await(name string) <-chan struct{} {
 		close(ch)
 		return ch
 	}
+	t.resolveAwaitLocked("")
 	t.awaitName, t.awaitCh = name, ch
 	return ch
 }
@@ -234,7 +237,7 @@ func (t *markTracker) resolveAwaitLocked(name string) {
 		return
 	}
 	close(t.awaitCh)
-	t.awaitCh = nil
+	t.awaitName, t.awaitCh = "", nil
 }
 
 // echo resolves an inbound mark echo from the carrier.
@@ -254,7 +257,7 @@ func (t *markTracker) echo(name string) {
 	}
 	m, ok := t.outstanding[name]
 	if !ok {
-		if t.consumerMarks {
+		if t.logUnmatchedEchoes {
 			log.Printf("twilio: realtime: mark echo %q matches no outstanding mark; not delivered as a match", name)
 		}
 		return

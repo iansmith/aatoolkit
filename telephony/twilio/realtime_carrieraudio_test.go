@@ -45,8 +45,9 @@ import (
 // socket going away, and a capture that ended silently at the close could only
 // show that frames arrived, never that they arrived first. It is the one record
 // kind that is not a message — the carrier's read failing is the observation —
-// so it carries no payload, no clear and no mark name, and every existing
-// predicate over this slice therefore ignores it.
+// so it carries no payload, no clear and no mark name. A predicate testing
+// clear, markName or an exact payload therefore ignores it; a bare len(wire())
+// does NOT, so a count taken after the call has ended includes it.
 type carrierWireRecord struct {
 	payload  string
 	clear    bool

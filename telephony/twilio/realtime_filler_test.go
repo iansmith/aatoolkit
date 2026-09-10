@@ -72,7 +72,7 @@ func frameB64OfFill(fill byte) string {
 // never one.
 func isFrameOfFills(rec carrierWireRecord, fills []byte) bool {
 	for _, f := range fills {
-		if rec.payload != "" && rec.payload == frameB64OfFill(f) {
+		if rec.payload == frameB64OfFill(f) {
 			return true
 		}
 	}
@@ -131,8 +131,16 @@ func fillerHarness(t *testing.T, url string, cfg FillerConfig) *realtimeHarness 
 	})
 }
 
-// armFiller emits the event the ticket names as the arm trigger: the backend
+// armFiller emits the event AATK-108 names as the arm trigger: the backend
 // reporting that the caller stopped speaking.
+//
+// It may be a NO-OP, and that is not a defect in the tests that use it. Since
+// AATK-128 a configured filler is also armed at call open, so by the time a
+// test calls this the countdown is usually already pending and arm leaves it
+// alone — deliberately, that being the re-arm rule. The episode a test then
+// observes is the call-open one. Every test below is insensitive to which
+// trigger armed it, EXCEPT those whose subject is the arm-to-start timing
+// itself; those call afterTheBackendHasSpoken first, and say so.
 func armFiller(t *testing.T, be *fakeRealtimeBackend) {
 	t.Helper()
 	be.emitOnce(t, map[string]string{"type": "input_audio_buffer.speech_stopped"})
@@ -957,6 +965,9 @@ func TestFiller_PlayGoroutineEndsWithTheEpisode(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
+	// The baseline must be taken with NO play goroutine running, so the
+	// call-open episode has to be disarmed before it rather than racing it.
+	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)
