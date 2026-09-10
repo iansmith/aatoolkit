@@ -39,8 +39,8 @@ var streamMic micFrameSource = streamMicFrames
 // outbound recorder as well -- four values no source read for itself. Each
 // existed only so the source could build the same one-line `send` that the
 // other source was building from the same four, and the gate would have been a
-// fifth: adding it under the old shape meant editing eleven declarations that
-// have nothing to do with capturing audio. dial builds send once and passes
+// fifth: adding it under the old shape meant editing thirteen declarations
+// that have nothing to do with capturing audio. dial builds send once and passes
 // it, so a source now takes exactly what a source needs: somewhere to put a
 // frame, and a way to say the first one arrived. Everything about how a frame
 // becomes a Twilio media event, gets gated, and gets recorded belongs to

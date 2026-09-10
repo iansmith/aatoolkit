@@ -81,15 +81,19 @@ func readHandshake(t *testing.T, buf *bufio.ReadWriter) []byte {
 // TestDial_PeerClosesBetweenHandshakeFrames read the handshake themselves
 // because asserting on it is the point, TestCLI_ServerClose closes without
 // reading it at all, and TestDial_ReturnsOnServerClose needs only the conn.
-// Three others -- TestDial_NoStopFrameOnServerClose, TestCLI_NoEchoMarks and
-// mediaConsumingServer -- do match this shape and have not been migrated; that
-// is worth doing, and is not this change.
+// Two others -- TestDial_NoStopFrameOnServerClose and TestCLI_NoEchoMarks --
+// do match this shape and have not been migrated; that is worth doing, and is
+// not this change.
 func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWriter)) *httptest.Server {
 	t.Helper()
 	served := make(chan struct{})
 	var mu sync.Mutex
 	var hijacked net.Conn
+	var started bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		started = true
+		mu.Unlock()
 		defer close(served)
 		conn, buf, err := w.(http.Hijacker).Hijack()
 		if err != nil {
@@ -107,7 +111,12 @@ func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWri
 	t.Cleanup(func() {
 		// Bounded, and it closes either way. A test that failed before it ever
 		// dialled has no handler to wait for, and a cleanup is the wrong place
-		// to turn that into a second failure on top of the real one.
+		// to turn that into a second failure on top of the real one -- so the
+		// timeout is only a failure when a handler actually started. The wait
+		// itself still runs in that case, because "no handler yet" and "no
+		// handler ever" are the same observation from here, and the whole
+		// point of this join is to give one that is merely behind on
+		// scheduling its chance to arrive.
 		select {
 		case <-served:
 		case <-time.After(5 * time.Second):
@@ -123,7 +132,12 @@ func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWri
 			select {
 			case <-served:
 			case <-time.After(time.Second):
-				t.Error("timed out waiting for the hijacked handler goroutine to finish")
+				mu.Lock()
+				ran := started
+				mu.Unlock()
+				if ran {
+					t.Error("timed out waiting for the hijacked handler goroutine to finish")
+				}
 			}
 		}
 		srv.Close()

@@ -46,10 +46,11 @@ the mic gate holds the outbound frames silent for its length plus the hangover �
 a second — and a word spoken over the beep is replaced by silence rather than clipped. Under
 `-full-duplex` there is no gate and the beep is only a beep.
 
-It does **not** say the server is ready for you. A server that opens with a recorded
-introduction, or takes several seconds to generate its first response, is not listening
-when this tone sounds — against a server whose introduction runs a minute or more, the cue
-lands that far ahead of the caller's first real turn. Whatever signals "now it is your
+It does **not** say the server is ready for you. A server that takes several seconds to
+generate its first response is not listening when this tone sounds, so the cue can land
+well ahead of the caller's first real turn. (A server that has already begun speaking by
+then gets no tone at all — it is suppressed, see `playEarconUnlessServerSpoke`.) Whatever
+signals "now it is your
 turn" has to come from the server, over the call, because only the server knows. Treat
 this tone as a capture check and wait for the server's own greeting.
 
@@ -198,9 +199,10 @@ suppressed and the server's own audio gates the mic instead.) Pass `-full-duplex
 point is to put a fixed byte stream in front of the server — a scripted run, a regression
 fixture, or the record-then-replay chain above.
 
-The earcon **does** still sound, once, as the first frame goes out. It is the same mic-warm
-signal, and there is nobody to cue on a file replay, so mute your output if you are running
-unattended.
+The earcon still sounds on a file replay — once, a beat after the first frame goes out,
+unless the server has already started speaking, in which case it is suppressed. It is the
+same mic-warm signal, and there is nobody to cue on a file replay, so mute your output if
+you are running unattended.
 
 A relative `-audio` path resolves against your current directory, not the repository root.
 

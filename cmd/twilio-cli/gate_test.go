@@ -64,28 +64,32 @@ func TestMicGate_ShutSubstitutesSilenceKeepingFrameCount(t *testing.T) {
 	gate := newMicGate()
 	gate.shutUntil(time.Now().Add(time.Second))
 
-	// Counted at the socket, not at the gate: `append` runs once per iteration
-	// whatever gated returns, so counting the slice would pass against a gate
-	// that returned nil. What the cadence claim is about is frames reaching
-	// write, which is what mediaFrameSender puts them through.
+	// Both halves are measured at the socket, not at the gate: what the claim
+	// is about is frames reaching write, which is what mediaFrameSender puts
+	// them through. Asking the gate directly for the content -- calling
+	// gate.gated and asserting on its return -- would pass against a sender
+	// that never consulted the gate at all, which is precisely the wiring
+	// under test here.
 	const frames = 5
 	var sent [][]byte
-	written := 0
 	seqNum := 1
-	send := mediaFrameSender(newMediaFrameEncoder("MZ_cadence", &seqNum), nil, gate, func([]byte) error {
-		written++
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_cadence", &seqNum), nil, gate, func(msg []byte) error {
+		f, err := twilio.DecodeFrame(msg)
+		if err != nil {
+			t.Errorf("decode written frame: %v", err)
+			return nil
+		}
+		sent = append(sent, f.Payload)
 		return nil
 	})
 	for range frames {
-		payload := loudFrame()
-		sent = append(sent, gate.gated(payload))
-		if err := send(payload); err != nil {
+		if err := send(loudFrame()); err != nil {
 			t.Fatalf("send: %v", err)
 		}
 	}
 
-	if written != frames {
-		t.Fatalf("frames written through a shut gate: got %d, want %d -- the gate must change what is sent, never whether", written, frames)
+	if len(sent) != frames {
+		t.Fatalf("frames written through a shut gate: got %d, want %d -- the gate must change what is sent, never whether", len(sent), frames)
 	}
 	for i, p := range sent {
 		if len(p) != muLawFrame20ms {
