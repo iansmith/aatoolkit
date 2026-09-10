@@ -156,7 +156,9 @@ func streamFileFrames(path string) func(context.Context, *websocket.Conn, string
 		}
 		defer f.Close()
 
-		send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn))
+		// Gated outside mediaFrameSender, for the reason capture_darwin.go's
+		// copy of this line gives: -record-sent must tee what went on the wire.
+		send := gate.wrap(mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn)))
 		return streamFileFramesFrom(ctx, f, send, onMicWarm)
 	}
 }

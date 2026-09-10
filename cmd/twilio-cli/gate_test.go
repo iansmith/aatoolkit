@@ -160,6 +160,21 @@ func TestMicGate_NilGateIsFullDuplex(t *testing.T) {
 	}
 }
 
+// TestMicGate_NilGateTakesTheWholeProtocol: --full-duplex is a nil gate, and
+// the feed path publishes a deadline on every frame the player is handed --
+// including the earcon's. Every method has to tolerate nil, not just the two
+// the frame source calls, or the flag turns a demo call into a panic on the
+// first thing the server says.
+func TestMicGate_NilGateTakesTheWholeProtocol(t *testing.T) {
+	var gate *micGate
+
+	gate.shutUntil(time.Now().Add(time.Second))
+	gate.open()
+	if gate.shut(time.Now()) {
+		t.Error("a nil gate reported itself shut -- there is no gate to shut")
+	}
+}
+
 // TestMicGate_SendErrorPropagates: the wrapper is a substitution, not a
 // swallow. A write failure still ends the drain loop.
 func TestMicGate_SendErrorPropagates(t *testing.T) {
@@ -302,8 +317,17 @@ func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
 	spokeAt := make(chan time.Time, 1)
 	collected := make(chan []sentFrame, 1)
 	srv := silenceProbeServer(t, func(conn net.Conn) {
-		spokeAt <- serverSpeaks(t, conn, streamSID, time.Second)
-	}, collected, 2*time.Second)
+		// Speak from a goroutine, and not immediately. Every call opens with
+		// the capture-live earcon, which is real bytes into the same player
+		// and so gates the mic for its own 240 ms; waiting that out first
+		// leaves the deadline this test measures derived from the second of
+		// speech alone. The delay runs on its own goroutine so the frame
+		// reader starts now -- see silenceProbeServer.
+		go func() {
+			time.Sleep(600 * time.Millisecond)
+			spokeAt <- serverSpeaks(t, conn, streamSID, time.Second)
+		}()
+	}, collected, 2600*time.Millisecond)
 
 	runGatedDial(t, srv)
 
@@ -321,6 +345,22 @@ func TestDial_MicIsGatedWhileTheServerIsSpeaking(t *testing.T) {
 		if !isSilenceFrame(f.payload) {
 			t.Errorf("the mic was live %s into the server's speech: frame is not silence (%x)",
 				f.at.Sub(spoke).Round(time.Millisecond), head(f.payload))
+			break
+		}
+	}
+
+	// The hangover: the audio has finished playing, but the room has not
+	// finished ringing. A gate that reopened the moment the queue emptied
+	// would let the tail of the last word through, which is enough for the
+	// server's STT to produce a turn -- the whole defect, quieter.
+	decaying := framesIn(frames, spoke.Add(1050*time.Millisecond), spoke.Add(1180*time.Millisecond))
+	if len(decaying) == 0 {
+		t.Fatal("no frames during the hangover window")
+	}
+	for _, f := range decaying {
+		if !isSilenceFrame(f.payload) {
+			t.Errorf("the mic reopened %s after the audio was handed over, before the %s hangover had run",
+				f.at.Sub(spoke).Round(time.Millisecond), micGateHangover)
 			break
 		}
 	}

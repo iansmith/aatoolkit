@@ -62,6 +62,7 @@ This tone used to be a single 20 ms frame, which nobody could hear; it is now 24
 | `-no-echo-marks` | Suppress mark-echo, to exercise the server's `AwaitingMarkEcho` timeout. |
 | `-record <file>` | Record inbound server audio to a raw μ-law file, with per-arrival timing in `<file>.jsonl`. |
 | `-record-sent <file>` | Record the outbound caller audio (mic or `-audio`) to a raw μ-law file, replayable with `-audio`. |
+| `-full-duplex` | Send captured audio even while the server is speaking. Off by default — see [Acoustic bleed](#acoustic-bleed). |
 
 ### Pointing twilio-cli at a config
 
@@ -149,7 +150,11 @@ go run ./cmd/twilio-cli -audio /tmp/me.ulaw -server other +15551234567   # same 
 ```
 
 The bytes are teed after the frame goes out, so the file is what this process put on the
-socket, not what the microphone heard: a frame whose write failed is not in it. That is a
+socket, not what the microphone heard: a frame whose write failed is not in it, and a frame
+the mic gate silenced is in it as silence. That last point matters for replay — on a gated
+run the stretches where the server was speaking record as silence, which is exactly what a
+second server should receive, but it is not a recording of the room. To capture what the
+microphone actually heard, run with headphones and `-full-duplex`. That is a
 claim about sending, not about delivery — a write can succeed and the frame still be lost
 if the connection drops straight after. Chaining is safe: recording a replay reproduces
 the file it replayed, byte for byte, as long as the recording goes to a different file — a
@@ -227,32 +232,55 @@ captured reply — From=+12183767443 To=+15551234567
 Do **not** set `TWILIO_API_BASE_URL` in your fleet config. Pointing the fleet at a local
 capture server by default would silently stop real SMS replies from being sent.
 
-## Acoustic bleed mitigation
+## Acoustic bleed
 
-The earcon tone is played through the local speaker and can be heard in the background
-by the microphone, creating a small amount of acoustic "bleed" into the recording. This is
-not a software isolation issue (capture and playback are separate OS processes), but a
-physical acoustics effect.
+twilio-cli plays inbound audio through the default output device and captures the default
+input device at the same time. On a laptop with no headphones the microphone hears the
+speaker, so everything the server says goes back up the stream as caller speech: the server
+transcribes its own voice, barges in on itself, and answers what it just said. Measured on
+one demo call, **every** inbound turn was the server's own preceding sentence, with the
+operator's real words appended to the tail of the echo.
 
-To eliminate acoustic bleed, use one of these mitigation strategies:
+This is physical acoustics, not a software isolation problem — capture and playback are
+separate OS processes. A real call does not have it because the carrier cancels the echo,
+so it is specific to the fake-call harness, which is exactly where turn-taking regressions
+are supposed to be visible.
 
-- **Headphones:** Connect headphones to the speaker output. The microphone will not pick up
-  headphone audio.
-- **Separate output device:** Set `AATOOLKIT_STT_MIC` to point to an alternate audio input
-  (e.g. a USB headset microphone instead of the system mic), while the earcon plays through
-  built-in speakers.
+**The mic is gated by default.** While the player still has audio to render — the server's
+speech, and the earcon tone, which goes into the same sink — the frames twilio-cli sends
+upstream carry μ-law silence instead of what the microphone heard, with a 250 ms hangover
+past the end of playout for the room to decay. Frames keep going out at the same rate:
+only their content changes, never the cadence, because a server that paces its writes
+against inbound frames stalls if the client goes quiet. A Twilio `clear` — barge-in, where
+the server abandons the rest of a reply — reopens the mic at once rather than waiting out
+audio nobody will hear.
 
-  The value is an ffmpeg avfoundation device spec, `[video]:[audio]` — so the **leading colon
-  matters**: `AATOOLKIT_STT_MIC=":1"` or `AATOOLKIT_STT_MIC=":USB Audio Device"`. A value with
-  no colon is treated as the audio half and gets one prepended, so a bare `1` still works;
-  passing a full spec such as `0:1` is left alone. List the devices ffmpeg can see with:
+The connected log line says which mode produced a call, so a recording or transcript can be
+read afterwards for what it is.
 
-  ```bash
-  ffmpeg -f avfoundation -list_devices true -i ""
-  ```
+This is half-duplex gating, not echo cancellation. Real AEC needs the playback signal as a
+reference, adaptive filtering and double-talk detection; ffmpeg ships nothing usable for it,
+and the alternatives are a cgo dependency on a test client.
 
-For most testing scenarios, the small acoustic bleed is acceptable — speech will still
-transcribe clearly.
+### Turning the gate off
+
+`-full-duplex` sends the captured frames throughout. Two reasons to want it:
+
+- **Headphones.** The microphone cannot hear them, so there is nothing to gate.
+- **Testing barge-in.** With the gate shut, talking over the server is the one behaviour the
+  harness cannot exercise. Use headphones and `-full-duplex` together.
+
+A third option isolates the two devices instead: set `AATOOLKIT_STT_MIC` to an alternate
+audio input (a USB headset microphone, say) while playback stays on the built-in speakers.
+
+The value is an ffmpeg avfoundation device spec, `[video]:[audio]` — so the **leading colon
+matters**: `AATOOLKIT_STT_MIC=":1"` or `AATOOLKIT_STT_MIC=":USB Audio Device"`. A value with
+no colon is treated as the audio half and gets one prepended, so a bare `1` still works;
+passing a full spec such as `0:1` is left alone. List the devices ffmpeg can see with:
+
+```bash
+ffmpeg -f avfoundation -list_devices true -i ""
+```
 
 ## Troubleshooting
 

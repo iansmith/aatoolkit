@@ -104,7 +104,9 @@ func streamMicFrames(ctx context.Context, conn *websocket.Conn, streamSID string
 		return fmt.Errorf("streamMicFrames: start ffmpeg (installed? `brew install ffmpeg`): %w", err)
 	}
 
-	send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn))
+	// Gated outside mediaFrameSender, so -record-sent tees the silence that
+	// actually went on the wire rather than the echo the mic heard.
+	send := gate.wrap(mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn)))
 	// Drain on context.Background(), NOT ctx: on shutdown ctx is cancelled, which
 	// (via newFFmpegCmd's cmd.Cancel) sends ffmpeg a SIGINT so it flushes its buffer
 	// and closes stdout. drainFrames must read that flushed tail through to EOF rather

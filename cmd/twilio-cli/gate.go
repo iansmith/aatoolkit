@@ -1,26 +1,109 @@
 package main
 
 import (
+	"bytes"
 	"sync/atomic"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony"
 )
 
-// micGateHangover is how long past the end of the player's queued audio the
-// mic stays shut.
-const micGateHangover = 250 * time.Millisecond
-
-// micGate is the half-duplex mic gate. See gate.go's doc in the
-// implementation commit; this is the contract the phase-0 tests bind.
+// A laptop is not a telephone handset.
+//
+// twilio-cli plays inbound audio through the default output device and
+// captures the default input device at the same time. With no headphones the
+// microphone hears the speaker, and every sentence the server says goes back
+// up the stream as caller speech: the server transcribes its own voice, barges
+// in on itself, and answers what it just said. Measured on one demo call --
+// every inbound turn was the preceding outbound one, with the operator's real
+// words appended to the tail of the echo. A real call does not have this
+// because the carrier cancels it, so the failure is specific to the fake-call
+// harness, which is exactly where turn-taking regressions are meant to show.
+//
+// Real acoustic echo cancellation needs the playback signal as a reference,
+// adaptive filtering and double-talk detection; ffmpeg ships nothing usable
+// for it and the alternatives are a cgo dependency on a test client. Not worth
+// it. Half-duplex gating is the right shape here, and the state it needs
+// already exists: playoutFiller.outstanding answers precisely "how much audio
+// has been handed to the player and not yet heard".
+//
+// So the gate is a deadline, not a switch. Whoever feeds the player publishes
+// the wall-clock instant through which the room will still be ringing, and the
+// frame source compares it against now. The two live on different goroutines
+// -- the filler is owned by dialReadLoop, the frame source runs off dial -- so
+// the crossing is one atomic, which leaves playoutFiller itself single-owner
+// and unsynchronised.
+//
+// What it does NOT do is stop sending. The server's prologue paces its writes
+// against inbound frames, so a client that goes quiet stalls the introduction
+// and then trips the server's read timeout. The cadence is the contract; only
+// the content of a frame changes.
 type micGate struct {
+	// shutUntilNanos is the UnixNano instant the mic reopens at, or 0 when the
+	// gate is open. Written only by the read-loop goroutine (from wherever the
+	// player is fed), read only by the frame source's.
 	shutUntilNanos atomic.Int64
 }
 
+// micGateHangover is how long past the end of the player's queued audio the
+// mic stays shut, for the room to decay.
+//
+// Too short is the failure that matters: the tail of the last word gets
+// through, which is enough for the server's STT to produce a turn -- and one
+// spurious turn is the whole defect, at a quieter volume.
+const micGateHangover = 250 * time.Millisecond
+
 func newMicGate() *micGate { return &micGate{} }
 
-func (g *micGate) shutUntil(_ time.Time) {}
+// shutUntil holds the mic shut through t.
+//
+// Nil-tolerant, like every method here: --full-duplex is a nil gate, and the
+// feed path publishes on every frame the player is handed. A caller that had
+// to check first would be one `if` away from the panic on whichever branch it
+// forgot -- and the branch it would forget is the earcon's.
+func (g *micGate) shutUntil(t time.Time) {
+	if g == nil {
+		return
+	}
+	g.shutUntilNanos.Store(t.UnixNano())
+}
 
-func (g *micGate) open() {}
+// open reopens the mic now, whatever deadline was standing.
+//
+// This is what a Twilio clear means here: the server abandoned the rest of the
+// reply, so the audio the deadline was derived from will never be heard, and
+// waiting it out would silence the caller through the one moment -- their
+// barge-in -- the harness most needs to record.
+func (g *micGate) open() {
+	if g == nil {
+		return
+	}
+	g.shutUntilNanos.Store(0)
+}
 
-func (g *micGate) shut(_ time.Time) bool { return false }
+// shut reports whether the mic is gated at now. A nil gate is never shut.
+func (g *micGate) shut(now time.Time) bool {
+	return g != nil && now.UnixNano() < g.shutUntilNanos.Load()
+}
 
-func (g *micGate) wrap(send func([]byte) error) func([]byte) error { return send }
+// wrap returns send with the gate in front of it: while the gate is shut the
+// frame that goes out is mu-law silence of the same size, and the frame the
+// mic captured is dropped.
+//
+// The substitution happens outside mediaFrameSender, so -record-sent tees what
+// actually went on the wire rather than what the microphone heard -- the
+// recording's claim is about sending, and a file full of echo would not be it.
+//
+// A nil gate is full duplex: --full-duplex is the absence of a gate rather
+// than a flag the gate consults, so there is nothing to keep in step.
+func (g *micGate) wrap(send func([]byte) error) func([]byte) error {
+	if g == nil {
+		return send
+	}
+	return func(payload []byte) error {
+		if g.shut(time.Now()) {
+			return send(bytes.Repeat([]byte{telephony.MuLawSilence}, len(payload)))
+		}
+		return send(payload)
+	}
+}

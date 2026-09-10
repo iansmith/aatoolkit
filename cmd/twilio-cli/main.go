@@ -319,6 +319,7 @@ func main() {
 	audioPath := flag.String("audio", "", "stream this raw μ-law file instead of capturing the mic (any platform)")
 	recordPath := flag.String("record", "", "record inbound server audio to this raw μ-law file, with per-arrival timing in <file>.jsonl")
 	recordSentPath := flag.String("record-sent", "", "record the outbound caller audio (mic or -audio) to this raw μ-law file, replayable with -audio")
+	fullDuplex := flag.Bool("full-duplex", false, "send captured audio even while the server is speaking; the default gates the mic so laptop speakers do not feed the server its own voice")
 	flag.Parse()
 
 	// The caller's E.164 number is optional in voice mode: a local validation
@@ -382,6 +383,9 @@ func main() {
 	}
 	if *recordSentPath != "" {
 		dialOpts = append(dialOpts, withSentRecording(*recordSentPath))
+	}
+	if *fullDuplex {
+		dialOpts = append(dialOpts, withFullDuplex())
 	}
 	if err := dial(ctx, callSid, streamURL, dialOpts...); err != nil {
 		log.Fatalf("twilio-cli: %v", err)
