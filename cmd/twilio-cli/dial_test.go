@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -239,16 +240,7 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	startReceived := make(chan struct{})
 	stopReceived := make(chan []byte, 1)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-		readHandshake(t, buf) // connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 		close(startReceived)
 
 		msg, err := readWSFrame(buf)
@@ -257,8 +249,7 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 			return
 		}
 		stopReceived <- msg
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -381,17 +372,7 @@ func TestCLI_MarkEcho(t *testing.T) {
 	withFakeMic(t, blockingMic)
 
 	echoReceived := make(chan []byte, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-		readHandshake(t, buf) // connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 
 		const streamSID = "SS_markecho"
 		mediaMsg, err := twilio.EncodeMedia(streamSID, make([]byte, muLawFrame20ms))
@@ -420,8 +401,7 @@ func TestCLI_MarkEcho(t *testing.T) {
 			return
 		}
 		echoReceived <- echoRaw
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx := dialCtx(t, 5*time.Second)
@@ -468,17 +448,7 @@ func TestCLI_MarkEchoRepeats(t *testing.T) {
 	withFakeMic(t, blockingMic)
 
 	echoReceived := make(chan []byte, 2)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-		readHandshake(t, buf) // connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 
 		const streamSID = "SS_repeatmark"
 		sendMarkedMedia := func(frames int, markName string) {
@@ -510,8 +480,7 @@ func TestCLI_MarkEchoRepeats(t *testing.T) {
 
 		sendMarkedMedia(1, "mark1")
 		sendMarkedMedia(2, "mark2")
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx := dialCtx(t, 5*time.Second)
@@ -606,25 +575,14 @@ func TestCLI_CallerHangup(t *testing.T) {
 	})
 
 	stopReceived := make(chan []byte, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-		readHandshake(t, buf) // connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 		msg, err := readWSFrame(buf)
 		if err != nil {
 			t.Errorf("read stop frame: %v", err)
 			return
 		}
 		stopReceived <- msg
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx := dialCtx(t, 5*time.Second)

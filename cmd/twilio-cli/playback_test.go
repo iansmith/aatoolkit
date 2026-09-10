@@ -1,13 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -378,17 +378,8 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 	})
 
 	// Call dial with a stub server.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // consume connected + start
-	}))
-	defer srv.Close()
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
@@ -433,17 +424,8 @@ func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
 	})
 
 	// Call dial with a stub server.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // consume connected + start
-	}))
-	defer srv.Close()
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
@@ -703,15 +685,7 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 		return nil
 	})
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // consume connected + start
+	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 
 		media, err := twilio.EncodeMedia("MZearcontest", serverAudio)
 		if err != nil {
@@ -724,8 +698,7 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 		}
 		// Hold the connection open so the client's read loop stays alive.
 		io.Copy(io.Discard, buf)
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	if err := dial(context.Background(), newSID("CA"), addr); err != nil {

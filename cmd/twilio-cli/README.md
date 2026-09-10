@@ -249,18 +249,22 @@ are supposed to be visible.
 **The mic is gated by default.** While the player still has audio to render — the server's
 speech, and the earcon tone, which goes into the same sink — the frames twilio-cli sends
 upstream carry μ-law silence instead of what the microphone heard, with a 250 ms hangover
-past the end of playout for the room to decay. Frames keep going out at the same rate:
+past the end of the audio handed to the player. Frames keep going out at the same rate:
 only their content changes, never the cadence, because a server that paces its writes
 against inbound frames stalls if the client goes quiet. A Twilio `clear` — barge-in, where
 the server abandons the rest of a reply — reopens the mic at once rather than waiting out
 audio nobody will hear.
 
+"Handed to the player", not "played": twilio-cli writes into ffplay's stdin and cannot
+observe what has come out of the speaker, so the hangover covers the player's own buffering
+as well as the room's decay. That is why it is larger than a room-decay figure alone, and
+what to bear in mind before retuning it.
+
 The connected log line says which mode produced a call, so a recording or transcript can be
 read afterwards for what it is.
 
-This is half-duplex gating, not echo cancellation. Real AEC needs the playback signal as a
-reference, adaptive filtering and double-talk detection; ffmpeg ships nothing usable for it,
-and the alternatives are a cgo dependency on a test client.
+This is half-duplex gating, not echo cancellation; `cmd/twilio-cli/gate.go` carries the
+argument for why, and is the place to read before changing any of it.
 
 ### Turning the gate off
 

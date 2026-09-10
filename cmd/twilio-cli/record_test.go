@@ -331,27 +331,45 @@ func waitServed(t *testing.T, served <-chan struct{}) {
 }
 
 // TestDial_RecordSentThroughTheAudioFrameSource pins the -audio half of the
-// wiring, which nothing else reaches: streamFileFrames must hand dial's
-// outbound recorder to mediaFrameSender.
+// wiring, which nothing else reaches: `-audio in.ulaw -record-sent out.ulaw`
+// -- the README's record-then-replay workflow, and the only frame source that
+// exists off macOS -- must put the streamed frames in the file.
 //
-// TestDial_RecordsSentAudioOnlyWhenAsked builds its own sender inside a fake
-// mic, so it proves dial passes a recorder down but cannot see what the real
-// file source does with one; every other test here drives streamFileFramesFrom,
-// which is the level below the wiring. So a build whose streamFileFrames passed
-// nil stays green across the whole suite while `-audio in.ulaw -record-sent
-// out.ulaw` -- the README's record-then-replay workflow, and the only frame
-// source that exists off macOS -- writes an empty file.
+// TestDial_RecordsSentAudioOnlyWhenAsked drives a fake mic, so it proves dial
+// builds a recording sender but says nothing about the real file source
+// reaching it; every other test here drives streamFileFramesFrom, which is the
+// level below the wiring. Between them a build could route -audio around the
+// recorder entirely and stay green across the whole suite.
 //
 // Driven --full-duplex on purpose (AATK-127): every call opens with the
 // capture-live earcon, which is real bytes into the player, so on the default
-// gated path the first half-second of outbound frames is mu-law silence by
-// design. This test's claim is about the recorder reaching the file source at
-// all, and it says so about the frames as streamed; the gated path's own claim
-// -- that the tee records what went on the wire rather than what was captured
-// -- is TestDial_RecordSentTeesTheGatedFrames below.
+// gated path the opening frames are mu-law silence by design. This test's
+// claim is that the streamed frames reach the file, so it takes the gate out
+// of the way; the gated path's own claim -- that the tee records what went on
+// the wire rather than what was captured -- is
+// TestDial_RecordSentTeesTheGatedFrames below.
 func TestDial_RecordSentThroughTheAudioFrameSource(t *testing.T) {
+	spoken, recorded := recordSentThroughFileSource(t, 3, withFullDuplex())
+	if !bytes.Equal(recorded, spoken) {
+		t.Errorf("-audio -record-sent recorded %d bytes, want the %d streamed from the file",
+			len(recorded), len(spoken))
+	}
+}
+
+// recordSentThroughFileSource drives one whole call the way an operator runs
+// `-audio in.ulaw -record-sent out.ulaw`: the real file frame source on the
+// seam -audio installs it on, a server that reads through to the stop event,
+// and dial owning everything in between. Returns what was streamed in and what
+// came back out of the recording.
+//
+// Both tests around it want the identical twenty lines and differ only in the
+// clip length, the dial options, and what they assert -- which is exactly the
+// shape that gets fixed in one place and left broken in the other.
+func recordSentThroughFileSource(t *testing.T, frames int, opts ...dialOption) (spoken, recorded []byte) {
+	t.Helper()
+
 	dir := t.TempDir()
-	spoken := framePattern(3)
+	spoken = framePattern(frames)
 	src := filepath.Join(dir, "in.ulaw")
 	if err := os.WriteFile(src, spoken, 0o644); err != nil {
 		t.Fatalf("write -audio source: %v", err)
@@ -368,7 +386,7 @@ func TestDial_RecordSentThroughTheAudioFrameSource(t *testing.T) {
 
 	out := filepath.Join(dir, "sent.ulaw")
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
-	if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, withSentRecording(out), withFullDuplex()); err != nil {
+	if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, append(opts, withSentRecording(out))...); err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 
@@ -376,10 +394,7 @@ func TestDial_RecordSentThroughTheAudioFrameSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", out, err)
 	}
-	if !bytes.Equal(recorded, spoken) {
-		t.Errorf("-audio %s -record-sent %s recorded %d bytes, want the %d streamed from the file",
-			src, out, len(recorded), len(spoken))
-	}
+	return spoken, recorded
 }
 
 // TestDial_RecordSentTeesTheGatedFrames is the gated half of the pair above
@@ -390,50 +405,46 @@ func TestDial_RecordSentThroughTheAudioFrameSource(t *testing.T) {
 //
 // The earcon is what holds the gate shut here: it plays into the same player
 // as the server's audio, is accounted to the filler, and so gates the mic for
-// its own 240 ms plus the hangover -- past the end of the 300 ms clip.
+// its own tone plus the hangover, which outlasts the whole clip.
 //
-// The first frame or two are expected to carry the captured audio, and that is
-// the gate being right rather than late: the tone is played by the read loop
-// on its own goroutine, signalled by the frame source's first frame, so until
-// it has actually been fed to the player there is nothing for the microphone
-// to have heard. Everything from the third frame on is over the tone and must
-// be silence.
+// The assertion is on the shape, not on an offset. The leading frames carry
+// captured audio, and that is the gate being right rather than late: the tone
+// is played by the read loop on its own goroutine, signalled by the frame
+// source's first frame, so until it has actually reached the player there is
+// nothing for the microphone to have heard. How many frames that handoff takes
+// is scheduling, not a contract -- pinning it at three would fail this test on
+// a loaded machine for a reason that has nothing to do with the tee. So:
+// silence starts at some frame, it starts early, and once it starts it runs to
+// the end.
 func TestDial_RecordSentTeesTheGatedFrames(t *testing.T) {
+	// Long enough that the tone plus hangover covers every frame after the
+	// handoff, so "silent to the end" is the gate and not the clip running out.
 	const frames = 15
-	const settleFrames = 3 // frames the earcon signal may still be in flight for
 
-	dir := t.TempDir()
-	spoken := framePattern(frames)
-	src := filepath.Join(dir, "in.ulaw")
-	if err := os.WriteFile(src, spoken, 0o644); err != nil {
-		t.Fatalf("write -audio source: %v", err)
-	}
-
-	withFakeMic(t, streamFileFrames(src))
-
-	srv, served := mediaConsumingServer(t)
-	defer func() {
-		waitServed(t, served)
-		srv.Close()
-	}()
-
-	out := filepath.Join(dir, "sent.ulaw")
-	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
-	if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, withSentRecording(out)); err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-
-	recorded, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatalf("read %s: %v", out, err)
-	}
+	spoken, recorded := recordSentThroughFileSource(t, frames)
 	if len(recorded) != len(spoken) {
 		t.Fatalf("-record-sent recorded %d bytes, want %d -- the gate changes content, never cadence", len(recorded), len(spoken))
 	}
-	for i := settleFrames; i < frames; i++ {
-		frame := recorded[i*muLawFrame20ms : (i+1)*muLawFrame20ms]
-		if !isSilenceFrame(frame) {
-			t.Errorf("-record-sent frame %d, over the earcon: got %x..., want mu-law silence -- the tee must be downstream of the gate", i, head(frame))
+
+	frame := func(i int) []byte { return recorded[i*muLawFrame20ms : (i+1)*muLawFrame20ms] }
+
+	shutAt := -1
+	for i := range frames {
+		if isSilenceFrame(frame(i)) {
+			shutAt = i
+			break
+		}
+	}
+	if shutAt < 0 {
+		t.Fatalf("-record-sent holds no silence at all: the tee is recording what the mic heard, not what went out (frame 0: %x...)", head(frame(0)))
+	}
+	if shutAt > frames/2 {
+		t.Errorf("the gate did not shut until frame %d of %d: the earcon should hold it shut from the opening frames of the call", shutAt, frames)
+	}
+	for i := shutAt; i < frames; i++ {
+		if !isSilenceFrame(frame(i)) {
+			t.Errorf("-record-sent frame %d went loud again after the gate shut at frame %d: got %x..., want silence through the tone",
+				i, shutAt, head(frame(i)))
 			break
 		}
 	}

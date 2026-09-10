@@ -44,15 +44,25 @@ func readHandshake(t *testing.T, buf *bufio.ReadWriter) []byte {
 	return start
 }
 
-// hijackedWSServer is the shape every twilio-cli protocol test's far end has:
-// hijack the connection, complete the upgrade, consume the opening handshake,
-// and hand the raw conn and buffer to serve. The conn is registered for close
-// at test end so a red test that times out cannot leak the client's dial
-// goroutine with it.
+// hijackedWSServer is the shape most of twilio-cli's protocol tests give their
+// far end: hijack the connection, complete the upgrade, consume the opening
+// handshake, and hand the raw conn and buffer to serve.
 //
-// It exists because that eight-line prologue had been copied into four servers
-// across three files, and each copy is a chance to forget trackConn or to read
-// a frame before the handshake.
+// It owns the server's lifetime as well as the connection's, both to test end.
+// That ordering is load-bearing, not tidiness: httptest.Server.Close does not
+// wait for a hijacked connection's goroutine, so a caller closing the server
+// the moment dial returns can pull the socket out from under a handler that
+// has not been scheduled yet -- which surfaces as an intermittent "read
+// connected frame: use of closed network connection", an error that names the
+// handshake and means nothing of the kind.
+//
+// It exists because that prologue had been copied into a dozen servers across
+// four files, several of which had dropped trackConn along the way and leaked
+// the client's dial goroutine on any test that timed out. Every copy that
+// matches this shape now calls it. Three deliberately do not and are the
+// reason the helper is not the only way to build one: stubWSServer checks the
+// Upgrade header before hijacking, TestCLI_ServerClose closes without reading
+// the handshake at all, and one test needs only the conn.
 func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWriter)) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
