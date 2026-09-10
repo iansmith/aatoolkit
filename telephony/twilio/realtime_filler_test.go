@@ -1056,6 +1056,78 @@ func TestFiller_CallTeardownLogsNoCarrierError(t *testing.T) {
 	}
 }
 
+// TestFiller_ShutdownIsNotLoggedAsACarrierFailure pins the line play must NOT
+// write when the call ends underneath it.
+//
+// The condition is the one TestFiller_ShutdownReleasesAPlayGoroutineParkedOnThe-
+// WriteSlot already builds: a frame parked waiting for the carrier's write slot,
+// released by shutdown cancelling the filler's context. What comes back is
+// "awaiting carrier write slot: context canceled" — the call ending normally,
+// not a carrier that failed — and logging it under the same "filler audio:"
+// prefix a real write failure uses makes the two indistinguishable in an
+// operator's log.
+//
+// Built against the sink directly rather than through a call, and deliberately:
+// driven through HandleStreamRealtime the play goroutine's own ctx.Done case
+// usually wins the race and the losing tick never happens, so a call-shaped
+// test passes whether or not the line is suppressed. Parking the slot is what
+// makes the losing tick certain.
+//
+// AATK-128 is why this is worth pinning now. Before it a call reached teardown
+// with a play goroutine only if the caller had spoken and the backend had then
+// gone quiet; now every call whose backend is silent at the open has one, so
+// this is the ordinary ending rather than an unusual one.
+//
+// slopstop:test contract
+func TestFiller_ShutdownIsNotLoggedAsACarrierFailure(t *testing.T) {
+	var buf syncBuffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	fill := newFiller(context.Background(), FillerConfig{
+		Loop:  fillerTestLoop(),
+		Delay: 20 * time.Millisecond,
+	})
+	sink := newCarrierMediaSink(w, "SSquiet", nil, nil, fill)
+	fill.attach(sink)
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(w.release) }) }
+	t.Cleanup(release)
+
+	// Occupy the slot on an unbounded context, as Media does on a real call.
+	mediaDone := make(chan error, 1)
+	go func() { mediaDone <- sink.Media(context.Background(), carrierPayloadB64()) }()
+	select {
+	case <-w.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("test setup: the media write never reached the carrier connection")
+	}
+
+	// The loop starts and parks behind that write.
+	fill.arm(armedByTurn)
+	time.Sleep(200 * time.Millisecond)
+
+	// The call ends. The parked frame is released with the filler's own
+	// cancelled context, which is not a carrier failure.
+	fill.shutdown()
+	time.Sleep(200 * time.Millisecond)
+
+	if bytes.Contains(buf.Bytes(), []byte("filler audio")) {
+		t.Fatalf("the call ending must not be logged as a carrier failure; log output: %q", buf.String())
+	}
+
+	release()
+	<-mediaDone
+}
+
 // TestFiller_ShutdownIsCalledWhenTheCallEnds pins the call site rather than the
 // method — HandleStreamRealtime's `defer fill.shutdown()`.
 //

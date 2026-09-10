@@ -377,6 +377,13 @@ func TestFarewell_AbsentWhenTheOptionIsNotSupplied(t *testing.T) {
 			took, idleTimeout)
 	}
 
+	// Wait for the capture to observe the CLOSE before scanning it. Without
+	// this the scan can run before the capture goroutine has read anything at
+	// all, and "nothing was written" would be indistinguishable from "nothing
+	// has been read yet" — measured at 3 failures in 10 with the guard removed
+	// from playFarewell, i.e. the test caught its own subject ~30% of runs.
+	waitForWireRecord(t, wire, isClosed)
+
 	if got := wire(); slices.IndexFunc(got, func(r carrierWireRecord) bool { return !r.closed }) >= 0 {
 		t.Fatalf("a call with no farewell option must write nothing to the carrier on the idle path, got %+v", got)
 	}
@@ -517,6 +524,13 @@ func TestHealthyCall_WritesNeitherCoverNorFarewell(t *testing.T) {
 // doc calls an unmatchable record the thing a consumer with two marks in flight
 // must never get; a call supplying both options must not be handed one by the
 // engine itself.
+//
+// This case covers the ECHO half. The TimedOut half is
+// TestMarkTracker_EngineOwnedMarkTimingOutIsNotDeliveredEither, driven at the
+// tracker rather than through a call, because a carrier that never echoes is
+// not something the harness's fake can express within a test's patience.
+//
+// slopstop:test contract
 func TestFarewell_MarkIsNotReportedOnTheConsumersEchoChannel(t *testing.T) {
 	const idleTimeout = 200 * time.Millisecond
 

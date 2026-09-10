@@ -3,6 +3,7 @@ package twilio
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -361,7 +362,20 @@ func (f *filler) play(gen uint64) {
 				// assume there is one: a filler frame fails precisely while
 				// the backend is SILENT, which is when no reply frame is
 				// coming to report anything. Hence the defer above.
-				log.Printf("twilio: realtime: filler audio: %v", err)
+				//
+				// A cancelled context is NOT that failure, and is not logged.
+				// It means this machine's own context ended — shutdown, or the
+				// call's context — while the frame was queueing for the write
+				// slot, which is the call ending normally. The select above
+				// catches that first whenever it wins the race; this catches
+				// the tick that got in ahead of it. AATK-128 made the race
+				// common rather than rare: a loop now plays on every call whose
+				// backend is quiet at the open, so at teardown there is usually
+				// a play goroutine to lose it, and the line it wrote is
+				// indistinguishable from a real carrier failure.
+				if !errors.Is(err, context.Canceled) {
+					log.Printf("twilio: realtime: filler audio: %v", err)
+				}
 				return
 			}
 			if !written {

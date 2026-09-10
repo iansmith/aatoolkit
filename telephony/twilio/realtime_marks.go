@@ -95,11 +95,13 @@ func (p *playoutClock) outstanding(now time.Time) time.Duration {
 // by one loop, which is the exception on this path and the reason it is a type
 // of its own.
 //
-// A nil *markTracker is the "consumer asked for no marks" case and every
+// A nil *markTracker is the "nobody needs marks on this call" case and every
 // method tolerates it: HandleStreamRealtime builds one only when a mark option
-// was actually supplied, so a call with neither option keeps today's behavior
-// exactly — no mark is written, and an inbound mark frame is ignored without
-// even a log line.
+// was supplied, or — since AATK-128 — when a farewell clip was, since the
+// engine waits on its own mark there. A call with none of the three keeps
+// today's behavior exactly: no mark is written, and an inbound mark frame is
+// ignored without even a log line. A farewell-only call keeps the same silence
+// on the CONSUMER's side, which is what logUnmatchedEchoes below is for.
 type markTracker struct {
 	// echoCh is the consumer's destination, resolved once per call, and nil
 	// when the consumer asked for none (it may still have asked for the
