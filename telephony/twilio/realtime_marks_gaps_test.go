@@ -34,7 +34,7 @@ import (
 // race makes it wrong.
 func TestMarkTracker_SpentBoundDoesNotResolveTheReArmThatReplacedIt(t *testing.T) {
 	echoes := make(chan MarkEcho, 4)
-	tr := newMarkTracker(echoes)
+	tr := newMarkTracker(echoes, true)
 
 	tr.arm("goodbye", time.Hour)
 	tr.mu.Lock()
@@ -70,7 +70,7 @@ func TestMarkTracker_SpentBoundDoesNotResolveTheReArmThatReplacedIt(t *testing.T
 // while removing the bound the ticket's fourth behavior turns on.
 func TestMarkTracker_BoundStillFiresForTheLiveArming(t *testing.T) {
 	echoes := make(chan MarkEcho, 4)
-	tr := newMarkTracker(echoes)
+	tr := newMarkTracker(echoes, true)
 
 	tr.arm("goodbye", time.Millisecond)
 
@@ -161,6 +161,12 @@ func TestMarkEchoBound_KeepsTheSubMillisecondRemainder(t *testing.T) {
 type blockingWSWriter struct {
 	entered chan struct{}
 	release chan struct{}
+	// passthrough is how many writes succeed immediately before the carrier
+	// wedges. Zero — the original behaviour — parks the very first one. A
+	// caller that makes SEVERAL writes in sequence needs to choose which of
+	// them is the one the carrier stops reading on, since a wedge at the first
+	// means every later write is never attempted and so never bounded.
+	passthrough int
 
 	mu   sync.Mutex
 	sent [][]byte
@@ -174,7 +180,11 @@ type blockingWSWriter struct {
 func (b *blockingWSWriter) Write(ctx context.Context, _ websocket.MessageType, msg []byte) error {
 	b.mu.Lock()
 	b.sent = append(b.sent, append([]byte(nil), msg...))
+	n := len(b.sent)
 	b.mu.Unlock()
+	if n <= b.passthrough {
+		return nil
+	}
 	select {
 	case b.entered <- struct{}{}:
 	default:
@@ -219,7 +229,7 @@ func (b *blockingWSWriter) writes() int {
 // the sink's writer"
 func TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight(t *testing.T) {
 	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
-	tr := newMarkTracker(make(chan MarkEcho, 4))
+	tr := newMarkTracker(make(chan MarkEcho, 4), true)
 	sink := newCarrierMediaSink(w, "SSslot", nil, tr, nil)
 
 	mediaDone := make(chan error, 1)
@@ -371,7 +381,7 @@ func TestCarrierMediaSink_MarkArmsTheDerivedBound(t *testing.T) {
 	const grace = telephony.MarkEchoGraceMS * time.Millisecond
 
 	echoes := make(chan MarkEcho, 4)
-	tr := newMarkTracker(echoes)
+	tr := newMarkTracker(echoes, true)
 	t.Cleanup(tr.stop)
 	sink := newCarrierMediaSink(&discardWSWriter{}, "SSderived", nil, tr, nil)
 

@@ -3,12 +3,36 @@ package twilio
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/realtime"
+)
+
+// armTrigger names what asked for a countdown, which is the whole of what the
+// machine needs to remember about its own cause: only one of the two is worth
+// a log line, and only start knows whether that countdown survived to play.
+//
+// A type rather than a bool because armedByCallOpen and armedByTurn read at the
+// call site, where a bare true/false would not — and because it is carried in
+// the pending start's closure rather than on the struct, so naming it costs
+// nothing that a field would have cost.
+type armTrigger int
+
+const (
+	// armedByTurn is observe's pair: the caller stopped speaking, or a
+	// response ended in a function call and the tool round trip begins. Both
+	// mean the caller has finished talking and is now waiting.
+	armedByTurn armTrigger = iota
+	// armedByCallOpen is the call itself opening, with nothing said on either
+	// side yet (AATK-128). Before it the machine was never armed until the
+	// caller spoke, so a backend that completed its handshake and then
+	// produced nothing left the caller on an open line, uncovered, until the
+	// idle guard dropped it.
+	armedByCallOpen
 )
 
 // filler plays the consumer's loop to the caller across the gap between the
@@ -21,7 +45,10 @@ import (
 //
 // ARMING is driven by observe, on the server-event drain goroutine, because
 // the two events that arm it — speech_stopped, and the response.done that
-// ended in a function call — reach this package nowhere else. That stream is
+// ended in a function call — reach this package nowhere else. (AATK-128 adds a
+// third trigger, armedByCallOpen, from HandleStreamRealtime's own setup
+// goroutine before either loop is running; it is not an event and so has
+// nothing to do with this stream's losses.) That stream is
 // lossy by construction (Bridge.publishEvent drops rather than parking Run's
 // read loop), and it is lossy in the safe direction: a dropped arm costs the
 // caller a loop that does not play, which is exactly the silence this option
@@ -147,14 +174,14 @@ func (f *filler) observe(ev ServerEvent) {
 	case realtime.EventSpeechStopped:
 		// The caller has finished a sentence. Everything from here to the
 		// reply's first frame is the wait this option exists to fill.
-		f.arm()
+		f.arm(armedByTurn)
 	case realtime.EventResponseDone:
 		// A response that ended in a function call is not the reply: it is
 		// the start of a second wait, the tool round trip plus the second
 		// LLM leg, which the caller hears as one continuous silence with the
 		// first. Any other response.done ends the turn, so the loop stops.
 		if realtime.ResponseEndedInFunctionCall(ev.Raw) {
-			f.arm()
+			f.arm(armedByTurn)
 		} else {
 			f.stop()
 		}
@@ -172,7 +199,11 @@ func (f *filler) observe(ev ServerEvent) {
 // a noisy room makes the VAD reopen the turn) means the wait CONTINUES, never
 // that it begins again — restarting a pending countdown was what pushed the
 // loop's start a whole Delay later than the caller's silence began.
-func (f *filler) arm() {
+//
+// by names which of the two waits this is. It rides the pending start's own
+// closure, exactly as gen does, so a re-arm that finds a countdown already
+// pending leaves the original label alone along with the original countdown.
+func (f *filler) arm(by armTrigger) {
 	if f == nil {
 		return
 	}
@@ -214,7 +245,7 @@ func (f *filler) arm() {
 	// this function's early return exists to prevent.
 	f.cancelPendingLocked()
 	gen := f.gen
-	f.timer = time.AfterFunc(f.delay, func() { f.start(gen) })
+	f.timer = time.AfterFunc(f.delay, func() { f.start(gen, by) })
 }
 
 // stop ends the loop, whether it was pending or playing, and reports whether
@@ -262,7 +293,7 @@ func (f *filler) cancelPendingLocked() {
 // loop begins. gen is the generation the pending start was created under; a
 // mismatch means the machine moved on while the timer was already running its
 // function, which Stop cannot undo.
-func (f *filler) start(gen uint64) {
+func (f *filler) start(gen uint64, by armTrigger) {
 	f.mu.Lock()
 	if f.stopped || f.gen != gen || f.playing {
 		f.mu.Unlock()
@@ -276,6 +307,17 @@ func (f *filler) start(gen uint64) {
 	f.playing = true
 	f.off = 0
 	f.mu.Unlock()
+
+	if by == armedByCallOpen {
+		// Once per call, and only when the condition actually happened: the
+		// backend completed its handshake and then produced no audio for the
+		// whole of Delay, with the caller never having spoken. Named so a call
+		// that sounded dead at the open is greppable afterwards — and
+		// deliberately NOT under the "filler audio:" prefix play's write-error
+		// line carries, which three tests in this package grep for as the
+		// signature of a frame that failed to reach the carrier.
+		log.Printf("twilio: realtime: silent backend at call open: playing the filler loop")
+	}
 
 	go f.play(gen)
 }
@@ -320,7 +362,20 @@ func (f *filler) play(gen uint64) {
 				// assume there is one: a filler frame fails precisely while
 				// the backend is SILENT, which is when no reply frame is
 				// coming to report anything. Hence the defer above.
-				log.Printf("twilio: realtime: filler audio: %v", err)
+				//
+				// A cancelled context is NOT that failure, and is not logged.
+				// It means this machine's own context ended — shutdown, or the
+				// call's context — while the frame was queueing for the write
+				// slot, which is the call ending normally. The select above
+				// catches that first whenever it wins the race; this catches
+				// the tick that got in ahead of it. AATK-128 made the race
+				// common rather than rare: a loop now plays on every call whose
+				// backend is quiet at the open, so at teardown there is usually
+				// a play goroutine to lose it, and the line it wrote is
+				// indistinguishable from a real carrier failure.
+				if !errors.Is(err, context.Canceled) {
+					log.Printf("twilio: realtime: filler audio: %v", err)
+				}
 				return
 			}
 			if !written {

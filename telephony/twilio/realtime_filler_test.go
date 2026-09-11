@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -46,46 +47,110 @@ const fillerTestDelay = 300 * time.Millisecond
 // with a backend delta on the wire.
 var fillerLoopFills = []byte{0x01, 0x02, 0x03}
 
-// fillerTestLoop is the consumer-supplied loop: three 20 ms μ-law frames.
-func fillerTestLoop() []byte {
+// clipOfFills builds a μ-law clip: one 20 ms frame per fill byte, in order.
+//
+// One definition serving both engine-supplied clips this suite drives — the
+// filler's loop and AATK-128's farewell — because the two differ only in which
+// bytes they are made of (CLAUDE.md #4).
+func clipOfFills(fills []byte) []byte {
 	var out []byte
-	for _, f := range fillerLoopFills {
+	for _, f := range fills {
 		out = append(out, bytes.Repeat([]byte{f}, defaultFrameBytes)...)
 	}
 	return out
 }
 
-// fillerFrameB64 is the base64 the carrier must receive for the nth frame of
-// fillerTestLoop, so a test compares wire bytes against the loop it supplied
-// rather than against a re-derivation of it.
-func fillerFrameB64(n int) string {
-	return base64.StdEncoding.EncodeToString(
-		bytes.Repeat([]byte{fillerLoopFills[n%len(fillerLoopFills)]}, defaultFrameBytes))
+// frameB64OfFill is the base64 the carrier must receive for one frame of such a
+// clip, so a test compares wire bytes against the clip it supplied rather than
+// against a re-derivation of it.
+func frameB64OfFill(fill byte) string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{fill}, defaultFrameBytes))
 }
 
-// isFillerFrame reports whether a wire record is one of the loop's frames.
-func isFillerFrame(rec carrierWireRecord) bool {
-	if rec.clear || rec.markName != "" {
-		return false
-	}
-	for i := range fillerLoopFills {
-		if rec.payload == fillerFrameB64(i) {
+// isFrameOfFills reports whether a wire record is one of that clip's frames.
+// Non-media records — a clear, a mark, the close — carry no payload and are
+// never one.
+func isFrameOfFills(rec carrierWireRecord, fills []byte) bool {
+	for _, f := range fills {
+		if rec.payload == frameB64OfFill(f) {
 			return true
 		}
 	}
 	return false
 }
 
-// fillerFrames returns only the loop frames from a wire capture, preserving
+// framesOfFills returns only that clip's frames from a wire capture, preserving
 // order and arrival time.
-func fillerFrames(recs []carrierWireRecord) []carrierWireRecord {
+func framesOfFills(recs []carrierWireRecord, fills []byte) []carrierWireRecord {
 	var out []carrierWireRecord
 	for _, r := range recs {
-		if isFillerFrame(r) {
+		if isFrameOfFills(r, fills) {
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+// fillerTestLoop is the consumer-supplied loop: three 20 ms μ-law frames.
+func fillerTestLoop() []byte { return clipOfFills(fillerLoopFills) }
+
+// fillerFrameB64 is the base64 of the nth frame of fillerTestLoop, wrapping as
+// the ring does.
+func fillerFrameB64(n int) string {
+	return frameB64OfFill(fillerLoopFills[n%len(fillerLoopFills)])
+}
+
+// isFillerFrame reports whether a wire record is one of the loop's frames.
+func isFillerFrame(rec carrierWireRecord) bool { return isFrameOfFills(rec, fillerLoopFills) }
+
+// fillerFrames returns only the loop frames from a wire capture.
+func fillerFrames(recs []carrierWireRecord) []carrierWireRecord {
+	return framesOfFills(recs, fillerLoopFills)
+}
+
+// waitForWireRecord blocks until the carrier capture holds a record matching
+// pred, failing the test if it never does. One definition for the poll every
+// wire assertion in this package opens with.
+func waitForWireRecord(t *testing.T, wire func() []carrierWireRecord, pred func(carrierWireRecord) bool) {
+	t.Helper()
+	waitFor(t, 5*time.Second, func() bool { return slices.IndexFunc(wire(), pred) >= 0 })
+}
+
+// hasPayload matches the media record carrying exactly payload.
+func hasPayload(payload string) func(carrierWireRecord) bool {
+	return func(r carrierWireRecord) bool { return r.payload == payload }
+}
+
+// isClear matches the barge-in record, pairing with hasPayload for the polls
+// whose subject is the clear rather than a frame.
+func isClear(r carrierWireRecord) bool { return r.clear }
+
+// assertClearThenReply is the stop edge, asserted once for both episodes that
+// can be interrupted: the carrier must see the clear IMMEDIATELY before the
+// backend's first frame — a clear sent after it would discard that frame — and
+// no loop frame may follow. What differs between the callers is only which
+// episode was playing when the reply arrived, so only that belongs in them.
+func assertClearThenReply(t *testing.T, wire func() []carrierWireRecord, reply string) {
+	t.Helper()
+
+	waitForWireRecord(t, wire, hasPayload(reply))
+	// Let anything the relay wrongly wrote after the reply arrive too.
+	time.Sleep(100 * time.Millisecond)
+
+	got := wire()
+	replyAt := slices.IndexFunc(got, hasPayload(reply))
+	if replyAt < 1 {
+		t.Fatalf("the reply frame must arrive after the loop, got records %+v", got)
+	}
+	if !got[replyAt-1].clear {
+		t.Fatalf("the record immediately before the reply's first frame must be the clear, got %+v",
+			got[replyAt-1])
+	}
+	for _, r := range got[replyAt:] {
+		if isFillerFrame(r) {
+			t.Fatalf("no loop frame may reach the carrier after the reply's first frame:\n%+v", got)
+		}
+	}
 }
 
 // fillerHarness wires HandleStreamRealtime directly with a filler config, which
@@ -98,11 +163,46 @@ func fillerHarness(t *testing.T, url string, cfg FillerConfig) *realtimeHarness 
 	})
 }
 
-// armFiller emits the event the ticket names as the arm trigger: the backend
+// armFiller emits the event AATK-108 names as the arm trigger: the backend
 // reporting that the caller stopped speaking.
+//
+// It may be a NO-OP, and that is not a defect in the tests that use it. Since
+// AATK-128 a configured filler is also armed at call open, so by the time a
+// test calls this the countdown is usually already pending and arm leaves it
+// alone — deliberately, that being the re-arm rule. The episode a test then
+// observes is the call-open one. Every test below is insensitive to which
+// trigger armed it. A test that is NOT — because it measures the wait itself,
+// or takes a baseline that a running loop would spoil — calls
+// afterTheBackendHasSpoken first and says why at the call site.
 func armFiller(t *testing.T, be *fakeRealtimeBackend) {
 	t.Helper()
 	be.emitOnce(t, map[string]string{"type": "input_audio_buffer.speech_stopped"})
+}
+
+// afterTheBackendHasSpoken makes explicit a precondition these tests used to
+// get for free. AATK-128 arms the machine at call open as well, so a test whose
+// subject is the speech_stopped trigger has to start from a call where the
+// call-open cover is already disarmed — and disarming it is what the backend's
+// first audio frame does, on a real call as much as here.
+//
+// It returns a wire query scoped to what followed that frame, so the assertion
+// sees only the episode the test is actually driving. Everything before it
+// belongs to the call opening, which the tests in realtime_silence_test.go
+// cover.
+func afterTheBackendHasSpoken(t *testing.T, be *fakeRealtimeBackend, wire func() []carrierWireRecord) func() []carrierWireRecord {
+	t.Helper()
+
+	first := distinctCarrierPayload(0x5b)
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": first})
+	waitForWireRecord(t, wire, hasPayload(first))
+
+	return func() []carrierWireRecord {
+		recs := wire()
+		if i := slices.IndexFunc(recs, hasPayload(first)); i >= 0 {
+			return recs[i+1:]
+		}
+		return nil
+	}
 }
 
 // waitFillerPlaying blocks until at least n loop frames have reached the
@@ -126,6 +226,7 @@ func TestFiller_StartsAfterDelayAndPaces(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
+	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	armedAt := time.Now()
 	armFiller(t, be)
@@ -179,6 +280,7 @@ func TestFiller_NoStartWhenBackendIsFast(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
+	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	armFiller(t, be)
 	time.Sleep(fillerTestDelay / 3)
@@ -204,43 +306,18 @@ func TestFiller_ClearThenFirstDelta(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
+	// The episode under test is the one speech_stopped arms, so the call-open
+	// cover is disarmed first — otherwise this asserts the same thing
+	// TestCallOpen_CoverStopsWhenTheBackendFinallySpeaks already does, on the
+	// same episode.
+	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	armFiller(t, be)
 	waitFillerPlaying(t, wire, 3)
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
-	// Let anything the relay wrongly wrote after the reply arrive too.
-	time.Sleep(100 * time.Millisecond)
-
-	got := wire()
-	replyAt := -1
-	for i, r := range got {
-		if r.payload == reply {
-			replyAt = i
-			break
-		}
-	}
-	if replyAt < 1 {
-		t.Fatalf("the reply frame must arrive after the loop, got records %+v", got)
-	}
-	if !got[replyAt-1].clear {
-		t.Fatalf("the record immediately before the reply's first frame must be the clear, got %+v",
-			got[replyAt-1])
-	}
-	for _, r := range got[replyAt:] {
-		if isFillerFrame(r) {
-			t.Fatalf("no loop frame may reach the carrier after the reply's first frame:\n%+v", got)
-		}
-	}
+	assertClearThenReply(t, wire, reply)
 }
 
 // --- behaviour 4: barge-in stops the loop, with one clear ------------------
@@ -261,14 +338,7 @@ func TestFiller_StopsOnSpeechStarted(t *testing.T) {
 	waitFillerPlaying(t, wire, 3)
 
 	be.emitOnce(t, map[string]string{"type": "input_audio_buffer.speech_started"})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.clear {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, isClear)
 	time.Sleep(150 * time.Millisecond)
 
 	got := wire()
@@ -304,6 +374,13 @@ func TestFiller_RearmsAfterFunctionCall(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
+	// The subject is the function-call trigger, so the call-open countdown has
+	// to be disarmed first. Without this the countdown is already pending when
+	// the response.done lands, arm leaves it alone (the re-arm rule), and the
+	// loop this test then watches is the call-open episode — which plays whether
+	// or not the function-call branch arms at all. Mutation-confirmed: with that
+	// arm removed, this passed 3/3.
+	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	be.emitAny(t, map[string]any{
 		"type": "response.done",
@@ -318,29 +395,7 @@ func TestFiller_RearmsAfterFunctionCall(t *testing.T) {
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
-	time.Sleep(100 * time.Millisecond)
-
-	got := wire()
-	replyAt := -1
-	for i, r := range got {
-		if r.payload == reply {
-			replyAt = i
-			break
-		}
-	}
-	for _, r := range got[replyAt:] {
-		if isFillerFrame(r) {
-			t.Fatalf("the second leg's first delta must stop the loop:\n%+v", got)
-		}
-	}
+	assertClearThenReply(t, wire, reply)
 }
 
 // --- behaviour 3: the loop wraps without a seam ----------------------------
@@ -421,14 +476,7 @@ func TestFiller_CarrierAudioRecordsAreMarkedFiller(t *testing.T) {
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(reply))
 
 	var sawFiller, sawReply bool
 	deadline := time.After(5 * time.Second)
@@ -477,6 +525,19 @@ func TestFiller_KeepsPlayingWhenRearmedMidLoop(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
+	// The call-open episode is disarmed first so the loop below is the one
+	// armFiller started: without this the countdown is already pending when
+	// armFiller runs, arm leaves it alone by the re-arm rule, and the episode
+	// watched is the call opening's.
+	//
+	// It does NOT make this test cover the function-call ARM, and the comment
+	// says so rather than claiming it: with that arm deleted this still passes
+	// 3/3, because a loop already playing keeps playing whether the branch arms
+	// or not. What this test binds is the other half of the branch — that a
+	// function-call response.done must not fall through to f.stop() and silence
+	// the loop across the tool round trip — which is red 3/3 under that
+	// mutation. The arm itself is TestFiller_RearmsAfterFunctionCall's.
+	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	armFiller(t, be)
 	waitFillerPlaying(t, wire, 5)
@@ -505,22 +566,9 @@ func TestFiller_KeepsPlayingWhenRearmedMidLoop(t *testing.T) {
 	// delta stops it, with the clear the carrier is owed.
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(reply))
 	got := wire()
-	replyAt := -1
-	for i, r := range got {
-		if r.payload == reply {
-			replyAt = i
-			break
-		}
-	}
+	replyAt := slices.IndexFunc(got, hasPayload(reply))
 	if replyAt < 1 || !got[replyAt-1].clear {
 		t.Fatalf("the second leg's first frame must be preceded by the clear:\n%+v", got)
 	}
@@ -710,7 +758,7 @@ func TestFiller_SurvivesACarrierWriteFailure(t *testing.T) {
 
 	countFiller := func() int { return len(fillerFrames(w.records())) }
 
-	fill.arm()
+	fill.arm(armedByTurn)
 	waitFor(t, 5*time.Second, func() bool { return countFiller() >= 2 })
 
 	// Fail the loop's next frame, and wait for that write to have been tried
@@ -738,7 +786,7 @@ func TestFiller_SurvivesACarrierWriteFailure(t *testing.T) {
 
 	// And the machine must still be usable: the next wait gets a loop.
 	before := countFiller()
-	fill.arm()
+	fill.arm(armedByTurn)
 	waitFor(t, 5*time.Second, func() bool { return countFiller() > before })
 }
 
@@ -765,14 +813,7 @@ func TestFiller_EachEpisodeStartsAtTheTopOfTheLoop(t *testing.T) {
 
 	reply := carrierPayloadB64()
 	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
-	waitFor(t, 5*time.Second, func() bool {
-		for _, r := range wire() {
-			if r.payload == reply {
-				return true
-			}
-		}
-		return false
-	})
+	waitForWireRecord(t, wire, hasPayload(reply))
 
 	// Second wait.
 	armFiller(t, be)
@@ -903,7 +944,7 @@ func TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot(t *testing.T)
 	parked := runtime.NumGoroutine()
 
 	// The loop starts and immediately parks behind that write.
-	fill.arm()
+	fill.arm(armedByTurn)
 	time.Sleep(300 * time.Millisecond)
 	if got := runtime.NumGoroutine(); got <= parked {
 		t.Fatalf("test setup: the play goroutine must be parked on the write slot (%d goroutines, was %d)",
@@ -949,6 +990,9 @@ func TestFiller_PlayGoroutineEndsWithTheEpisode(t *testing.T) {
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
 	waitBackendReady(t, be, h)
 	wire := h.captureCarrierWire(t)
+	// The baseline must be taken with NO play goroutine running, so the
+	// call-open episode has to be disarmed before it rather than racing it.
+	wire = afterTheBackendHasSpoken(t, be, wire)
 
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)
@@ -1030,6 +1074,78 @@ func TestFiller_CallTeardownLogsNoCarrierError(t *testing.T) {
 		t.Fatalf("a call ending while the loop plays must stop it before the carrier connection goes away, "+
 			"never write into a torn-down one; log output: %q", buf.String())
 	}
+}
+
+// TestFiller_ShutdownIsNotLoggedAsACarrierFailure pins the line play must NOT
+// write when the call ends underneath it.
+//
+// The condition is the one TestFiller_ShutdownReleasesAPlayGoroutineParkedOnThe-
+// WriteSlot already builds: a frame parked waiting for the carrier's write slot,
+// released by shutdown cancelling the filler's context. What comes back is
+// "awaiting carrier write slot: context canceled" — the call ending normally,
+// not a carrier that failed — and logging it under the same "filler audio:"
+// prefix a real write failure uses makes the two indistinguishable in an
+// operator's log.
+//
+// Built against the sink directly rather than through a call, and deliberately:
+// driven through HandleStreamRealtime the play goroutine's own ctx.Done case
+// usually wins the race and the losing tick never happens, so a call-shaped
+// test passes whether or not the line is suppressed. Parking the slot is what
+// makes the losing tick certain.
+//
+// AATK-128 is why this is worth pinning now. Before it a call reached teardown
+// with a play goroutine only if the caller had spoken and the backend had then
+// gone quiet; now every call whose backend is silent at the open has one, so
+// this is the ordinary ending rather than an unusual one.
+//
+// slopstop:test contract
+func TestFiller_ShutdownIsNotLoggedAsACarrierFailure(t *testing.T) {
+	var buf syncBuffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	fill := newFiller(context.Background(), FillerConfig{
+		Loop:  fillerTestLoop(),
+		Delay: 20 * time.Millisecond,
+	})
+	sink := newCarrierMediaSink(w, "SSquiet", nil, nil, fill)
+	fill.attach(sink)
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(w.release) }) }
+	t.Cleanup(release)
+
+	// Occupy the slot on an unbounded context, as Media does on a real call.
+	mediaDone := make(chan error, 1)
+	go func() { mediaDone <- sink.Media(context.Background(), carrierPayloadB64()) }()
+	select {
+	case <-w.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("test setup: the media write never reached the carrier connection")
+	}
+
+	// The loop starts and parks behind that write.
+	fill.arm(armedByTurn)
+	time.Sleep(200 * time.Millisecond)
+
+	// The call ends. The parked frame is released with the filler's own
+	// cancelled context, which is not a carrier failure.
+	fill.shutdown()
+	time.Sleep(200 * time.Millisecond)
+
+	if bytes.Contains(buf.Bytes(), []byte("filler audio")) {
+		t.Fatalf("the call ending must not be logged as a carrier failure; log output: %q", buf.String())
+	}
+
+	release()
+	<-mediaDone
 }
 
 // TestFiller_ShutdownIsCalledWhenTheCallEnds pins the call site rather than the

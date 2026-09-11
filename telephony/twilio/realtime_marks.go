@@ -95,16 +95,25 @@ func (p *playoutClock) outstanding(now time.Time) time.Duration {
 // by one loop, which is the exception on this path and the reason it is a type
 // of its own.
 //
-// A nil *markTracker is the "consumer asked for no marks" case and every
+// A nil *markTracker is the "nobody needs marks on this call" case and every
 // method tolerates it: HandleStreamRealtime builds one only when a mark option
-// was actually supplied, so a call with neither option keeps today's behavior
-// exactly — no mark is written, and an inbound mark frame is ignored without
-// even a log line.
+// was supplied, or — since AATK-128 — when a farewell clip was, since the
+// engine waits on its own mark there. A call with none of the three keeps
+// today's behavior exactly: no mark is written, and an inbound mark frame is
+// ignored without even a log line. A farewell-only call keeps the same silence
+// on the CONSUMER's side, which is what logUnmatchedEchoes below is for.
 type markTracker struct {
 	// echoCh is the consumer's destination, resolved once per call, and nil
 	// when the consumer asked for none (it may still have asked for the
 	// request half). The engine NEVER closes it.
 	echoCh chan<- MarkEcho
+
+	// logUnmatchedEchoes gates echo's "matches no outstanding mark" line. It
+	// is false when the tracker exists only for the engine's own farewell
+	// wait: a call that named neither mark option ignored an inbound mark
+	// frame without even a log line, and the tracker appearing underneath a
+	// farewell must not change that.
+	logUnmatchedEchoes bool
 
 	mu sync.Mutex
 	// outstanding maps each written-but-unechoed mark name to the arming that
@@ -114,6 +123,15 @@ type markTracker struct {
 	// See outstandingMark.
 	gen     uint64
 	dropped int
+	// awaitName and awaitCh are the ENGINE'S own wait on a mark, as opposed to
+	// the consumer's observation of one through echoCh. AATK-128 needs exactly
+	// one: the farewell must have reached the caller before the socket closes,
+	// and the echo is the only honest report that it did. One waiter per call
+	// rather than a map, because there is one engine-internal wait and it is
+	// the last thing the call does; a second would be a different feature and
+	// would say so by needing a different shape here.
+	awaitName string
+	awaitCh   chan struct{}
 	// stopped is set when the call ends. It is what keeps a timer that fires,
 	// or an echo that arrives, during teardown from delivering on a channel
 	// whose consumer has already been told the call is over.
@@ -135,8 +153,12 @@ type outstandingMark struct {
 	gen   uint64
 }
 
-func newMarkTracker(echoCh chan<- MarkEcho) *markTracker {
-	return &markTracker{echoCh: echoCh, outstanding: make(map[string]outstandingMark)}
+func newMarkTracker(echoCh chan<- MarkEcho, consumerMarks bool) *markTracker {
+	return &markTracker{
+		echoCh:             echoCh,
+		logUnmatchedEchoes: consumerMarks,
+		outstanding:        make(map[string]outstandingMark),
+	}
 }
 
 // arm records name as outstanding and starts its bound.
@@ -170,6 +192,64 @@ func (t *markTracker) arm(name string, bound time.Duration) {
 	t.outstanding[name] = outstandingMark{timer: time.AfterFunc(bound, func() { t.expire(name, gen) }), gen: gen}
 }
 
+// await registers name as the mark the engine itself is waiting on and returns
+// the channel closed when that mark resolves — echoed by the carrier, expired
+// at its own bound, or cut short by the call ending. All three are "stop
+// waiting": the caller is deciding when it may close the socket, not judging
+// the carrier.
+//
+// It is therefore already BOUNDED without a timer of its own: arm gives every
+// mark a bound derived from the playout queued ahead of it, and expire resolves
+// this wait when that bound fires. A nil tracker, or one whose call has already
+// ended, returns an already-closed channel rather than one that never fires —
+// waiting on a tracker that cannot answer is the one outcome a caller about to
+// close a socket must not get.
+//
+// Call it BEFORE writing the mark: the echo can arrive as soon as the write
+// returns, and a waiter registered afterwards would miss it and wait out the
+// whole bound.
+//
+// One waiter at a time, and a second releases the first rather than orphaning
+// it — a channel nobody closes parks its caller until its context dies, which
+// on this path is the socket staying open past the call.
+func (t *markTracker) await(name string) <-chan struct{} {
+	ch := make(chan struct{})
+	if t == nil {
+		close(ch)
+		return ch
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped {
+		close(ch)
+		return ch
+	}
+	t.resolveAwaitLocked("")
+	t.awaitName, t.awaitCh = name, ch
+	return ch
+}
+
+// resolveAwaitLocked ends the engine's wait if name is the mark it was waiting
+// on, and reports whether it did. An empty name resolves whatever is waiting,
+// which is what stop needs: the call is over and nothing is going to answer.
+//
+// The report is what tells echo and expire that the mark they just finished was
+// the ENGINE'S own — written by playFarewell, never requested by the consumer —
+// so its resolution is not delivered on echoCh. Without that, a call supplying
+// both WithMarkEchoChan and WithFarewellAudio would hand the consumer an echo
+// (or a TimedOut record) for a mark name it never wrote, which is exactly the
+// unmatchable record markTracker's own doc says a consumer must not get.
+//
+// Called with t.mu held, from every path that finishes a mark.
+func (t *markTracker) resolveAwaitLocked(name string) bool {
+	if t.awaitCh == nil || (name != "" && name != t.awaitName) {
+		return false
+	}
+	close(t.awaitCh)
+	t.awaitName, t.awaitCh = "", nil
+	return true
+}
+
 // echo resolves an inbound mark echo from the carrier.
 //
 // An echo matching nothing outstanding is logged and NOT delivered — the
@@ -187,11 +267,17 @@ func (t *markTracker) echo(name string) {
 	}
 	m, ok := t.outstanding[name]
 	if !ok {
-		log.Printf("twilio: realtime: mark echo %q matches no outstanding mark; not delivered as a match", name)
+		if t.logUnmatchedEchoes {
+			log.Printf("twilio: realtime: mark echo %q matches no outstanding mark; not delivered as a match", name)
+		}
 		return
 	}
 	m.timer.Stop()
 	delete(t.outstanding, name)
+	if t.resolveAwaitLocked(name) {
+		// The engine's own farewell mark: not the consumer's to hear about.
+		return
+	}
 	t.deliver(MarkEcho{Name: name})
 }
 
@@ -217,7 +303,12 @@ func (t *markTracker) expire(name string, gen uint64) {
 		return
 	}
 	delete(t.outstanding, name)
+	engineOwned := t.resolveAwaitLocked(name)
 	log.Printf("twilio: realtime: carrier did not honor mark protocol for %q within its bound", name)
+	if engineOwned {
+		// The engine's own farewell mark: not the consumer's to hear about.
+		return
+	}
 	t.deliver(MarkEcho{Name: name, TimedOut: true})
 }
 
@@ -232,6 +323,10 @@ func (t *markTracker) stop() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.stopped = true
+	// Whatever the engine was waiting on, it is not going to be answered now:
+	// release it rather than leaving a caller parked on a tracker that has
+	// stopped resolving anything.
+	t.resolveAwaitLocked("")
 	for name, m := range t.outstanding {
 		m.timer.Stop()
 		delete(t.outstanding, name)
