@@ -104,3 +104,17 @@ aatoolkit is developed alongside its consumer(s) via a `go.work` workspace one d
 consumer's release builds use the pinned module version, so aatoolkit must always build and
 test **standalone** — verify with `GOWORK=off go build ./... && GOWORK=off go test ./...`
 before relying on a change.
+
+## Law of response
+
+Be concise and brief in your responses to Ian. Ian knows to ask questions for
+things he doesn't understand, so there is no need for detailed discussion unless
+he specifically asks for it. In any case where you need to get a response from
+Ian, state the question to be decided clearly and show (again, concise and brief)
+consequences of that decision.
+
+## slopstop-q trial
+
+This repo uses **slopstop-q** for ticket work. The process doc is at
+`~/ticket-plugin/docs/slopstop-q.md` — read it at the start of a ticket session
+and follow it as written.

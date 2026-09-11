@@ -94,10 +94,11 @@ func (g *micGate) shutUntil(horizon time.Time) {
 // waiting it out would silence the caller through the one moment -- their
 // barge-in -- the harness most needs to record.
 //
-// It reopens over a residual echo window, deliberately. What playoutFiller.flush
-// cannot drop is the audio already inside ffplay's stdin pipe, so for as long as
-// that takes to drain the speaker is still playing the abandoned reply with the
-// mic live. Recording the barge-in is worth that; recording nothing is not.
+// It reopens over a residual echo window, deliberately. A clear drops the
+// player's own queue too (audioPlayer.flush), but nothing can reach the bytes
+// already written into ffplay's stdin -- so for as long as that pipe takes to
+// drain, the speaker is still playing the abandoned reply with the mic live.
+// Recording the barge-in is worth that; recording nothing is not.
 func (g *micGate) open() {
 	if g == nil {
 		return

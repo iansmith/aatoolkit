@@ -8,17 +8,64 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"sync"
 
 	"github.com/iansmith/aatoolkit/telephony"
 )
+
+// playerQueueFrames sizes the queue between the read loop and the sink.
+//
+// It is denominated in frames rather than seconds because that is what the
+// queue holds, but the number is chosen from seconds: a single reply can be
+// tens of seconds of audio delivered in well under one (78s in ~5.5s, measured
+// on the demo call of 2026-09-09 09:37), and the queue's whole purpose is to
+// take a burst like that without the read loop waiting on the speaker. 8192
+// frames is roughly 160s of 20ms audio -- longer than any single reply
+// observed -- at a few hundred KB of []byte headers and payloads, which is not
+// a cost worth tuning against a call that lasts minutes.
+const playerQueueFrames = 8192
 
 // audioPlayer streams μ-law audio frames to a single sink for the lifetime of a
 // call. In production the sink is the stdin of one long-lived ffplay process, so
 // every received frame plays as one continuous stream instead of spawning a new
 // process per 20ms frame.
+//
+// WRITES ARE ASYNCHRONOUS, and that is the whole of this type's job beyond
+// owning the process. ffplay reads its stdin at playback rate, so the pipe into
+// it is a rate limiter: measured on this machine, the kernel accepts 65,440
+// bytes -- 8.18s of 8kHz mu-law -- before a write blocks. A server that sends
+// faster than real time fills that in one burst, and a synchronous write then
+// parks whichever goroutine made it for as long as ffplay takes to drain.
+//
+// In twilio-cli that goroutine is dialReadLoop, which is the ONLY websocket
+// reader, the only playout-filler tick, and the only mark echoer. So a long
+// reply used to stop the client reading its socket entirely: measured on the
+// demo call of 2026-09-09 10:57, a 12.8x burst at t=69s was followed by a
+// 16.2-SECOND gap in inbound frames while the outbound stream kept flowing at
+// 0.99x without a single gap -- the client was alive and sending, and simply
+// not receiving. The server, writing into a socket nobody drained, eventually
+// died with a broken pipe.
+//
+// So play() hands the frame to a queue and returns, and one writer goroutine
+// owns the sink. The queue is also flushable, which the pipe was not: see
+// flush.
 type audioPlayer struct {
 	sink io.WriteCloser
 	wait func() error // reaps the ffplay process on close; nil when the sink is injected
+
+	frames chan playItem
+	// writerDone closes when the writer goroutine has returned, so close can
+	// wait for the queue to reach the sink before shutting it.
+	writerDone chan struct{}
+
+	mu sync.Mutex
+	// err is the first sink write failure. Recorded rather than returned,
+	// because the write that fails happens on the writer goroutine long after
+	// the play() that queued it; play reports it on the next call, which is
+	// what lets lazyPlayer keep its "disable permanently on first failure"
+	// behavior.
+	err     error
+	dropped int
 }
 
 // newPlayerFunc is a seam for tests to inject a fake player. Default is the real newPlayerImpl.
@@ -43,27 +90,168 @@ func newPlayerImpl(ctx context.Context) (*audioPlayer, error) {
 		return nil, fmt.Errorf("newPlayer: start ffplay (installed? `brew install ffmpeg`): %w", err)
 	}
 
-	return &audioPlayer{sink: stdin, wait: cmd.Wait}, nil
+	return newAudioPlayer(stdin, cmd.Wait), nil
 }
 
 // newPlayerWithSink builds a player around an already-open sink. Used by tests.
 func newPlayerWithSink(sink io.WriteCloser) *audioPlayer {
-	return &audioPlayer{sink: sink}
+	return newAudioPlayer(sink, nil)
 }
 
-// play writes one decoded μ-law frame to the sink. Empty frames are ignored.
+// newAudioPlayer wires a sink to its writer goroutine. One constructor for both
+// the real player and the injected-sink one, so a test exercises the same
+// asynchronous path production uses rather than a synchronous stand-in.
+func newAudioPlayer(sink io.WriteCloser, wait func() error) *audioPlayer {
+	p := &audioPlayer{
+		sink:       sink,
+		wait:       wait,
+		frames:     make(chan playItem, playerQueueFrames),
+		writerDone: make(chan struct{}),
+	}
+	go p.writeLoop()
+	return p
+}
+
+// playItem is one entry in the player's queue: either audio to write, or a
+// barrier to close once everything queued ahead of it has been written.
+//
+// The barrier exists because "the queue is empty" is not the same question as
+// "everything I queued has been written" -- a frame can be inside sink.Write
+// when the queue reads empty. Travelling in the queue itself is what makes the
+// answer exact, since the writer serves entries in order.
+type playItem struct {
+	data    []byte
+	barrier chan struct{}
+}
+
+// writeLoop is the only goroutine that touches the sink. It ends when frames is
+// closed, which close does, so a returned writeLoop means every queued frame
+// has reached the sink.
+func (p *audioPlayer) writeLoop() {
+	defer close(p.writerDone)
+	for item := range p.frames {
+		if item.barrier != nil {
+			close(item.barrier)
+			continue
+		}
+		if _, err := p.sink.Write(item.data); err != nil {
+			p.mu.Lock()
+			if p.err == nil {
+				p.err = err
+			}
+			p.mu.Unlock()
+			// Keep draining rather than returning: close() closes frames and
+			// waits here, and a writer that abandoned the channel would leave
+			// it doing so forever.
+		}
+	}
+}
+
+// play queues one decoded μ-law frame and returns without waiting for it to be
+// written. Empty frames are ignored.
+//
+// The returned error is the sink's FIRST failure, seen on a later call than the
+// one that caused it -- see audioPlayer.err. It is reported once, so a caller
+// that disables playback on it does so exactly once.
+//
+// A full queue DROPS. It means ffplay has stopped consuming for long enough to
+// fall 160s behind, which is a dead player rather than a slow one; blocking
+// here would put back the exact stall this type exists to remove.
 func (p *audioPlayer) play(frame []byte) error {
+	if err := p.takeErr(); err != nil {
+		return err
+	}
 	if len(frame) == 0 {
 		return nil
 	}
-	_, err := p.sink.Write(frame)
+	// The frame is a slice of a buffer the caller may reuse, and it now
+	// outlives this call. Copy it.
+	queued := make([]byte, len(frame))
+	copy(queued, frame)
+	select {
+	case p.frames <- playItem{data: queued}:
+	default:
+		p.mu.Lock()
+		p.dropped++
+		n := p.dropped
+		p.mu.Unlock()
+		if n == 1 {
+			log.Printf("twilio-cli: audio queue full -- the player is %d frames behind and frames are being dropped", playerQueueFrames)
+		}
+	}
+	return nil
+}
+
+// takeErr returns the first sink error once and then forgets it.
+func (p *audioPlayer) takeErr() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	err := p.err
+	p.err = nil
 	return err
 }
 
-// close signals end-of-stream to the sink (the EOF that makes ffplay drain its
-// buffer and exit) and waits for the process to finish. On context cancellation
-// ffplay is killed instead; either way the process is reaped.
+// flush discards everything queued and not yet written.
+//
+// This is what a Twilio `clear` can finally act on. The server sends one when
+// the caller barges in: it has abandoned the rest of its reply and is telling
+// the client to drop what is queued. Before the queue existed there was
+// nothing here to drop -- the audio was already inside ffplay's stdin pipe,
+// which cannot be flushed without killing the player mid-call -- so a
+// discarded reply kept playing at the caller for as long as the pipe held it,
+// up to the 8.18s it accepts. Whatever is still in this queue is now dropped
+// with it; the pipe's own contents remain unflushable, which is a smaller
+// residue than the reply itself.
+func (p *audioPlayer) flush() {
+	for {
+		select {
+		case item := <-p.frames:
+			// A barrier is a promise to somebody who is waiting on it, and a
+			// flush is not a reason to break it: dropping one silently would
+			// park settle for the rest of the call.
+			if item.barrier != nil {
+				close(item.barrier)
+			}
+		default:
+			return
+		}
+	}
+}
+
+// settle blocks until every frame queued before the call has reached the sink.
+//
+// It is the synchronisation point an asynchronous player owes its callers.
+// Nothing in the call path needs it -- play returns immediately by design and
+// close drains on its own -- but a test that queues audio and then reads the
+// sink is asking "has it been written yet?", and without this it is really
+// asking "has the writer goroutine been scheduled yet?", which is a race
+// dressed as an assertion.
+func (p *audioPlayer) settle() {
+	barrier := make(chan struct{})
+	select {
+	case p.frames <- playItem{barrier: barrier}:
+	default:
+		// Queue full: nothing can be promised, and the frames this would have
+		// waited on were dropped by play for the same reason.
+		return
+	}
+	select {
+	case <-barrier:
+	case <-p.writerDone:
+	}
+}
+
+// close drains the queue to the sink, signals end-of-stream (the EOF that makes
+// ffplay drain its buffer and exit) and waits for the process to finish. On
+// context cancellation ffplay is killed instead; either way the process is
+// reaped.
+//
+// The queue is drained rather than discarded, so the tail of a call is heard.
+// That is a bounded wait: what remains plays out at real time, and the caller
+// of close is the call's own teardown.
 func (p *audioPlayer) close() error {
+	close(p.frames)
+	<-p.writerDone
 	err := p.sink.Close()
 	if p.wait != nil {
 		_ = p.wait()
@@ -119,6 +307,22 @@ func (l *lazyPlayer) play(frame []byte) {
 		_ = l.player.close()
 		l.player = nil
 		l.failed = true
+	}
+}
+
+// flush drops the queued playout, if a player was ever started. A call with no
+// audio yet has nothing to drop, which is why this is not an error.
+func (l *lazyPlayer) flush() {
+	if l.player != nil {
+		l.player.flush()
+	}
+}
+
+// settle blocks until everything played so far has reached the sink, if a
+// player was ever started. See audioPlayer.settle.
+func (l *lazyPlayer) settle() {
+	if l.player != nil {
+		l.player.settle()
 	}
 }
 

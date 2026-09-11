@@ -106,6 +106,8 @@ func TestPlayer_FramesFormOneContinuousStreamInOrder(t *testing.T) {
 		}
 	}
 
+	p.settle() // writes are asynchronous now; wait for the queue to reach the sink
+
 	want := bytes.Join([][]byte{a, b, c}, nil)
 	if !bytes.Equal(s.buf.Bytes(), want) {
 		t.Errorf("stream mismatch: got %d bytes, want %d contiguous in-order bytes",
@@ -125,6 +127,8 @@ func TestPlayer_ManyFramesAllContiguous(t *testing.T) {
 			t.Fatalf("play %d: %v", i, err)
 		}
 	}
+
+	p.settle() // writes are asynchronous now; wait for the queue to reach the sink
 
 	if s.buf.Len() != n*muLawFrame20ms {
 		t.Fatalf("total bytes = %d, want %d (no gaps, no drops)", s.buf.Len(), n*muLawFrame20ms)
@@ -476,6 +480,8 @@ func TestPlayer_ShortFinalFrameWrittenWhole(t *testing.T) {
 		t.Fatalf("play short: %v", err)
 	}
 
+	p.settle() // writes are asynchronous now; wait for the queue to reach the sink
+
 	want := append(append([]byte{}, full...), short...)
 	if !bytes.Equal(s.buf.Bytes(), want) {
 		t.Errorf("short final frame not written whole: got %d bytes, want %d",
@@ -501,23 +507,138 @@ func TestPlayer_MixedSizeFramesConcatenatedExactly(t *testing.T) {
 		}
 	}
 
+	p.settle() // writes are asynchronous now; wait for the queue to reach the sink
+
 	want := bytes.Join(frames, nil)
 	if !bytes.Equal(s.buf.Bytes(), want) {
 		t.Errorf("mixed-size concat mismatch: got %d bytes, want %d", s.buf.Len(), len(want))
 	}
 }
 
+// TestPlayer_SlowSinkDoesNotBlockPlay is the regression test for the stall that
+// stopped twilio-cli reading its socket.
+//
+// ffplay consumes stdin at playback rate, so the pipe into it is a rate
+// limiter: measured, the kernel takes 65,440 bytes -- 8.18s of 8kHz mu-law --
+// before a write blocks. play() used to write straight through, on
+// dialReadLoop's goroutine, which is the only websocket reader, the only
+// playout-filler tick and the only mark echoer. A reply arriving faster than
+// real time therefore stopped the client reading at all: on the demo call of
+// 2026-09-09 10:57, a 12.8x burst was followed by a 16.2-second gap in inbound
+// frames while the outbound stream kept flowing without one.
+//
+// So the claim is a TIMING one and the test has to be: a sink that blocks
+// must not hold up play. Asserting only that the bytes eventually arrive
+// passes against the old code, which delivered them perfectly -- and hung.
+func TestPlayer_SlowSinkDoesNotBlockPlay(t *testing.T) {
+	release := make(chan struct{})
+	s := &blockingSink{gate: release}
+	p := newPlayerWithSink(s)
+	t.Cleanup(func() { close(release) })
+
+	// Far more than ffplay's ~8s pipe would have taken before blocking.
+	const frames = 2000
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < frames; i++ {
+			if err := p.play(mkFrame(byte(i))); err != nil {
+				t.Errorf("play %d: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("play blocked on a stalled sink -- on a real call that is dialReadLoop, and the client stops reading its socket entirely")
+	}
+}
+
+// TestPlayer_FlushDropsQueuedAudio pins what a Twilio `clear` can now act on.
+//
+// The server sends one when the caller barges in: it has abandoned the rest of
+// its reply and is telling the client to drop what is queued. There used to be
+// nothing here to drop -- the audio was already inside ffplay's stdin pipe,
+// which cannot be flushed without killing the player mid-call -- so a
+// discarded reply kept playing at the caller for as long as the pipe held it,
+// up to the 8.18s it accepts.
+//
+// The sink blocks so the frames are genuinely still queued when the flush
+// lands. Against a sink that accepts writes immediately this test would pass
+// vacuously: everything would already have been written and there would be
+// nothing for flush to drop.
+func TestPlayer_FlushDropsQueuedAudio(t *testing.T) {
+	release := make(chan struct{})
+	s := &blockingSink{gate: release}
+	p := newPlayerWithSink(s)
+
+	const frames = 200
+	for i := 0; i < frames; i++ {
+		if err := p.play(mkFrame(byte(i))); err != nil {
+			t.Fatalf("play %d: %v", i, err)
+		}
+	}
+
+	p.flush()
+	close(release) // let the one write that was already in flight finish
+	p.settle()
+
+	if got := s.count(); got >= frames {
+		t.Errorf("sink wrote %d of %d frames after a flush, want far fewer -- the abandoned reply is still being played at the caller", got, frames)
+	}
+}
+
+// blockingSink parks every write until its gate is closed, standing in for
+// ffplay with a full stdin pipe.
+type blockingSink struct {
+	gate   chan struct{}
+	mu     sync.Mutex
+	writes int
+}
+
+func (b *blockingSink) Write(p []byte) (int, error) {
+	<-b.gate
+	b.mu.Lock()
+	b.writes++
+	b.mu.Unlock()
+	return len(p), nil
+}
+
+func (b *blockingSink) Close() error { return nil }
+
+// count reads the write tally under the lock -- the writer goroutine is the
+// one incrementing it.
+func (b *blockingSink) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.writes
+}
+
 // --- error / rejection ---
 
 // A sink write failure (e.g. ffplay died, broken pipe) must propagate from play,
 // not be swallowed.
+//
+// It surfaces on the NEXT play rather than the one that caused it, because
+// writes are asynchronous: the failing write happens on the writer goroutine
+// after the play that queued it has already returned. Reported once and then
+// forgotten, which is what lets lazyPlayer disable playback exactly once.
 func TestPlayer_WriteErrorPropagated(t *testing.T) {
 	wantErr := errors.New("broken pipe")
 	s := &recordingSink{writeErr: wantErr}
 	p := newPlayerWithSink(s)
 
-	if err := p.play(mkFrame(0x01)); !errors.Is(err, wantErr) {
+	if err := p.play(mkFrame(0x01)); err != nil {
+		t.Errorf("first play = %v, want nil -- the write has not been attempted yet", err)
+	}
+	p.settle()
+	if err := p.play(mkFrame(0x02)); !errors.Is(err, wantErr) {
 		t.Errorf("play error = %v, want %v", err, wantErr)
+	}
+	if err := p.play(mkFrame(0x03)); !errors.Is(err, wantErr) {
+		t.Logf("note: the error is reported once; later plays see %v", err)
 	}
 }
 
@@ -549,11 +670,16 @@ func TestLazyPlayer_DisablesAndReapsAfterMidCallWriteError(t *testing.T) {
 	l := newLazyPlayer(context.Background())
 	l.newPlayer = func(context.Context) (*audioPlayer, error) {
 		calls++
-		return &audioPlayer{sink: failing}, nil
+		// newPlayerWithSink, not a bare &audioPlayer{}: the queue and its
+		// writer goroutine are what a player IS now, and a hand-built one
+		// would have a nil queue that silently drops every frame.
+		return newPlayerWithSink(failing), nil
 	}
 
-	l.play(mkFrame(0x01)) // starts player, write fails → disable + reap
-	l.play(mkFrame(0x02)) // must be a no-op
+	l.play(mkFrame(0x01)) // starts the player and queues the frame
+	l.settle()            // the write happens here, and fails
+	l.play(mkFrame(0x02)) // sees the recorded error → disable + reap
+	l.play(mkFrame(0x03)) // must be a no-op
 
 	if calls != 1 {
 		t.Errorf("newPlayer called %d times, want 1 (dead player must not be recreated)", calls)
