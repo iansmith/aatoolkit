@@ -23,6 +23,7 @@ func newFFmpegCmd(ctx context.Context, mic string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-f", "avfoundation", "-i", normalizeMicSpec(mic),
+		"-af", "aresample=async=1",
 		"-ar", "8000", "-ac", "1",
 		"-acodec", "pcm_mulaw", "-f", "mulaw", "-",
 	)
