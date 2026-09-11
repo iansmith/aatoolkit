@@ -37,15 +37,20 @@ Posts the voice webhook, then opens the media-stream WebSocket and plays microph
 printing the server's marks and control frames as they arrive.
 
 **The earcon cue means capture is live — not that the server is listening.** When capture
-emits the mic-warm signal (the initial silence-discard period is over), twilio-cli plays a
-240 ms 400 Hz tone to the local speaker. It fires within a second or two of the call
-connecting, and it says one thing: your microphone is now being streamed, so a word spoken
-from here on will not be clipped.
+emits the mic-warm signal, at the first frame, twilio-cli plays a 240 ms 400 Hz tone to the
+local speaker. It fires within a second or two of the call connecting, and it says one
+thing: your microphone is now being streamed.
 
-It does **not** say the server is ready for you. A server that opens with a recorded
-introduction, or takes several seconds to generate its first response, is not listening
-when this tone sounds — against a server whose introduction runs a minute or more, the cue
-lands that far ahead of the caller's first real turn. Whatever signals "now it is your
+Wait for it to finish before you speak. The tone is real audio out of the same speaker, so
+the mic gate holds the outbound frames silent for its length plus the hangover — about half
+a second — and a word spoken over the beep is replaced by silence rather than clipped. Under
+`-full-duplex` there is no gate and the beep is only a beep.
+
+It does **not** say the server is ready for you. A server that takes several seconds to
+generate its first response is not listening when this tone sounds, so the cue can land
+well ahead of the caller's first real turn. (A server that has already begun speaking by
+then gets no tone at all — it is suppressed, see `playEarconUnlessServerSpoke`.) Whatever
+signals "now it is your
 turn" has to come from the server, over the call, because only the server knows. Treat
 this tone as a capture check and wait for the server's own greeting.
 
@@ -62,6 +67,7 @@ This tone used to be a single 20 ms frame, which nobody could hear; it is now 24
 | `-no-echo-marks` | Suppress mark-echo, to exercise the server's `AwaitingMarkEcho` timeout. |
 | `-record <file>` | Record inbound server audio to a raw μ-law file, with per-arrival timing in `<file>.jsonl`. |
 | `-record-sent <file>` | Record the outbound caller audio (mic or `-audio`) to a raw μ-law file, replayable with `-audio`. |
+| `-full-duplex` | Send captured audio — mic or `-audio` — even while the server is speaking. Off by default; see [Acoustic bleed](#acoustic-bleed). |
 
 ### Pointing twilio-cli at a config
 
@@ -151,16 +157,26 @@ go run ./cmd/twilio-cli -audio /tmp/me.ulaw -server other +15551234567   # same 
 The bytes are teed after the frame goes out, so the file is what this process put on the
 socket, not what the microphone heard: a frame whose write failed is not in it. That is a
 claim about sending, not about delivery — a write can succeed and the frame still be lost
-if the connection drops straight after. Chaining is safe: recording a replay reproduces
-the file it replayed, byte for byte, as long as the recording goes to a different file — a
+if the connection drops straight after.
+
+A frame the mic gate silenced is in it as silence, which is the same claim held to
+honestly: on a gated run the stretches where the server was speaking record as silence,
+because that is what went out. It is not a recording of the room, and it is not the file
+you streamed in. To capture what the microphone actually heard, run with headphones and
+`-full-duplex`.
+
+That makes `-full-duplex` the flag chaining needs. Under it, recording a replay reproduces
+the file it replayed byte for byte, as long as the recording goes to a different file — a
 run that would record over the audio it is replaying is refused before anything is
-opened, since recording truncates.
+opened, since recording truncates. Without it a replay is gated like any other source, so
+the second-generation file is silent wherever the server was speaking — and, on a call that
+opens quietly, for the ~490 ms the capture-live earcon holds the gate shut a few frames in.
 
 ### Streaming a file instead of the mic
 
 Mic capture needs ffmpeg and is macOS-only (it uses avfoundation). `-audio` streams a raw
-8 kHz μ-law file as the same 20 ms frames to the same endpoint, so it runs anywhere and is
-deterministic — which makes it the way to drive the frame path from a script or a test:
+8 kHz μ-law file as the same 20 ms frames to the same endpoint, so it runs anywhere and
+needs no hardware — which makes it the way to drive the frame path from a script or a test:
 
 ```bash
 go run ./cmd/twilio-cli -audio telephony/testdata/how_are_you.ulaw +15551234567
@@ -170,13 +186,23 @@ The repo's own fixtures work as input (`telephony/testdata/*.ulaw`, `telephony/a
 Frames are paced in real time, not burst, so the server's VAD sees the clip exactly as it
 would a live call. Reaching the end of the file ends the call the same way hanging up does.
 
-One deliberate difference from the mic path: leading silence is **not** discarded — a fixture
-streams verbatim, so replays stay reproducible. (The mic path discards up to 1500 ms of leading
-silence while the microphone warms up; a file has no warm-up.)
+Leading silence is **not** discarded — a fixture is read verbatim, frame one onward, exactly
+as the mic path now is.
 
-The earcon **does** still sound, once, as the first frame goes out. It is the same mic-warm
-signal, and there is nobody to cue on a file replay, so mute your output if you are running
-unattended.
+**A replay is gated like any other source.** What the file holds and what goes on the wire are
+different things: the mic gate silences outbound frames while the player has audio queued, and
+that includes the capture-live earcon, which plays on any call the server does not open by
+speaking. So an `-audio` run loses roughly 490 ms near the start and any stretch the server
+talks over. (The earcon is played by the read loop a beat after the first frame goes out, so
+the very first frames are ungated; and on a call the server opens by speaking, the tone is
+suppressed and the server's own audio gates the mic instead.) Pass `-full-duplex` when the
+point is to put a fixed byte stream in front of the server — a scripted run, a regression
+fixture, or the record-then-replay chain above.
+
+The earcon still sounds on a file replay — once, a beat after the first frame goes out,
+unless the server has already started speaking, in which case it is suppressed. It is the
+same mic-warm signal, and there is nobody to cue on a file replay, so mute your output if
+you are running unattended.
 
 A relative `-audio` path resolves against your current directory, not the repository root.
 
@@ -227,32 +253,59 @@ captured reply — From=+12183767443 To=+15551234567
 Do **not** set `TWILIO_API_BASE_URL` in your fleet config. Pointing the fleet at a local
 capture server by default would silently stop real SMS replies from being sent.
 
-## Acoustic bleed mitigation
+## Acoustic bleed
 
-The earcon tone is played through the local speaker and can be heard in the background
-by the microphone, creating a small amount of acoustic "bleed" into the recording. This is
-not a software isolation issue (capture and playback are separate OS processes), but a
-physical acoustics effect.
+twilio-cli plays inbound audio through the default output device and captures the default
+input device at the same time. On a laptop with no headphones the microphone hears the
+speaker, so everything the server says goes back up the stream as caller speech: the server
+transcribes its own voice, barges in on itself, and answers what it just said. Measured on
+one demo call, **every** inbound turn was the server's own preceding sentence, with the
+operator's real words appended to the tail of the echo.
 
-To eliminate acoustic bleed, use one of these mitigation strategies:
+This is physical acoustics, not a software isolation problem — capture and playback are
+separate OS processes. A real call does not have it because the carrier cancels the echo,
+so it is specific to the fake-call harness, which is exactly where turn-taking regressions
+are supposed to be visible.
 
-- **Headphones:** Connect headphones to the speaker output. The microphone will not pick up
-  headphone audio.
-- **Separate output device:** Set `AATOOLKIT_STT_MIC` to point to an alternate audio input
-  (e.g. a USB headset microphone instead of the system mic), while the earcon plays through
-  built-in speakers.
+**The mic is gated by default.** While the player still has audio to render — the server's
+speech, and the earcon tone, which goes into the same sink — the frames twilio-cli sends
+upstream carry μ-law silence instead of what the microphone heard, with a 250 ms hangover
+past the end of the audio handed to the player. Frames keep going out at the same rate:
+only their content changes, never the cadence, because a server that paces its writes
+against inbound frames stalls if the client goes quiet. A Twilio `clear` — barge-in, where
+the server abandons the rest of a reply — reopens the mic at once rather than waiting out
+audio nobody will hear.
 
-  The value is an ffmpeg avfoundation device spec, `[video]:[audio]` — so the **leading colon
-  matters**: `AATOOLKIT_STT_MIC=":1"` or `AATOOLKIT_STT_MIC=":USB Audio Device"`. A value with
-  no colon is treated as the audio half and gets one prepended, so a bare `1` still works;
-  passing a full spec such as `0:1` is left alone. List the devices ffmpeg can see with:
+"Handed to the player", not "played": twilio-cli writes into ffplay's stdin and cannot
+observe what has come out of the speaker, so the hangover covers the player's own buffering
+as well as the room's decay. That is why it is larger than a room-decay figure alone, and
+what to bear in mind before retuning it.
 
-  ```bash
-  ffmpeg -f avfoundation -list_devices true -i ""
-  ```
+The connected log line says which mode produced a call, so a recording or transcript can be
+read afterwards for what it is.
 
-For most testing scenarios, the small acoustic bleed is acceptable — speech will still
-transcribe clearly.
+This is half-duplex gating, not echo cancellation; `cmd/twilio-cli/gate.go` carries the
+argument for why, and is the place to read before changing any of it.
+
+### Turning the gate off
+
+`-full-duplex` sends the captured frames throughout. Two reasons to want it:
+
+- **Headphones.** The microphone cannot hear them, so there is nothing to gate.
+- **Testing barge-in.** With the gate shut, talking over the server is the one behaviour the
+  harness cannot exercise. Use headphones and `-full-duplex` together.
+
+A third option isolates the two devices instead: set `AATOOLKIT_STT_MIC` to an alternate
+audio input (a USB headset microphone, say) while playback stays on the built-in speakers.
+
+The value is an ffmpeg avfoundation device spec, `[video]:[audio]` — so the **leading colon
+matters**: `AATOOLKIT_STT_MIC=":1"` or `AATOOLKIT_STT_MIC=":USB Audio Device"`. A value with
+no colon is treated as the audio half and gets one prepended, so a bare `1` still works;
+passing a full spec such as `0:1` is left alone. List the devices ffmpeg can see with:
+
+```bash
+ffmpeg -f avfoundation -list_devices true -i ""
+```
 
 ## Troubleshooting
 

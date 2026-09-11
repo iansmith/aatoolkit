@@ -1,20 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
+	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/coder/websocket"
 )
 
 // AATK-99 Phase 0. These tests are transcribed from the ticket's Test
@@ -47,7 +46,7 @@ func recordSentFrom(t *testing.T, path string, src io.Reader) []byte {
 		t.Fatalf("newStreamRecorder(%s): %v", path, err)
 	}
 	seqNum := 1
-	send := mediaFrameSender(newMediaFrameEncoder("MZ_recordsent", &seqNum), rec, func([]byte) error { return nil })
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_recordsent", &seqNum), rec, nil, func([]byte) error { return nil })
 	if err := streamFileFramesFrom(context.Background(), src, send, func(bool) {}); err != nil {
 		t.Fatalf("streamFileFramesFrom: %v", err)
 	}
@@ -72,7 +71,7 @@ func TestRecordSent_WritesSentPayloads(t *testing.T) {
 	}
 	seqNum := 1
 	var wire [][]byte
-	send := mediaFrameSender(newMediaFrameEncoder("MZ_sent", &seqNum), rec, func(msg []byte) error {
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_sent", &seqNum), rec, nil, func(msg []byte) error {
 		wire = append(wire, append([]byte(nil), msg...))
 		return nil
 	})
@@ -108,7 +107,7 @@ func TestRecordSent_Off(t *testing.T) {
 	dir := t.TempDir()
 	seqNum := 1
 	sent := 0
-	send := mediaFrameSender(newMediaFrameEncoder("MZ_off", &seqNum), nil, func([]byte) error {
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_off", &seqNum), nil, nil, func([]byte) error {
 		sent++
 		return nil
 	})
@@ -174,7 +173,7 @@ func TestRecordSent_NotRecordedWhenTheSendFails(t *testing.T) {
 	seqNum := 1
 	attempt := 0
 	sendErr := errors.New("socket gone")
-	send := mediaFrameSender(newMediaFrameEncoder("MZ_failsend", &seqNum), rec, func([]byte) error {
+	send := mediaFrameSender(newMediaFrameEncoder("MZ_failsend", &seqNum), rec, nil, func([]byte) error {
 		attempt++
 		if attempt == 2 {
 			return sendErr
@@ -207,10 +206,16 @@ func TestRecordSent_NotRecordedWhenTheSendFails(t *testing.T) {
 }
 
 // TestDial_RecordsSentAudioOnlyWhenAsked pins the one link the tests above
-// cannot see: dial creating the outbound recorder and handing it down to the
-// frame source. Everything below mediaFrameSender is already covered, and all
-// of it stays green if dial passes nil to streamMic instead -- which would
-// leave -record-sent writing an empty file on every real call.
+// cannot see: dial creating the outbound recorder and wiring it into the send
+// it hands the frame source. Everything below mediaFrameSender is already
+// covered, and all of it stays green if dial builds a sender with a nil
+// recorder -- which would leave -record-sent writing an empty file on every
+// real call.
+//
+// The evidence is the file rather than a non-nil pointer arriving at the frame
+// source. Since dial owns the whole outbound path, a source has nothing to
+// inspect any more; what it has is a send, and whether that send records is
+// exactly what the file answers.
 //
 // Differential, for the same reason TestCLI_NoEchoMarks is: "records nothing
 // without the flag" passes equally well against a build that records nothing
@@ -219,14 +224,13 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 	spoken := framePattern(2)
 
 	// run dials a server that reads to the stop frame, with a fake mic that
-	// sends spoken through the real send seam and then ends (capture EOF =
+	// pushes spoken through the send dial built and then ends (capture EOF =
 	// caller hangup), so dial tears down and closes the recorder before it
-	// returns. Reports whether the frame source was handed a recorder at all.
-	run := func(t *testing.T, opts ...dialOption) (gotRecorder bool) {
+	// returns.
+	run := func(t *testing.T, opts ...dialOption) {
 		t.Helper()
-		withFakeMic(t, func(_ context.Context, conn *websocket.Conn, streamSID string, seqNum *int, rec *streamRecorder, _ func(bool)) error {
-			gotRecorder = rec != nil
-			send := mediaFrameSender(newMediaFrameEncoder(streamSID, seqNum), rec, connFrameWriter(conn))
+		withFakePlayer(t)
+		withFakeMic(t, func(_ context.Context, send func([]byte) error, _ func(bool)) error {
 			for i := 0; i*muLawFrame20ms < len(spoken); i++ {
 				if err := send(spoken[i*muLawFrame20ms : (i+1)*muLawFrame20ms]); err != nil {
 					return err
@@ -236,22 +240,18 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 		})
 
 		srv := mediaConsumingServer(t)
-		defer srv.Close()
-
 		addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 		if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, opts...); err != nil {
 			t.Fatalf("dial: %v", err)
 		}
-		return gotRecorder
 	}
 
-	path := filepath.Join(t.TempDir(), "sent.ulaw")
-	if !run(t, withSentRecording(path)) {
-		t.Fatalf("-record-sent was passed but the frame source got a nil recorder: dial must hand its outbound recorder to streamMic")
-	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sent.ulaw")
+	run(t, withSentRecording(path))
 	recorded, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		t.Fatalf("read %s: %v -- dial must wire its outbound recorder into the send it hands down", path, err)
 	}
 	if !bytes.Equal(recorded, spoken) {
 		t.Errorf("dial -record-sent recorded %d bytes, want the %d that were sent", len(recorded), len(spoken))
@@ -260,8 +260,20 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 		t.Errorf("timing sidecar missing: %v", err)
 	}
 
-	if run(t) {
-		t.Errorf("no -record-sent, but the frame source was handed a recorder: recording must be off unless the flag names a file")
+	// The other half: no flag, no recording. Same call, same frames.
+	//
+	// The evidence has to be the directory. Stat'ing a path this test invented
+	// and never passed to anything would report "not there" against any build
+	// whatsoever, including one that records everything -- it names no file the
+	// code could have written. What a recording run leaves behind is files, so
+	// what an off run must leave behind is none of them.
+	run(t)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("run without -record-sent wrote extra files: %d in the dir, want the 2 from the recorded run", len(entries))
 	}
 }
 
@@ -270,18 +282,18 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 // dial only runs that teardown -- and so only closes the outbound recorder --
 // once the media it already wrote has been consumed; a server that stopped
 // reading after the handshake would leave the frames in the socket buffer.
+//
+// It is hijackedWSServer's shape plus that read loop, so it takes the shared
+// helper rather than restating the hijack prologue -- and with it the bounded
+// join hijackedWSServer already does in its own cleanup. That join is what
+// keeps httptest.Server.Close, which does not wait for a hijacked connection's
+// goroutine, from pulling the socket out from under a handler that has not
+// been scheduled yet -- which a fake mic sending two frames and hanging up
+// makes likely. Without it the handler's read error surfaces, intermittently,
+// as "read connected frame" about a connection that was fine.
 func mediaConsumingServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		trackConn(t, conn)
-		defer conn.Close()
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // connected + start
+	return hijackedWSServer(t, func(_ net.Conn, buf *bufio.ReadWriter) {
 		for {
 			msg, err := readWSFrame(buf)
 			if err != nil {
@@ -292,23 +304,51 @@ func mediaConsumingServer(t *testing.T) *httptest.Server {
 				return
 			}
 		}
-	}))
+	})
 }
 
 // TestDial_RecordSentThroughTheAudioFrameSource pins the -audio half of the
-// wiring, which nothing else reaches: streamFileFrames must hand dial's
-// outbound recorder to mediaFrameSender.
+// wiring, which nothing else reaches: `-audio in.ulaw -record-sent out.ulaw`
+// -- the README's record-then-replay workflow, and the only frame source that
+// exists off macOS -- must put the streamed frames in the file.
 //
-// TestDial_RecordsSentAudioOnlyWhenAsked builds its own sender inside a fake
-// mic, so it proves dial passes a recorder down but cannot see what the real
-// file source does with one; every other test here drives streamFileFramesFrom,
-// which is the level below the wiring. So a build whose streamFileFrames passed
-// nil stays green across the whole suite while `-audio in.ulaw -record-sent
-// out.ulaw` -- the README's record-then-replay workflow, and the only frame
-// source that exists off macOS -- writes an empty file.
+// TestDial_RecordsSentAudioOnlyWhenAsked drives a fake mic, so it proves dial
+// builds a recording sender but says nothing about the real file source
+// reaching it; every other test here drives streamFileFramesFrom, which is the
+// level below the wiring. Between them a build could route -audio around the
+// recorder entirely and stay green across the whole suite.
+//
+// Driven --full-duplex on purpose (AATK-127): this call opens with the
+// capture-live earcon -- the server here never speaks, so nothing suppresses it
+// -- which is real bytes into the player, so on the default gated path most of
+// the clip goes out as mu-law silence by design. This test's
+// claim is that the streamed frames reach the file, so it takes the gate out
+// of the way; the gated path's own claim -- that the tee records what went on
+// the wire rather than what was captured -- is
+// TestDial_RecordSentTeesTheGatedFrames below.
 func TestDial_RecordSentThroughTheAudioFrameSource(t *testing.T) {
+	spoken, recorded := recordSentThroughFileSource(t, 3, withFullDuplex())
+	if !bytes.Equal(recorded, spoken) {
+		t.Errorf("-audio -record-sent recorded %d bytes, want the %d streamed from the file",
+			len(recorded), len(spoken))
+	}
+}
+
+// recordSentThroughFileSource drives one whole call the way an operator runs
+// `-audio in.ulaw -record-sent out.ulaw`: the real file frame source on the
+// seam -audio installs it on, a server that reads through to the stop event,
+// and dial owning everything in between. Returns what was streamed in and what
+// came back out of the recording.
+//
+// Both tests around it want the identical twenty lines and differ only in the
+// clip length, the dial options, and what they assert -- which is exactly the
+// shape that gets fixed in one place and left broken in the other.
+func recordSentThroughFileSource(t *testing.T, frames int, opts ...dialOption) (spoken, recorded []byte) {
+	t.Helper()
+	withFakePlayer(t)
+
 	dir := t.TempDir()
-	spoken := framePattern(3)
+	spoken = framePattern(frames)
 	src := filepath.Join(dir, "in.ulaw")
 	if err := os.WriteFile(src, spoken, 0o644); err != nil {
 		t.Fatalf("write -audio source: %v", err)
@@ -318,11 +358,10 @@ func TestDial_RecordSentThroughTheAudioFrameSource(t *testing.T) {
 	withFakeMic(t, streamFileFrames(src))
 
 	srv := mediaConsumingServer(t)
-	defer srv.Close()
 
 	out := filepath.Join(dir, "sent.ulaw")
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
-	if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, withSentRecording(out)); err != nil {
+	if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, append(opts, withSentRecording(out))...); err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 
@@ -330,8 +369,59 @@ func TestDial_RecordSentThroughTheAudioFrameSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", out, err)
 	}
-	if !bytes.Equal(recorded, spoken) {
-		t.Errorf("-audio %s -record-sent %s recorded %d bytes, want the %d streamed from the file",
-			src, out, len(recorded), len(spoken))
+	return spoken, recorded
+}
+
+// TestDial_RecordSentTeesTheGatedFrames is the gated half of the pair above
+// (AATK-127): -record-sent claims to be what went out, so it must be teed
+// downstream of the mic gate. A recording of what the microphone heard while
+// the gate was shut would be a file of the server's own voice labelled as the
+// caller's -- the exact confusion the gate exists to end.
+//
+// The earcon is what holds the gate shut here: this server never speaks, so
+// nothing suppresses the tone; it plays into the same player the server's audio
+// would, is accounted to the filler, and so gates the mic for its own tone plus
+// the hangover, which outlasts the whole clip.
+//
+// The assertion is on the shape, not on an offset. The leading frames carry
+// captured audio, and that is the gate being right rather than late: the tone
+// is played by the read loop on its own goroutine, signalled by the frame
+// source's first frame, so until it has actually reached the player there is
+// nothing for the microphone to have heard. How many frames that handoff takes
+// is scheduling, not a contract -- pinning it at three would fail this test on
+// a loaded machine for a reason that has nothing to do with the tee. So:
+// silence starts at some frame, it starts early, and once it starts it runs to
+// the end.
+func TestDial_RecordSentTeesTheGatedFrames(t *testing.T) {
+	// Long enough that the tone plus hangover covers every frame after the
+	// handoff, so "silent to the end" is the gate and not the clip running out.
+	const frames = 15
+
+	spoken, recorded := recordSentThroughFileSource(t, frames)
+	if len(recorded) != len(spoken) {
+		t.Fatalf("-record-sent recorded %d bytes, want %d -- the gate changes content, never cadence", len(recorded), len(spoken))
+	}
+
+	frame := func(i int) []byte { return recorded[i*muLawFrame20ms : (i+1)*muLawFrame20ms] }
+
+	shutAt := -1
+	for i := range frames {
+		if isSilenceFrame(frame(i)) {
+			shutAt = i
+			break
+		}
+	}
+	if shutAt < 0 {
+		t.Fatalf("-record-sent holds no silence at all: the tee is recording what the mic heard, not what went out (frame 0: %x...)", head(frame(0)))
+	}
+	if shutAt > frames/2 {
+		t.Errorf("the gate did not shut until frame %d of %d: the earcon should hold it shut from the opening frames of the call", shutAt, frames)
+	}
+	for i := shutAt; i < frames; i++ {
+		if !isSilenceFrame(frame(i)) {
+			t.Errorf("-record-sent frame %d went loud again after the gate shut at frame %d: got %x..., want silence through the tone",
+				i, shutAt, head(frame(i)))
+			break
+		}
 	}
 }
