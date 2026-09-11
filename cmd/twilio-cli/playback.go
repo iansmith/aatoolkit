@@ -26,6 +26,33 @@ import (
 // a cost worth tuning against a call that lasts minutes.
 const playerQueueFrames = 8192
 
+// playerLead is the most audio the writer is allowed to have sitting in the
+// sink ahead of real time.
+//
+// Zero would be the literal answer to "as little buffering as possible" and is
+// the wrong one: the writer is a goroutine, and a scheduler that wakes it 5ms
+// late with nothing in the pipe is an underrun the listener hears. The lead is
+// what the writer is allowed to be late by without the sound stopping.
+//
+// It is small enough to be the thing it replaces: the kernel pipe into ffplay
+// accepts 65,536 bytes -- measured on this machine, 8.19s of 8kHz mu-law --
+// and a server that sends faster than real time used to fill it in one burst.
+// Everything in that pipe when ffplay's audio device finishes opening is
+// audio the listener does not hear (AATK-134), so the lead is also the bound
+// on what a slow device open can cost.
+const playerLead = 200 * time.Millisecond
+
+// maxPaceCatchUp is the deficit past which the writer resyncs instead of
+// writing its way out frame by frame.
+//
+// Same reasoning as the playout filler's own resync, for the same reason: a
+// machine that slept, or a writer descheduled behind something slow, can come
+// back seconds behind. Honouring that honestly means writing seconds of audio
+// as fast as the pipe accepts -- which is precisely the burst this pacing
+// exists to prevent. A resync loses the illusion of continuity once; a burst
+// loses the opening of whatever is playing.
+const maxPaceCatchUp = 2 * time.Second
+
 // audioPlayer streams μ-law audio frames to a single sink for the lifetime of a
 // call. In production the sink is the stdin of one long-lived ffplay process, so
 // every received frame plays as one continuous stream instead of spawning a new
@@ -56,6 +83,17 @@ type audioPlayer struct {
 
 	// tap is the -record-played recorder, or nil. See attachTap.
 	tap *streamRecorder
+
+	// paced releases frames to the sink at real time rather than as fast as it
+	// accepts them; see awaitTurn. Off for an injected sink, so a test that
+	// queues a hundred frames does not wait two seconds for them.
+	paced bool
+	now   func() time.Time    // seam: wall clock
+	sleep func(time.Duration) // seam: the wait itself
+
+	// writeThrough is the wall time the audio written so far extends to. Owned
+	// by writeLoop alone -- no other goroutine reads or writes it.
+	writeThrough time.Time
 
 	frames chan playItem
 	// writerDone closes when the writer goroutine has returned, so close can
@@ -94,7 +132,9 @@ func newPlayerImpl(ctx context.Context) (*audioPlayer, error) {
 		return nil, fmt.Errorf("newPlayer: start ffplay (installed? `brew install ffmpeg`): %w", err)
 	}
 
-	return newAudioPlayer(stdin, cmd.Wait), nil
+	p := newAudioPlayer(stdin, cmd.Wait)
+	p.paced = true
+	return p, nil
 }
 
 // attachTap installs the -record-played recorder on this player.
@@ -123,6 +163,8 @@ func newAudioPlayer(sink io.WriteCloser, wait func() error) *audioPlayer {
 	p := &audioPlayer{
 		sink:       sink,
 		wait:       wait,
+		now:        time.Now,
+		sleep:      time.Sleep,
 		frames:     make(chan playItem, playerQueueFrames),
 		writerDone: make(chan struct{}),
 	}
@@ -152,6 +194,7 @@ func (p *audioPlayer) writeLoop() {
 			close(item.barrier)
 			continue
 		}
+		p.awaitTurn(item.data)
 		if _, err := p.sink.Write(item.data); err == nil {
 			// Recorded HERE, after the write returned, and nowhere else. The
 			// tap's question is what reached the player and when; a tap at
@@ -175,6 +218,30 @@ func (p *audioPlayer) writeLoop() {
 			// it doing so forever.
 		}
 	}
+}
+
+// awaitTurn blocks until this frame is due, so the sink never holds more than
+// playerLead of audio ahead of real time.
+//
+// It runs on writeLoop's goroutine and nowhere else, which is what lets
+// writeThrough be an ordinary field: play() hands frames to a channel and never
+// touches it. Blocking HERE is the whole point -- it is the one goroutine that
+// may wait, because it is the one the queue exists to decouple from the read
+// loop. Blocking in play() would restore the exact stall the queue removed.
+func (p *audioPlayer) awaitTurn(frame []byte) {
+	if !p.paced {
+		return
+	}
+	now := p.now()
+	// First frame of the call, or so far behind that catching up would itself
+	// be a burst: restart the clock from here.
+	if p.writeThrough.IsZero() || now.Sub(p.writeThrough) > maxPaceCatchUp {
+		p.writeThrough = now
+	}
+	if d := p.writeThrough.Sub(now) - playerLead; d > 0 {
+		p.sleep(d)
+	}
+	p.writeThrough = p.writeThrough.Add(telephony.MuLawDuration(len(frame)))
 }
 
 // play queues one decoded μ-law frame and returns without waiting for it to be

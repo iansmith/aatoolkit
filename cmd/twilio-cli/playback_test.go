@@ -987,3 +987,193 @@ func TestRecordPlayed_FailedWriteIsNotRecorded(t *testing.T) {
 		t.Errorf("tap recorded %d bytes for a write that failed; the file would describe audio that never reached the player", len(got))
 	}
 }
+
+// --- paced writes: keep the sink shallow so a slow device open costs little ---
+
+// pacedTestPlayer builds a paced player over sink with a fake clock, so the
+// assertions are about the pacing arithmetic rather than about wall time.
+// advance() moves the clock the way a real sleep would.
+func pacedTestPlayer(sink io.WriteCloser) (*audioPlayer, *fakeClock) {
+	c := &fakeClock{t: time.Unix(0, 0)}
+	p := newPlayerWithSink(sink)
+	p.paced = true
+	p.now = c.Now
+	p.sleep = c.Sleep
+	return p, c
+}
+
+type fakeClock struct {
+	mu     sync.Mutex
+	t      time.Time
+	slept  time.Duration
+	sleeps int
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+// Sleep advances the clock instead of waiting, which is what makes a test about
+// a 200ms lead finish instantly.
+func (c *fakeClock) Sleep(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+	c.slept += d
+	c.sleeps++
+}
+
+func (c *fakeClock) stats() (time.Duration, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.slept, c.sleeps
+}
+
+// The property the whole change exists for: a burst handed to the player must
+// not become a burst handed to the sink. 150 frames is 3s of audio -- the size
+// of the prologue prime that provoked AATK-134 -- and the writer must release
+// it at real time, holding at most playerLead ahead.
+func TestPaced_BurstIsReleasedAtRealTimeNotAtOnce(t *testing.T) {
+	sink := &recordingSink{}
+	p, clock := pacedTestPlayer(sink)
+
+	const frames = 150 // 150 * 20ms = 3s
+	for i := 0; i < frames; i++ {
+		if err := p.play(mkFrame(byte(i))); err != nil {
+			t.Fatalf("play %d: %v", i, err)
+		}
+	}
+	p.settle()
+	if err := p.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Every byte still arrives -- pacing delays, it never drops.
+	if got, want := sink.len(), frames*muLawFrame20ms; got != want {
+		t.Errorf("sink got %d bytes, want %d — pacing must not lose audio", got, want)
+	}
+
+	// 3s of audio, 200ms of which may sit ahead of real time, so the writer
+	// must have waited out the remaining ~2.8s.
+	slept, sleeps := clock.stats()
+	wantMin := 3*time.Second - playerLead - 40*time.Millisecond
+	if slept < wantMin {
+		t.Errorf("writer slept %v across %d waits, want at least %v;\n"+
+			"less than that means it handed the sink a burst, which is the defect this pacing removes",
+			slept, sleeps, wantMin)
+	}
+	if slept > 3*time.Second {
+		t.Errorf("writer slept %v, want no more than the audio's own 3s — pacing must not run SLOWER than real time", slept)
+	}
+}
+
+// The lead is what keeps a late wakeup from being an underrun, so it has to
+// actually be granted: the first playerLead of audio goes out without waiting.
+func TestPaced_LeadIsWrittenWithoutWaiting(t *testing.T) {
+	sink := &recordingSink{}
+	p, clock := pacedTestPlayer(sink)
+
+	// 200ms of lead is 10 frames; the 11th is the first that must wait.
+	for i := 0; i < 10; i++ {
+		if err := p.play(mkFrame(byte(i))); err != nil {
+			t.Fatalf("play: %v", err)
+		}
+	}
+	p.settle()
+	if slept, n := clock.stats(); slept != 0 || n != 0 {
+		t.Errorf("writer slept %v across %d waits for the first %v of audio; the lead exists precisely so it does not",
+			slept, n, playerLead)
+	}
+	// Frame 11 lands exactly ON the boundary (writeThrough-now == playerLead, so
+	// the wait is zero), which is why this asserts the property past the
+	// boundary rather than at it: once the lead is full the writer must start
+	// waiting, and by frame 13 it certainly has.
+	for i := 0; i < 3; i++ {
+		if err := p.play(mkFrame(byte(90 + i))); err != nil {
+			t.Fatalf("play: %v", err)
+		}
+	}
+	p.settle()
+	if _, n := clock.stats(); n == 0 {
+		t.Errorf("writer never waited once the lead was full; the sink would keep taking audio ahead of real time, which is the burst")
+	}
+	_ = p.close()
+}
+
+// A writer that comes back seconds behind must resync, not write its way out.
+//
+// The property is NOT "it does not sleep on the next frame" -- that is true
+// either way and pins nothing. It is that the deficit does not buy a burst: a
+// writer 3s behind with no resync writes 3s of audio at full speed before real
+// time catches up to it, which is exactly the pipe-filling this pacing removes.
+// So the assertion is on what happens to a backlog queued AFTER the gap.
+func TestPaced_FarBehindResyncsInsteadOfBursting(t *testing.T) {
+	sink := &recordingSink{}
+	p, clock := pacedTestPlayer(sink)
+
+	if err := p.play(mkFrame(1)); err != nil {
+		t.Fatalf("play: %v", err)
+	}
+	p.settle()
+
+	// The machine slept: the clock jumps far past writeThrough.
+	clock.mu.Lock()
+	clock.t = clock.t.Add(maxPaceCatchUp + time.Second)
+	clock.mu.Unlock()
+	before, _ := clock.stats()
+
+	// 150 frames is 3s. With the resync only the lead is free, so the writer
+	// must wait out nearly all of it. Without the resync it owes 3s of deficit
+	// and writes the lot without waiting once.
+	for i := 0; i < 150; i++ {
+		if err := p.play(mkFrame(byte(i))); err != nil {
+			t.Fatalf("play %d: %v", i, err)
+		}
+	}
+	p.settle()
+
+	slept, _ := clock.stats()
+	gained := slept - before
+	wantMin := 3*time.Second - playerLead - 40*time.Millisecond
+	if gained < wantMin {
+		t.Errorf("after a %v gap the writer slept only %v for 3s of audio, want at least %v;\n"+
+			"a deficit that large must be resynced away, not honoured -- honouring it means a burst",
+			maxPaceCatchUp+time.Second, gained, wantMin)
+	}
+	_ = p.close()
+}
+
+// An injected sink is not paced, so the existing suite is unaffected and a test
+// that queues a hundred frames still finishes at once.
+func TestPaced_OffForAnInjectedSink(t *testing.T) {
+	p := newPlayerWithSink(&recordingSink{})
+	if p.paced {
+		t.Error("newPlayerWithSink returned a paced player; every dial-driven test would then run at real time")
+	}
+}
+
+// The real player -- the one with an ffplay process on the other end of the
+// pipe -- must be paced. Asserting only that the injected sink is NOT paced
+// leaves the production path unpinned, which is the half that matters: an
+// unpaced newPlayerImpl is the original defect, and every test in this file
+// uses an injected sink and would stay green through it.
+func TestPaced_OnForTheRealPlayer(t *testing.T) {
+	if _, err := exec.LookPath("ffplay"); err != nil {
+		t.Skip("ffplay not installed")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p, err := newPlayerImpl(ctx)
+	if err != nil {
+		t.Fatalf("newPlayerImpl: %v", err)
+	}
+	// Nothing is played, so ffplay reaches EOF at once and exits silently.
+	defer func() { _ = p.close() }()
+
+	if !p.paced {
+		t.Error("newPlayerImpl returned an UNPACED player; it would hand ffplay a burst and everything in the pipe at device-open time is audio nobody hears (AATK-134)")
+	}
+}
