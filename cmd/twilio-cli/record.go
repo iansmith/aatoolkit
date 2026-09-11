@@ -55,6 +55,13 @@ type recorderKind struct {
 var (
 	recordInbound  = recorderKind{dir: "inbound", flag: "-record"}
 	recordOutbound = recorderKind{dir: "outbound", flag: "-record-sent"}
+	// recordPlayed is the only one of the three that is not a socket. The other
+	// two answer "what crossed the wire"; this one answers "what did this
+	// process hand to the speaker, and when" -- the interval between them being
+	// the queue, which the other two cannot see into. A defect that lives in
+	// that interval is invisible to every recording taken at a socket, which is
+	// why one survived four diagnosed calls (AATK-134).
+	recordPlayed = recorderKind{dir: "played", flag: "-record-played"}
 )
 
 // newStreamRecorder opens path for the raw μ-law stream and path+".jsonl" for

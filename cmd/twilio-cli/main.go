@@ -43,7 +43,7 @@ func validateE164(s string) error {
 // A pure validator in validateE164's shape, called before any file is opened
 // for writing and before any network call, so a refusal costs nothing and
 // arrives on its own terms.
-func validateRecordingPaths(audioPath, recordPath, recordSentPath string) error {
+func validateRecordingPaths(audioPath, recordPath, recordSentPath, recordPlayedPath string) error {
 	// claimed maps each file to the flag that already named it. -audio goes in
 	// first because it is the only one that is read rather than written, so it
 	// is the one whose collision means data loss.
@@ -54,6 +54,7 @@ func validateRecordingPaths(audioPath, recordPath, recordSentPath string) error 
 	for _, out := range []struct{ flag, path string }{
 		{"-record", recordPath},
 		{"-record-sent", recordSentPath},
+		{"-record-played", recordPlayedPath},
 	} {
 		if out.path == "" {
 			continue
@@ -319,6 +320,7 @@ func main() {
 	audioPath := flag.String("audio", "", "stream this raw μ-law file instead of capturing the mic (any platform)")
 	recordPath := flag.String("record", "", "record inbound server audio to this raw μ-law file, with per-arrival timing in <file>.jsonl")
 	recordSentPath := flag.String("record-sent", "", "record the outbound caller audio (mic or -audio) to this raw μ-law file, replayable with -audio")
+	recordPlayedPath := flag.String("record-played", "", "record what is handed to the audio player -- filler silence included -- to this raw μ-law file, with per-write timing in <file>.jsonl; the one tap that is not a socket")
 	fullDuplex := flag.Bool("full-duplex", false, "send captured audio (mic or -audio) even while the server is speaking; the default gates it to silence so laptop speakers do not feed the server its own voice")
 	flag.Parse()
 
@@ -353,7 +355,7 @@ func main() {
 	// Checked here, after -audio has been proved readable and before any
 	// network call: the recordings are opened (and truncated) inside dial, so
 	// a guard any later than this is too late on a run that reaches a server.
-	if err := validateRecordingPaths(*audioPath, *recordPath, *recordSentPath); err != nil {
+	if err := validateRecordingPaths(*audioPath, *recordPath, *recordSentPath, *recordPlayedPath); err != nil {
 		log.Fatalf("twilio-cli: %v", err)
 	}
 
@@ -383,6 +385,9 @@ func main() {
 	}
 	if *recordSentPath != "" {
 		dialOpts = append(dialOpts, withSentRecording(*recordSentPath))
+	}
+	if *recordPlayedPath != "" {
+		dialOpts = append(dialOpts, withPlayedRecording(*recordPlayedPath))
 	}
 	if *fullDuplex {
 		dialOpts = append(dialOpts, withFullDuplex())

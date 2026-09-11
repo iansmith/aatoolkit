@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -648,7 +649,7 @@ func TestPlayer_WriteErrorPropagated(t *testing.T) {
 // on later frames.
 func TestLazyPlayer_DisablesAfterStartFailure(t *testing.T) {
 	calls := 0
-	l := newLazyPlayer(context.Background())
+	l := newLazyPlayer(context.Background(), nil)
 	l.newPlayer = func(context.Context) (*audioPlayer, error) {
 		calls++
 		return nil, errors.New("no ffplay")
@@ -667,7 +668,7 @@ func TestLazyPlayer_DisablesAfterStartFailure(t *testing.T) {
 func TestLazyPlayer_DisablesAndReapsAfterMidCallWriteError(t *testing.T) {
 	failing := &recordingSink{writeErr: errors.New("broken pipe")}
 	calls := 0
-	l := newLazyPlayer(context.Background())
+	l := newLazyPlayer(context.Background(), nil)
 	l.newPlayer = func(context.Context) (*audioPlayer, error) {
 		calls++
 		// newPlayerWithSink, not a bare &audioPlayer{}: the queue and its
@@ -865,5 +866,124 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 	}
 	if len(got) < len(serverAudio) {
 		t.Errorf("playback sink holds %d bytes, want at least the server's %d", len(got), len(serverAudio))
+	}
+}
+
+// --- -record-played: the tap at the sink (AATK-134) ---
+
+// The tap's contract, and the reason it is at the sink rather than at play():
+// the bytes it records are the bytes that reached the player, in the order they
+// reached it, INCLUDING the playout filler's silence. A tap that skipped filler
+// writes could not answer the question it exists for -- "does the played stream
+// open with three seconds of silence, or with the server's audio?" -- because
+// both candidate mechanisms produce the same socket recording and differ only
+// here.
+func TestRecordPlayed_TapRecordsEveryFrameInOrderIncludingSilence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "played.ulaw")
+
+	rec, err := newStreamRecorder(recordPlayed, path, time.Now())
+	if err != nil {
+		t.Fatalf("newStreamRecorder: %v", err)
+	}
+
+	sink := &recordingSink{}
+	p := newPlayerWithSink(sink)
+	p.attachTap(rec)
+
+	// Silence first, then audio: the exact shape the ticket is trying to tell
+	// apart, so the assertion fails if the tap ever learns to skip filler.
+	silence := mkFrame(telephony.MuLawSilence)
+	audio := mkFrame(0x2A)
+	for _, f := range [][]byte{silence, silence, audio, silence, audio} {
+		if err := p.play(f); err != nil {
+			t.Fatalf("play: %v", err)
+		}
+	}
+	p.settle()
+	if err := p.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	rec.close(time.Now())
+
+	var want []byte
+	for _, f := range [][]byte{silence, silence, audio, silence, audio} {
+		want = append(want, f...)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read tap file: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("tap file = %d bytes, want %d; first difference decides whether the tap\n"+
+			"reordered, dropped, or skipped a frame — all three make it useless as evidence\n got[:16] = %v\nwant[:16] = %v",
+			len(got), len(want), got[:min(16, len(got))], want[:min(16, len(want))])
+	}
+	// The sidecar is half the instrument: the audio alone cannot show a gap,
+	// and a gap is what a three-second hole in the opening would look like.
+	sidecar, err := os.ReadFile(path + ".jsonl")
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	if n := bytes.Count(sidecar, []byte("\n")); n != 5 {
+		t.Errorf("sidecar has %d lines, want 5 — one per write that reached the sink", n)
+	}
+}
+
+// Absent the flag the tap is nil, and the player must behave exactly as it does
+// today. This is the "no cost when off" half of the contract: a diagnostic that
+// changes the thing it measures is not a diagnostic.
+func TestRecordPlayed_NilTapChangesNothing(t *testing.T) {
+	sink := &recordingSink{}
+	p := newPlayerWithSink(sink) // no attachTap: the off state
+	frames := [][]byte{mkFrame(1), mkFrame(2), mkFrame(3)}
+	for _, f := range frames {
+		if err := p.play(f); err != nil {
+			t.Fatalf("play: %v", err)
+		}
+	}
+	p.settle()
+	if err := p.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var want []byte
+	for _, f := range frames {
+		want = append(want, f...)
+	}
+	got, _ := sink.snapshot()
+	if !bytes.Equal(got, want) {
+		t.Errorf("sink got %d bytes, want %d — the wire path must not depend on whether the tap is on",
+			len(got), len(want))
+	}
+}
+
+// A write that fails never reached the player, so the tap must not claim it did.
+// Recording it would put audio in the evidence file that nobody could have
+// heard — which is the one way this instrument could actively mislead.
+func TestRecordPlayed_FailedWriteIsNotRecorded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "played.ulaw")
+
+	rec, err := newStreamRecorder(recordPlayed, path, time.Now())
+	if err != nil {
+		t.Fatalf("newStreamRecorder: %v", err)
+	}
+
+	p := newPlayerWithSink(&recordingSink{writeErr: errors.New("sink is dead")})
+	p.attachTap(rec)
+	if err := p.play(mkFrame(7)); err != nil {
+		t.Fatalf("first play should not report the error that has not happened yet: %v", err)
+	}
+	p.settle()
+	_ = p.close()
+	rec.close(time.Now())
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read tap file: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("tap recorded %d bytes for a write that failed; the file would describe audio that never reached the player", len(got))
 	}
 }

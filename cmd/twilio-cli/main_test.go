@@ -1163,10 +1163,10 @@ func TestValidateRecordingPaths(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
-			err := validateRecordingPaths(tc.audio, tc.record, tc.recordSent)
+			err := validateRecordingPaths(tc.audio, tc.record, tc.recordSent, "")
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("validateRecordingPaths(%q, %q, %q) = %v, wantErr %v",
-					tc.audio, tc.record, tc.recordSent, err, tc.wantErr)
+				t.Fatalf("validateRecordingPaths(%q, %q, %q, %q) = %v, wantErr %v",
+					tc.audio, tc.record, tc.recordSent, "", err, tc.wantErr)
 			}
 			for _, want := range tc.wantMentions {
 				if !strings.Contains(err.Error(), want) {
@@ -1186,7 +1186,7 @@ func TestValidateRecordingPaths_RelativeAndAbsoluteAreOneFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	err := validateRecordingPaths("x.ulaw", "", filepath.Join(dir, "x.ulaw"))
+	err := validateRecordingPaths("x.ulaw", "", filepath.Join(dir, "x.ulaw"), "")
 	if err == nil {
 		t.Fatalf("validateRecordingPaths accepted a relative -audio and an absolute -record-sent naming one file; the recording would truncate the file it replays")
 	}

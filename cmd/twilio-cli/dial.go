@@ -123,10 +123,11 @@ func (a *callAudio) flush(now time.Time) {
 
 // dialOptions configures optional dial() behavior.
 type dialOptions struct {
-	noEchoMarks    bool
-	recordPath     string
-	recordSentPath string
-	fullDuplex     bool
+	noEchoMarks      bool
+	recordPath       string
+	recordSentPath   string
+	recordPlayedPath string
+	fullDuplex       bool
 }
 
 // dialOption configures dialOptions.
@@ -158,6 +159,15 @@ func withSentRecording(path string) dialOption {
 	return func(o *dialOptions) { o.recordSentPath = path }
 }
 
+// withPlayedRecording records every payload handed to the audio player to path
+// (see -record-played in main.go). Unlike the other two this is not a socket
+// tap: it is written by the player's writer goroutine at the moment a payload
+// reaches the sink, so it includes the filler's silence and excludes anything
+// the queue dropped or a failed write never delivered.
+func withPlayedRecording(path string) dialOption {
+	return func(o *dialOptions) { o.recordPlayedPath = path }
+}
+
 func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	var cfg dialOptions
 	for _, opt := range opts {
@@ -173,7 +183,13 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	// One audio player per call: every media frame streams into the same player
 	// so playback is one continuous sound. Bound to ctx — a clean server close
 	// lets ffplay drain and finish; Ctrl-C (ctx cancel) kills it.
-	player := newLazyPlayer(ctx)
+	playedRecorder, err := newStreamRecorder(recordPlayed, cfg.recordPlayedPath, time.Now())
+	if err != nil {
+		return err
+	}
+	defer func() { playedRecorder.close(time.Now()) }()
+
+	player := newLazyPlayer(ctx, playedRecorder)
 	defer player.close()
 
 	// One bundle for the whole inbound frame path -- see callAudio.

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony"
 )
@@ -53,6 +54,9 @@ type audioPlayer struct {
 	sink io.WriteCloser
 	wait func() error // reaps the ffplay process on close; nil when the sink is injected
 
+	// tap is the -record-played recorder, or nil. See attachTap.
+	tap *streamRecorder
+
 	frames chan playItem
 	// writerDone closes when the writer goroutine has returned, so close can
 	// wait for the queue to reach the sink before shutting it.
@@ -92,6 +96,20 @@ func newPlayerImpl(ctx context.Context) (*audioPlayer, error) {
 
 	return newAudioPlayer(stdin, cmd.Wait), nil
 }
+
+// attachTap installs the -record-played recorder on this player.
+//
+// It MUST be called before the first play(), and lazyPlayer.play is the one
+// caller that does so. That ordering is what makes the field safe to read from
+// writeLoop without a lock: writeLoop is parked on `range p.frames` until an
+// item arrives, the first item can only arrive from a play() that happens after
+// this call, and the channel send establishes the happens-before edge. Setting
+// it after audio has started would be a data race, which is why this is a
+// method with a contract rather than an exported field.
+//
+// A nil recorder is the off state; streamRecorder.write tolerates it, so the
+// write path carries no conditional.
+func (p *audioPlayer) attachTap(rec *streamRecorder) { p.tap = rec }
 
 // newPlayerWithSink builds a player around an already-open sink. Used by tests.
 func newPlayerWithSink(sink io.WriteCloser) *audioPlayer {
@@ -134,7 +152,19 @@ func (p *audioPlayer) writeLoop() {
 			close(item.barrier)
 			continue
 		}
-		if _, err := p.sink.Write(item.data); err != nil {
+		if _, err := p.sink.Write(item.data); err == nil {
+			// Recorded HERE, after the write returned, and nowhere else. The
+			// tap's question is what reached the player and when; a tap at
+			// play() would answer the first half and get the second wrong,
+			// because the queue between them is exactly the interval under
+			// suspicion -- "queued at t=0, written at t=0" and "queued at t=0,
+			// written at t=3" are the two answers it exists to tell apart.
+			//
+			// A failed write is not recorded: those bytes never reached the
+			// player, and a tap that logged them would describe audio nobody
+			// could have heard.
+			p.tap.write(item.data, time.Now())
+		} else {
 			p.mu.Lock()
 			if p.err == nil {
 				p.err = err
@@ -274,12 +304,13 @@ func (p *audioPlayer) close() error {
 type lazyPlayer struct {
 	newPlayer func(context.Context) (*audioPlayer, error) // seam for tests
 	ctx       context.Context
+	tap       *streamRecorder // -record-played; nil when off
 	player    *audioPlayer
 	failed    bool
 }
 
-func newLazyPlayer(ctx context.Context) *lazyPlayer {
-	return &lazyPlayer{newPlayer: newPlayerFunc, ctx: ctx}
+func newLazyPlayer(ctx context.Context, tap *streamRecorder) *lazyPlayer {
+	return &lazyPlayer{newPlayer: newPlayerFunc, ctx: ctx, tap: tap}
 }
 
 // play streams one μ-law frame, starting the player on first use. Errors are
@@ -298,6 +329,9 @@ func (l *lazyPlayer) play(frame []byte) {
 			l.failed = true
 			return
 		}
+		// Before any frame reaches it -- see attachTap for why the ordering is
+		// the whole of the field's thread safety.
+		p.attachTap(l.tap)
 		l.player = p
 	}
 	if err := l.player.play(frame); err != nil {
