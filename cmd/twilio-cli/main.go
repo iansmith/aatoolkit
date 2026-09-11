@@ -321,6 +321,7 @@ func main() {
 	recordPath := flag.String("record", "", "record inbound server audio to this raw μ-law file, with per-arrival timing in <file>.jsonl")
 	recordSentPath := flag.String("record-sent", "", "record the outbound caller audio (mic or -audio) to this raw μ-law file, replayable with -audio")
 	recordPlayedPath := flag.String("record-played", "", "record what is handed to the audio player -- filler silence included -- to this raw μ-law file, with per-write timing in <file>.jsonl; the one tap that is not a socket")
+	warmTones := flag.Bool("warm-tones", false, "play a 3s rising scale (C4..F4, 500ms each) into the player before any call audio, so ffplay's audio-device open consumes tones instead of the server's first words; the tone you hear FIRST measures how long the open took. Costs a 3s mic-gate and mark-echo delay, so it is for diagnostic calls")
 	fullDuplex := flag.Bool("full-duplex", false, "send captured audio (mic or -audio) even while the server is speaking; the default gates it to silence so laptop speakers do not feed the server its own voice")
 	flag.Parse()
 
@@ -389,6 +390,7 @@ func main() {
 	if *recordPlayedPath != "" {
 		dialOpts = append(dialOpts, withPlayedRecording(*recordPlayedPath))
 	}
+	setWarmTones(*warmTones)
 	if *fullDuplex {
 		dialOpts = append(dialOpts, withFullDuplex())
 	}

@@ -110,6 +110,28 @@ type audioPlayer struct {
 	dropped int
 }
 
+// warmTonePrime is the rising scale written into ffplay's stdin at open, or nil
+// when -warm-tones is off. Set once by setWarmTones before any call.
+//
+// A package-level value rather than a parameter because newPlayerFunc is the
+// seam every test substitutes, and widening its signature to carry a diagnostic
+// would churn a dozen call sites for something none of them use. It mirrors
+// newPlayerFunc's own shape.
+var warmTonePrime []byte
+
+// setWarmTones turns the open-time scale on or off.
+//
+// A function rather than an assignment in main so the wiring is reachable from
+// a test: a flag parsed and then never applied is inert, and the inert version
+// looks identical from every other test in this package.
+func setWarmTones(on bool) {
+	if on {
+		warmTonePrime = warmToneFrames()
+		return
+	}
+	warmTonePrime = nil
+}
+
 // newPlayerFunc is a seam for tests to inject a fake player. Default is the real newPlayerImpl.
 var newPlayerFunc func(context.Context) (*audioPlayer, error) = newPlayerImpl
 
@@ -132,7 +154,9 @@ func newPlayerImpl(ctx context.Context) (*audioPlayer, error) {
 		return nil, fmt.Errorf("newPlayer: start ffplay (installed? `brew install ffmpeg`): %w", err)
 	}
 
-	p := newAudioPlayer(stdin, cmd.Wait)
+	// The scale goes STRAIGHT into ffplay's stdin, before the writer goroutine
+	// exists -- not through play(). See warmTonePrime.
+	p := newAudioPlayer(stdin, cmd.Wait, warmTonePrime)
 	p.paced = true
 	return p, nil
 }
@@ -153,13 +177,13 @@ func (p *audioPlayer) attachTap(rec *streamRecorder) { p.tap = rec }
 
 // newPlayerWithSink builds a player around an already-open sink. Used by tests.
 func newPlayerWithSink(sink io.WriteCloser) *audioPlayer {
-	return newAudioPlayer(sink, nil)
+	return newAudioPlayer(sink, nil, nil)
 }
 
 // newAudioPlayer wires a sink to its writer goroutine. One constructor for both
 // the real player and the injected-sink one, so a test exercises the same
 // asynchronous path production uses rather than a synchronous stand-in.
-func newAudioPlayer(sink io.WriteCloser, wait func() error) *audioPlayer {
+func newAudioPlayer(sink io.WriteCloser, wait func() error, prime []byte) *audioPlayer {
 	p := &audioPlayer{
 		sink:       sink,
 		wait:       wait,
@@ -167,6 +191,19 @@ func newAudioPlayer(sink io.WriteCloser, wait func() error) *audioPlayer {
 		sleep:      time.Sleep,
 		frames:     make(chan playItem, playerQueueFrames),
 		writerDone: make(chan struct{}),
+	}
+	// Written here, synchronously, before the writer goroutine is started. The
+	// writer would not touch the sink before its first queued item either, so
+	// this ordering is belt-and-braces rather than load-bearing -- but it makes
+	// the guarantee unconditional instead of resting on what writeLoop happens
+	// to do first. It also means the scale is not a frame, not queued, and not
+	// known to the filler: it sits in the pipe ahead of everything the call
+	// will produce, which is exactly what makes it disposable to the device
+	// open. An error is ignored on purpose; a sink that cannot take the prime
+	// will fail the first real frame, and that path already disables playback
+	// with a message.
+	if len(prime) > 0 {
+		_, _ = sink.Write(prime)
 	}
 	go p.writeLoop()
 	return p
