@@ -140,3 +140,54 @@ func TestNewFFmpegCmd_NormalizesTheMicSpec(t *testing.T) {
 		})
 	}
 }
+
+// The full argv, pinned. TestNewFFmpegCmd_NormalizesTheMicSpec above covers only
+// the value after -i, so every other flag in this command was unpinned: an edit
+// could drop one and no test would notice.
+//
+// Each flag here is load-bearing, which is why the whole list is asserted rather
+// than a subset:
+//
+//   - -hide_banner -loglevel error — stderr is wired to the parent's, so ffmpeg's
+//     banner and per-frame chatter would otherwise interleave with the CLI's own
+//     output on every call.
+//   - -f avfoundation — without it ffmpeg probes the -i spec as a filename.
+//   - -af aresample=async=1 — stretches, squeezes and gap-fills so device-clock
+//     drift and avfoundation timestamp gaps do not accumulate in a stream that is
+//     consumed as fixed 20 ms frames in realtime.
+//   - -ar 8000 -ac 1 -acodec pcm_mulaw -f mulaw — the carrier's wire format. A
+//     change to any of these silently produces frames the far end cannot decode,
+//     because nothing downstream re-checks the format.
+//   - "-" — stdout, which streamMicFrames reads.
+//
+// Order matters to ffmpeg: -f and -i are input options and must precede -i, while
+// -af and the codec options are output options and must follow it. Asserting the
+// exact sequence pins that too.
+//
+// This test is expected to fail when someone changes the pipeline. That is its
+// job: update the want list deliberately, in the same commit as the change.
+func TestNewFFmpegCmd_PinsTheFullArgv(t *testing.T) {
+	cmd := newFFmpegCmd(context.Background(), "0:1")
+
+	want := []string{
+		"ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-f", "avfoundation", "-i", "0:1",
+		"-af", "aresample=async=1",
+		"-ar", "8000", "-ac", "1",
+		"-acodec", "pcm_mulaw", "-f", "mulaw", "-",
+	}
+
+	// cmd.Args[0] is the command name as invoked; cmd.Path is the resolved
+	// absolute path and is deliberately not asserted, since it varies by machine.
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("argv has %d elements, want %d\n got: %v\nwant: %v",
+			len(cmd.Args), len(want), cmd.Args, want)
+	}
+	for i := range want {
+		if cmd.Args[i] != want[i] {
+			t.Errorf("argv[%d] = %q, want %q\n got: %v\nwant: %v",
+				i, cmd.Args[i], want[i], cmd.Args, want)
+		}
+	}
+}
