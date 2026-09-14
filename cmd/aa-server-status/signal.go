@@ -95,6 +95,7 @@ func watchSignals(out io.Writer, engine Engine) {
 // shuts down on a single signal — systemd sends one SIGTERM and expects
 // the process to exit within its TimeoutStopSec.
 func watchAutoSignals(stop chan struct{}) {
+	signal.Ignore(syscall.SIGTSTP)
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh

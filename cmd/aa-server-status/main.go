@@ -1,8 +1,9 @@
-// Command aa-server-status is the supervisor's operator REPL: a singleton
-// process (enforced via an exclusive flock) that prints a status table on
-// launch and accepts verbs at a "aa-server-status> " prompt. The only
-// non-interactive path is --auto up|down, added for systemd/ops automation
-// (AATK-135); every other verb is typed at the prompt.
+// Command aa-server-status is the supervisor's operator REPL: normally a
+// singleton process (enforced via an exclusive flock) that prints a status
+// table on launch and accepts verbs at a "aa-server-status> " prompt. The
+// only non-interactive path is --auto up|down, added for systemd/ops
+// automation (AATK-135); --auto down skips the flock so it can tear down a
+// fleet while --auto up holds the lock.
 package main
 
 import (
