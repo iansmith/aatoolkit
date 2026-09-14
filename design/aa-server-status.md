@@ -37,7 +37,7 @@ $ aa-server-status --auto down   # stops the enabled fleet, then exits
 
 **`--auto up`** calls `Up("")` (fleet-wide, all enabled servers), prints the status table, and blocks. A single SIGTERM or SIGINT triggers `TeardownAll` and a clean exit. There is no 3×-burst counter — systemd sends one SIGTERM and expects the process to exit within `TimeoutStopSec`. If `Up("")` returns an error (partial or total failure), the error is printed to stderr and the process exits non-zero without staying alive — a half-up fleet must not linger as if it were healthy.
 
-**`--auto down`** calls `Down("")` and exits. Non-zero on any failure, so Ansible/`task` can tell success from partial failure without parsing output.
+**`--auto down`** skips the exclusive flock (so it can run while `--auto up` holds the lock) and iterates each enabled server by name, calling `Down(name)` individually. The per-server down path discovers running processes by declared port even when this engine instance did not start them, so a cold-start `--auto down` can tear down a fleet started by another supervisor. Non-zero on any failure, so Ansible/`task` can tell success from partial failure without parsing output.
 
 The REPL path is completely unchanged when `--auto` is absent: same prompt, same EOF-teardown, same 3×-SIGINT dance. `--auto` does not accept stdin — the shared-`bufio.Reader` is nil and no prompt can be asked, so any server declaring a `[server.prompt]` will error on `--auto up`. This is deliberate: prompts are interactive by definition, and a server that needs one cannot be automated without resolving the prompt differently (env var, config override, etc.).
 

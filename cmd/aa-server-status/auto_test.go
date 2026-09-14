@@ -88,18 +88,29 @@ func TestRunAuto_UpErrorReturnedImmediately(t *testing.T) {
 
 // --- RunAuto: down mode ---
 
-// TestRunAuto_DownCallsFleetDownAndReturns pins: --auto down calls
-// Down("") and returns immediately (the program exits).
-func TestRunAuto_DownCallsFleetDownAndReturns(t *testing.T) {
-	eng := &fakeEngine{}
+// TestRunAuto_DownCallsPerServerDownAndReturns pins: --auto down iterates
+// enabled servers and calls Down(name) for each, so the per-server path's
+// port-discovery teardown is used (not the fleet-wide path that only
+// touches owned servers).
+func TestRunAuto_DownCallsPerServerDownAndReturns(t *testing.T) {
+	eng := &fakeEngine{
+		statuses: []ServerStatus{
+			{Name: "web", Enabled: true},
+			{Name: "worker", Enabled: true},
+			{Name: "debug", Enabled: false},
+		},
+	}
 	var out strings.Builder
 
 	err := RunAuto("down", &out, eng, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(eng.downCalls) != 1 || eng.downCalls[0] != "" {
-		t.Fatalf("expected Down(\"\") called once for fleet-wide down, got %v", eng.downCalls)
+	if len(eng.downCalls) != 2 {
+		t.Fatalf("expected Down called for each enabled server, got %v", eng.downCalls)
+	}
+	if eng.downCalls[0] != "web" || eng.downCalls[1] != "worker" {
+		t.Fatalf("expected Down(\"web\"), Down(\"worker\"); got %v", eng.downCalls)
 	}
 }
 
@@ -107,7 +118,10 @@ func TestRunAuto_DownCallsFleetDownAndReturns(t *testing.T) {
 // its error so main can exit non-zero — operators and Ansible need a clear
 // signal that the fleet did not come down cleanly.
 func TestRunAuto_DownErrorReturnedForExitCode(t *testing.T) {
-	eng := &fakeEngine{failNotImplemented: true}
+	eng := &fakeEngine{
+		failNotImplemented: true,
+		statuses:           []ServerStatus{{Name: "web", Enabled: true}},
+	}
 	var out strings.Builder
 
 	err := RunAuto("down", &out, eng, nil)
