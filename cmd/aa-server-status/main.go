@@ -1,7 +1,8 @@
 // Command aa-server-status is the supervisor's operator REPL: a singleton
 // process (enforced via an exclusive flock) that prints a status table on
-// launch and accepts verbs at a "aa-server-status> " prompt. There is no
-// one-shot CLI grammar — every verb is typed at the prompt.
+// launch and accepts verbs at a "aa-server-status> " prompt. The only
+// non-interactive path is --auto up|down, added for systemd/ops automation
+// (AATK-135); every other verb is typed at the prompt.
 package main
 
 import (
