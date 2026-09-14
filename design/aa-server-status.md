@@ -26,7 +26,22 @@ aa-server-status> bye
 
 Rationale: a single in-process owner is the most accurate identity model (it holds the actual handles) and matches the "one source of truth" goal. This is a small dev box; durability across terminal sessions is explicitly *not* required (the nightly ritual is `bye`/`down` before closing the lid).
 
-### 1.1 Signals
+### 1.1 Non-interactive auto mode (AATK-135)
+
+`--auto up` and `--auto down` are the one exception to the "no one-shot CLI" rule. They exist for systemd units, ops Taskfiles, and any supervisor that cannot type at a prompt.
+
+```
+$ aa-server-status --auto up     # brings the enabled fleet up, then stays alive until SIGTERM/SIGINT
+$ aa-server-status --auto down   # stops the enabled fleet, then exits
+```
+
+**`--auto up`** calls `Up("")` (fleet-wide, all enabled servers), prints the status table, and blocks. A single SIGTERM or SIGINT triggers `TeardownAll` and a clean exit. There is no 3×-burst counter — systemd sends one SIGTERM and expects the process to exit within `TimeoutStopSec`. If `Up("")` returns an error (partial or total failure), the error is printed to stderr and the process exits non-zero without staying alive — a half-up fleet must not linger as if it were healthy.
+
+**`--auto down`** skips the exclusive flock (so it can run while `--auto up` holds the lock) and iterates each enabled server by name, calling `Down(name)` individually. The per-server down path discovers running processes by declared port even when this engine instance did not start them, so a cold-start `--auto down` can tear down a fleet started by another supervisor. Non-zero on any failure, so Ansible/`task` can tell success from partial failure without parsing output.
+
+The REPL path is completely unchanged when `--auto` is absent: same prompt, same EOF-teardown, same 3×-SIGINT dance. `--auto` does not accept stdin — the shared-`bufio.Reader` is nil and no prompt can be asked, so any server declaring a `[server.prompt]` will error on `--auto up`. This is deliberate: prompts are interactive by definition, and a server that needs one cannot be automated without resolving the prompt differently (env var, config override, etc.).
+
+### 1.2 Signals
 
 - **Ctrl-C (`SIGINT`):** a single or double SIGINT is **swallowed** (fleet keeps running). **Three SIGINTs within ~2 s** → run `down`, then exit. This prevents an accidental keystroke from tearing down the fleet.
 - **Ctrl-Z (`SIGTSTP`):** trapped and **ignored** — the supervisor must not be suspended out from under its children.
