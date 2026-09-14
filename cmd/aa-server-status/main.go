@@ -69,9 +69,12 @@ func main() {
 
 	if autoMode != "" {
 		engine := NewEngine(cfg, nil, os.Stdout)
-		engine.WatchConfig(basePath)
-		stop := make(chan struct{})
-		go watchAutoSignals(stop)
+		var stop chan struct{}
+		if autoMode == "up" {
+			engine.WatchConfig(basePath)
+			stop = make(chan struct{})
+			go watchAutoSignals(stop)
+		}
 		if err := RunAuto(autoMode, os.Stdout, engine, stop); err != nil {
 			fmt.Fprintf(os.Stderr, "aa-server-status: %v\n", err)
 			os.Exit(1)

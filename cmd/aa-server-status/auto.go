@@ -10,10 +10,9 @@ import (
 // the enabled fleet and returns immediately. Errors from the engine are
 // returned so the caller can exit non-zero.
 func RunAuto(mode string, out io.Writer, engine Engine, stop <-chan struct{}) error {
-	engine.ReloadConfigIfChanged(out)
-
 	switch mode {
 	case "up":
+		engine.ReloadConfigIfChanged(out)
 		if err := engine.Up(""); err != nil {
 			return err
 		}
@@ -24,6 +23,6 @@ func RunAuto(mode string, out io.Writer, engine Engine, stop <-chan struct{}) er
 	case "down":
 		return engine.Down("")
 	default:
-		return fmt.Errorf("--auto: unknown mode %q (want up or down)", mode)
+		panic(fmt.Sprintf("RunAuto: invalid mode %q; parseFlags must reject this", mode))
 	}
 }

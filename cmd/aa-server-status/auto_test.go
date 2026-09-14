@@ -82,9 +82,8 @@ func TestRunAuto_UpErrorReturnedImmediately(t *testing.T) {
 func TestRunAuto_DownCallsFleetDownAndReturns(t *testing.T) {
 	eng := &fakeEngine{}
 	var out strings.Builder
-	stop := make(chan struct{})
 
-	err := RunAuto("down", &out, eng, stop)
+	err := RunAuto("down", &out, eng, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,27 +98,10 @@ func TestRunAuto_DownCallsFleetDownAndReturns(t *testing.T) {
 func TestRunAuto_DownErrorReturnedForExitCode(t *testing.T) {
 	eng := &fakeEngine{failNotImplemented: true}
 	var out strings.Builder
-	stop := make(chan struct{})
 
-	err := RunAuto("down", &out, eng, stop)
+	err := RunAuto("down", &out, eng, nil)
 	if err == nil {
 		t.Fatal("expected error from failing Down, got nil")
-	}
-}
-
-// --- RunAuto: invalid mode ---
-
-func TestRunAuto_InvalidModeReturnsError(t *testing.T) {
-	eng := &fakeEngine{}
-	var out strings.Builder
-	stop := make(chan struct{})
-
-	err := RunAuto("bogus", &out, eng, stop)
-	if err == nil {
-		t.Fatal("expected error for invalid mode, got nil")
-	}
-	if !strings.Contains(err.Error(), "bogus") {
-		t.Errorf("error should name the bad mode, got: %v", err)
 	}
 }
 
