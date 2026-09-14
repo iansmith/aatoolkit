@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,10 +24,20 @@ func TestRunAuto_UpCallsFleetUpAndBlocksUntilStop(t *testing.T) {
 		done <- RunAuto("up", &out, eng, stop)
 	}()
 
-	// Give RunAuto time to call Up and settle.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for RunAuto to call Up and reach the blocking <-stop.
+	// fakeEngine.Up is synchronous, so once upCalls is populated the
+	// goroutine is past Up and blocked on the channel.
+	deadline := time.After(2 * time.Second)
+	for len(eng.upCalls) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("RunAuto did not call Up within timeout")
+		default:
+			runtime.Gosched()
+		}
+	}
 
-	if len(eng.upCalls) != 1 || eng.upCalls[0] != "" {
+	if eng.upCalls[0] != "" {
 		t.Fatalf("expected Up(\"\") called once for fleet-wide up, got %v", eng.upCalls)
 	}
 
