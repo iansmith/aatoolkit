@@ -89,3 +89,14 @@ func watchSignals(out io.Writer, engine Engine) {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTSTP)
 	runSignalLoop(sigCh, out, engine, os.Exit)
 }
+
+// watchAutoSignals closes stop on the first SIGTERM or SIGINT, so RunAuto
+// can tear down and exit. Unlike the REPL's 3x-burst counter, auto mode
+// shuts down on a single signal — systemd sends one SIGTERM and expects
+// the process to exit within its TimeoutStopSec.
+func watchAutoSignals(stop chan struct{}) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	<-sigCh
+	close(stop)
+}
