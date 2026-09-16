@@ -151,6 +151,9 @@ type realtimeConfig struct {
 	// rather than stored as a plain channel, for the same reason.
 	carrierAudioChanFor func(start Frame) chan<- CarrierAudio
 
+	// inboundAudioChanFor is the caller→backend μ-law, base64 as on the wire.
+	inboundAudioChanFor func(start Frame) chan<- string
+
 	// markRequestChanFor mirrors voiceUpdateChanFor — the consumer writes,
 	// the engine reads — but carries the name of a Twilio mark to place after
 	// the audio written so far. AATK-105: it is the request half of the
@@ -288,6 +291,13 @@ func (c realtimeConfig) carrierAudioChan(start Frame) chan<- CarrierAudio {
 		return nil
 	}
 	return c.carrierAudioChanFor(start)
+}
+
+func (c realtimeConfig) inboundAudioChan(start Frame) chan<- string {
+	if c.inboundAudioChanFor == nil {
+		return nil
+	}
+	return c.inboundAudioChanFor(start)
 }
 
 // markRequestChan resolves the source for one call, or nil when the consumer
@@ -520,6 +530,27 @@ func WithCarrierAudioChan(ch chan<- CarrierAudio) RealtimeOption {
 // A nil function, or one returning nil, means no consumer.
 func WithCarrierAudioChanFor(fn func(start Frame) chan<- CarrierAudio) RealtimeOption {
 	return func(c *realtimeConfig) { c.carrierAudioChanFor = fn }
+}
+
+// WithInboundAudioChan delivers each inbound media payload (base64 μ-law, as
+// on the wire) to ch. Non-blocking: a full ch drops the frame rather than
+// stalling the carrier pump. The engine never closes ch, so a consumer may
+// reuse it across calls.
+//
+// Observation is independent of forwarding: a dropped observation still
+// reaches the backend. Without this option, inbound is forwarded exactly as
+// today, with no observer.
+func WithInboundAudioChan(ch chan<- string) RealtimeOption {
+	return WithInboundAudioChanFor(func(Frame) chan<- string { return ch })
+}
+
+// WithInboundAudioChanFor resolves the destination when the call arrives,
+// from the start frame — so a consumer can route different calls to
+// different channels. Mirrors WithCarrierAudioChanFor.
+//
+// A nil function, or one returning nil, means no consumer.
+func WithInboundAudioChanFor(fn func(start Frame) chan<- string) RealtimeOption {
+	return func(c *realtimeConfig) { c.inboundAudioChanFor = fn }
 }
 
 // WithClientEventChan lets a consumer send its own events to the backend for
@@ -992,7 +1023,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event", fill.observe)
 
 	carrierDone := make(chan error, 1)
-	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge, marks) }()
+	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge, marks, cfg.inboundAudioChan(start)) }()
 
 	// Resolved once, before the loop, mirroring how transcriptChan/
 	// serverEventChan are resolved once via cfg.transcriptChan(start) /
@@ -1444,7 +1475,7 @@ func deliver[T any](src <-chan T, out chan<- T, what string, observe func(T)) {
 // It forwards Frame.EncodedPayload — the base64 exactly as it arrived — never
 // re-encoding Frame.Payload, which would spend a decode and an encode per 20 ms
 // frame reproducing bytes the carrier already sent.
-func pumpCarrierToBridge(ctx context.Context, conn *websocket.Conn, bridge *realtime.Bridge, marks *markTracker) error {
+func pumpCarrierToBridge(ctx context.Context, conn *websocket.Conn, bridge *realtime.Bridge, marks *markTracker, inbound chan<- string) error {
 	for {
 		_, raw, err := conn.Read(ctx)
 		if err != nil {
@@ -1460,6 +1491,12 @@ func pumpCarrierToBridge(ctx context.Context, conn *websocket.Conn, bridge *real
 
 		switch f.Event {
 		case EventMedia:
+			if inbound != nil && f.EncodedPayload != "" {
+				select {
+				case inbound <- f.EncodedPayload:
+				default:
+				}
+			}
 			if err := bridge.Forward(ctx, f.EncodedPayload); err != nil {
 				log.Printf("twilio: realtime: forward to backend: %v", err)
 				return err
