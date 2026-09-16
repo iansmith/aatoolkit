@@ -128,6 +128,9 @@ func TestRunAuto_DownErrorReturnedForExitCode(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from failing Down, got nil")
 	}
+	if !strings.Contains(out.String(), ErrorMark) {
+		t.Errorf("down failure output = %q, want it to contain %q so software_update can grep the log", out.String(), ErrorMark)
+	}
 }
 
 // --- RunAuto: existing REPL unchanged ---

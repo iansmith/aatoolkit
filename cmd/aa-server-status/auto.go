@@ -39,7 +39,7 @@ func coldDown(out io.Writer, engine Engine) error {
 			continue
 		}
 		if err := engine.Down(s.Name); err != nil {
-			fmt.Fprintf(out, "down %s: %v\n", s.Name, err)
+			printErrTo(out, "down %s: %v", s.Name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

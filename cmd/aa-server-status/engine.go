@@ -1665,7 +1665,7 @@ func (e *RealEngine) TeardownAll() []string {
 	e.mu.Unlock()
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "aa-server-status: teardown: %v\n", err)
+		printErr("teardown: %v", err)
 	}
 
 	sort.Strings(names)

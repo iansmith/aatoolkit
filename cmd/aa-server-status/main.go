@@ -49,7 +49,7 @@ func main() {
 
 	cfg, err := config.Load(basePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "aa-server-status: config error: %v\n", err)
+		printErr("config error: %v", err)
 		os.Exit(1)
 	}
 
@@ -64,7 +64,7 @@ func main() {
 	if autoMode == "down" {
 		engine := NewEngine(cfg, nil, os.Stdout)
 		if err := RunAuto("down", os.Stdout, engine, nil); err != nil {
-			fmt.Fprintf(os.Stderr, "aa-server-status: %v\n", err)
+			printErr("%v", err)
 			os.Exit(1)
 		}
 		return
@@ -72,7 +72,7 @@ func main() {
 
 	lock, err := AcquireLock(lockPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "aa-server-status: %v\n", err)
+		printErr("%v", err)
 		os.Exit(1)
 	}
 	defer lock.Release()
@@ -83,7 +83,7 @@ func main() {
 		stop := make(chan struct{})
 		go watchAutoSignals(stop)
 		if err := RunAuto("up", os.Stdout, engine, stop); err != nil {
-			fmt.Fprintf(os.Stderr, "aa-server-status: %v\n", err)
+			printErr("%v", err)
 			os.Exit(1)
 		}
 		return
@@ -98,7 +98,7 @@ func main() {
 	engine.WatchConfig(basePath)
 	go watchSignals(os.Stdout, engine)
 	if err := Run(stdin, os.Stdout, engine); err != nil {
-		fmt.Fprintf(os.Stderr, "aa-server-status: %v\n", err)
+		printErr("%v", err)
 		os.Exit(1)
 	}
 }
