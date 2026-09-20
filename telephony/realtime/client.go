@@ -81,7 +81,7 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 	// Read until the session is acknowledged. A backend is free to emit other
 	// events first; only session.created ends the handshake.
 	//
-	// The last such frame is kept, and named in the failure, because it is
+	// One such frame is kept, and named in the failure, because it is
 	// usually the only thing that says WHY the handshake never completed
 	// (AATK-136). A backend that refuses the session — an unknown field, a
 	// rejected voice, a malformed tool declaration — answers with an error
@@ -94,22 +94,61 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 	// Raw, not a summary of it — this package models only the handful of
 	// fields it acts on, and the part naming the problem is one the protocol
 	// defines and this package does not read.
+	//
+	// PREFERRED, not merely latest: the first EventError frame wins and is
+	// then never replaced, because a backend that refuses the session may
+	// well keep talking afterwards — a rate-limit notice, a keepalive — and
+	// the newest frame is then noise that buries the reason. Measured: error
+	// frame, then one benign frame, and the dial named the benign one.
+	// Preferring rather than FILTERING is the other half, and deliberate: a
+	// backend refusing an engine extension need not label its refusal
+	// EventError at all, so filtering would return exactly those callers to a
+	// bare deadline.
 	var last json.RawMessage
+	var haveError bool
 	for {
 		ev, err := c.Read(ctx)
 		if err != nil {
 			conn.CloseNow()
 			if len(last) > 0 {
-				return nil, fmt.Errorf("realtime: awaiting %s: %w (last frame from backend: %s)",
-					EventSessionCreated, err, last)
+				return nil, fmt.Errorf("realtime: awaiting %s: %w (%s: %s)",
+					EventSessionCreated, err, lastFrameLabel, clipFrame(last))
 			}
 			return nil, fmt.Errorf("realtime: awaiting %s: %w", EventSessionCreated, err)
 		}
 		if ev.Type == EventSessionCreated {
 			return c, nil
 		}
-		last = ev.Raw
+		if !haveError {
+			last = ev.Raw
+			haveError = ev.Type == EventError
+		}
 	}
+}
+
+// lastFrameLabel introduces the retained frame in Dial's error. It is a
+// constant rather than a literal so the tests that assert on it — one that
+// requires it when a frame arrived, one that forbids it when none did —
+// cannot be silently defeated by rewording the message.
+const lastFrameLabel = "last frame from backend"
+
+// maxFrameInError bounds how much of a backend frame reaches that error.
+//
+// The transport already caps a frame at coder/websocket's default read limit
+// (~32 KiB), so this is not about unbounded growth; it is about the log line.
+// HandleStreamRealtime logs this error on every refused dial, and a 32 KB
+// single line is a bad trade for a diagnostic that measured 60-120 bytes in
+// every refusal actually observed.
+const maxFrameInError = 512
+
+// clipFrame renders raw for an error message, bounded. The result is for
+// human eyes and is not guaranteed to be valid JSON — a clipped frame says
+// so rather than pretending to be whole.
+func clipFrame(raw json.RawMessage) string {
+	if len(raw) <= maxFrameInError {
+		return string(raw)
+	}
+	return fmt.Sprintf("%s… (%d bytes truncated)", raw[:maxFrameInError], len(raw)-maxFrameInError)
 }
 
 // DialOption configures the session negotiated by Dial. Supplying none

@@ -92,13 +92,19 @@ func TestBuildSessionUpdate_EmptyNonNilToolsOmitsTheField(t *testing.T) {
 // splice would emit `"session":{,"tools":…` — invalid JSON, reported by
 // nothing, discovered as a dial that never completes.
 //
-// It cannot today, and the reason is worth pinning rather than asserting in
-// prose: Audio is a STRUCT, and `omitempty` has no effect on a struct field,
-// so no tag change can remove it. (Go 1.24's `omitzero` can — that, or
-// deleting Audio, is what this test would catch.) An earlier version of
-// buildSessionUpdate's comment credited Type with this guarantee and offered
-// "give every field omitempty" as the counterexample; both were wrong, and a
-// test is what keeps the next such claim honest.
+// What this catches, stated as what it actually catches: sessionSpec having
+// NO unconditionally-emitted field. Two fields supply that today and either
+// one suffices — Type (a string without omitempty is emitted whatever its
+// value) and Audio (a struct, on which omitempty is a no-op). So silencing
+// one alone leaves the splice safe and correctly leaves this test GREEN:
+// dropping Audio, or putting omitzero on it, passes. Only silencing both —
+// omitempty/omitzero on Type together with omitzero on Audio — reds it.
+//
+// That precision is the point. Three successive versions of
+// buildSessionUpdate's comment stated the rule wrongly, and an earlier
+// version of THIS comment named two mutations it claimed to catch and did
+// not. A test doc that overstates its own reach is the failure it exists to
+// prevent.
 //
 // slopstop:test regression — guards: "sessionSpec must never marshal to an empty object."
 func TestBuildSessionUpdate_SessionSpecCannotMarshalEmpty(t *testing.T) {

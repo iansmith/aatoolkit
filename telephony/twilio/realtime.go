@@ -454,15 +454,15 @@ func WithTools(tools json.RawMessage) RealtimeOption {
 // handshake a caller supplying no option gets — the same rule WithVoice,
 // WithInstructions and WithTools all state.
 //
-// ONE identifier for every call this option is applied to. That is the right
-// shape only where the option slice is built per call. Calling
-// HandleStreamRealtime directly lets a caller do that — though nothing makes
-// them: hoisting the slice to a package variable reproduces the collision
-// below just as well. On the NewStreamHandler path it is not available at
-// all: that binds its options once and replays them for every call it serves,
-// so an identifier supplied here is per-process and every concurrent caller
-// announces the same session — the precise collision this field exists to
-// prevent. Use WithSessionIDFor unless the value really is built per call.
+// ONE identifier for every call this option is applied to, which is the right
+// shape only where the option slice is built per call — realtime.WithSessionID
+// carries that argument in full and this comment does not repeat it.
+//
+// What is specific to THIS layer: NewStreamHandler binds its options once and
+// replays them for every call it serves, so an identifier supplied here is
+// per-process on that path and every concurrent caller announces the same
+// session — the precise collision the field exists to prevent. Use
+// WithSessionIDFor there.
 //
 // This is sugar over WithSessionIDFor, exactly as WithInstructions is over
 // WithInstructionsFor.

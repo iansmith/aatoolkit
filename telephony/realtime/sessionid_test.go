@@ -137,12 +137,12 @@ func TestBuildSessionUpdate_SessionIDComposesWithToolsSplice(t *testing.T) {
 	}
 
 	var decoded struct {
-		// Tools is belt-and-braces: it pins WHERE the spliced value landed,
-		// but the json.Valid check above fires first for every brace-arithmetic
-		// mistake actually available here — stripping one brace instead of two
-		// yields a trailing '}' and fails validity, not this. It is kept
-		// because nesting is what this test is about, not because a known
-		// mutation reaches it. There is deliberately no matching check for
+		// Tools must stay unset here, and this check is reachable: a splice
+		// that strips ONE brace and appends one — a coherent mis-edit, not a
+		// typo — lands tools at sessionUpdate's top level in output that is
+		// still valid JSON and still contains the substring checked above.
+		// Measured: that mutation reds this assertion and nothing else in
+		// either splice test. There is deliberately no matching check for
 		// client_session_id: it is an ordinary struct field on sessionSpec, so
 		// encoding/json cannot emit it anywhere but inside "session", and such
 		// a check could never fail.

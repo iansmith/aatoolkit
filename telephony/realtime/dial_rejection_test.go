@@ -16,24 +16,31 @@ import (
 //
 // Dial's loop reads until session.created and ignores every other frame. A
 // backend that rejects the handshake — because it has not been taught an
-// engine extension like client_session_id, or because it dislikes any other
-// field — answers with an error frame naming the problem and then simply
-// waits. The loop discarded that frame, so the dial failed with nothing but
-// the caller's own deadline, and the one sentence identifying the cause was
-// dropped on the floor.
+// engine extension like the consumer session identifier, or because it
+// dislikes any other field — answers with an error frame naming the problem
+// and then simply waits. The loop discarded that frame, so the dial failed
+// with nothing but the caller's own deadline, and the one sentence
+// identifying the cause was dropped on the floor.
 //
 // This is the first-run experience for a consumer turning on a session field
 // their backend does not know, so the frame has to survive into the error.
 
-// rejectingBackend answers the handshake with an error frame and keeps the
-// socket OPEN, which is the hard case: a backend that closes surfaces
-// promptly as a read error, while one that stays open leaves Dial blocked
-// until the caller's context ends, with nothing said about why.
+// benignFrameType is what a backend says AFTER refusing and before going
+// quiet. Keeping the refusal rather than this is the whole point of
+// preferring an error frame, so it is a distinct type the tests can assert is
+// absent.
+const benignFrameType = "rate_limits.updated"
+
+// refusingBackend answers the handshake with the frames in order and then
+// keeps the socket OPEN, which is the hard case: a backend that closes
+// surfaces promptly as a read error, while one that stays open leaves Dial
+// blocked until the caller's context ends, with nothing said about why.
 //
 // It is a local server rather than a knob on the shared fakeBackend because
 // that one always sends session.created, which is the one thing this backend
-// must never do.
-func rejectingBackend(t *testing.T, message string) string {
+// must never do. Passing no frames covers the silent backend, so there is one
+// server here and not two.
+func refusingBackend(t *testing.T, frames ...any) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, nil)
@@ -46,10 +53,11 @@ func rejectingBackend(t *testing.T, message string) string {
 		if _, _, err := c.Read(ctx); err != nil {
 			return
 		}
-		_ = writeJSON(ctx, c, map[string]any{
-			"type":  "error",
-			"error": map[string]string{"type": "invalid_request_error", "message": message},
-		})
+		for _, f := range frames {
+			if err := writeJSON(ctx, c, f); err != nil {
+				return
+			}
+		}
 		// Say nothing further, and do not close: block until the client
 		// gives up, which is what the real service does.
 		<-ctx.Done()
@@ -58,54 +66,81 @@ func rejectingBackend(t *testing.T, message string) string {
 	return "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
-// TestDial_RejectedHandshakeSurfacesTheBackendsLastFrame pins that the reason
-// reaches the caller. Without it the error names only the deadline, and a
-// consumer has no way to learn which field the backend refused short of
-// packet capture.
+func errorFrame(message string) map[string]any {
+	return map[string]any{
+		"type":  EventError,
+		"error": map[string]string{"type": "invalid_request_error", "message": message},
+	}
+}
+
+// TestDial_RejectedHandshakeSurfacesTheBackendsRefusal pins that the reason
+// reaches the caller whichever side of the refusal the noise falls on.
+//
+// BOTH orderings are needed, and neither alone suffices — this is the whole
+// content of "prefer the error frame" as opposed to keeping the first or the
+// last. A backend is explicitly free to emit other events around its
+// refusal, so:
+//
+//   - refusal LAST catches an implementation that keeps the earliest frame;
+//   - refusal FIRST catches one that keeps the latest.
+//
+// Measured: with only the first case present, mutating Dial to keep the first
+// frame passed. Each case kills exactly the mutant the other misses.
 //
 // slopstop:test contract
-func TestDial_RejectedHandshakeSurfacesTheBackendsLastFrame(t *testing.T) {
+func TestDial_RejectedHandshakeSurfacesTheBackendsRefusal(t *testing.T) {
 	const reason = "Unknown parameter: 'session.client_session_id'."
-	url := rejectingBackend(t, reason)
+	benign := map[string]any{"type": benignFrameType, "rate_limits": []any{}}
 
-	// Short bound: this package's Dial has no timer of its own, so the
-	// caller's context is what ends the wait.
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
+	for _, tc := range []struct {
+		name   string
+		frames []any
+	}{
+		{"refusal then noise", []any{errorFrame(reason), benign}},
+		{"noise then refusal", []any{benign, errorFrame(reason)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url := refusingBackend(t, tc.frames...)
 
-	c, err := Dial(ctx, url, WithSessionID("sess-rejected"))
-	if err == nil {
-		c.Close()
-		t.Fatal("Dial must fail when the backend never acknowledges the session")
-	}
-	if !strings.Contains(err.Error(), reason) {
-		t.Fatalf("Dial's error must carry the backend's own explanation.\n got  %v\nwant substring %q", err, reason)
+			// Short bound: this package's Dial has no timer of its own, so
+			// the caller's context is what ends the wait.
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+
+			c, err := Dial(ctx, url, WithSessionID("sess-rejected"))
+			if err == nil {
+				c.Close()
+				t.Fatal("Dial must fail when the backend never acknowledges the session")
+			}
+			got := err.Error()
+			if !strings.Contains(got, reason) {
+				t.Fatalf("Dial's error must carry the backend's own explanation.\n got  %v\nwant substring %q", err, reason)
+			}
+			if strings.Contains(got, benignFrameType) {
+				t.Fatalf("a frame around the refusal must not replace it.\n got %v", err)
+			}
+			// The label is asserted positively here so that rewording it
+			// cannot silently vacate the negative assertion in the
+			// silent-backend test.
+			if !strings.Contains(got, lastFrameLabel) {
+				t.Fatalf("Dial's error must introduce the frame with %q.\n got %v", lastFrameLabel, err)
+			}
+		})
 	}
 }
 
 // TestDial_RejectedHandshakeWithNoFrameStillReportsTheDeadline pins the other
 // half: a backend that says NOTHING at all must still produce the error it
-// always did, with no empty "last frame" noise appended to it.
+// always did, with no empty frame clause appended to it.
 //
 // slopstop:test regression — guards: "A silent backend's dial error is unchanged."
 func TestDial_RejectedHandshakeWithNoFrameStillReportsTheDeadline(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer c.CloseNow()
-		if _, _, err := c.Read(r.Context()); err != nil {
-			return
-		}
-		<-r.Context().Done()
-	}))
-	t.Cleanup(srv.Close)
+	url := refusingBackend(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	c, err := Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"))
+	c, err := Dial(ctx, url)
 	if err == nil {
 		c.Close()
 		t.Fatal("Dial must fail when the backend never acknowledges the session")
@@ -113,7 +148,7 @@ func TestDial_RejectedHandshakeWithNoFrameStillReportsTheDeadline(t *testing.T) 
 	if !strings.Contains(err.Error(), EventSessionCreated) {
 		t.Fatalf("a silent backend's error must still name what was awaited, got %v", err)
 	}
-	if strings.Contains(err.Error(), "last frame") {
+	if strings.Contains(err.Error(), lastFrameLabel) {
 		t.Fatalf("no frame arrived, so the error must not mention one: %v", err)
 	}
 }
