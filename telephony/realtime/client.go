@@ -134,15 +134,12 @@ func WithVoice(name string) DialOption {
 // nor normalized here, and it is never read back off the wire. Empty (the
 // default) omits the field rather than sending "".
 //
-// Per call, when the consumer supplies options per call — and it is expected
-// to vary per call, because a session identifier is by definition
-// per-session. There is deliberately no WithSessionIDFor twin taking a
-// resolver, which is the opposite of the reason WithVoice and WithTools have
-// none: the variation here is real, but it is supplied from the other side.
-// The consumer builds its option slice when it opens the session, so the
-// value is already as fresh as a resolver could make it. A resolver taking
-// the carrier's frame would in fact be worse, since the identifier is minted
-// by the consumer and is not derivable from that frame.
+// A plain string is the right shape HERE and needs no resolver twin, because
+// Dial's options are per-dial by construction: one Dial, one session, one
+// identifier, and the caller is holding the value at the moment it calls.
+// That is a property of this layer, not a general one — a caller that binds
+// options once and reuses them across sessions needs the value resolved when
+// the session starts instead, which is what twilio.WithSessionIDFor is for.
 func WithSessionID(id string) DialOption {
 	return func(c *dialConfig) { c.sessionID = id }
 }

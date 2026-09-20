@@ -147,6 +147,15 @@ type sessionSpec struct {
 	// The wire name is stated here and nowhere else — both WithSessionID doc
 	// comments point at this tag rather than spelling it again.
 	//
+	// It is an ENGINE EXTENSION, not a field of the protocol this package
+	// speaks. instructions, voice and tools are all defined by the backend's
+	// own session object; this one is a convention between a consumer and
+	// whatever reads its handshake, so a backend has to be taught it. A
+	// backend that rejects unknown session fields will fail the dial, and
+	// Dial's handshake loop reads until session.created and surfaces that
+	// only as its own timeout — so the field's absence from the protocol is
+	// worth knowing before a consumer turns it on.
+	//
 	// It is named for the client because the server's own `id` on
 	// session.created is a different value with a different owner, and a
 	// backend reading both must not have to guess which it has.
@@ -252,11 +261,21 @@ func newSessionUpdate(instructions, voice, sessionID string) sessionUpdate {
 // list with its closing brace removed, tools is appended as its new last
 // field, and both closing braces are appended back.
 //
-// That invariant is what constrains where a new sessionSpec field may go
-// (AATK-136 added one): any field declared BEFORE Audio leaves Audio as the
-// last to marshal and the two-byte offset intact, whether the new field is
-// emitted or omitted. A field declared after Audio would be safe only while
-// it is omitempty, which is a sharper edge than the splice needs.
+// Stated precisely, because AATK-136 added a sessionSpec field and the
+// question "where may it go?" came up: the splice needs (a) Session to remain
+// sessionUpdate's LAST field, and (b) sessionSpec to be incapable of
+// marshalling to an empty object. Nothing else. Field ORDER within
+// sessionSpec is irrelevant, and so is whether a new field carries omitempty
+// — measured, with the field before and after Audio, omitempty and not, set
+// and unset: every combination splices to valid JSON.
+//
+// (b) is the one that can actually be broken, and it is Type — which has no
+// omitempty — that guarantees it today, not Audio. Audio being non-omitempty
+// is sufficient but is not the mechanism; the paragraph above names it only
+// because it happens to be last. Give every sessionSpec field omitempty and
+// an all-zero spec marshals to "{}", so base ends "...\"session\":{}}", the
+// suffix check still passes, and the splice emits "\"session\":{,\"tools\":..."
+// — invalid, and reported by nothing here.
 func buildSessionUpdate(instructions, voice, sessionID string, tools json.RawMessage) ([]byte, error) {
 	base, err := json.Marshal(newSessionUpdate(instructions, voice, sessionID))
 	if err != nil {
