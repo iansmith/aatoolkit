@@ -74,8 +74,9 @@ func TestDial_HandshakeCarriesSuppliedSessionID(t *testing.T) {
 // emit "client_session_id":"" and change every handshake of a consumer that
 // passes a sometimes-empty value. The frozen-literal form of the same
 // requirement is at the twilio layer, mirroring how
-// TestDial_HandshakeWithNoToolsOmitsTheField splits with
-// TestSessionUpdate_UnsetToolsIsByteIdenticalToToday (tools_test.go).
+// TestDial_HandshakeWithNoToolsOmitsTheField (tools_test.go, this package)
+// splits with TestSessionUpdate_UnsetToolsIsByteIdenticalToToday
+// (telephony/twilio/realtime_tools_test.go).
 //
 // slopstop:test regression — guards: "No option, or an empty string, produces a handshake with no such field."
 func TestDial_HandshakeWithEmptySessionIDOmitsTheField(t *testing.T) {
@@ -107,12 +108,15 @@ func TestDial_HandshakeWithEmptySessionIDOmitsTheField(t *testing.T) {
 // two mechanisms meet inside one document.
 //
 // The splice finds its insertion point by asserting the marshalled bytes end
-// in exactly "}}" — sessionSpec's close followed by sessionUpdate's. An
-// omitempty field added to sessionSpec keeps that true whether it is emitted
-// or not, but only as long as it is not the last field to marshal into
-// something that changes the tail. This requires the whole document to be
-// valid JSON, both values to sit under "session", and the tools bytes to
-// still appear verbatim.
+// in exactly "}}" — sessionSpec's close followed by sessionUpdate's. Adding a
+// field to sessionSpec cannot disturb that, wherever it sits and whether or
+// not it is emitted: the two closing braces are the objects' own, not any
+// field's. See buildSessionUpdate for the two conditions that CAN break the
+// splice, and TestBuildSessionUpdate_SessionSpecCannotMarshalEmpty for the
+// one of them a test can reach.
+//
+// This test requires the whole document to be valid JSON, both values to sit
+// under "session", and the tools bytes to still appear verbatim.
 //
 // slopstop:test contract
 func TestBuildSessionUpdate_SessionIDComposesWithToolsSplice(t *testing.T) {
@@ -133,12 +137,15 @@ func TestBuildSessionUpdate_SessionIDComposesWithToolsSplice(t *testing.T) {
 	}
 
 	var decoded struct {
-		// Tools must stay unset here: a splice that strips one brace instead
-		// of two lands it at sessionUpdate's top level, which is still valid
-		// JSON and still contains the substring checked above. There is no
-		// matching top-level check for client_session_id, because it is an
-		// ordinary struct field on sessionSpec — encoding/json cannot emit it
-		// anywhere but inside "session", so such a check could never fail.
+		// Tools is belt-and-braces: it pins WHERE the spliced value landed,
+		// but the json.Valid check above fires first for every brace-arithmetic
+		// mistake actually available here — stripping one brace instead of two
+		// yields a trailing '}' and fails validity, not this. It is kept
+		// because nesting is what this test is about, not because a known
+		// mutation reaches it. There is deliberately no matching check for
+		// client_session_id: it is an ordinary struct field on sessionSpec, so
+		// encoding/json cannot emit it anywhere but inside "session", and such
+		// a check could never fail.
 		Tools   json.RawMessage `json:"tools"`
 		Session struct {
 			ClientSessionID string          `json:"client_session_id"`

@@ -126,14 +126,8 @@ type realtimeConfig struct {
 	// per-call resolver, so there is no WithToolsFor.
 	tools json.RawMessage
 
-	// sessionIDFor is the consumer's own identifier for the session
-	// (AATK-136), resolved per call and forwarded to the client layer's
-	// WithSessionID. It takes instructionsFor's shape rather than voice's,
-	// and for instructionsFor's reason: NewStreamHandler binds its options
-	// once at construction and reuses them for every call it serves, so a
-	// plain string here would be per-process on that path — and every
-	// concurrent caller would announce the SAME session, which is the exact
-	// collision the field exists to prevent. See WithSessionID.
+	// sessionIDFor mirrors instructionsFor — resolved per call, for the same
+	// reason — rather than voice's plain value. See WithSessionIDFor.
 	sessionIDFor func(start Frame) string
 
 	transcriptChanFor func(start Frame) chan<- Transcript
@@ -461,12 +455,14 @@ func WithTools(tools json.RawMessage) RealtimeOption {
 // WithInstructions and WithTools all state.
 //
 // ONE identifier for every call this option is applied to. That is the right
-// shape only where the option slice is built per call, which on a direct
-// HandleStreamRealtime call it is. On the NewStreamHandler path it is NOT:
-// that binds its options once and replays them for every call it serves, so
-// an identifier supplied here would be per-process and every concurrent
-// caller would announce the same session — the precise collision this field
-// exists to prevent. Use WithSessionIDFor there.
+// shape only where the option slice is built per call. Calling
+// HandleStreamRealtime directly lets a caller do that — though nothing makes
+// them: hoisting the slice to a package variable reproduces the collision
+// below just as well. On the NewStreamHandler path it is not available at
+// all: that binds its options once and replays them for every call it serves,
+// so an identifier supplied here is per-process and every concurrent caller
+// announces the same session — the precise collision this field exists to
+// prevent. Use WithSessionIDFor unless the value really is built per call.
 //
 // This is sugar over WithSessionIDFor, exactly as WithInstructions is over
 // WithInstructionsFor.

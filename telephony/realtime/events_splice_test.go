@@ -82,6 +82,46 @@ func TestBuildSessionUpdate_EmptyNonNilToolsOmitsTheField(t *testing.T) {
 	}
 }
 
+// TestBuildSessionUpdate_SessionSpecCannotMarshalEmpty pins the one condition
+// the tools splice actually depends on, against the REAL sessionSpec rather
+// than a description of it (AATK-136).
+//
+// The splice strips a fixed two-byte suffix, so it needs the session object
+// to have at least one field. If sessionSpec could ever marshal to "{}", base
+// would end `"session":{}}`, the suffix check would still pass, and the
+// splice would emit `"session":{,"tools":…` — invalid JSON, reported by
+// nothing, discovered as a dial that never completes.
+//
+// It cannot today, and the reason is worth pinning rather than asserting in
+// prose: Audio is a STRUCT, and `omitempty` has no effect on a struct field,
+// so no tag change can remove it. (Go 1.24's `omitzero` can — that, or
+// deleting Audio, is what this test would catch.) An earlier version of
+// buildSessionUpdate's comment credited Type with this guarantee and offered
+// "give every field omitempty" as the counterexample; both were wrong, and a
+// test is what keeps the next such claim honest.
+//
+// slopstop:test regression — guards: "sessionSpec must never marshal to an empty object."
+func TestBuildSessionUpdate_SessionSpecCannotMarshalEmpty(t *testing.T) {
+	// The all-zero spec is the worst case: every omitempty field omitted.
+	base, err := json.Marshal(sessionSpec{})
+	if err != nil {
+		t.Fatalf("marshal sessionSpec: %v", err)
+	}
+	if string(base) == "{}" {
+		t.Fatalf("sessionSpec must never marshal to an empty object — the tools splice emits invalid JSON if it can: %s", base)
+	}
+
+	// And prove the consequence end to end rather than trusting the reasoning:
+	// an all-zero session still splices to something a backend could parse.
+	out, err := buildSessionUpdate("", "", "", json.RawMessage(`[{"name":"x"}]`))
+	if err != nil {
+		t.Fatalf("buildSessionUpdate: %v", err)
+	}
+	if !json.Valid(out) {
+		t.Fatalf("splice over an all-zero session produced invalid JSON: %s", out)
+	}
+}
+
 // TestBuildSessionUpdate_MalformedToolsIsRejected pins that a syntactically
 // invalid tools value is reported as an error rather than spliced in blind.
 // The splice below is plain byte concatenation with no parser of its own, so

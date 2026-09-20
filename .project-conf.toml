@@ -38,11 +38,11 @@ version  = "5"  # set 2026-08-01 (grand synchronization)
 # "claude" → in-house /code-review (Skill); "coderabbit" → CodeRabbit bot;
 # "greptile" → Greptile bot.
 [pr_review]
-# Stays "claude" deliberately. Greptile is being trialled on the sophie repo
+# Stays "claude" deliberately. Greptile is being trialled on one other repo
 # (backend = "greptile" there, 2026-07-25) and the GitHub App is NOT installed
 # here — aatoolkit PRs report no checks at all. Do not install it or switch this
-# until Greptile has earned confidence on sophie; the point of the trial is to
-# have one repo's worth of evidence before spending it on two.
+# until that trial has earned confidence; the point of the trial is to have one
+# repo's worth of evidence before spending it on two.
 backend = "claude"
 effort = "high"
 

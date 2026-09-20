@@ -63,6 +63,14 @@ func TestSessionUpdate_SessionIDVariesPerCallThroughOneHandler(t *testing.T) {
 
 	calls := 0
 	handler := NewStreamHandler(be.url(), WithSessionIDFor(func(start Frame) string {
+		// WithSessionIDFor's doc promises fn receives THE CALL'S start frame,
+		// and calls that frame's CallSID the key a consumer looks its own
+		// identifier up by. Without this assertion that promise is invisible
+		// to the suite: resolving with a zero Frame instead of the call's
+		// passes every other test here, because none of them read the frame.
+		if start.CallSID == "" {
+			t.Errorf("resolver must receive the call's start frame, got a zero Frame")
+		}
 		calls++
 		if calls == 1 {
 			return "sess-first"

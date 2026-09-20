@@ -80,15 +80,35 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 
 	// Read until the session is acknowledged. A backend is free to emit other
 	// events first; only session.created ends the handshake.
+	//
+	// The last such frame is kept, and named in the failure, because it is
+	// usually the only thing that says WHY the handshake never completed
+	// (AATK-136). A backend that refuses the session — an unknown field, a
+	// rejected voice, a malformed tool declaration — answers with an error
+	// frame and then waits. Nothing else is listening yet: the bridge that
+	// would publish server events to a consumer is not built until this
+	// function returns, so a frame discarded here reaches nobody, and the
+	// dial used to fail carrying only the caller's own deadline. The
+	// diagnosis was on the wire and thrown away.
+	//
+	// Raw, not a summary of it — this package models only the handful of
+	// fields it acts on, and the part naming the problem is one the protocol
+	// defines and this package does not read.
+	var last json.RawMessage
 	for {
 		ev, err := c.Read(ctx)
 		if err != nil {
 			conn.CloseNow()
+			if len(last) > 0 {
+				return nil, fmt.Errorf("realtime: awaiting %s: %w (last frame from backend: %s)",
+					EventSessionCreated, err, last)
+			}
 			return nil, fmt.Errorf("realtime: awaiting %s: %w", EventSessionCreated, err)
 		}
 		if ev.Type == EventSessionCreated {
 			return c, nil
 		}
+		last = ev.Raw
 	}
 }
 
@@ -134,12 +154,13 @@ func WithVoice(name string) DialOption {
 // nor normalized here, and it is never read back off the wire. Empty (the
 // default) omits the field rather than sending "".
 //
-// A plain string is the right shape HERE and needs no resolver twin, because
-// Dial's options are per-dial by construction: one Dial, one session, one
-// identifier, and the caller is holding the value at the moment it calls.
-// That is a property of this layer, not a general one — a caller that binds
-// options once and reuses them across sessions needs the value resolved when
-// the session starts instead, which is what twilio.WithSessionIDFor is for.
+// A plain string is the right shape HERE and needs no resolver twin: this
+// package has no entry point that binds options once and replays them across
+// sessions, so a caller is always able to supply the right value at dial time
+// — one Dial, one session, one identifier. Able, not forced; hoisting an
+// option slice to a package variable would still share one identifier across
+// dials. That is a property of this layer rather than a general one, and the
+// layer that does bind options once has twilio.WithSessionIDFor for it.
 func WithSessionID(id string) DialOption {
 	return func(c *dialConfig) { c.sessionID = id }
 }

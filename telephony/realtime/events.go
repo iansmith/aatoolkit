@@ -144,17 +144,20 @@ type sessionSpec struct {
 	// this session with whatever the consumer knows it by. This engine mints
 	// nothing and reads nothing back: the value is opaque here.
 	//
-	// The wire name is stated here and nowhere else — both WithSessionID doc
-	// comments point at this tag rather than spelling it again.
+	// This tag is the wire name's only appearance in prose — both
+	// WithSessionID doc comments point here rather than spelling it again.
+	// The tests do spell it, because they assert on wire bytes, so a rename
+	// touches them too.
 	//
 	// It is an ENGINE EXTENSION, not a field of the protocol this package
 	// speaks. instructions, voice and tools are all defined by the backend's
 	// own session object; this one is a convention between a consumer and
 	// whatever reads its handshake, so a backend has to be taught it. A
-	// backend that rejects unknown session fields will fail the dial, and
-	// Dial's handshake loop reads until session.created and surfaces that
-	// only as its own timeout — so the field's absence from the protocol is
-	// worth knowing before a consumer turns it on.
+	// backend that refuses the field fails the dial: if it closes the socket
+	// that arrives promptly as a read error, and if it answers with an error
+	// frame and waits, Dial surfaces that frame in its own error (see the
+	// handshake loop) once the caller's context ends. Either way the field's
+	// absence from the protocol is worth knowing before turning it on.
 	//
 	// It is named for the client because the server's own `id` on
 	// session.created is a different value with a different owner, and a
@@ -165,10 +168,19 @@ type sessionSpec struct {
 	//
 	// Unlike tools this is an ordinary struct field, marshalled by
 	// encoding/json like any other. buildSessionUpdate's doc comment explains
-	// why tools cannot be: the encoder rewrites raw JSON bytes. A string has
-	// no such hazard — the escaping the encoder applies to a string IS
-	// correct string marshalling — so copying the splice for this would add a
-	// mechanism to defend against nothing.
+	// why tools cannot be: the encoder rewrites raw JSON bytes, reordering
+	// and dropping what it does not understand. A string has no structure to
+	// lose — '<', '>' and '&' become <, > and &, and decode
+	// back to the identical string — so copying the splice here would defend
+	// against nothing.
+	//
+	// One value does NOT survive: a string carrying invalid UTF-8 is silently
+	// rewritten to U+FFFD, with no error at any layer, and the splice would
+	// not help (raw invalid UTF-8 is not valid JSON either). A consumer
+	// minting an identifier from a byte slice rather than text should make it
+	// valid UTF-8 first. This is encoding/json's behaviour for every string
+	// field here, Instructions and Voice included; it is written down at this
+	// one because this field is the one a backend keys state on.
 	ClientSessionID string       `json:"client_session_id,omitempty"`
 	Audio           sessionAudio `json:"audio"`
 }
@@ -264,18 +276,23 @@ func newSessionUpdate(instructions, voice, sessionID string) sessionUpdate {
 // Stated precisely, because AATK-136 added a sessionSpec field and the
 // question "where may it go?" came up: the splice needs (a) Session to remain
 // sessionUpdate's LAST field, and (b) sessionSpec to be incapable of
-// marshalling to an empty object. Nothing else. Field ORDER within
-// sessionSpec is irrelevant, and so is whether a new field carries omitempty
-// — measured, with the field before and after Audio, omitempty and not, set
-// and unset: every combination splices to valid JSON.
+// marshalling to an empty object. Nothing else — in particular, field ORDER
+// within sessionSpec is irrelevant, and so is whether a new field carries
+// omitempty. Put one anywhere.
 //
-// (b) is the one that can actually be broken, and it is Type — which has no
-// omitempty — that guarantees it today, not Audio. Audio being non-omitempty
-// is sufficient but is not the mechanism; the paragraph above names it only
-// because it happens to be last. Give every sessionSpec field omitempty and
-// an all-zero spec marshals to "{}", so base ends "...\"session\":{}}", the
-// suffix check still passes, and the splice emits "\"session\":{,\"tools\":..."
-// — invalid, and reported by nothing here.
+// (b) is the one that can be broken, and Audio is what holds it: a struct
+// field is emitted whatever its tag says, because omitempty has no effect on
+// a struct. Type helps only while it stays a non-omitempty string. So the
+// ways to break (b) are to remove Audio, to change it to something omittable,
+// or to reach for Go 1.24's omitzero, which unlike omitempty DOES drop a zero
+// struct. Then base ends `"session":{}}`, the suffix check still passes, and
+// the splice emits `"session":{,"tools":…` — invalid JSON, reported by
+// nothing here, surfacing as a dial that never completes.
+//
+// TestBuildSessionUpdate_SessionSpecCannotMarshalEmpty is the guard; this
+// paragraph is not. Two earlier versions of it stated the rule wrongly in
+// opposite directions, and the second was written specifically to correct the
+// first, so the invariant now lives in a test that marshals the real type.
 func buildSessionUpdate(instructions, voice, sessionID string, tools json.RawMessage) ([]byte, error) {
 	base, err := json.Marshal(newSessionUpdate(instructions, voice, sessionID))
 	if err != nil {
