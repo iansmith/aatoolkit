@@ -126,6 +126,14 @@ type realtimeConfig struct {
 	// per-call resolver, so there is no WithToolsFor.
 	tools json.RawMessage
 
+	// sessionID is the consumer's own identifier for the session (AATK-136),
+	// forwarded to the client layer's WithSessionID and from there into the
+	// handshake. A plain string like voice and tools, and there is no
+	// WithSessionIDFor — but NOT for their reason. This value does vary per
+	// call; it varies from the other side, because a consumer that mints one
+	// per session builds its option slice per session too. See WithSessionID.
+	sessionID string
+
 	transcriptChanFor func(start Frame) chan<- Transcript
 
 	// serverEventChanFor mirrors transcriptChanFor: resolved per call rather
@@ -437,6 +445,30 @@ func WithVoice(name string) RealtimeOption {
 // rather than sending a malformed handshake.
 func WithTools(tools json.RawMessage) RealtimeOption {
 	return func(c *realtimeConfig) { c.tools = tools }
+}
+
+// WithSessionID puts the consumer's OWN identifier for the session into the
+// handshake (AATK-136), under the wire name
+// realtime.sessionSpec.ClientSessionID's struct tag states. It forwards to
+// the client layer's realtime.WithSessionID, which carries the reasoning;
+// this engine mints nothing, validates nothing, and never reads the value
+// back.
+//
+// Empty (the default) omits the field entirely, which is byte-for-byte the
+// handshake a caller supplying no option gets — the same rule WithVoice,
+// WithInstructions and WithTools all state.
+//
+// One identifier for every call this option is applied to, so a consumer
+// minting one per session supplies this option per session: NewStreamHandler
+// binds its options once and reuses them for every call it serves, so an
+// identifier bound there would be per-process, which is not what a session
+// identifier means. There is no WithSessionIDFor twin taking a resolver —
+// not because the value is constant (it is not), but because the consumer
+// already builds its option slice at the moment it knows the value, and a
+// resolver taking the carrier's Frame could not derive an identifier the
+// consumer minted anyway.
+func WithSessionID(id string) RealtimeOption {
+	return func(c *realtimeConfig) { c.sessionID = id }
 }
 
 // WithTranscriptChan delivers each transcript the backend produces, partial and
@@ -913,6 +945,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 		realtime.WithInstructions(cfg.instructions(start)),
 		realtime.WithVoice(cfg.voice),
 		realtime.WithTools(cfg.tools),
+		realtime.WithSessionID(cfg.sessionID),
 	)
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)

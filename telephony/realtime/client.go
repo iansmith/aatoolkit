@@ -68,7 +68,7 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 	// reach the wire unmodified, and c.send's json.Marshal path re-escapes
 	// and re-compacts a json.RawMessage field — see buildSessionUpdate's doc
 	// comment for the measured failure this avoids.
-	handshake, err := buildSessionUpdate(cfg.instructions, cfg.voice, cfg.tools)
+	handshake, err := buildSessionUpdate(cfg.instructions, cfg.voice, cfg.sessionID, cfg.tools)
 	if err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("realtime: building %s: %w", EventSessionUpdate, err)
@@ -99,6 +99,7 @@ type DialOption func(*dialConfig)
 type dialConfig struct {
 	instructions string
 	voice        string
+	sessionID    string
 	tools        json.RawMessage
 	httpClient   *http.Client
 }
@@ -119,6 +120,31 @@ func WithInstructions(s string) DialOption {
 // unmodified. Empty omits the field rather than sending "".
 func WithVoice(name string) DialOption {
 	return func(c *dialConfig) { c.voice = name }
+}
+
+// WithSessionID puts the consumer's OWN identifier for this session into the
+// handshake (AATK-136), under the wire name sessionSpec.ClientSessionID's
+// struct tag states. A backend that forwards this session's work onward — to
+// a proxy, a context service, anything holding per-session state — has
+// nothing in the request identifying which session it belongs to; this is
+// that identifier, and what the backend does with it is entirely the
+// backend's and the consumer's business.
+//
+// The value is opaque to this package: it is neither generated, validated,
+// nor normalized here, and it is never read back off the wire. Empty (the
+// default) omits the field rather than sending "".
+//
+// Per call, when the consumer supplies options per call — and it is expected
+// to vary per call, because a session identifier is by definition
+// per-session. There is deliberately no WithSessionIDFor twin taking a
+// resolver, which is the opposite of the reason WithVoice and WithTools have
+// none: the variation here is real, but it is supplied from the other side.
+// The consumer builds its option slice when it opens the session, so the
+// value is already as fresh as a resolver could make it. A resolver taking
+// the carrier's frame would in fact be worse, since the identifier is minted
+// by the consumer and is not derivable from that frame.
+func WithSessionID(id string) DialOption {
+	return func(c *dialConfig) { c.sessionID = id }
 }
 
 // WithTools declares the consumer's tool definitions for this session

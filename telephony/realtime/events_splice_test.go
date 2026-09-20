@@ -26,7 +26,7 @@ import (
 // nesting level: a child of "session", not of the top-level message.
 func TestBuildSessionUpdate_ToolsSpliceProducesWellFormedNestedJSON(t *testing.T) {
 	tools := json.RawMessage(`[{"type":"function","name":"lookup_weather"}]`)
-	out, err := buildSessionUpdate("be helpful", "nova", tools)
+	out, err := buildSessionUpdate("be helpful", "nova", "", tools)
 	if err != nil {
 		t.Fatalf("buildSessionUpdate: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestBuildSessionUpdate_ToolsSpliceProducesWellFormedNestedJSON(t *testing.T
 // explicitly empty but non-nil json.RawMessage must still omit the field,
 // not splice in an empty value.
 func TestBuildSessionUpdate_EmptyNonNilToolsOmitsTheField(t *testing.T) {
-	out, err := buildSessionUpdate("", "", json.RawMessage{})
+	out, err := buildSessionUpdate("", "", "", json.RawMessage{})
 	if err != nil {
 		t.Fatalf("buildSessionUpdate: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestBuildSessionUpdate_EmptyNonNilToolsOmitsTheField(t *testing.T) {
 // without this check a truncated or unbalanced fragment would silently
 // produce an invalid handshake instead of a local, actionable error.
 func TestBuildSessionUpdate_MalformedToolsIsRejected(t *testing.T) {
-	_, err := buildSessionUpdate("", "", json.RawMessage(`[{"type":"function"`))
+	_, err := buildSessionUpdate("", "", "", json.RawMessage(`[{"type":"function"`))
 	if err == nil {
 		t.Fatal("buildSessionUpdate must reject syntactically invalid tools JSON, got nil error")
 	}

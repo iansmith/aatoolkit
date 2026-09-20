@@ -138,8 +138,30 @@ type sessionSpec struct {
 	// an absent field from an empty string, so a caller who supplies nothing
 	// must produce the handshake this engine sent before the field existed —
 	// not a near-equivalent carrying "".
-	Instructions string       `json:"instructions,omitempty"`
-	Audio        sessionAudio `json:"audio"`
+	Instructions string `json:"instructions,omitempty"`
+	// ClientSessionID is the consumer's OWN identifier for this session
+	// (AATK-136), carried so a backend can correlate the work it does for
+	// this session with whatever the consumer knows it by. This engine mints
+	// nothing and reads nothing back: the value is opaque here.
+	//
+	// The wire name is stated here and nowhere else — both WithSessionID doc
+	// comments point at this tag rather than spelling it again.
+	//
+	// It is named for the client because the server's own `id` on
+	// session.created is a different value with a different owner, and a
+	// backend reading both must not have to guess which it has.
+	//
+	// omitempty for the reason Instructions gives above, and the regression
+	// guard for it is the byte-for-byte baseline test at the twilio layer.
+	//
+	// Unlike tools this is an ordinary struct field, marshalled by
+	// encoding/json like any other. buildSessionUpdate's doc comment explains
+	// why tools cannot be: the encoder rewrites raw JSON bytes. A string has
+	// no such hazard — the escaping the encoder applies to a string IS
+	// correct string marshalling — so copying the splice for this would add a
+	// mechanism to defend against nothing.
+	ClientSessionID string       `json:"client_session_id,omitempty"`
+	Audio           sessionAudio `json:"audio"`
 }
 
 type sessionUpdate struct {
@@ -179,13 +201,18 @@ type ServerEvent struct {
 // values below (rather than one shared literal assigned to both) precisely
 // so setting voice can never leak onto the input channel. Empty omits the
 // field entirely, same as instructions.
-func newSessionUpdate(instructions, voice string) sessionUpdate {
+//
+// sessionID is the consumer's own identifier for the session; see
+// sessionSpec.ClientSessionID. Empty omits the field entirely, same as the
+// other two.
+func newSessionUpdate(instructions, voice, sessionID string) sessionUpdate {
 	format := audioFormat{Type: FormatG711ULaw}
 	return sessionUpdate{
 		Type: EventSessionUpdate,
 		Session: sessionSpec{
-			Type:         sessionTypeRealtime,
-			Instructions: instructions,
+			Type:            sessionTypeRealtime,
+			Instructions:    instructions,
+			ClientSessionID: sessionID,
 			Audio: sessionAudio{
 				Input:  audioChannel{Format: format},
 				Output: audioChannel{Format: format, Voice: voice},
@@ -224,8 +251,14 @@ func newSessionUpdate(instructions, voice string) sessionUpdate {
 // the end). Stripping the trailing "}}" exposes the session object's field
 // list with its closing brace removed, tools is appended as its new last
 // field, and both closing braces are appended back.
-func buildSessionUpdate(instructions, voice string, tools json.RawMessage) ([]byte, error) {
-	base, err := json.Marshal(newSessionUpdate(instructions, voice))
+//
+// That invariant is what constrains where a new sessionSpec field may go
+// (AATK-136 added one): any field declared BEFORE Audio leaves Audio as the
+// last to marshal and the two-byte offset intact, whether the new field is
+// emitted or omitted. A field declared after Audio would be safe only while
+// it is omitempty, which is a sharper edge than the splice needs.
+func buildSessionUpdate(instructions, voice, sessionID string, tools json.RawMessage) ([]byte, error) {
+	base, err := json.Marshal(newSessionUpdate(instructions, voice, sessionID))
 	if err != nil {
 		return nil, fmt.Errorf("realtime: marshal session.update: %w", err)
 	}
