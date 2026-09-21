@@ -68,7 +68,7 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 	// reach the wire unmodified, and c.send's json.Marshal path re-escapes
 	// and re-compacts a json.RawMessage field — see buildSessionUpdate's doc
 	// comment for the measured failure this avoids.
-	handshake, err := buildSessionUpdate(cfg.instructions, cfg.voice, cfg.tools)
+	handshake, err := buildSessionUpdate(cfg.instructions, cfg.voice, cfg.sessionID, cfg.tools)
 	if err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("realtime: building %s: %w", EventSessionUpdate, err)
@@ -80,16 +80,75 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 
 	// Read until the session is acknowledged. A backend is free to emit other
 	// events first; only session.created ends the handshake.
+	//
+	// One such frame is kept, and named in the failure, because it is
+	// usually the only thing that says WHY the handshake never completed
+	// (AATK-136). A backend that refuses the session — an unknown field, a
+	// rejected voice, a malformed tool declaration — answers with an error
+	// frame and then waits. Nothing else is listening yet: the bridge that
+	// would publish server events to a consumer is not built until this
+	// function returns, so a frame discarded here reaches nobody, and the
+	// dial used to fail carrying only the caller's own deadline. The
+	// diagnosis was on the wire and thrown away.
+	//
+	// Raw, not a summary of it — this package models only the handful of
+	// fields it acts on, and the part naming the problem is one the protocol
+	// defines and this package does not read.
+	//
+	// PREFERRED, not merely latest: the first EventError frame wins and is
+	// then never replaced, because a backend that refuses the session may
+	// well keep talking afterwards — a rate-limit notice, a keepalive — and
+	// the newest frame is then noise that buries the reason. Measured: error
+	// frame, then one benign frame, and the dial named the benign one.
+	// Preferring rather than FILTERING is the other half, and deliberate: a
+	// backend refusing an engine extension need not label its refusal
+	// EventError at all, so filtering would return exactly those callers to a
+	// bare deadline.
+	var last json.RawMessage
+	var haveError bool
 	for {
 		ev, err := c.Read(ctx)
 		if err != nil {
 			conn.CloseNow()
+			if len(last) > 0 {
+				return nil, fmt.Errorf("realtime: awaiting %s: %w (%s: %s)",
+					EventSessionCreated, err, lastFrameLabel, clipFrame(last))
+			}
 			return nil, fmt.Errorf("realtime: awaiting %s: %w", EventSessionCreated, err)
 		}
 		if ev.Type == EventSessionCreated {
 			return c, nil
 		}
+		if !haveError {
+			last = ev.Raw
+			haveError = ev.Type == EventError
+		}
 	}
+}
+
+// lastFrameLabel introduces the retained frame in Dial's error. It is a
+// constant rather than a literal so the tests that assert on it — one that
+// requires it when a frame arrived, one that forbids it when none did —
+// cannot be silently defeated by rewording the message.
+const lastFrameLabel = "last frame from backend"
+
+// maxFrameInError bounds how much of a backend frame reaches that error.
+//
+// The transport already caps a frame at coder/websocket's default read limit
+// (~32 KiB), so this is not about unbounded growth; it is about the log line.
+// HandleStreamRealtime logs this error on every refused dial, and a 32 KB
+// single line is a bad trade for a diagnostic that measured 60-120 bytes in
+// every refusal actually observed.
+const maxFrameInError = 512
+
+// clipFrame renders raw for an error message, bounded. The result is for
+// human eyes and is not guaranteed to be valid JSON — a clipped frame says
+// so rather than pretending to be whole.
+func clipFrame(raw json.RawMessage) string {
+	if len(raw) <= maxFrameInError {
+		return string(raw)
+	}
+	return fmt.Sprintf("%s… (%d bytes truncated)", raw[:maxFrameInError], len(raw)-maxFrameInError)
 }
 
 // DialOption configures the session negotiated by Dial. Supplying none
@@ -99,6 +158,7 @@ type DialOption func(*dialConfig)
 type dialConfig struct {
 	instructions string
 	voice        string
+	sessionID    string
 	tools        json.RawMessage
 	httpClient   *http.Client
 }
@@ -119,6 +179,29 @@ func WithInstructions(s string) DialOption {
 // unmodified. Empty omits the field rather than sending "".
 func WithVoice(name string) DialOption {
 	return func(c *dialConfig) { c.voice = name }
+}
+
+// WithSessionID puts the consumer's OWN identifier for this session into the
+// handshake (AATK-136), under the wire name sessionSpec.ClientSessionID's
+// struct tag states. A backend that forwards this session's work onward — to
+// a proxy, a context service, anything holding per-session state — has
+// nothing in the request identifying which session it belongs to; this is
+// that identifier, and what the backend does with it is entirely the
+// backend's and the consumer's business.
+//
+// The value is opaque to this package: it is neither generated, validated,
+// nor normalized here, and it is never read back off the wire. Empty (the
+// default) omits the field rather than sending "".
+//
+// A plain string is the right shape HERE and needs no resolver twin: this
+// package has no entry point that binds options once and replays them across
+// sessions, so a caller is always able to supply the right value at dial time
+// — one Dial, one session, one identifier. Able, not forced; hoisting an
+// option slice to a package variable would still share one identifier across
+// dials. That is a property of this layer rather than a general one, and the
+// layer that does bind options once has twilio.WithSessionIDFor for it.
+func WithSessionID(id string) DialOption {
+	return func(c *dialConfig) { c.sessionID = id }
 }
 
 // WithTools declares the consumer's tool definitions for this session

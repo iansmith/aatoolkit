@@ -126,6 +126,10 @@ type realtimeConfig struct {
 	// per-call resolver, so there is no WithToolsFor.
 	tools json.RawMessage
 
+	// sessionIDFor mirrors instructionsFor — resolved per call, for the same
+	// reason — rather than voice's plain value. See WithSessionIDFor.
+	sessionIDFor func(start Frame) string
+
 	transcriptChanFor func(start Frame) chan<- Transcript
 
 	// serverEventChanFor mirrors transcriptChanFor: resolved per call rather
@@ -437,6 +441,57 @@ func WithVoice(name string) RealtimeOption {
 // rather than sending a malformed handshake.
 func WithTools(tools json.RawMessage) RealtimeOption {
 	return func(c *realtimeConfig) { c.tools = tools }
+}
+
+// WithSessionID puts the consumer's OWN identifier for the session into the
+// handshake (AATK-136), under the wire name
+// realtime.sessionSpec.ClientSessionID's struct tag states. It forwards to
+// the client layer's realtime.WithSessionID, which carries the reasoning;
+// this engine mints nothing, validates nothing, and never reads the value
+// back.
+//
+// Empty (the default) omits the field entirely, which is byte-for-byte the
+// handshake a caller supplying no option gets — the same rule WithVoice,
+// WithInstructions and WithTools all state.
+//
+// ONE identifier for every call this option is applied to, which is the right
+// shape only where the option slice is built per call — realtime.WithSessionID
+// carries that argument in full and this comment does not repeat it.
+//
+// What is specific to THIS layer: NewStreamHandler binds its options once and
+// replays them for every call it serves, so an identifier supplied here is
+// per-process on that path and every concurrent caller announces the same
+// session — the precise collision the field exists to prevent. Use
+// WithSessionIDFor there.
+//
+// This is sugar over WithSessionIDFor, exactly as WithInstructions is over
+// WithInstructionsFor.
+func WithSessionID(id string) RealtimeOption {
+	return WithSessionIDFor(func(Frame) string { return id })
+}
+
+// WithSessionIDFor resolves the consumer's session identifier when the call
+// arrives, rather than binding one for the life of the handler.
+//
+// This is the form NewStreamHandler consumers want, and the reason it exists
+// is the reason WithInstructionsFor exists: a handler serves every call from
+// one bound option slice, so a session identifier fixed at construction
+// would be shared by every concurrent caller. A backend keying per-session
+// state on it would then serve one caller's context to another — which is
+// the failure the identifier was added to make impossible.
+//
+// fn receives the call's start Frame, whose CallSID, StreamSID and From are
+// the keys a consumer looks its own minted identifier up by. It is a LOOKUP,
+// not a derivation: this engine cannot compute a consumer's identifier and
+// does not try, exactly as instructionsFor does not derive a persona from
+// the frame.
+//
+// fn is called once per call, on the goroutine handling it, before the dial.
+// Returning "" omits the field for that call, which is byte-for-byte the
+// handshake a caller supplying no option gets. Supplying no option at all is
+// the same case, resolved in one place by realtimeConfig.sessionID.
+func WithSessionIDFor(fn func(start Frame) string) RealtimeOption {
+	return func(c *realtimeConfig) { c.sessionIDFor = fn }
 }
 
 // WithTranscriptChan delivers each transcript the backend produces, partial and
@@ -869,6 +924,15 @@ func (c realtimeConfig) instructions(start Frame) string {
 	return c.instructionsFor(start)
 }
 
+// sessionID resolves the consumer's session identifier for one call, or ""
+// when the consumer supplied none. Mirrors instructions.
+func (c realtimeConfig) sessionID(start Frame) string {
+	if c.sessionIDFor == nil {
+		return ""
+	}
+	return c.sessionIDFor(start)
+}
+
 // HandleStreamRealtime drives one call over the realtime voice backend. It is
 // the realtime peer of HandleStreamWithOpts: same entry shape, called with the
 // (ctx, conn, start) a StreamHandler receives, so a consumer that owns its own
@@ -913,6 +977,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 		realtime.WithInstructions(cfg.instructions(start)),
 		realtime.WithVoice(cfg.voice),
 		realtime.WithTools(cfg.tools),
+		realtime.WithSessionID(cfg.sessionID(start)),
 	)
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)

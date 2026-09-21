@@ -32,6 +32,14 @@ const (
 	EventTranscriptDone  = "conversation.item.input_audio_transcription.completed"
 	EventAudioDelta      = "response.output_audio.delta"
 	EventResponseDone    = "response.done"
+
+	// EventError is how a backend refuses something. This package acts on it
+	// nowhere — it is named only so Dial can PREFER such a frame when saying
+	// why a handshake never completed (AATK-136). Deliberately not a filter:
+	// a backend refusing an engine extension is under no obligation to label
+	// its refusal, and filtering would leave exactly those callers with a
+	// bare deadline and nothing to go on.
+	EventError = "error"
 )
 
 // ItemTypeFunctionCall is the "type" of a response output item that is a tool
@@ -138,8 +146,56 @@ type sessionSpec struct {
 	// an absent field from an empty string, so a caller who supplies nothing
 	// must produce the handshake this engine sent before the field existed —
 	// not a near-equivalent carrying "".
-	Instructions string       `json:"instructions,omitempty"`
-	Audio        sessionAudio `json:"audio"`
+	Instructions string `json:"instructions,omitempty"`
+	// ClientSessionID is the consumer's OWN identifier for this session
+	// (AATK-136), carried so a backend can correlate the work it does for
+	// this session with whatever the consumer knows it by. This engine mints
+	// nothing and reads nothing back: the value is opaque here.
+	//
+	// This tag is the wire name's definition, and no doc comment respells it
+	// — both WithSessionID comments point here. It is NOT the only
+	// occurrence: the tests assert on wire bytes, and a few test comments
+	// name it in prose, so a rename touches this tag, those assertions, and
+	// those comments — and only the assertions will fail if it is missed.
+	//
+	// It is an ENGINE EXTENSION, not a field of the protocol this package
+	// speaks. instructions, voice and tools are all defined by the backend's
+	// own session object; this one is a convention between a consumer and
+	// whatever reads its handshake, so a backend has to be taught it. A
+	// backend that refuses the field fails the dial, and Dial names the
+	// refusal in its error either way (see the handshake loop); what differs
+	// is only how fast. Measured: a backend that closes the socket ends the
+	// read in about two milliseconds, while one that answers and then waits
+	// costs the caller's full remaining context. The field's absence from the
+	// protocol is worth knowing before turning it on.
+	//
+	// It is named for the client because the server's own `id` on
+	// session.created is a different value with a different owner, and a
+	// backend reading both must not have to guess which it has.
+	//
+	// omitempty for the reason Instructions gives above, and the regression
+	// guard for it is the byte-for-byte baseline test at the twilio layer.
+	//
+	// Unlike tools this is an ordinary struct field, marshalled by
+	// encoding/json like any other. buildSessionUpdate's doc comment explains
+	// why tools cannot be: the encoder HTML-escapes '<', '>' and '&' and
+	// compacts insignificant whitespace, which for raw JSON means the
+	// consumer's bytes are not the bytes that ship. A string has no
+	// whitespace to compact and no structure to lose — '<', '>' and '&'
+	// become \u003c, \u003e and \u0026, which decode back to the identical
+	// string — so copying the splice here would defend against nothing.
+	//
+	// One value does NOT survive: a string carrying invalid UTF-8 is silently
+	// rewritten to U+FFFD, with no error at any layer. A splice would in fact
+	// carry those bytes through untouched — json.Valid accepts them — but the
+	// result is not valid JSON under RFC 8259, so that is not a fix worth
+	// having. A consumer
+	// minting an identifier from a byte slice rather than text should make it
+	// valid UTF-8 first. This is encoding/json's behaviour for every string
+	// field here, Instructions and Voice included; it is written down at this
+	// one because this field is the one a backend keys state on.
+	ClientSessionID string       `json:"client_session_id,omitempty"`
+	Audio           sessionAudio `json:"audio"`
 }
 
 type sessionUpdate struct {
@@ -179,13 +235,18 @@ type ServerEvent struct {
 // values below (rather than one shared literal assigned to both) precisely
 // so setting voice can never leak onto the input channel. Empty omits the
 // field entirely, same as instructions.
-func newSessionUpdate(instructions, voice string) sessionUpdate {
+//
+// sessionID is the consumer's own identifier for the session; see
+// sessionSpec.ClientSessionID. Empty omits the field entirely, same as the
+// other two.
+func newSessionUpdate(instructions, voice, sessionID string) sessionUpdate {
 	format := audioFormat{Type: FormatG711ULaw}
 	return sessionUpdate{
 		Type: EventSessionUpdate,
 		Session: sessionSpec{
-			Type:         sessionTypeRealtime,
-			Instructions: instructions,
+			Type:            sessionTypeRealtime,
+			Instructions:    instructions,
+			ClientSessionID: sessionID,
 			Audio: sessionAudio{
 				Input:  audioChannel{Format: format},
 				Output: audioChannel{Format: format, Voice: voice},
@@ -224,8 +285,36 @@ func newSessionUpdate(instructions, voice string) sessionUpdate {
 // the end). Stripping the trailing "}}" exposes the session object's field
 // list with its closing brace removed, tools is appended as its new last
 // field, and both closing braces are appended back.
-func buildSessionUpdate(instructions, voice string, tools json.RawMessage) ([]byte, error) {
-	base, err := json.Marshal(newSessionUpdate(instructions, voice))
+//
+// Stated precisely, because AATK-136 added a sessionSpec field and the
+// question "where may it go?" came up: the splice needs (a) Session to remain
+// sessionUpdate's LAST field, and (b) sessionSpec to be incapable of
+// marshalling to an empty object. Nothing else — in particular, field ORDER
+// within sessionSpec is irrelevant, and so is whether a new field carries
+// omitempty. Put one anywhere.
+//
+// (b) is the one that can be broken, and it holds while AT LEAST ONE
+// sessionSpec field is emitted unconditionally. Two are, independently:
+//
+//   - Type, because a string without omitempty is emitted whatever its value,
+//     "" included;
+//   - Audio, because it is a struct, and omitempty has no effect on one.
+//
+// Neither is more durable than the other and neither alone is load-bearing:
+// each falls to a single tag change (omitempty on Type; Go 1.24's omitzero on
+// Audio, which unlike omitempty DOES drop a zero struct), and (b) survives
+// either one. Breaking it takes silencing BOTH. Only then does base end
+// `"session":{}}`, with the suffix check still passing and the splice
+// emitting `"session":{,"tools":…` — invalid JSON, reported by nothing here,
+// surfacing as a dial that never completes.
+//
+// TestBuildSessionUpdate_SessionSpecCannotMarshalEmpty is the guard; this
+// paragraph is not. It has now been written wrong three times, in three
+// different directions — first "a new field must precede Audio", then "Type
+// is the guarantor", then "Audio is" — so trust the test, which marshals the
+// real type, over any sentence here including this one.
+func buildSessionUpdate(instructions, voice, sessionID string, tools json.RawMessage) ([]byte, error) {
+	base, err := json.Marshal(newSessionUpdate(instructions, voice, sessionID))
 	if err != nil {
 		return nil, fmt.Errorf("realtime: marshal session.update: %w", err)
 	}
