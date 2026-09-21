@@ -515,6 +515,13 @@ func WithSessionIDFor(fn func(start Frame) string) RealtimeOption {
 // goroutine it creates blocks only on things it owns — a channel it closes, a
 // context it cancels, a select with a default — so a consumer that never reads
 // costs nothing once the call ends.
+//
+// ONE ch SERVES ONE CALL AT A TIME. NewStreamHandler binds its options once
+// and reuses them for every call it serves; two calls running concurrently
+// through the same ch interleave their transcripts on it, and Transcript
+// carries no call identity, so the consumer cannot tell which call produced
+// which. For calls that can overlap, use WithTranscriptChanFor and give each
+// call its own channel.
 func WithTranscriptChan(ch chan<- Transcript) RealtimeOption {
 	return WithTranscriptChanFor(func(Frame) chan<- Transcript { return ch })
 }
@@ -552,6 +559,13 @@ func WithTranscriptChanFor(fn func(start Frame) chan<- Transcript) RealtimeOptio
 // here could not stall that loop; what it would do instead is stop draining
 // Bridge.Events() and leave this engine goroutine parked past the end of the
 // call — a bounded loss turned into a total one, plus a leak.
+//
+// ONE ch SERVES ONE CALL AT A TIME. NewStreamHandler binds its options once
+// and reuses them for every call it serves; two calls running concurrently
+// through the same ch interleave their events on it, and ServerEvent carries
+// no call identity, so the consumer cannot tell which call produced which.
+// For calls that can overlap, use WithServerEventChanFor and give each call
+// its own channel.
 func WithServerEventChan(ch chan<- ServerEvent) RealtimeOption {
 	return WithServerEventChanFor(func(Frame) chan<- ServerEvent { return ch })
 }
@@ -574,6 +588,13 @@ func WithServerEventChanFor(fn func(start Frame) chan<- ServerEvent) RealtimeOpt
 //
 // Without this option the engine sends carrier audio exactly as it does
 // today, with no observer.
+//
+// ONE ch SERVES ONE CALL AT A TIME. NewStreamHandler binds its options once
+// and reuses them for every call it serves; two calls running concurrently
+// through the same ch interleave their carrier audio on it, and CarrierAudio
+// carries no call identity, so the consumer cannot tell which call produced
+// which. For calls that can overlap, use WithCarrierAudioChanFor and give
+// each call its own channel.
 func WithCarrierAudioChan(ch chan<- CarrierAudio) RealtimeOption {
 	return WithCarrierAudioChanFor(func(Frame) chan<- CarrierAudio { return ch })
 }
@@ -590,11 +611,18 @@ func WithCarrierAudioChanFor(fn func(start Frame) chan<- CarrierAudio) RealtimeO
 // WithInboundAudioChan delivers each inbound media payload (base64 μ-law, as
 // on the wire) to ch. Non-blocking: a full ch drops the frame rather than
 // stalling the carrier pump. The engine never closes ch, so a consumer may
-// reuse it across calls.
+// reuse it across sequential calls.
 //
 // Observation is independent of forwarding: a dropped observation still
 // reaches the backend. Without this option, inbound is forwarded exactly as
 // today, with no observer.
+//
+// ONE ch SERVES ONE CALL AT A TIME. NewStreamHandler binds its options once
+// and reuses them for every call it serves; two calls running concurrently
+// through the same ch splice their μ-law frames into one stream with no
+// boundary and no call identity, so anything decoding or transcribing it gets
+// two callers' voices merged. For calls that can overlap, use
+// WithInboundAudioChanFor and give each call its own channel.
 func WithInboundAudioChan(ch chan<- string) RealtimeOption {
 	return WithInboundAudioChanFor(func(Frame) chan<- string { return ch })
 }
@@ -654,8 +682,11 @@ func WithInboundAudioChanFor(fn func(start Frame) chan<- string) RealtimeOption 
 //
 // ONE ch SERVES ONE CALL AT A TIME, and that is the consequence of the
 // reversal that bites. On the engine-writes options a single ch shared by
-// concurrent calls fans IN, and is safe; here it fans OUT, and a channel
-// value goes to exactly ONE receiver. Two calls running concurrently off the
+// concurrent calls fans IN — safe from data races and misdelivery, but the
+// interleaved stream carries no call identity, so a consumer cannot tell
+// which call produced which record; those options document the hazard
+// individually. Here it fans OUT, and a channel value goes to exactly ONE
+// receiver. Two calls running concurrently off the
 // same ch therefore SPLIT the stream between them at random: an event the
 // consumer meant for one call is forwarded to the other call's backend, and
 // nothing reports it. Reuse across SEQUENTIAL calls is fine — the engine
@@ -842,6 +873,15 @@ func WithMarkRequestChanFor(fn func(start Frame) <-chan string) RealtimeOption {
 // Nothing is delivered once the call has ended. A consumer must not treat this
 // channel as the only way its wait can finish — the call ending is the other,
 // and it is the consumer's own context that ends it.
+//
+// ONE ch SERVES ONE CALL AT A TIME. NewStreamHandler binds its options once
+// and reuses them for every call it serves; two calls running concurrently
+// through the same ch receive each other's echoes, and MarkEcho carries only
+// a name, not a call identity. If both calls request a mark with the same
+// name, the consumer's waiter for one call reads the other's echo — hanging
+// up a caller mid-word, which is the failure the mark seam was built to
+// prevent. For calls that can overlap, use WithMarkEchoChanFor and give each
+// call its own channel.
 func WithMarkEchoChan(ch chan<- MarkEcho) RealtimeOption {
 	return WithMarkEchoChanFor(func(Frame) chan<- MarkEcho { return ch })
 }
