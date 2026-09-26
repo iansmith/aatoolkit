@@ -34,14 +34,15 @@ const realtimeDialTimeout = 10 * time.Second
 // connected carrier with nothing on the line and nothing in the log.
 const realtimeSlowResolverWarning = 2 * time.Second
 
-// warnIfSlowResolver arms the realtimeSlowResolverWarning log for the named
-// resolver. The caller stops the returned timer when the resolver returns,
-// so the line is written only while it is still running.
-func warnIfSlowResolver(name string) *time.Timer {
-	return time.AfterFunc(realtimeSlowResolverWarning, func() {
+// resolveHandshake runs one handshake resolution site, logging by name if it
+// is still running after realtimeSlowResolverWarning. The timer is stopped
+// when resolve returns, so the line is written only while it is still running.
+func resolveHandshake(name string, resolve func(Frame) string, start Frame) string {
+	defer time.AfterFunc(realtimeSlowResolverWarning, func() {
 		log.Printf("twilio: realtime: %s resolver still running after %v; the call cannot dial until it returns",
 			name, realtimeSlowResolverWarning)
-	})
+	}).Stop()
+	return resolve(start)
 }
 
 // realtimeClientEventSendTimeout bounds one consumer-event write to the
@@ -984,7 +985,6 @@ func (c realtimeConfig) instructions(start Frame) string {
 	if c.instructionsFor == nil {
 		return ""
 	}
-	defer warnIfSlowResolver("instructions").Stop()
 	return c.instructionsFor(start)
 }
 
@@ -994,7 +994,6 @@ func (c realtimeConfig) sessionID(start Frame) string {
 	if c.sessionIDFor == nil {
 		return ""
 	}
-	defer warnIfSlowResolver("session ID").Stop()
 	return c.sessionIDFor(start)
 }
 
@@ -1042,8 +1041,8 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// "context deadline exceeded" against a healthy backend, naming nothing
 	// about the lookup. realtimeSlowResolverWarning covers the one that never
 	// returns.
-	instructions := cfg.instructions(start)
-	sessionID := cfg.sessionID(start)
+	instructions := resolveHandshake("instructions", cfg.instructions, start)
+	sessionID := resolveHandshake("session ID", cfg.sessionID, start)
 
 	dialCtx, cancelDial := context.WithTimeout(ctx, realtimeDialTimeout)
 	defer cancelDial()
