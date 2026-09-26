@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"testing"
@@ -223,15 +222,9 @@ func TestMarkEchoChan_UnrequestedEchoIsNotDeliveredAsAMatch(t *testing.T) {
 	requests := make(chan string, testChanBuffer)
 	echoes := make(chan MarkEcho, testChanBuffer)
 
-	// syncBuffer, not a bare bytes.Buffer: the line under test is written by
-	// pumpCarrierToBridge's goroutine while this one reads it
-	// (realtime_serverevents_gaps_test.go, where it was introduced for the
-	// same reason). log.Writer is restored rather than nilled — a nil writer
-	// panics the next log.Printf on any goroutine.
-	var buf syncBuffer
-	origOutput := log.Writer()
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(origOutput) })
+	// The line under test is written by pumpCarrierToBridge's goroutine while
+	// this one reads it, which captureLog's syncBuffer is safe for.
+	buf := captureLog(t)
 
 	be := newFakeRealtimeBackend(t)
 	h := markHarness(t, be.url(), requests, echoes)

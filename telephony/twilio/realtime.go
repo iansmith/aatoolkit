@@ -1034,13 +1034,10 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// function however the call ends.
 	defer func() { _ = conn.CloseNow() }()
 
-	// The two resolvers the handshake needs run BEFORE the dial context
-	// exists, not as arguments to dialRealtime (AATK-138). They run consumer
-	// code, and anything run after WithTimeout is charged against the
-	// backend's handshake budget: a slow lookup used to fail the dial with
-	// "context deadline exceeded" against a healthy backend, naming nothing
-	// about the lookup. realtimeSlowResolverWarning covers the one that never
-	// returns.
+	// Resolved BEFORE the dial context exists, not as arguments to
+	// dialRealtime, so consumer code cannot spend the backend's handshake
+	// budget (AATK-138). Keep it that way: inlining them into the call below
+	// looks harmless and brings the bug back.
 	instructions := resolveHandshake("instructions", cfg.instructions, start)
 	sessionID := resolveHandshake("session ID", cfg.sessionID, start)
 

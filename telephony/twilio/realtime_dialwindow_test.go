@@ -172,8 +172,7 @@ func TestDialWindow_WedgedResolverIsLoggedWhileItIsStillRunning(t *testing.T) {
 			// is still running. Released on cleanup too, so a failure below
 			// does not leave the call parked in it.
 			release := make(chan struct{})
-			var releaseOnce sync.Once
-			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			unblock := sync.OnceFunc(func() { close(release) })
 			t.Cleanup(unblock)
 			be := newFakeRealtimeBackend(t)
 			h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
