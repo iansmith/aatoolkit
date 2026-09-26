@@ -72,13 +72,16 @@ func TestDialWindow_SlowResolverDoesNotSpendTheDialBudget(t *testing.T) {
 
 	for _, r := range dialWindowResolvers {
 		t.Run(r.name, func(t *testing.T) {
-			want := "resolved-" + r.name
+			// Derived from the call's own start frame (the harness sets
+			// CallSID to "CA"+t.Name()), so the site must pass the resolver
+			// this call's frame, not a zero Frame.
+			want := "resolved-CA" + t.Name()
 			seen := recordDialBudget(t)
 			be := newFakeRealtimeBackend(t)
 			h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
-				r.with(func(Frame) string {
+				r.with(func(f Frame) string {
 					time.Sleep(resolverWork)
-					return want
+					return "resolved-" + f.CallSID
 				}),
 			))
 			waitBackendReady(t, be, h)
@@ -108,6 +111,43 @@ func TestDialWindow_SlowResolverDoesNotSpendTheDialBudget(t *testing.T) {
 				t.Fatalf("a stop frame must end the call cleanly, got: %v", err)
 			}
 		})
+	}
+}
+
+// TestDialWindow_ResolverSlowerThanTheDialTimeoutStillDials is the ticket's
+// literal case: a resolver that takes longer than realtimeDialTimeout, against
+// a backend that answers normally, still dials — with the resolver's own value.
+//
+// The budget test above proves the same property faster; this one also pins
+// that the engine WAITS for the value rather than abandoning a slow resolver
+// and dialing with "" (the ticket's rejected option B). Any such fallback
+// bounded below realtimeDialTimeout fails here, since the value would be
+// missing from the handshake. A bound above it cannot be told apart from a
+// wait by any finite test.
+//
+// Instructions only: both sites go through resolveHandshake, which is where a
+// fallback would have to live, and a second case would double a 10 s test.
+//
+// slopstop:test regression — guards: "a handshake resolver slower than realtimeDialTimeout neither fails the dial nor is replaced by a fallback value"
+func TestDialWindow_ResolverSlowerThanTheDialTimeoutStillDials(t *testing.T) {
+	const value = "resolved-after-the-dial-timeout"
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
+		WithInstructionsFor(func(Frame) string {
+			time.Sleep(realtimeDialTimeout + 500*time.Millisecond)
+			return value
+		}),
+	))
+
+	h.sendRaw(mediaFrameRaw(h.streamSID, carrierPayloadB64()))
+	waitForAppends(t, be, 1, realtimeDialTimeout+5*time.Second)
+	if hs := be.handshake(0); !strings.Contains(hs, value) {
+		t.Fatalf("the slow resolver's own value must reach the handshake, got %s", hs)
+	}
+
+	h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
+	if err := h.waitDone(5 * time.Second); err != nil {
+		t.Fatalf("a stop frame must end the call cleanly, got: %v", err)
 	}
 }
 
@@ -175,15 +215,22 @@ func TestDialWindow_WedgedResolverIsLoggedWhileItIsStillRunning(t *testing.T) {
 			unblock := sync.OnceFunc(func() { close(release) })
 			t.Cleanup(unblock)
 			be := newFakeRealtimeBackend(t)
+			const value = "wedged-then-released"
 			h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
 				r.with(func(Frame) string {
 					<-release
-					return ""
+					return value
 				}),
 			))
 
-			// Slack over the threshold for timer and scheduling latency.
-			waitFor(t, realtimeSlowResolverWarning+2*time.Second, func() bool {
+			// Pinned from both sides: not before the threshold (a warning
+			// for a lookup that is merely not instant is noise), and by the
+			// threshold plus scheduling slack.
+			time.Sleep(realtimeSlowResolverWarning - 500*time.Millisecond)
+			if strings.Contains(logs.String(), want) {
+				t.Fatalf("the %s warning must not fire before realtimeSlowResolverWarning (%v)", want, realtimeSlowResolverWarning)
+			}
+			waitFor(t, time.Second, func() bool {
 				return strings.Contains(logs.String(), want)
 			})
 
@@ -191,6 +238,9 @@ func TestDialWindow_WedgedResolverIsLoggedWhileItIsStillRunning(t *testing.T) {
 			// about the call itself.
 			unblock()
 			waitBackendReady(t, be, h)
+			if hs := be.handshake(0); !strings.Contains(hs, value) {
+				t.Fatalf("the %s resolver's value must reach the handshake once released, got %s", r.name, hs)
+			}
 			h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))
 			if err := h.waitDone(5 * time.Second); err != nil {
 				t.Fatalf("a released resolver's call must end cleanly on stop, got: %v", err)
@@ -217,8 +267,12 @@ func TestDialWindow_PromptResolverIsNotLogged(t *testing.T) {
 	// Both timers were armed before the backend saw the handshake, so the
 	// threshold alone, measured from here, is already past both of them.
 	time.Sleep(realtimeSlowResolverWarning + 100*time.Millisecond)
-	if strings.Contains(logs.String(), "resolver still running") {
-		t.Fatalf("a prompt resolver must not be reported as slow, log was: %q", logs.String())
+	// The same match the wedged test uses, so rewording the warning cannot
+	// leave this test searching for text that is no longer written.
+	for _, r := range dialWindowResolvers {
+		if want := r.name + " resolver"; strings.Contains(logs.String(), want) {
+			t.Fatalf("a prompt %s must not be reported as slow, log was: %q", want, logs.String())
+		}
 	}
 
 	h.sendRaw([]byte(`{"event":"stop","streamSid":"` + h.streamSID + `"}`))

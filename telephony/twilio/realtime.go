@@ -36,7 +36,9 @@ const realtimeSlowResolverWarning = 2 * time.Second
 
 // resolveHandshake runs one handshake resolution site, logging by name if it
 // is still running after realtimeSlowResolverWarning. The timer is stopped
-// when resolve returns, so the line is written only while it is still running.
+// when resolve returns, so the line is written only for a resolver that was
+// still running at the threshold (one returning at that very instant may see
+// its line land just after).
 func resolveHandshake(name string, resolve func(Frame) string, start Frame) string {
 	defer time.AfterFunc(realtimeSlowResolverWarning, func() {
 		log.Printf("twilio: realtime: %s resolver still running after %v; the call cannot dial until it returns",
