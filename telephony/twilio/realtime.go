@@ -21,6 +21,32 @@ import (
 // line for as long as the carrier tolerates it.
 const realtimeDialTimeout = 10 * time.Second
 
+// realtimeSlowResolverWarning is how long a handshake resolver — the
+// instructions or session-ID lookup, which the call cannot dial without — may
+// run before the engine logs that it is still running (AATK-138).
+//
+// A warning, not a bound. A resolver is not context-aware, so it cannot be
+// cancelled, only abandoned; abandoning it would mean dialing with a fallback
+// value, and for either resolver the fallback is "" — a call with no persona,
+// or with no session identity. A hang is visible and gets investigated; that
+// substitution would not be. So the engine names the resolver and keeps
+// waiting, and a resolver that never returns is diagnosable instead of a
+// connected carrier with nothing on the line and nothing in the log.
+const realtimeSlowResolverWarning = 2 * time.Second
+
+// resolveHandshake runs one handshake resolution site, logging by name if it
+// is still running after realtimeSlowResolverWarning. The timer is stopped
+// when resolve returns, so the line is written only for a resolver that was
+// still running at the threshold (one returning at that very instant may see
+// its line land just after).
+func resolveHandshake(name string, resolve func(Frame) string, start Frame) string {
+	defer time.AfterFunc(realtimeSlowResolverWarning, func() {
+		log.Printf("twilio: realtime: %s resolver still running after %v; the call cannot dial until it returns",
+			name, realtimeSlowResolverWarning)
+	}).Stop()
+	return resolve(start)
+}
+
 // realtimeClientEventSendTimeout bounds one consumer-event write to the
 // backend, for the same reason realtimeDialTimeout bounds the handshake: a
 // backend that neither accepts nor refuses would otherwise hold the call open
@@ -1010,14 +1036,21 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// function however the call ends.
 	defer func() { _ = conn.CloseNow() }()
 
+	// Resolved BEFORE the dial context exists, not as arguments to
+	// dialRealtime, so consumer code cannot spend the backend's handshake
+	// budget (AATK-138). Keep it that way: inlining them into the call below
+	// looks harmless and brings the bug back.
+	instructions := resolveHandshake("instructions", cfg.instructions, start)
+	sessionID := resolveHandshake("session ID", cfg.sessionID, start)
+
 	dialCtx, cancelDial := context.WithTimeout(ctx, realtimeDialTimeout)
 	defer cancelDial()
 
 	client, err := dialRealtime(dialCtx, url,
-		realtime.WithInstructions(cfg.instructions(start)),
+		realtime.WithInstructions(instructions),
 		realtime.WithVoice(cfg.voice),
 		realtime.WithTools(cfg.tools),
-		realtime.WithSessionID(cfg.sessionID(start)),
+		realtime.WithSessionID(sessionID),
 	)
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)

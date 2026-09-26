@@ -1,7 +1,6 @@
 package twilio
 
 import (
-	"bytes"
 	"context"
 	"log"
 	"strings"
@@ -29,9 +28,12 @@ func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 // captureLog redirects the standard logger for one test and returns the buffer
 // it writes into. It restores the previous writer rather than assuming stderr,
 // so a caller that is itself capturing gets its output back.
-func captureLog(t *testing.T) *bytes.Buffer {
+//
+// A syncBuffer, so a test may read it while an engine goroutine is still
+// logging into it.
+func captureLog(t *testing.T) *syncBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	var buf syncBuffer
 	orig := log.Writer()
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(orig) })
