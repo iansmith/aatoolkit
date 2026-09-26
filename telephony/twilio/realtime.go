@@ -21,6 +21,10 @@ import (
 // line for as long as the carrier tolerates it.
 const realtimeDialTimeout = 10 * time.Second
 
+// realtimeSlowResolverWarning is how long a handshake resolver may run before
+// the engine logs that it is still running.
+const realtimeSlowResolverWarning = 2 * time.Second
+
 // realtimeClientEventSendTimeout bounds one consumer-event write to the
 // backend, for the same reason realtimeDialTimeout bounds the handshake: a
 // backend that neither accepts nor refuses would otherwise hold the call open
