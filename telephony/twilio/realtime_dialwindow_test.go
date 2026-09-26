@@ -244,8 +244,9 @@ func TestDialWindow_WedgedResolverIsLoggedWhileItIsStillRunning(t *testing.T) {
 			))
 
 			// Pinned relative to the threshold from both sides, with 500 ms of
-			// scheduling slack each way. The threshold's own size is pinned by
-			// TestDialWindow_PromptResolverIsNotLogged.
+			// scheduling slack each way. The threshold's own size is pinned
+			// from below only, by TestDialWindow_PromptResolverIsNotLogged;
+			// nothing bounds it from above.
 			time.Sleep(realtimeSlowResolverWarning - 500*time.Millisecond)
 			if strings.Contains(logs.String(), want) {
 				t.Fatalf("the %s warning must not fire before realtimeSlowResolverWarning (%v)", want, realtimeSlowResolverWarning)
