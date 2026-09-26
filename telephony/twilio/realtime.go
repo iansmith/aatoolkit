@@ -21,9 +21,28 @@ import (
 // line for as long as the carrier tolerates it.
 const realtimeDialTimeout = 10 * time.Second
 
-// realtimeSlowResolverWarning is how long a handshake resolver may run before
-// the engine logs that it is still running.
+// realtimeSlowResolverWarning is how long a handshake resolver — the
+// instructions or session-ID lookup, which the call cannot dial without — may
+// run before the engine logs that it is still running (AATK-138).
+//
+// A warning, not a bound. A resolver is not context-aware, so it cannot be
+// cancelled, only abandoned; abandoning it would mean dialing with a fallback
+// value, and for either resolver the fallback is "" — a call with no persona,
+// or with no session identity. A hang is visible and gets investigated; that
+// substitution would not be. So the engine names the resolver and keeps
+// waiting, and a resolver that never returns is diagnosable instead of a
+// connected carrier with nothing on the line and nothing in the log.
 const realtimeSlowResolverWarning = 2 * time.Second
+
+// warnIfSlowResolver arms the realtimeSlowResolverWarning log for the named
+// resolver. The caller stops the returned timer when the resolver returns,
+// so the line is written only while it is still running.
+func warnIfSlowResolver(name string) *time.Timer {
+	return time.AfterFunc(realtimeSlowResolverWarning, func() {
+		log.Printf("twilio: realtime: %s resolver still running after %v; the call cannot dial until it returns",
+			name, realtimeSlowResolverWarning)
+	})
+}
 
 // realtimeClientEventSendTimeout bounds one consumer-event write to the
 // backend, for the same reason realtimeDialTimeout bounds the handshake: a
@@ -965,6 +984,7 @@ func (c realtimeConfig) instructions(start Frame) string {
 	if c.instructionsFor == nil {
 		return ""
 	}
+	defer warnIfSlowResolver("instructions").Stop()
 	return c.instructionsFor(start)
 }
 
@@ -974,6 +994,7 @@ func (c realtimeConfig) sessionID(start Frame) string {
 	if c.sessionIDFor == nil {
 		return ""
 	}
+	defer warnIfSlowResolver("session ID").Stop()
 	return c.sessionIDFor(start)
 }
 
@@ -1014,14 +1035,24 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// function however the call ends.
 	defer func() { _ = conn.CloseNow() }()
 
+	// The two resolvers the handshake needs run BEFORE the dial context
+	// exists, not as arguments to dialRealtime (AATK-138). They run consumer
+	// code, and anything run after WithTimeout is charged against the
+	// backend's handshake budget: a slow lookup used to fail the dial with
+	// "context deadline exceeded" against a healthy backend, naming nothing
+	// about the lookup. realtimeSlowResolverWarning covers the one that never
+	// returns.
+	instructions := cfg.instructions(start)
+	sessionID := cfg.sessionID(start)
+
 	dialCtx, cancelDial := context.WithTimeout(ctx, realtimeDialTimeout)
 	defer cancelDial()
 
 	client, err := dialRealtime(dialCtx, url,
-		realtime.WithInstructions(cfg.instructions(start)),
+		realtime.WithInstructions(instructions),
 		realtime.WithVoice(cfg.voice),
 		realtime.WithTools(cfg.tools),
-		realtime.WithSessionID(cfg.sessionID(start)),
+		realtime.WithSessionID(sessionID),
 	)
 	if err != nil {
 		log.Printf("twilio: realtime: dial: %v", err)
