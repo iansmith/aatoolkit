@@ -124,6 +124,10 @@ func TestDialWindow_UnresponsiveBackendStillEndsOnTheDialTimeout(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	t.Cleanup(silent.Close)
+	// Runs before Close (cleanups are LIFO). Close waits for the handler
+	// above, and if the dial were ever unbounded nothing else would end it —
+	// the test would hang instead of failing.
+	t.Cleanup(silent.CloseClientConnections)
 	url := "ws" + strings.TrimPrefix(silent.URL, "http")
 
 	start := time.Now()
