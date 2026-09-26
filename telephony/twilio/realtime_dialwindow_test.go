@@ -72,7 +72,7 @@ func TestDialWindow_SlowResolverDoesNotSpendTheDialBudget(t *testing.T) {
 
 	for _, r := range dialWindowResolvers {
 		t.Run(r.name, func(t *testing.T) {
-			want := "resolved-" + strings.ReplaceAll(r.name, " ", "-")
+			want := "resolved-" + r.name
 			seen := recordDialBudget(t)
 			be := newFakeRealtimeBackend(t)
 			h := newRealtimeHarnessWith(t, NewStreamHandler(be.url(),
