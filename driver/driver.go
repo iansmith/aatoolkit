@@ -63,7 +63,7 @@ type Host struct {
 	tts         TTSConfig
 	speech      *speechQueue // serial TTS worker so an ack and the answer don't overlap
 	history     []message
-	userContext func() string // optional user context block
+	userContext func(queryText string) string // optional user context block
 	histMu      sync.Mutex
 }
 
@@ -76,7 +76,7 @@ type Config struct {
 	Tiers       map[string]Tier
 	TTS         TTSConfig
 	Prompt      func() string
-	UserContext func() string // optional user context block injected after system prompt
+	UserContext func(queryText string) string // optional user context block injected after system prompt; queryText is what the policy passed to Context
 
 	// RealtimeURL selects the voice transport. Empty — the default — runs the
 	// existing VAD/STT/TTS sidecar path and constructs no realtime client. Set
@@ -436,13 +436,18 @@ func (h *Host) LastAnswer() []byte {
 }
 
 // Context assembles [current system prompt] + optional user context + history
-// into a JSON messages array ready for Send.
-func (h *Host) Context() []byte {
-	h.histMu.Lock()
+// into a JSON messages array ready for Send. queryText is handed to the user
+// context provider so its block can depend on the current turn.
+func (h *Host) Context(queryText string) []byte {
+	// Outside histMu: the provider may do I/O (e.g. retrieval) and never reads
+	// history, so holding the lock would stall Remember/Forget for no reason.
+	// The call has no deadline and no error path: a provider bounds its own
+	// I/O and returns "" on failure.
 	var userCtx string
 	if h.userContext != nil {
-		userCtx = h.userContext()
+		userCtx = h.userContext(queryText)
 	}
+	h.histMu.Lock()
 	capacity := len(h.history) + 1
 	if userCtx != "" {
 		capacity++
