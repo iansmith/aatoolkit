@@ -12,6 +12,9 @@ import (
 // it exactly — including Context's query-text parameter.
 var _ host.Host = (*Host)(nil)
 
+// testTiers points at a dead endpoint: these tests only assemble context.
+var testTiers = map[string]Tier{"fast": {URL: "http://127.0.0.1:1", Model: "test", MaxTokens: 512}}
+
 // TestDriver_UserContextInjected verifies that when UserContext is provided,
 // it is injected as a system message immediately after the system prompt
 // and before history.
@@ -22,7 +25,7 @@ func TestDriver_UserContextInjected(t *testing.T) {
 	h := &Host{
 		client:      &http.Client{},
 		prompt:      func() string { return systemPrompt },
-		tiers:       map[string]Tier{"fast": {URL: "http://127.0.0.1:1", Model: "test", Reasoning: false, MaxTokens: 512}},
+		tiers:       testTiers,
 		userContext: func(string) string { return userContextBlock },
 		history:     []message{},
 	}
@@ -57,7 +60,7 @@ func TestDriver_UserContextNilUnchanged(t *testing.T) {
 	h := &Host{
 		client:      &http.Client{},
 		prompt:      func() string { return systemPrompt },
-		tiers:       map[string]Tier{"fast": {URL: "http://127.0.0.1:1", Model: "test", Reasoning: false, MaxTokens: 512}},
+		tiers:       testTiers,
 		userContext: nil,
 		history:     []message{},
 	}
@@ -81,18 +84,21 @@ func TestDriver_UserContextNilUnchanged(t *testing.T) {
 
 // TestDriver_UserContextWiredThroughNew verifies that Config.UserContext, as
 // passed to the public driver.New constructor, is actually wired into the
-// Host used by Context() — not just the unexported field when set directly.
+// Host used by Context() — not just the unexported field when set directly —
+// and that the text passed to Context reaches it, so a consumer can build a
+// query-dependent block (e.g. retrieval keyed on the current turn).
 func TestDriver_UserContextWiredThroughNew(t *testing.T) {
 	systemPrompt := "You are a helpful assistant."
-	userContextBlock := "The current user is Ian."
+	const query = "what did I say yesterday?"
+	userContextBlock := "context for " + query
 
 	h := New(Config{
-		Tiers:       map[string]Tier{"fast": {URL: "http://127.0.0.1:1", Model: "test", Reasoning: false, MaxTokens: 512}},
+		Tiers:       testTiers,
 		Prompt:      func() string { return systemPrompt },
-		UserContext: func(string) string { return userContextBlock },
+		UserContext: func(q string) string { return "context for " + q },
 	})
 
-	ctx := h.Context("")
+	ctx := h.Context(query)
 
 	var msgs []message
 	if err := json.Unmarshal(ctx, &msgs); err != nil {
@@ -111,34 +117,5 @@ func TestDriver_UserContextWiredThroughNew(t *testing.T) {
 	if msgs[1].Role != "system" || msgs[1].Content != userContextBlock {
 		t.Fatalf("second message: want {role: system, content: %q}, got {role: %s, content: %q}",
 			userContextBlock, msgs[1].Role, msgs[1].Content)
-	}
-}
-
-// TestDriver_UserContextReceivesQueryText verifies that the text passed to
-// Context reaches Config.UserContext, so a consumer can build a
-// query-dependent block (e.g. retrieval keyed on the current turn).
-func TestDriver_UserContextReceivesQueryText(t *testing.T) {
-	const query = "what did I say yesterday?"
-	var gotQuery string
-	h := New(Config{
-		Tiers:  map[string]Tier{"fast": {URL: "http://127.0.0.1:1", Model: "test", Reasoning: false, MaxTokens: 512}},
-		Prompt: func() string { return "sys" },
-		UserContext: func(queryText string) string {
-			gotQuery = queryText
-			return "context for " + queryText
-		},
-	})
-
-	ctx := h.Context(query)
-
-	if gotQuery != query {
-		t.Fatalf("UserContext got query %q, want %q", gotQuery, query)
-	}
-	var msgs []message
-	if err := json.Unmarshal(ctx, &msgs); err != nil {
-		t.Fatalf("failed to unmarshal context: %v", err)
-	}
-	if len(msgs) != 2 || msgs[1].Content != "context for "+query {
-		t.Fatalf("want the user context block built from the query, got %+v", msgs)
 	}
 }

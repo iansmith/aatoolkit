@@ -439,11 +439,13 @@ func (h *Host) LastAnswer() []byte {
 // into a JSON messages array ready for Send. queryText is handed to the user
 // context provider so its block can depend on the current turn.
 func (h *Host) Context(queryText string) []byte {
-	h.histMu.Lock()
+	// Outside histMu: the provider may do I/O (e.g. retrieval) and never reads
+	// history, so holding the lock would stall Remember/Forget for no reason.
 	var userCtx string
 	if h.userContext != nil {
 		userCtx = h.userContext(queryText)
 	}
+	h.histMu.Lock()
 	capacity := len(h.history) + 1
 	if userCtx != "" {
 		capacity++
