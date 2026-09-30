@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/iansmith/aatoolkit/host"
 )
@@ -84,4 +85,35 @@ func TestDriver_UserContextWiredThroughNew(t *testing.T) {
 
 	assertSystemMessages(t, h.Context("what did I say yesterday?"),
 		systemPrompt, "context for what did I say yesterday?")
+}
+
+// TestDriver_UserContextRunsOutsideHistoryLock verifies that a slow
+// UserContext provider (e.g. retrieval I/O) does not hold the history lock:
+// Remember must complete while the provider is still blocked inside Context.
+func TestDriver_UserContextRunsOutsideHistoryLock(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	h := New(Config{
+		Tiers:  testTiers,
+		Prompt: func() string { return "sys" },
+		UserContext: func(string) string {
+			close(entered)
+			<-release
+			return ""
+		},
+	})
+
+	done := make(chan struct{})
+	go func() { h.Context("q"); close(done) }()
+	<-entered
+
+	remembered := make(chan struct{})
+	go func() { h.Remember("user", []byte("hi")); close(remembered) }()
+	select {
+	case <-remembered:
+	case <-time.After(time.Second):
+		t.Fatal("Remember blocked while the UserContext provider was running")
+	}
+	close(release)
+	<-done
 }

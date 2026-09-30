@@ -441,6 +441,8 @@ func (h *Host) LastAnswer() []byte {
 func (h *Host) Context(queryText string) []byte {
 	// Outside histMu: the provider may do I/O (e.g. retrieval) and never reads
 	// history, so holding the lock would stall Remember/Forget for no reason.
+	// The call has no deadline and no error path: a provider bounds its own
+	// I/O and returns "" on failure.
 	var userCtx string
 	if h.userContext != nil {
 		userCtx = h.userContext(queryText)
