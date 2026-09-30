@@ -41,10 +41,12 @@ type Host interface {
 	// earlier ones. This history is durable host state — it survives /reload.
 	Remember(role string, content []byte)
 
-	// Context returns the messages array to send: the current system prompt
-	// followed by the remembered history, as a JSON array ready for Send.
-	// queryText is the current turn's text, for context that depends on it
-	// (e.g. retrieval keyed on the query); pass "" when there is none.
+	// Context returns the messages array to send: the current system prompt,
+	// then any user-context block the driver was configured with, then the
+	// remembered history, as a JSON array ready for Send. queryText is the
+	// current turn's text, handed to that user-context provider so its block
+	// can depend on it (e.g. retrieval keyed on the query); pass "" when there
+	// is none.
 	Context(queryText string) []byte
 
 	// Forget drops the most recently remembered message. The policy uses it to
