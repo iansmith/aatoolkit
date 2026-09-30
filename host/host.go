@@ -43,7 +43,9 @@ type Host interface {
 
 	// Context returns the messages array to send: the current system prompt
 	// followed by the remembered history, as a JSON array ready for Send.
-	Context() []byte
+	// queryText is the current turn's text, for context that depends on it
+	// (e.g. retrieval keyed on the query); pass "" when there is none.
+	Context(queryText string) []byte
 
 	// Forget drops the most recently remembered message. The policy uses it to
 	// roll back a user turn whose send failed, so history stays consistent (and
