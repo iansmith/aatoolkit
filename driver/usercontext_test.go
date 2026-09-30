@@ -15,6 +15,25 @@ var _ host.Host = (*Host)(nil)
 // testTiers points at a dead endpoint: these tests only assemble context.
 var testTiers = map[string]Tier{"fast": {URL: "http://127.0.0.1:1", Model: "test", MaxTokens: 512}}
 
+// assertSystemMessages checks that ctx is exactly the given system messages,
+// in order.
+func assertSystemMessages(t *testing.T, ctx []byte, want ...string) {
+	t.Helper()
+	var msgs []message
+	if err := json.Unmarshal(ctx, &msgs); err != nil {
+		t.Fatalf("failed to unmarshal context: %v", err)
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("want %d messages, got %d: %+v", len(want), len(msgs), msgs)
+	}
+	for i, w := range want {
+		if msgs[i].Role != "system" || msgs[i].Content != w {
+			t.Fatalf("message %d: want {role: system, content: %q}, got {role: %s, content: %q}",
+				i, w, msgs[i].Role, msgs[i].Content)
+		}
+	}
+}
+
 // TestDriver_UserContextInjected verifies that when UserContext is provided,
 // it is injected as a system message immediately after the system prompt
 // and before history.
@@ -30,26 +49,7 @@ func TestDriver_UserContextInjected(t *testing.T) {
 		history:     []message{},
 	}
 
-	ctx := h.Context("")
-
-	var msgs []message
-	if err := json.Unmarshal(ctx, &msgs); err != nil {
-		t.Fatalf("failed to unmarshal context: %v", err)
-	}
-
-	if len(msgs) != 2 {
-		t.Fatalf("want 2 messages (system + user context), got %d", len(msgs))
-	}
-
-	if msgs[0].Role != "system" || msgs[0].Content != systemPrompt {
-		t.Fatalf("first message: want {role: system, content: %q}, got {role: %s, content: %q}",
-			systemPrompt, msgs[0].Role, msgs[0].Content)
-	}
-
-	if msgs[1].Role != "system" || msgs[1].Content != userContextBlock {
-		t.Fatalf("second message: want {role: system, content: %q}, got {role: %s, content: %q}",
-			userContextBlock, msgs[1].Role, msgs[1].Content)
-	}
+	assertSystemMessages(t, h.Context(""), systemPrompt, userContextBlock)
 }
 
 // TestDriver_UserContextNilUnchanged verifies that when UserContext is nil,
@@ -65,21 +65,7 @@ func TestDriver_UserContextNilUnchanged(t *testing.T) {
 		history:     []message{},
 	}
 
-	ctx := h.Context("")
-
-	var msgs []message
-	if err := json.Unmarshal(ctx, &msgs); err != nil {
-		t.Fatalf("failed to unmarshal context: %v", err)
-	}
-
-	if len(msgs) != 1 {
-		t.Fatalf("want 1 message (system only), got %d", len(msgs))
-	}
-
-	if msgs[0].Role != "system" || msgs[0].Content != systemPrompt {
-		t.Fatalf("message: want {role: system, content: %q}, got {role: %s, content: %q}",
-			systemPrompt, msgs[0].Role, msgs[0].Content)
-	}
+	assertSystemMessages(t, h.Context(""), systemPrompt)
 }
 
 // TestDriver_UserContextWiredThroughNew verifies that Config.UserContext, as
@@ -89,8 +75,6 @@ func TestDriver_UserContextNilUnchanged(t *testing.T) {
 // query-dependent block (e.g. retrieval keyed on the current turn).
 func TestDriver_UserContextWiredThroughNew(t *testing.T) {
 	systemPrompt := "You are a helpful assistant."
-	const query = "what did I say yesterday?"
-	userContextBlock := "context for " + query
 
 	h := New(Config{
 		Tiers:       testTiers,
@@ -98,24 +82,6 @@ func TestDriver_UserContextWiredThroughNew(t *testing.T) {
 		UserContext: func(q string) string { return "context for " + q },
 	})
 
-	ctx := h.Context(query)
-
-	var msgs []message
-	if err := json.Unmarshal(ctx, &msgs); err != nil {
-		t.Fatalf("failed to unmarshal context: %v", err)
-	}
-
-	if len(msgs) != 2 {
-		t.Fatalf("want 2 messages (system + user context), got %d", len(msgs))
-	}
-
-	if msgs[0].Role != "system" || msgs[0].Content != systemPrompt {
-		t.Fatalf("first message: want {role: system, content: %q}, got {role: %s, content: %q}",
-			systemPrompt, msgs[0].Role, msgs[0].Content)
-	}
-
-	if msgs[1].Role != "system" || msgs[1].Content != userContextBlock {
-		t.Fatalf("second message: want {role: system, content: %q}, got {role: %s, content: %q}",
-			userContextBlock, msgs[1].Role, msgs[1].Content)
-	}
+	assertSystemMessages(t, h.Context("what did I say yesterday?"),
+		systemPrompt, "context for what did I say yesterday?")
 }
