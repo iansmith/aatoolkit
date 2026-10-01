@@ -208,7 +208,8 @@ func WithSessionID(id string) DialOption {
 // stamps the client_session_id given to WithSessionID on every outbound
 // chat-completions request, so a proxy in front of the model can tie each
 // request to its session. The fork defines the same string as
-// CLIENT_SESSION_HEADER; each side pins its own copy in a test.
+// CLIENT_SESSION_HEADER; Go cannot import it, so the copy here is pinned by
+// a test and a rename must be made on both sides together.
 const XClientSessionID = "X-Client-Session-Id"
 
 // WithTools declares the consumer's tool definitions for this session

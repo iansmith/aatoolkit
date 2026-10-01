@@ -169,8 +169,8 @@ func TestBuildSessionUpdate_SessionIDComposesWithToolsSplice(t *testing.T) {
 
 // --- AATK-140: the header the backend stamps the identifier on ---------------
 
-// TestXClientSessionID_PinsTheWireName pins the header name; see
-// XClientSessionID for why the fork keeps its own copy.
+// TestXClientSessionID_PinsTheWireName pins the header name, so a change to
+// it here is deliberate and made together with the fork's copy.
 //
 // slopstop:test contract
 func TestXClientSessionID_PinsTheWireName(t *testing.T) {
