@@ -166,3 +166,16 @@ func TestBuildSessionUpdate_SessionIDComposesWithToolsSplice(t *testing.T) {
 			decoded.Session.ClientSessionID, sessionIDRaw, out)
 	}
 }
+
+// --- AATK-140: the header the backend stamps the identifier on ---------------
+
+// TestXClientSessionID_PinsTheWireName pins the header name, so a change to
+// it here is deliberate and made together with the fork's copy.
+//
+// slopstop:test contract
+func TestXClientSessionID_PinsTheWireName(t *testing.T) {
+	const want = "X-Client-Session-Id"
+	if XClientSessionID != want {
+		t.Fatalf("XClientSessionID = %q, want %q", XClientSessionID, want)
+	}
+}
