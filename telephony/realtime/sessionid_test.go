@@ -166,3 +166,17 @@ func TestBuildSessionUpdate_SessionIDComposesWithToolsSplice(t *testing.T) {
 			decoded.Session.ClientSessionID, sessionIDRaw, out)
 	}
 }
+
+// --- AATK-140: the header the backend stamps the identifier on ---------------
+
+// TestXClientSessionID_PinsTheWireName pins the exact header string. The
+// speech-to-speech fork defines the same string in Python, and Go cannot
+// import it, so each side pins its own copy: a rename on either side fails
+// that side's test instead of silently dropping the session id at the proxy.
+//
+// slopstop:test contract
+func TestXClientSessionID_PinsTheWireName(t *testing.T) {
+	if XClientSessionID != "X-Client-Session-Id" {
+		t.Fatalf("XClientSessionID = %q, want %q", XClientSessionID, "X-Client-Session-Id")
+	}
+}
