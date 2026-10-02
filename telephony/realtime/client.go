@@ -145,8 +145,9 @@ const readLimit = 1 << 20
 //
 // The transport already caps a frame at readLimit, so this is not about
 // unbounded growth; it is about the log line. HandleStreamRealtime logs this
-// error on every refused dial, and a frame-sized single line is a bad trade for a diagnostic that measured 60-120 bytes in
-// every refusal actually observed.
+// error on every refused dial, and a frame-sized single line is a bad trade
+// for a diagnostic that measured 60-120 bytes in every refusal actually
+// observed.
 const maxFrameInError = 512
 
 // clipFrame renders raw for an error message, bounded. The result is for

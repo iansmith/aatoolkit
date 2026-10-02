@@ -7,33 +7,21 @@ import (
 	"testing"
 )
 
-// Tests for AATK-141: a server event larger than coder/websocket's default
-// read limit (32 KiB) must reach the read loop intact. A backend echoes the
-// whole session in session.updated, so long instructions or many tool
-// declarations push that one frame past the default, and exceeding it is
-// fatal — the transport closes the connection, ending the call.
+// Tests for AATK-141: a server event over coder/websocket's default read
+// limit must reach Client.Read intact. See readLimit for why.
 
-// TestRead_SessionUpdatedLargerThanDefaultReadLimit pushes a session.updated
-// of about 64 KiB — twice the default limit — through Client.Read after a
+// TestRead_SessionUpdatedLargerThanDefaultReadLimit pushes a ~64 KiB
+// session.updated — twice the default limit — through Client.Read after a
 // successful Dial, and requires the verbatim frame back.
 //
 // slopstop:test contract
 func TestRead_SessionUpdatedLargerThanDefaultReadLimit(t *testing.T) {
 	const defaultReadLimit = 32768 // coder/websocket's default, the limit being lifted
-	big := map[string]any{
-		"type":    "session.updated",
-		"session": map[string]any{"instructions": strings.Repeat("x", 2*defaultReadLimit)},
-	}
-	want, err := json.Marshal(big)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(want) <= defaultReadLimit {
-		t.Fatalf("fixture is %d bytes; it must exceed %d to test anything", len(want), defaultReadLimit)
-	}
+	frame := []byte(`{"type":"session.updated","session":{"instructions":"` +
+		strings.Repeat("x", 2*defaultReadLimit) + `"}}`)
 
 	be := newFakeBackend(t)
-	be.toSend = []any{big}
+	be.toSend = []any{json.RawMessage(frame)}
 	ctx := testCtx(t)
 
 	c, err := Dial(ctx, be.url())
@@ -44,12 +32,12 @@ func TestRead_SessionUpdatedLargerThanDefaultReadLimit(t *testing.T) {
 
 	ev, err := c.Read(ctx)
 	if err != nil {
-		t.Fatalf("Read of a %d-byte session.updated: %v", len(want), err)
+		t.Fatalf("Read of a %d-byte session.updated: %v", len(frame), err)
 	}
 	if ev.Type != "session.updated" {
 		t.Fatalf("Type = %q, want session.updated", ev.Type)
 	}
-	if !bytes.Equal(ev.Raw, want) {
-		t.Fatalf("Raw is %d bytes, want the %d-byte frame verbatim", len(ev.Raw), len(want))
+	if !bytes.Equal(ev.Raw, frame) {
+		t.Fatalf("Raw is %d bytes, want the %d-byte frame verbatim", len(ev.Raw), len(frame))
 	}
 }
