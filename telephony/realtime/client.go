@@ -62,6 +62,7 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 		// user:password, and this error is the one thing guaranteed to be logged.
 		return nil, fmt.Errorf("realtime: dial %s: %w", redactUserinfo(url), err)
 	}
+	conn.SetReadLimit(readLimit)
 	c := &Client{conn: conn, writeSem: make(chan struct{}, 1)}
 
 	// buildSessionUpdate, not c.send(newSessionUpdate(...)): cfg.tools must
@@ -132,12 +133,19 @@ func Dial(ctx context.Context, url string, opts ...DialOption) (*Client, error) 
 // cannot be silently defeated by rewording the message.
 const lastFrameLabel = "last frame from backend"
 
+// readLimit is the largest server event Dial's connection will read (AATK-141).
+// coder/websocket's default is 32 KiB, and exceeding it is fatal: the read
+// fails and the connection is closed, ending the call. A backend echoes the
+// whole session in session.updated, so long instructions or many tool
+// declarations push that one frame past the default. 1 MiB clears any
+// plausible session with room to spare while still bounding a runaway frame.
+const readLimit = 1 << 20
+
 // maxFrameInError bounds how much of a backend frame reaches that error.
 //
-// The transport already caps a frame at coder/websocket's default read limit
-// (~32 KiB), so this is not about unbounded growth; it is about the log line.
-// HandleStreamRealtime logs this error on every refused dial, and a 32 KB
-// single line is a bad trade for a diagnostic that measured 60-120 bytes in
+// The transport already caps a frame at readLimit, so this is not about
+// unbounded growth; it is about the log line. HandleStreamRealtime logs this
+// error on every refused dial, and a frame-sized single line is a bad trade for a diagnostic that measured 60-120 bytes in
 // every refusal actually observed.
 const maxFrameInError = 512
 
