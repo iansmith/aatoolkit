@@ -15,12 +15,16 @@ const (
 // a response; the policy does not condition response style on transport or
 // session identity. Transport, SessionID, and From are reply-routing metadata
 // only — they tell the harness where and how to deliver the response, but do
-// not influence the response content.
+// not influence the response content. MessageSID is bookkeeping metadata the
+// policy never reads: the carrier's id for an inbound SMS (what
+// twilio.InboundSMS.MessageSID holds), a stable key for counting or
+// de-duplicating inbound messages. It is empty for voice and outbound turns.
 type Message struct {
-	Text      string
-	Transport TransportType
-	SessionID string
-	From      string
+	Text       string
+	Transport  TransportType
+	SessionID  string
+	From       string
+	MessageSID string
 }
 
 // VADKind is the kind of voice-activity event emitted by the VAD goroutine.
