@@ -50,3 +50,29 @@ func TestMessage_FromField(t *testing.T) {
 		t.Errorf("expected unset From to default to empty string, got '%s'", partialMsg.From)
 	}
 }
+
+func TestMessage_MessageSIDField(t *testing.T) {
+	const sid = "SM0123456789abcdef0123456789abcdef"
+	msg := Message{
+		Text:       "hi",
+		Transport:  TransportSMS,
+		SessionID:  "S1",
+		From:       "+15105550123",
+		MessageSID: sid,
+	}
+	if msg.MessageSID != sid {
+		t.Errorf("MessageSID: got %q want %q", msg.MessageSID, sid)
+	}
+	if msg.Text != "hi" || msg.Transport != TransportSMS || msg.SessionID != "S1" || msg.From != "+15105550123" {
+		t.Errorf("other fields changed: got %+v", msg)
+	}
+
+	if got := (Message{}).MessageSID; got != "" {
+		t.Errorf("zero-value MessageSID: got %q want empty", got)
+	}
+
+	voiceMsg := Message{Text: "hello", Transport: TransportVoice, SessionID: "CALL-1"}
+	if voiceMsg.MessageSID != "" {
+		t.Errorf("unset MessageSID on a voice turn: got %q want empty", voiceMsg.MessageSID)
+	}
+}
