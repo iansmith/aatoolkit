@@ -16,7 +16,7 @@ const (
 // session identity. Transport, SessionID, and From are reply-routing metadata
 // only — they tell the harness where and how to deliver the response, but do
 // not influence the response content. MessageSID is bookkeeping metadata the
-// policy never reads: the carrier's id for an inbound SMS, which the harness
+// policy never reads: the provider's id for an inbound SMS, which the harness
 // copies from twilio.InboundSMS.MessageSID to give a stable key for counting
 // or de-duplicating inbound messages. The harness sets it only on SMS turns.
 type Message struct {
