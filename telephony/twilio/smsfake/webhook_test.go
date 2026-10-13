@@ -287,6 +287,33 @@ func TestPostWebhook_TruncatedResponseReturnsStatusAndWhatArrived(t *testing.T) 
 	}
 }
 
+// TestPostWebhook_RedirectLoopReturnsTheLastStatus pins the one failure in
+// which the client both received a response and returned an error: it gave up
+// on a redirect chain. The server did answer, so its last status comes back
+// and a zero status keeps meaning nobody answered; the body is nil, because
+// the client has already closed it.
+func TestPostWebhook_RedirectLoopReturnsTheLastStatus(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/sms/inbound", http.StatusTemporaryRedirect)
+	}))
+	defer ts.Close()
+
+	form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0010", "+15551234567", "+15105559999", "hello there")
+	status, body, err := smsfake.PostWebhook(context.Background(), ts.URL+"/sms/inbound", "test-auth-token", form)
+	if err == nil {
+		t.Fatal("PostWebhook succeeded against a redirect loop, want an error")
+	}
+	if got := err.Error(); !strings.HasPrefix(got, "post SMS webhook: ") {
+		t.Errorf("error = %q, want the post-failure text", got)
+	}
+	if status != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want %d — the server answered, with a redirect the client stopped following", status, http.StatusTemporaryRedirect)
+	}
+	if body != nil {
+		t.Errorf("body = %q, want nil — the client closed it before handing the response back", body)
+	}
+}
+
 // TestPostWebhook_NoResponseReturnsNoStatus pins the two failures in which no
 // response ever arrives — a request that cannot be built, and one nobody
 // answers: an error carrying the matching text, a zero status and a nil body.
