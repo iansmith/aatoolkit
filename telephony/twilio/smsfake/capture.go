@@ -130,8 +130,8 @@ func (c *CaptureServer) Captured() []Message {
 	return out
 }
 
-// Notify returns the wake-up channel described on CaptureServer's notify
-// field. Every recorded message sends a wake-up on it without blocking; it is
+// Notify returns the server's one wake-up channel, so a waiter is woken by an
+// arrival itself rather than by polling for it. Every recorded message sends a wake-up on it without blocking; it is
 // buffered by one, so arrivals while a wake-up is already pending coalesce
 // into that one. A wake-up signals "something arrived", not "your message
 // arrived", so a waiter re-reads Captured to decide. It is receive-only to
