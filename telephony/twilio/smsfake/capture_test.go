@@ -355,9 +355,10 @@ func bodiesOf(msgs []smsfake.Message) []string {
 	return out
 }
 
-// requireClosed fails the test unless msgs is closed: a receive on it must
-// report the channel closed, not deliver a message and not block. The wait is
-// bounded by subscribeWait.
+// requireClosed fails the test unless msgs is already closed: a receive on it
+// must report the channel closed at once — not deliver a message, and not
+// block. It does not wait, because unsubscribe and Close promise the channel
+// is closed by the time they return.
 func requireClosed(t *testing.T, msgs <-chan smsfake.Message, which string) {
 	t.Helper()
 	select {
@@ -365,8 +366,8 @@ func requireClosed(t *testing.T, msgs <-chan smsfake.Message, which string) {
 		if ok {
 			t.Errorf("%s delivered %q, want the subscription closed", which, msg.Body)
 		}
-	case <-time.After(subscribeWait):
-		t.Errorf("%s is still open %s later, want it closed", which, subscribeWait)
+	default:
+		t.Errorf("%s is still open, want it closed by the time unsubscribe or Close returned", which)
 	}
 }
 
