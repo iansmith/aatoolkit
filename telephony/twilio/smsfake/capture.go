@@ -33,7 +33,12 @@ type Message struct {
 
 	// ReceivedAt is when the capture server recorded the message: read inside
 	// the handler at the moment of recording, not when a reader looks at it,
-	// so every copy of one message carries the same instant.
+	// so every copy of one message carries the same instant. It is read under
+	// the lock that records the message, so it never decreases along
+	// Captured's order, which is every subscriber's order too. That holds as
+	// Before compares two readings of time.Now, on the monotonic clock; a copy
+	// that has lost its monotonic reading, as a serialised one does, compares
+	// on the wall clock, which can be stepped back.
 	ReceivedAt time.Time
 }
 
