@@ -367,18 +367,35 @@ func eachCreated(bodies []string, send func(form url.Values) (status int, err er
 // channel closes first or they have not all arrived within subscribeWait. It
 // reports through its error, so any goroutine can call it.
 func collect(msgs <-chan smsfake.Message, n int) ([]smsfake.Message, error) {
+	return collectUntil(msgs, fmt.Sprintf("all %d messages", n), func(got []smsfake.Message) bool {
+		return len(got) == n
+	})
+}
+
+// collectThrough receives from msgs up to and including the first message
+// whose Body is last, failing as collect does.
+func collectThrough(msgs <-chan smsfake.Message, last string) ([]smsfake.Message, error) {
+	return collectUntil(msgs, fmt.Sprintf("the message %q", last), func(got []smsfake.Message) bool {
+		return len(got) > 0 && got[len(got)-1].Body == last
+	})
+}
+
+// collectUntil receives from msgs until done reports true of everything
+// received so far, and returns an error if the channel closes first or done
+// has not been met within subscribeWait. want names what done waits for.
+func collectUntil(msgs <-chan smsfake.Message, want string, done func(got []smsfake.Message) bool) ([]smsfake.Message, error) {
 	deadline := time.NewTimer(subscribeWait)
 	defer deadline.Stop()
-	got := make([]smsfake.Message, 0, n)
-	for len(got) < n {
+	var got []smsfake.Message
+	for !done(got) {
 		select {
 		case msg, ok := <-msgs:
 			if !ok {
-				return got, fmt.Errorf("subscription closed after %d of %d messages", len(got), n)
+				return got, fmt.Errorf("subscription closed after %d messages, before %s arrived", len(got), want)
 			}
 			got = append(got, msg)
 		case <-deadline.C:
-			return got, fmt.Errorf("received %d of %d messages within %s", len(got), n, subscribeWait)
+			return got, fmt.Errorf("received %d messages within %s, not %s", len(got), subscribeWait, want)
 		}
 	}
 	return got, nil
@@ -750,6 +767,125 @@ func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
 			t.Errorf("subscriber %d received %q, want Captured's order %q", i, bodies, recorded)
 		}
 	}
+}
+
+// TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun pins the locking
+// around the server's subscription set, which no other test can see: each of
+// them subscribes before posting and closes after the last POST is answered.
+// Here subscribers join and leave, over and over, while concurrent POSTs are
+// recorded and fanned out, and go on doing so while Close runs. Under -race,
+// an unlocked Subscribe, unsubscribe or Close is reported as a data race; it
+// can also fault the map outright. Close cannot race the handler itself —
+// httptest's Close waits for in-flight POSTs — so it is the joining and
+// leaving that Close must be locked against.
+//
+// It also pins what a subscriber joining mid-stream receives: exactly the
+// messages recorded after it subscribed, which is a run of Captured that
+// starts between the counts read just before and just after Subscribe and
+// runs, unbroken, to the last message.
+func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
+	const posters, perPoster, churners, joiners = 8, 40, 4, 8
+	capture := newCapture(t)
+
+	stopChurn := make(chan struct{})
+	var churn sync.WaitGroup
+	for range churners {
+		churn.Go(func() {
+			for {
+				select {
+				case <-stopChurn:
+					return
+				default:
+				}
+				_, unsubscribe := capture.Subscribe()
+				unsubscribe()
+			}
+		})
+	}
+	stop := sync.OnceFunc(func() {
+		close(stopChurn)
+		churn.Wait()
+	})
+	t.Cleanup(stop)
+
+	errs := make(chan error, posters)
+	postingDone := make(chan struct{})
+	var posting sync.WaitGroup
+	for p := range posters {
+		posting.Go(func() { errs <- postBodies(capture, numbered(fmt.Sprintf("poster %d", p), perPoster)) })
+	}
+	go func() {
+		posting.Wait()
+		close(postingDone)
+	}()
+
+	// Joiner i waits until about i+1 in every joiners+1 of the posters'
+	// messages have been recorded, so the joins are spread through the stream,
+	// each made while POSTs are in flight. A wake-up sent after the count is
+	// read stays pending, so none is missed.
+	type joiner struct {
+		msgs          <-chan smsfake.Message
+		before, after int // messages recorded just before and just after Subscribe
+	}
+	joined := make([]joiner, joiners)
+	returnsWithin(t, "subscribing while POSTs are in flight", func() {
+		for i := range joined {
+			target := (i + 1) * posters * perPoster / (joiners + 1)
+			for posting := true; posting && len(capture.Captured()) < target; {
+				select {
+				case <-capture.Notify():
+				case <-postingDone:
+					posting = false
+				}
+			}
+			before := len(capture.Captured())
+			msgs, unsubscribe := capture.Subscribe()
+			after := len(capture.Captured())
+			t.Cleanup(unsubscribe)
+			joined[i] = joiner{msgs, before, after}
+		}
+	})
+	returnsWithin(t, fmt.Sprintf("%d concurrent posters", posters), func() { <-postingDone })
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// One message after every poster has finished, so every joiner has at
+	// least one to receive and a known last one to stop at.
+	const last = "last"
+	if err := postBodies(capture, []string{last}); err != nil {
+		t.Fatal(err)
+	}
+	recorded := bodiesOf(capture.Captured())
+	if want := posters*perPoster + 1; len(recorded) != want {
+		t.Fatalf("recorded %d messages, want %d", len(recorded), want)
+	}
+
+	for i, j := range joined {
+		got, err := collectThrough(j.msgs, last)
+		if err != nil {
+			t.Errorf("subscriber %d: %v", i, err)
+			continue
+		}
+		from := len(recorded) - len(got)
+		if from < j.before || from > j.after {
+			t.Errorf("subscriber %d, subscribing when %d to %d messages were recorded, received the last %d, want the run starting within that range", i, j.before, j.after, len(got))
+			continue
+		}
+		if bodies := bodiesOf(got); !reflect.DeepEqual(bodies, recorded[from:]) {
+			t.Errorf("subscriber %d's %d messages are not the last %d Captured lists, in its order", i, len(got), len(got))
+		}
+	}
+
+	returnsWithin(t, "Close while subscribers join and leave", capture.Close)
+	stop()
+	for i, j := range joined {
+		requireClosed(t, j.msgs, fmt.Sprintf("subscriber %d, after Close", i))
+	}
+	requireSubscribers(t, capture, 0, "after Close")
 }
 
 // TestCapture_SlowSubscriberDoesNotBlock pins that a subscriber which never
