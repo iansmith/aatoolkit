@@ -1156,6 +1156,34 @@ func TestCapture_CloseEndsEverySubscription(t *testing.T) {
 	})
 }
 
+// TestCapture_CloseStopsTheServer pins that CaptureServer.Close, which stands
+// in front of the embedded Server's own Close, still shuts the server down:
+// once it returns, a POST to the old URL is refused and recorded nowhere, and
+// the port is free to bind again.
+func TestCapture_CloseStopsTheServer(t *testing.T) {
+	port := freeTCPPort(t)
+	capture, err := smsfake.NewCaptureServer(port)
+	if err != nil {
+		t.Fatalf("NewCaptureServer(%d): %v", port, err)
+	}
+	defer capture.Close()
+	postMessage(t, capture, subscribeAccount, url.Values{"Body": {"before Close"}})
+
+	returnsWithin(t, "Close", capture.Close)
+
+	if resp, _, err := sendMessage(capture, subscribeAccount, url.Values{"Body": {"after Close"}}); err == nil {
+		t.Errorf("a POST after Close was answered with status %d, want it refused", resp.StatusCode)
+	}
+	if n := len(capture.Captured()); n != 1 {
+		t.Errorf("Captured holds %d messages, want only the 1 posted before Close", n)
+	}
+	again, err := smsfake.NewCaptureServer(port)
+	if err != nil {
+		t.Fatalf("binding port %d again after Close: %v — want it released", port, err)
+	}
+	again.Close()
+}
+
 // TestCapture_ConcurrentClosesEachEndEverySubscription pins that Close's
 // promise is kept to every caller, not only to the one that does the work:
 // when two Closes race, each finds every subscription closed once it returns —
