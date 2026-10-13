@@ -13,6 +13,11 @@ func BaseURLEnv(captureURL string) string {
 	return "TWILIO_API_BASE_URL=" + captureURL
 }
 
+// Resolve is not yet implemented.
+func Resolve(flagValue, envValue, configValue string) string {
+	return ""
+}
+
 // NewSID returns a fresh Twilio-shaped SID: prefix followed by 32 lowercase
 // hex characters drawn from crypto/rand.
 func NewSID(prefix string) string {

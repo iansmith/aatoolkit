@@ -2,10 +2,12 @@ package smsfake_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -175,5 +177,145 @@ func TestPostWebhook_WrongAuthToken403s(t *testing.T) {
 	_, _, err := smsfake.PostWebhook(context.Background(), webhookURL, "wrong-client-token", form)
 	if err == nil {
 		t.Fatal("expected an error POSTing with a mismatched auth token, got nil")
+	}
+}
+
+// TestPostWebhook_AcceptedByRealServerReturnsStatusAndBody drives the ceremony
+// against the real inbound-SMS handler: a correctly signed post is accepted,
+// the handler sees the message the form carried, and PostWebhook hands back
+// the 200 and the body the server answered with rather than discarding them.
+func TestPostWebhook_AcceptedByRealServerReturnsStatusAndBody(t *testing.T) {
+	const authToken = "test-auth-token"
+
+	got := make(chan twilio.InboundSMS, 1)
+	srv := &twilio.Server{
+		AuthToken:    authToken,
+		StreamScheme: "ws",
+		HandleSMS:    func(_ context.Context, msg twilio.InboundSMS) { got <- msg },
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sms/inbound", srv.ServeSMS)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0006", "+15551234567", "+15105559999", "hello there")
+	status, body, err := smsfake.PostWebhook(context.Background(), ts.URL+"/sms/inbound", authToken, form)
+	if err != nil {
+		t.Fatalf("PostWebhook: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want %d", status, http.StatusOK)
+	}
+	if want := "<Response></Response>"; string(body) != want {
+		t.Errorf("body = %q, want the server's empty TwiML %q", body, want)
+	}
+
+	msg := <-got
+	if msg.MessageSID != "SMtest0006" || msg.From != "+15551234567" || msg.To != "+15105559999" || msg.Body != "hello there" {
+		t.Errorf("server parsed %+v, want MessageSID SMtest0006, From +15551234567, To +15105559999, Body %q", msg, "hello there")
+	}
+}
+
+// TestPostWebhook_NonOKReturnsStatusAndBodyWithTheError pins the rejection
+// path: anything but 200 — a 2xx included — is an error naming the URL, the
+// status and the body, and PostWebhook also returns that status and body, so a
+// caller can act on the server's answer without parsing the error text.
+func TestPostWebhook_NonOKReturnsStatusAndBodyWithTheError(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{
+		{http.StatusForbidden, "signature mismatch"},
+		{http.StatusCreated, "created, which is still not 200"},
+	} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+
+			webhookURL := ts.URL + "/sms/inbound"
+			form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0007", "+15551234567", "+15105559999", "hello there")
+			status, body, err := smsfake.PostWebhook(context.Background(), webhookURL, "test-auth-token", form)
+			if err == nil {
+				t.Fatalf("PostWebhook answered %d succeeded, want an error", tc.status)
+			}
+			if want := fmt.Sprintf("SMS webhook %s returned status %d: %s", webhookURL, tc.status, tc.body); err.Error() != want {
+				t.Errorf("error = %q, want %q", err, want)
+			}
+			if status != tc.status {
+				t.Errorf("status = %d, want %d alongside the error", status, tc.status)
+			}
+			if string(body) != tc.body {
+				t.Errorf("body = %q, want %q alongside the error", body, tc.body)
+			}
+		})
+	}
+}
+
+// TestPostWebhook_TruncatedResponseReturnsStatusAndWhatArrived pins the read
+// failure: the status line arrived, so its code comes back, together with the
+// part of the body that was read before the connection dropped.
+func TestPostWebhook_TruncatedResponseReturnsStatusAndWhatArrived(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		// A Content-Length the body never reaches, then a dropped connection.
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
+		_ = buf.Flush()
+	}))
+	defer ts.Close()
+
+	form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0008", "+15551234567", "+15105559999", "hello there")
+	status, body, err := smsfake.PostWebhook(context.Background(), ts.URL+"/sms/inbound", "test-auth-token", form)
+	if err == nil {
+		t.Fatal("PostWebhook succeeded on a truncated response, want a read error")
+	}
+	if got := err.Error(); !strings.HasPrefix(got, "read SMS webhook response: ") {
+		t.Errorf("error = %q, want the read-failure text", got)
+	}
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want %d — the status line arrived before the body broke", status, http.StatusOK)
+	}
+	if string(body) != "partial" {
+		t.Errorf("body = %q, want the %q that arrived", body, "partial")
+	}
+}
+
+// TestPostWebhook_NoResponseReturnsNoStatus pins the two failures in which no
+// response ever arrives — a request that cannot be built, and one nobody
+// answers: an error carrying the matching text, a zero status and a nil body.
+func TestPostWebhook_NoResponseReturnsNoStatus(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL + "/sms/inbound"
+	closed.Close()
+
+	for _, tc := range []struct {
+		name, webhookURL, wantPrefix string
+	}{
+		{"unbuildable request", "http://[::1/sms/inbound", "build SMS webhook request: "},
+		{"nobody listening", closedURL, "post SMS webhook: "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0009", "+15551234567", "+15105559999", "hello there")
+			status, body, err := smsfake.PostWebhook(context.Background(), tc.webhookURL, "test-auth-token", form)
+			if err == nil {
+				t.Fatal("PostWebhook succeeded, want an error")
+			}
+			if got := err.Error(); !strings.HasPrefix(got, tc.wantPrefix) {
+				t.Errorf("error = %q, want it to start %q", got, tc.wantPrefix)
+			}
+			if status != 0 {
+				t.Errorf("status = %d, want 0 when no response arrived", status)
+			}
+			if body != nil {
+				t.Errorf("body = %q, want nil when no response arrived", body)
+			}
+		})
 	}
 }
