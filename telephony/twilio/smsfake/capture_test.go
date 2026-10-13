@@ -1427,7 +1427,7 @@ func TestCapture_CloseStopsTheServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCaptureServer(%d): %v", port, err)
 	}
-	defer capture.Close()
+	defer returnsWithin(t, "Close at the end of the test", capture.Close)
 	postMessage(t, capture, subscribeAccount, url.Values{"Body": {"before Close"}})
 
 	returnsWithin(t, "Close", capture.Close)
@@ -1442,7 +1442,7 @@ func TestCapture_CloseStopsTheServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("binding port %d again after Close: %v — want it released", port, err)
 	}
-	again.Close()
+	returnsWithin(t, "Close of the server bound again", again.Close)
 }
 
 // TestCapture_ConcurrentClosesEachEndEverySubscription pins that Close's
