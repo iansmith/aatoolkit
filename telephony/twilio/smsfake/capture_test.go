@@ -658,13 +658,14 @@ func TestCapture_StatusCallbackIsNeverCalled(t *testing.T) {
 // TestCapture_RetainsFieldsItDoesNotKnow pins that the record is the posted
 // form itself rather than a list of known fields read back out of it: a field
 // SendSMS never sends is kept, and a repeated field keeps every value in the
-// order posted.
+// order posted. The values are posted out of sorted order, so a capture that
+// sorts or otherwise normalises them is caught.
 func TestCapture_RetainsFieldsItDoesNotKnow(t *testing.T) {
 	capture := newCapture(t)
 
 	posted := url.Values{
 		"Body":            {"two pictures"},
-		"MediaUrl":        {"https://example.com/1.png", "https://example.com/2.png"},
+		"MediaUrl":        {"https://example.com/2.png", "https://example.com/1.png"},
 		"ProvideFeedback": {"true"},
 	}
 	postMessage(t, capture, subscribeAccount, posted)
@@ -1328,7 +1329,7 @@ func TestCapture_FormsAreNotShared(t *testing.T) {
 
 	posted := url.Values{
 		"Body":     {"original"},
-		"MediaUrl": {"https://example.com/1.png", "https://example.com/2.png"},
+		"MediaUrl": {"https://example.com/2.png", "https://example.com/1.png"},
 	}
 	postMessage(t, capture, subscribeAccount, posted)
 
