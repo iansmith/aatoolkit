@@ -58,8 +58,9 @@ func (m Message) clone() Message {
 // asserted on without one.
 //
 // A caller reads what was recorded in one of three ways: Captured for a
-// snapshot of everything so far, Notify for a bare wake-up on each arrival,
-// or Subscribe for each arriving message itself.
+// snapshot of everything so far, Notify for a bare wake-up when something has
+// arrived (arrivals while one is pending coalesce into it), or Subscribe for
+// each arriving message itself.
 type CaptureServer struct {
 	*httptest.Server
 
