@@ -545,7 +545,8 @@ func TestCapture_RetainsFieldsItDoesNotKnow(t *testing.T) {
 // StatusCallback is recorded without one: the key is absent from the Form, not
 // present with an empty value. The two are different requests — only a
 // present StatusCallback asks the provider for anything — so the record must
-// keep them apart. The whole-Form comparison also keeps the absence check from
+// keep them apart; TestCapture_StatusCallbackKeptWhenSentEmpty pins the other
+// direction. The whole-Form comparison also keeps the absence check from
 // passing on a record with no Form at all.
 func TestCapture_StatusCallbackAbsentWhenNotSent(t *testing.T) {
 	capture := newCapture(t)
@@ -566,6 +567,40 @@ func TestCapture_StatusCallbackAbsentWhenNotSent(t *testing.T) {
 	want := url.Values{"From": {sms.From}, "To": {sms.To}, "Body": {sms.Body}}
 	if got := msgs[0].Form; !reflect.DeepEqual(got, want) {
 		t.Errorf("recorded Form = %v, want %v", got, want)
+	}
+}
+
+// TestCapture_StatusCallbackKeptWhenSentEmpty is the other half of keeping
+// "sent empty" and "not sent" apart: a StatusCallback posted with an empty
+// value is recorded as present with that one empty value, not dropped. SendSMS
+// never posts an empty StatusCallback, so the form is posted directly. Captured
+// and a subscriber each get a copy made on its own, so both are checked.
+func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
+	capture := newCapture(t)
+	msgs, unsubscribe := capture.Subscribe()
+	defer unsubscribe()
+
+	posted := url.Values{"Body": {"empty callback"}, "StatusCallback": {""}}
+	postMessage(t, capture, subscribeAccount, posted)
+
+	recorded := capture.Captured()
+	if len(recorded) != 1 {
+		t.Fatalf("got %d recorded messages, want 1", len(recorded))
+	}
+	delivered, err := collect(msgs, 1)
+	if err != nil {
+		t.Fatalf("subscriber: %v", err)
+	}
+	for _, view := range []struct {
+		who  string
+		form url.Values
+	}{
+		{"Captured", recorded[0].Form},
+		{"the subscriber", delivered[0].Form},
+	} {
+		if !reflect.DeepEqual(view.form, posted) {
+			t.Errorf("%s's Form = %q, want exactly what was posted, StatusCallback present and empty: %q", view.who, view.form, posted)
+		}
 	}
 }
 
