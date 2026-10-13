@@ -997,24 +997,42 @@ func TestCapture_UnsubscribeStopsDelivery(t *testing.T) {
 	requireSubscribers(t, capture, 0, "after both unsubscribed")
 }
 
-// TestCapture_UnsubscribeIsIdempotent pins that unsubscribe may be called
-// again, including from several goroutines at once, without panicking or
-// blocking, and that releasing one subscription leaves the server recording
-// and delivering to the next.
+// TestCapture_UnsubscribeIsIdempotent pins that unsubscribe may be called more
+// than once, and from several goroutines at once, without panicking or
+// blocking, and that releasing subscriptions leaves the server recording and
+// delivering to the next.
+//
+// The concurrent calls are each subscription's first: all of them wait at one
+// start line, so they race to end a live subscription rather than finding it
+// already ended. Under -race, ending it other than once and only once is
+// reported as a data race; it can also close a channel twice outright. A call
+// made after the subscription has ended must return too.
 func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
+	const subscriptions, callers = 100, 4
 	capture := newCapture(t)
-	msgs, unsubscribe := capture.Subscribe()
 
-	unsubscribe()
-	returnsWithin(t, "a second unsubscribe", unsubscribe)
-	returnsWithin(t, "three concurrent unsubscribes", func() {
-		var wg sync.WaitGroup
-		for range 3 {
-			wg.Go(unsubscribe)
+	start := make(chan struct{})
+	feeds := make([]<-chan smsfake.Message, subscriptions)
+	unsubscribes := make([]func(), subscriptions)
+	var wg sync.WaitGroup
+	for i := range feeds {
+		feeds[i], unsubscribes[i] = capture.Subscribe()
+		for range callers {
+			wg.Go(func() {
+				<-start
+				unsubscribes[i]()
+			})
 		}
+	}
+	returnsWithin(t, fmt.Sprintf("%d concurrent first unsubscribes of each of %d subscriptions", callers, subscriptions), func() {
+		close(start)
 		wg.Wait()
 	})
-	requireClosed(t, msgs, "the unsubscribed subscription")
+	for i, msgs := range feeds {
+		requireClosed(t, msgs, fmt.Sprintf("subscription %d", i))
+	}
+	requireSubscribers(t, capture, 0, "after every subscription was unsubscribed")
+	returnsWithin(t, "an unsubscribe after the subscription had ended", unsubscribes[0])
 
 	next, _ := subscribe(t, capture)
 	if err := postBodies(capture, []string{"still serving"}); err != nil {
@@ -1022,6 +1040,43 @@ func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
 	}
 	if _, err := collect(next, 1); err != nil {
 		t.Errorf("a subscriber after the repeated unsubscribes: %v", err)
+	}
+}
+
+// TestCapture_UnsubscribeRacesClose pins that a subscription's unsubscribe and
+// the server's Close may end it at the same moment — a consumer's deferred
+// unsubscribe running while its server shuts down — and that both return with
+// it ended and released. Each round holds every subscription's unsubscribe and
+// a Close at one start line on a fresh server, so that some unsubscribe finds
+// its subscription already taken by Close and the two end it together: under
+// -race, ending it other than once and only once is reported as a data race.
+func TestCapture_UnsubscribeRacesClose(t *testing.T) {
+	const rounds, subscriptions = 50, 8
+	for round := range rounds {
+		capture := newCapture(t)
+		start := make(chan struct{})
+		feeds := make([]<-chan smsfake.Message, subscriptions)
+		var wg sync.WaitGroup
+		for i := range feeds {
+			msgs, unsubscribe := capture.Subscribe()
+			feeds[i] = msgs
+			wg.Go(func() {
+				<-start
+				unsubscribe()
+			})
+		}
+		wg.Go(func() {
+			<-start
+			capture.Close()
+		})
+		returnsWithin(t, fmt.Sprintf("round %d: Close racing %d unsubscribes", round, subscriptions), func() {
+			close(start)
+			wg.Wait()
+		})
+		for i, msgs := range feeds {
+			requireClosed(t, msgs, fmt.Sprintf("round %d, subscription %d", round, i))
+		}
+		requireSubscribers(t, capture, 0, fmt.Sprintf("round %d, after Close and every unsubscribe", round))
 	}
 }
 
