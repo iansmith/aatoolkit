@@ -308,11 +308,14 @@ func (s *subscription) enqueue(msg Message) {
 	}
 }
 
-// pump delivers the queue to out in order until the subscription ends. It
-// closes out as it returns, so a closed out means pump has gone.
+// pump delivers the queue to out in order until the subscription ends. As it
+// returns it closes out and only then done, so a closed done means out is
+// closed: end returns on done and promises that.
 func (s *subscription) pump() {
-	defer close(s.done)
-	defer close(s.out)
+	defer func() {
+		close(s.out) // first: once done is closed, end returns, promising out closed
+		close(s.done)
+	}()
 
 	for {
 		// Checked first, so a subscription that has ended stops here rather
