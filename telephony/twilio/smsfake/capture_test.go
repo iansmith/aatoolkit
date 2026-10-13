@@ -458,6 +458,15 @@ func requireClosed(t *testing.T, msgs <-chan smsfake.Message, which string) {
 	}
 }
 
+// requireSubscribers fails the test unless capture holds exactly want
+// subscriptions. when says at what point in the test it was checked.
+func requireSubscribers(t *testing.T, capture *smsfake.CaptureServer, want int, when string) {
+	t.Helper()
+	if got := capture.SubscriberCount(); got != want {
+		t.Errorf("%s, the server holds %d subscriptions, want %d", when, got, want)
+	}
+}
+
 // returnsWithin runs fn on a goroutine of its own and, if it has not returned
 // within subscribeWait, crashes the test binary with a panic naming the test
 // and what stalled. Anything fn writes is safe to read once returnsWithin has
@@ -793,16 +802,19 @@ func TestCapture_SlowSubscriberLosesNothing(t *testing.T) {
 }
 
 // TestCapture_UnsubscribeStopsDelivery pins that unsubscribing releases the
-// subscription: nothing posted afterwards reaches it, and its channel is
-// closed. A second subscriber, still subscribed, receives the later message,
-// which shows it was recorded and fanned out — so the first subscriber's
-// silence is the unsubscribe's doing and not an empty server's.
+// subscription: nothing posted afterwards reaches it, its channel is closed,
+// and the server no longer holds it, so it is not left collecting a copy of
+// every later message for nobody. A second subscriber, still subscribed,
+// receives the later message, which shows it was recorded and fanned out — so
+// the first subscriber's silence is the unsubscribe's doing and not an empty
+// server's.
 func TestCapture_UnsubscribeStopsDelivery(t *testing.T) {
 	capture := newCapture(t)
 	msgs, unsubscribe := capture.Subscribe()
 	defer unsubscribe()
 	witness, unsubscribeWitness := capture.Subscribe()
 	defer unsubscribeWitness()
+	requireSubscribers(t, capture, 2, "with two subscribed")
 
 	if err := postBodies(capture, []string{"before"}); err != nil {
 		t.Fatal(err)
@@ -828,6 +840,10 @@ func TestCapture_UnsubscribeStopsDelivery(t *testing.T) {
 		t.Fatalf("witness subscriber received %q, want %q", bodies, want)
 	}
 	requireClosed(t, msgs, "the unsubscribed subscription")
+	requireSubscribers(t, capture, 1, "after one of two unsubscribed")
+
+	unsubscribeWitness()
+	requireSubscribers(t, capture, 0, "after both unsubscribed")
 }
 
 // TestCapture_UnsubscribeIsIdempotent pins that unsubscribe may be called
@@ -907,8 +923,9 @@ func TestCapture_LateSubscriberGetsNoReplay(t *testing.T) {
 // TestCapture_CloseEndsEverySubscription pins that shutting the server down
 // ends its subscriptions rather than leaving their feeds running: after Close
 // returns, the channel of a subscriber with nothing queued and the channel of
-// one with messages queued and unread are both closed. Subscribing to a closed
-// server yields a closed channel, and every unsubscribe stays safe to call.
+// one with messages queued and unread are both closed, and the server holds
+// neither. Subscribing to a closed server yields a closed channel and leaves
+// nothing held, and every unsubscribe stays safe to call.
 // The channel is closed by the feed as it exits, so a closed channel is the
 // observable sign that the feed is gone.
 func TestCapture_CloseEndsEverySubscription(t *testing.T) {
@@ -922,9 +939,11 @@ func TestCapture_CloseEndsEverySubscription(t *testing.T) {
 	returnsWithin(t, "Close with live subscribers", capture.Close)
 	requireClosed(t, idle, "a subscription with nothing queued")
 	requireClosed(t, backlogged, "a subscription with messages queued")
+	requireSubscribers(t, capture, 0, "after Close")
 
 	afterClose, unsubscribeAfterClose := capture.Subscribe()
 	requireClosed(t, afterClose, "a subscription to a closed server")
+	requireSubscribers(t, capture, 0, "after subscribing to a closed server")
 
 	returnsWithin(t, "unsubscribe after Close", func() {
 		unsubscribeBacklogged()
