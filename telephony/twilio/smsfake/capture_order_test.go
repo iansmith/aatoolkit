@@ -1,7 +1,6 @@
 package smsfake_test
 
 import (
-	"net/http"
 	"net/url"
 	"testing"
 	"time"
@@ -20,7 +19,6 @@ import (
 // with plenty to spare.
 func TestCaptureServer_RecordsBeforeItWakes(t *testing.T) {
 	capture := newCapture(t)
-	endpoint := capture.URL + "/2010-04-01/Accounts/ACorder00000000000000000000000/Messages.json"
 
 	release := capture.HoldRecording()
 	released := false
@@ -32,10 +30,7 @@ func TestCaptureServer_RecordsBeforeItWakes(t *testing.T) {
 
 	posted := make(chan error, 1)
 	go func() {
-		resp, err := http.PostForm(endpoint, url.Values{"Body": {"recorded first"}})
-		if err == nil {
-			resp.Body.Close()
-		}
+		_, _, err := sendMessage(capture, "ACorder00000000000000000000000", url.Values{"Body": {"recorded first"}})
 		posted <- err
 	}()
 
@@ -57,6 +52,6 @@ func TestCaptureServer_RecordsBeforeItWakes(t *testing.T) {
 		t.Errorf("Captured() = %+v, want the one message whose wake-up arrived", got)
 	}
 	if err := <-posted; err != nil {
-		t.Fatalf("POST %s: %v", endpoint, err)
+		t.Fatal(err)
 	}
 }
