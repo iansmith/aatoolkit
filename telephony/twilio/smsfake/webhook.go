@@ -54,7 +54,10 @@ func InboundForm(accountSID, apiVersion, messageSID, from, to, body string) url.
 // Whenever a response arrived it also returns that response's status code and
 // body: on success, alongside the error when the status was not 200, and —
 // with whatever part of the body was read — when reading the body failed.
-// When no response arrived at all, status is 0 and body is nil.
+// When the client gives up on a redirect chain (net/http's default policy
+// stops after 10), the last redirect's status comes back with the error and a
+// nil body, because the client has already closed it. When no response
+// arrived at all, status is 0 and body is nil.
 func PostWebhook(ctx context.Context, webhookURL, authToken string, form url.Values) (status int, body []byte, err error) {
 	sig := twilio.ComputeSignature(authToken, webhookURL, form)
 
@@ -67,7 +70,12 @@ func PostWebhook(ctx context.Context, webhookURL, authToken string, form url.Val
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("post SMS webhook: %w", err)
+		// Do returns a response with its error only when it stopped following
+		// redirects, and has closed that response's body already.
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		return status, nil, fmt.Errorf("post SMS webhook: %w", err)
 	}
 	defer resp.Body.Close()
 
