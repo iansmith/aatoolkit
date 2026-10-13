@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"regexp"
@@ -52,12 +53,18 @@ func newCapture(t *testing.T) *smsfake.CaptureServer {
 	return capture
 }
 
+// messagesPath is the path of accountSID's Messages.json endpoint, the one
+// RESTClient.SendSMS POSTs to.
+func messagesPath(accountSID string) string {
+	return "/2010-04-01/Accounts/" + accountSID + "/Messages.json"
+}
+
 // sendMessage makes one Messages.json POST to capture for accountSID, the way
 // RESTClient.SendSMS does, and returns the response with its body read. It
 // reports failure as an error rather than through a *testing.T, so a goroutine
 // other than the test's own can call it.
 func sendMessage(capture *smsfake.CaptureServer, accountSID string, form url.Values) (*http.Response, []byte, error) {
-	endpoint := capture.URL + "/2010-04-01/Accounts/" + accountSID + "/Messages.json"
+	endpoint := capture.URL + messagesPath(accountSID)
 	resp, err := http.PostForm(endpoint, form)
 	if err != nil {
 		return nil, nil, fmt.Errorf("POST %s: %v", endpoint, err)
@@ -292,10 +299,14 @@ const subscribeAccount = "ACsubscribe00000000000000000000"
 const subscribeWait = 5 * time.Second
 
 // backlog is how many messages the slow-subscriber tests queue for a
-// subscriber that is not reading: more than any plausible fixed channel
-// buffer, so a bounded queue that blocks or drops when full is caught rather
-// than hidden by headroom.
-const backlog = 300
+// subscriber that is not reading. Its feed holds one of them in hand, so its
+// queue reaches backlog-1: a queue bounded below that which blocks or drops
+// when full is caught, and one bounded at or above it is not. No finite backlog
+// catches every bound; this one sits well above the buffer sizes a bounded
+// queue would plausibly use, 512 to 4096. The tests queue it through
+// serveBodies, because a loopback round trip per message would cost seconds
+// under -race.
+const backlog = 10000
 
 // numbered returns n distinct message bodies, prefix followed by a counter,
 // in posting order.
@@ -307,17 +318,46 @@ func numbered(prefix string, n int) []string {
 	return out
 }
 
-// postBodies POSTs one message per body, in order, each answered before the
-// next is sent, and returns the first failure: a transport error or a status
-// other than 201. It reports through its error, so any goroutine can call it.
+// postBodies POSTs one message per body over HTTP, in order, each answered
+// before the next is sent, and returns the first failure: a transport error or
+// a status other than 201. It reports through its error, so any goroutine can
+// call it.
 func postBodies(capture *smsfake.CaptureServer, bodies []string) error {
+	return eachCreated(bodies, func(form url.Values) (int, error) {
+		resp, _, err := sendMessage(capture, subscribeAccount, form)
+		if err != nil {
+			return 0, err
+		}
+		return resp.StatusCode, nil
+	})
+}
+
+// serveBodies is postBodies without the network: each POST is handed straight
+// to capture's handler on the calling goroutine. It is what lets the
+// slow-subscriber tests queue backlog messages in well under a second. It
+// drives the same handler a POST reaches, so a handler that blocks blocks
+// serveBodies' caller just as it would hold up a POST's response.
+func serveBodies(capture *smsfake.CaptureServer, bodies []string) error {
+	return eachCreated(bodies, func(form url.Values) (int, error) {
+		req := httptest.NewRequest(http.MethodPost, messagesPath(subscribeAccount), strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		capture.Config.Handler.ServeHTTP(rec, req)
+		return rec.Code, nil
+	})
+}
+
+// eachCreated sends one message per body, in order, through send, which
+// returns the response status, and returns the first failure: an error from
+// send or a status other than 201.
+func eachCreated(bodies []string, send func(form url.Values) (status int, err error)) error {
 	for _, body := range bodies {
-		resp, _, err := sendMessage(capture, subscribeAccount, url.Values{"Body": {body}})
+		status, err := send(url.Values{"Body": {body}})
 		if err != nil {
 			return err
 		}
-		if resp.StatusCode != http.StatusCreated {
-			return fmt.Errorf("POST %q: status %d, want %d", body, resp.StatusCode, http.StatusCreated)
+		if status != http.StatusCreated {
+			return fmt.Errorf("POST %q: status %d, want %d", body, status, http.StatusCreated)
 		}
 	}
 	return nil
@@ -640,7 +680,7 @@ func TestCapture_SlowSubscriberDoesNotBlock(t *testing.T) {
 	posted := numbered("past the slow one", backlog)
 	var postErr error
 	returnsWithin(t, fmt.Sprintf("%d POSTs with a subscriber that never reads", backlog), func() {
-		postErr = postBodies(capture, posted)
+		postErr = serveBodies(capture, posted)
 	})
 	if postErr != nil {
 		t.Fatal(postErr)
@@ -661,7 +701,7 @@ func TestCapture_SlowSubscriberLosesNothing(t *testing.T) {
 	posted := numbered("backlog", backlog)
 	var postErr error
 	returnsWithin(t, fmt.Sprintf("%d POSTs to a subscriber not yet reading", backlog), func() {
-		postErr = postBodies(capture, posted)
+		postErr = serveBodies(capture, posted)
 	})
 	if postErr != nil {
 		t.Fatal(postErr)
