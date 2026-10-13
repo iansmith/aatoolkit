@@ -10,7 +10,12 @@ import (
 	"sync"
 )
 
-// Message is one outbound Messages.json POST recorded by CaptureServer.
+// Message is one request recorded by CaptureServer, which records every
+// request under /2010-04-01/Accounts/, whatever its method or resource — not
+// only the Messages.json POST twilio.RESTClient.SendSMS makes. AccountSID is
+// the path after that prefix with any /Messages.json suffix trimmed, so for
+// any other resource it holds the rest of the path; From, To and Body are
+// empty unless the request posted them.
 type Message struct {
 	AccountSID string
 	From       string
@@ -19,9 +24,9 @@ type Message struct {
 }
 
 // CaptureServer implements the Twilio Messages API shape used by
-// RESTClient.SendSMS (POST /2010-04-01/Accounts/{sid}/Messages.json -> 201 +
-// minimal JSON), recording every call it receives. It stands in for a real
-// Twilio account so a server's outbound SMS reply can be captured and
+// twilio.RESTClient.SendSMS (POST /2010-04-01/Accounts/{sid}/Messages.json ->
+// 201 + minimal JSON), recording every call it receives. It stands in for a
+// real Twilio account so a server's outbound SMS reply can be captured and
 // asserted on without one.
 type CaptureServer struct {
 	*httptest.Server
@@ -49,10 +54,13 @@ type CaptureServer struct {
 // can be named before the capture server exists. The server whose reply is
 // being captured reads TWILIO_API_BASE_URL once at startup, so when it is
 // launched first (twilio-cli's flow, where the operator starts it before the
-// CLI) it has to be given that URL in advance. It keeps the
-// embedded *httptest.Server — only the listener is swapped — so URL and Close
-// behave exactly as callers already expect, and a bind failure returns an error
-// instead of the panic httptest.NewServer would raise.
+// CLI) it has to be given that URL in advance. It keeps the embedded
+// *httptest.Server — only the listener is swapped — so URL and Close behave
+// exactly as callers already expect, and a failure to bind the requested port
+// returns an error instead of the panic httptest.NewServer would raise. It
+// does not remove httptest's own bind: NewUnstartedServer still binds a
+// throwaway ephemeral listener before the swap, and if even that bind fails
+// it panics, leaving the requested port held.
 //
 // The port-range and bind errors name -capture-port, the flag twilio-cli
 // exposes this port as. A caller without such a flag should reword them rather
@@ -91,11 +99,11 @@ func NewCaptureServer(port int) (*CaptureServer, error) {
 }
 
 // handleMessages records the outbound SMS-send POST and answers with the
-// minimal 201 JSON shape SendSMS treats as success.
+// minimal 201 JSON shape twilio.RESTClient.SendSMS treats as success.
 //
-// The "sid" key is a contract, not decoration: RESTClient.SendSMS parses it to
-// return the message id, and a 2xx carrying none yields an empty id rather than
-// an error — so dropping it here would go unnoticed.
+// The "sid" key is a contract, not decoration: twilio.RESTClient.SendSMS
+// parses it to return the message id, and a 2xx carrying none yields an empty
+// id rather than an error — so dropping it here would go unnoticed.
 // TestCaptureServer_SendSMSGetsTheSIDBack asserts the id makes it back, which
 // is what keeps the two ends honest.
 func (c *CaptureServer) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +136,7 @@ func (c *CaptureServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Captured returns a snapshot of every Messages.json POST recorded so far.
+// Captured returns a snapshot of every request recorded so far (see Message).
 func (c *CaptureServer) Captured() []Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
