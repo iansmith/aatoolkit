@@ -2,6 +2,7 @@ package smsfake_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
@@ -125,22 +127,28 @@ func TestPostWebhook_SignatureURLMismatch403s(t *testing.T) {
 }
 
 // TestPostWebhook_SignsTheFormOverTheExactURL pins the ceremony's wire shape
-// from the receiving side: the form arrives intact, form-encoded, and carrying
-// the X-Twilio-Signature twilio.ComputeSignature yields for the auth token,
-// the exact URL posted to, and that form — which is what a real server checks.
+// from the receiving side: the form arrives intact, form-encoded, POSTed, and
+// carrying the X-Twilio-Signature twilio.ComputeSignature yields for the auth
+// token, the exact URL posted to, and that form — which is what a real server
+// checks.
+//
+// The method is asserted here because nothing downstream would notice it
+// change: twilio.Server.ServeSMS reads the form whatever the method, so a PUT
+// passes every test that goes through it, and only a consuming server that
+// routes by method would answer it 405.
 func TestPostWebhook_SignsTheFormOverTheExactURL(t *testing.T) {
 	const authToken = "test-auth-token"
 
 	type seen struct {
-		contentType, signature string
-		form                   url.Values
+		method, contentType, signature string
+		form                           url.Values
 	}
 	got := make(chan seen, 1)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Errorf("parse posted form: %v", err)
 		}
-		got <- seen{r.Header.Get("Content-Type"), r.Header.Get("X-Twilio-Signature"), r.PostForm}
+		got <- seen{r.Method, r.Header.Get("Content-Type"), r.Header.Get("X-Twilio-Signature"), r.PostForm}
 	}))
 	defer ts.Close()
 
@@ -151,6 +159,9 @@ func TestPostWebhook_SignsTheFormOverTheExactURL(t *testing.T) {
 	}
 
 	s := <-got
+	if s.method != http.MethodPost {
+		t.Errorf("method = %q, want %q", s.method, http.MethodPost)
+	}
 	if want := "application/x-www-form-urlencoded"; s.contentType != want {
 		t.Errorf("Content-Type = %q, want %q", s.contentType, want)
 	}
@@ -353,5 +364,64 @@ func TestPostWebhook_NoResponseReturnsNoStatus(t *testing.T) {
 				t.Errorf("body = %q, want nil when no response was handed back", body)
 			}
 		})
+	}
+}
+
+// TestPostWebhook_CancellingCtxAbandonsTheInFlightPOST pins that ctx bounds
+// the request itself. http.DefaultClient has no timeout of its own, so a
+// webhook server that takes the request and never answers would hold
+// PostWebhook forever if ctx were not on the request. The cancel lands only
+// once the server holds the request, so it is the in-flight POST that ctx
+// abandons, not one that was never sent.
+func TestPostWebhook_CancellingCtxAbandonsTheInFlightPOST(t *testing.T) {
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		select { // never answers; released only so ts.Close can return
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer ts.Close()
+	defer close(release) // runs before ts.Close, which waits for the handler
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		status int
+		body   []byte
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0011", "+15551234567", "+15105559999", "hello there")
+		status, body, err := smsfake.PostWebhook(ctx, ts.URL+"/sms/inbound", "test-auth-token", form)
+		done <- result{status, body, err}
+	}()
+
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the webhook server never received the POST")
+	}
+	cancel()
+
+	select {
+	case r := <-done:
+		if !errors.Is(r.err, context.Canceled) {
+			t.Errorf("error = %v, want one wrapping context.Canceled", r.err)
+		}
+		if r.err != nil && !strings.HasPrefix(r.err.Error(), "post SMS webhook: ") {
+			t.Errorf("error = %q, want the post-failure text", r.err)
+		}
+		if r.status != 0 {
+			t.Errorf("status = %d, want 0 — no response was handed back", r.status)
+		}
+		if r.body != nil {
+			t.Errorf("body = %q, want nil — no response was handed back", r.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("PostWebhook still blocked 5s after its ctx was cancelled mid-POST")
 	}
 }
