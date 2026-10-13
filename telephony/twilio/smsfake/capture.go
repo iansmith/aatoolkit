@@ -51,6 +51,10 @@ type CaptureServer struct {
 // embedded *httptest.Server — only the listener is swapped — so URL and Close
 // behave exactly as callers already expect, and a bind failure returns an error
 // instead of the panic httptest.NewServer would raise.
+//
+// The port-range and bind errors name -capture-port, the flag twilio-cli
+// exposes this port as. A caller without such a flag should reword them rather
+// than pass the hint on.
 func NewCaptureServer(port int) (*CaptureServer, error) {
 	// Port 0 is the one value net.Listen would accept while defeating the whole
 	// point: it binds an ephemeral port, so the URL is again unknowable before
@@ -131,11 +135,12 @@ func (c *CaptureServer) Captured() []Message {
 }
 
 // Notify returns the server's one wake-up channel, so a waiter is woken by an
-// arrival itself rather than by polling for it. Every recorded message sends a wake-up on it without blocking; it is
-// buffered by one, so arrivals while a wake-up is already pending coalesce
-// into that one. A wake-up signals "something arrived", not "your message
-// arrived", so a waiter re-reads Captured to decide. It is receive-only to
-// callers; only the capture server sends on it.
+// arrival itself rather than by polling for it. Every recorded message sends a
+// wake-up on it without blocking; it is buffered by one, so arrivals while a
+// wake-up is already pending coalesce into that one. A wake-up signals
+// "something arrived", not "your message arrived", so a waiter re-reads
+// Captured to decide. It is receive-only to callers; only the capture server
+// sends on it.
 func (c *CaptureServer) Notify() <-chan struct{} {
 	return c.notify
 }

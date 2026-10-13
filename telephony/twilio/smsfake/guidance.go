@@ -6,9 +6,10 @@ import (
 )
 
 // BaseURLEnv renders the environment assignment that points a server's
-// outbound Twilio REST client at captureURL. Single-sourced here because two
-// places have to agree on it exactly: the guidance the operator copies before
-// launching the server, and the timeout error reminding them they didn't.
+// outbound Twilio REST client at captureURL. Single-sourced here because every
+// sentence that quotes it has to agree on it exactly: twilio-cli's guidance
+// and usage text, which the operator copies before launching the server, and
+// its timeout error reminding them they didn't.
 func BaseURLEnv(captureURL string) string {
 	return "TWILIO_API_BASE_URL=" + captureURL
 }
