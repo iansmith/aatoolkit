@@ -933,6 +933,54 @@ func TestCapture_CloseEndsEverySubscription(t *testing.T) {
 	})
 }
 
+// TestCapture_ConcurrentClosesEachEndEverySubscription pins that Close's
+// promise is kept to every caller, not only to the one that does the work:
+// when two Closes race, each finds every subscription closed once it returns —
+// a shutdown path and a test cleanup closing together must not let one of
+// them return with feeds still running. Nothing is posted, so a receive that
+// does not report the channel closed at once means it is still open. Many
+// subscribers keep the work long enough that a Close returning early is seen.
+func TestCapture_ConcurrentClosesEachEndEverySubscription(t *testing.T) {
+	const subscribers, closers = 2000, 2
+	capture := newCapture(t)
+	feeds := make([]<-chan smsfake.Message, subscribers)
+	for i := range feeds {
+		feeds[i], _ = capture.Subscribe() // Close ends every one
+	}
+
+	start := make(chan struct{})
+	stillOpen := make(chan int, closers)
+	returnsWithin(t, fmt.Sprintf("%d concurrent Closes", closers), func() {
+		var wg sync.WaitGroup
+		for range closers {
+			wg.Go(func() {
+				<-start
+				capture.Close()
+				open := 0
+				for _, msgs := range feeds {
+					select {
+					case _, ok := <-msgs:
+						if ok {
+							open++
+						}
+					default:
+						open++
+					}
+				}
+				stillOpen <- open
+			})
+		}
+		close(start)
+		wg.Wait()
+	})
+	close(stillOpen)
+	for open := range stillOpen {
+		if open != 0 {
+			t.Errorf("a Close racing another returned with %d of %d subscriptions still open, want every one closed", open, subscribers)
+		}
+	}
+}
+
 // TestCapture_FormsAreNotShared pins that every reader gets a Form of its
 // own. Two subscribers and Captured each receive the same message; editing one
 // copy — a value in place, or the set of keys — must change neither the
