@@ -296,6 +296,46 @@ func TestCaptureServer_NotifyIsBufferedByOneAndReceiveOnly(t *testing.T) {
 	}
 }
 
+// TestCaptureServer_NotifyFiresWithSubscribersAttached pins that subscribing
+// leaves the wake-up channel as it was. With one subscriber reading and one
+// never reading, a recorded message still leaves a wake-up pending on Notify,
+// two unread arrivals still coalesce into one, and the reading subscriber
+// receives the same messages: both signals fire for every arrival.
+func TestCaptureServer_NotifyFiresWithSubscribersAttached(t *testing.T) {
+	capture := newCapture(t)
+	notify := capture.Notify()
+	subscribe(t, capture) // never read
+	posted := []string{"one", "two", "three"}
+	reader := collectEach(t, capture, 1, len(posted))
+
+	// The handler sends the wake-up before it writes the response, so once a
+	// POST has been answered its wake-up is already pending.
+	if err := postBodies(capture, posted[:1]); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-notify:
+	default:
+		t.Fatal("no wake-up pending after a message recorded with subscribers attached, want one")
+	}
+
+	if err := postBodies(capture, posted[1:]); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-notify:
+	default:
+		t.Fatal("no wake-up pending after two more messages recorded with subscribers attached, want one")
+	}
+	select {
+	case <-notify:
+		t.Error("a second wake-up was pending after two unread arrivals with subscribers attached, want them coalesced into one")
+	default:
+	}
+
+	requireEachReceived(t, reader, posted, "reading subscriber")
+}
+
 // subscribeAccount is the account postBodies and the fan-out tests post as.
 // Nothing they assert depends on it.
 const subscribeAccount = "ACsubscribe00000000000000000000"
