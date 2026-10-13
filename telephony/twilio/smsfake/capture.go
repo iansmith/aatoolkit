@@ -6,8 +6,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Message is one outbound Messages.json POST recorded by CaptureServer.
@@ -16,6 +18,8 @@ type Message struct {
 	From       string
 	To         string
 	Body       string
+	Form       url.Values
+	ReceivedAt time.Time
 }
 
 // CaptureServer implements the Twilio Messages API shape used by
@@ -138,4 +142,9 @@ func (c *CaptureServer) Captured() []Message {
 // callers; only the capture server sends on it.
 func (c *CaptureServer) Notify() <-chan struct{} {
 	return c.notify
+}
+
+// Subscribe is not implemented yet.
+func (c *CaptureServer) Subscribe() (msgs <-chan Message, unsubscribe func()) {
+	return make(chan Message), func() {}
 }

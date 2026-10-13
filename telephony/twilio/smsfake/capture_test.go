@@ -12,7 +12,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
@@ -50,19 +52,31 @@ func newCapture(t *testing.T) *smsfake.CaptureServer {
 	return capture
 }
 
-// postMessage makes one Messages.json POST to capture for accountSID, the way
-// RESTClient.SendSMS does, and returns the response with its body read.
-func postMessage(t *testing.T, capture *smsfake.CaptureServer, accountSID string, form url.Values) (*http.Response, []byte) {
-	t.Helper()
+// sendMessage makes one Messages.json POST to capture for accountSID, the way
+// RESTClient.SendSMS does, and returns the response with its body read. It
+// reports failure as an error rather than through a *testing.T, so a goroutine
+// other than the test's own can call it.
+func sendMessage(capture *smsfake.CaptureServer, accountSID string, form url.Values) (*http.Response, []byte, error) {
 	endpoint := capture.URL + "/2010-04-01/Accounts/" + accountSID + "/Messages.json"
 	resp, err := http.PostForm(endpoint, form)
 	if err != nil {
-		t.Fatalf("POST %s: %v", endpoint, err)
+		return nil, nil, fmt.Errorf("POST %s: %v", endpoint, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read response from %s: %v", endpoint, err)
+		return nil, nil, fmt.Errorf("read response from %s: %v", endpoint, err)
+	}
+	return resp, body, nil
+}
+
+// postMessage is sendMessage for the test's own goroutine: a failed POST fails
+// the test.
+func postMessage(t *testing.T, capture *smsfake.CaptureServer, accountSID string, form url.Values) (*http.Response, []byte) {
+	t.Helper()
+	resp, body, err := sendMessage(capture, accountSID, form)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return resp, body
 }
@@ -267,5 +281,569 @@ func TestCaptureServer_NotifyIsBufferedByOneAndReceiveOnly(t *testing.T) {
 	}
 	if got := len(capture.Captured()); got != 2 {
 		t.Errorf("recorded %d messages, want 2 — a coalesced wake-up must not lose the record", got)
+	}
+}
+
+// subscribeAccount is the account the fan-out tests post as. Nothing they
+// assert depends on it.
+const subscribeAccount = "ACsubscribe00000000000000000000"
+
+// subscribeWait bounds every wait on a subscription, a POST or a shutdown in
+// the tests below. It is a failure detector only: a correct server delivers in
+// milliseconds, and no test sleeps to let delivery happen.
+const subscribeWait = 5 * time.Second
+
+// backlog is how many messages the slow-subscriber tests queue for a
+// subscriber that is not reading: more than any plausible fixed channel
+// buffer, so a bounded queue that blocks or drops when full is caught rather
+// than hidden by headroom.
+const backlog = 300
+
+// numbered returns n distinct message bodies, prefix followed by a counter,
+// in posting order.
+func numbered(prefix string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%s %03d", prefix, i)
+	}
+	return out
+}
+
+// postBodies POSTs one message per body, in order, each answered before the
+// next is sent, and returns the first failure: a transport error or a status
+// other than 201. It reports through its error, so any goroutine can call it.
+func postBodies(capture *smsfake.CaptureServer, bodies []string) error {
+	for _, body := range bodies {
+		resp, _, err := sendMessage(capture, subscribeAccount, url.Values{"Body": {body}})
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusCreated {
+			return fmt.Errorf("POST %q: status %d, want %d", body, resp.StatusCode, http.StatusCreated)
+		}
+	}
+	return nil
+}
+
+// collect receives exactly n messages from msgs, and returns an error if the
+// channel closes first or they have not all arrived within subscribeWait. It
+// reports through its error, so any goroutine can call it.
+func collect(msgs <-chan smsfake.Message, n int) ([]smsfake.Message, error) {
+	deadline := time.NewTimer(subscribeWait)
+	defer deadline.Stop()
+	got := make([]smsfake.Message, 0, n)
+	for len(got) < n {
+		select {
+		case msg, ok := <-msgs:
+			if !ok {
+				return got, fmt.Errorf("subscription closed after %d of %d messages", len(got), n)
+			}
+			got = append(got, msg)
+		case <-deadline.C:
+			return got, fmt.Errorf("received %d of %d messages within %s", len(got), n, subscribeWait)
+		}
+	}
+	return got, nil
+}
+
+// bodiesOf returns the Body of each message, in order.
+func bodiesOf(msgs []smsfake.Message) []string {
+	out := make([]string, len(msgs))
+	for i, msg := range msgs {
+		out[i] = msg.Body
+	}
+	return out
+}
+
+// requireClosed fails the test unless msgs is closed: a receive on it must
+// report the channel closed, not deliver a message and not block. The wait is
+// bounded by subscribeWait.
+func requireClosed(t *testing.T, msgs <-chan smsfake.Message, which string) {
+	t.Helper()
+	select {
+	case msg, ok := <-msgs:
+		if ok {
+			t.Errorf("%s delivered %q, want the subscription closed", which, msg.Body)
+		}
+	case <-time.After(subscribeWait):
+		t.Errorf("%s is still open %s later, want it closed", which, subscribeWait)
+	}
+}
+
+// returnsWithin runs fn on a goroutine of its own and fails the test if it
+// has not returned within subscribeWait. Anything fn writes is safe to read
+// once returnsWithin has returned.
+func returnsWithin(t *testing.T, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(subscribeWait):
+		t.Fatalf("%s did not return within %s", what, subscribeWait)
+	}
+}
+
+// TestCapture_RetainsWholePostedForm pins full-fidelity capture: a send
+// carrying From, To, Body and StatusCallback is recorded with every one of
+// those fields in its Form, exactly as posted — the StatusCallback included,
+// recorded though never acted on.
+func TestCapture_RetainsWholePostedForm(t *testing.T) {
+	capture := newCapture(t)
+
+	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL}
+	sms := twilio.OutboundSMS{
+		From:           "+15105559999",
+		To:             "+15551234567",
+		Body:           "hi back",
+		StatusCallback: "http://127.0.0.1:9/status?ref=fidelity",
+	}
+	if _, err := rest.SendSMS(context.Background(), sms); err != nil {
+		t.Fatalf("SendSMS: %v", err)
+	}
+
+	msgs := capture.Captured()
+	if len(msgs) != 1 {
+		t.Fatalf("got %d recorded messages, want 1", len(msgs))
+	}
+	want := url.Values{
+		"From":           {sms.From},
+		"To":             {sms.To},
+		"Body":           {sms.Body},
+		"StatusCallback": {sms.StatusCallback},
+	}
+	if got := msgs[0].Form; !reflect.DeepEqual(got, want) {
+		t.Errorf("recorded Form = %v, want every posted field: %v", got, want)
+	}
+}
+
+// TestCapture_RetainsFieldsItDoesNotKnow pins that the record is the posted
+// form itself rather than a list of known fields read back out of it: a field
+// SendSMS never sends is kept, and a repeated field keeps every value in the
+// order posted.
+func TestCapture_RetainsFieldsItDoesNotKnow(t *testing.T) {
+	capture := newCapture(t)
+
+	posted := url.Values{
+		"Body":            {"two pictures"},
+		"MediaUrl":        {"https://example.com/1.png", "https://example.com/2.png"},
+		"ProvideFeedback": {"true"},
+	}
+	postMessage(t, capture, subscribeAccount, posted)
+
+	msgs := capture.Captured()
+	if len(msgs) != 1 {
+		t.Fatalf("got %d recorded messages, want 1", len(msgs))
+	}
+	if got := msgs[0].Form; !reflect.DeepEqual(got, posted) {
+		t.Errorf("recorded Form = %v, want exactly what was posted: %v", got, posted)
+	}
+}
+
+// TestCapture_StatusCallbackAbsentWhenNotSent pins that a send without a
+// StatusCallback is recorded without one: the key is absent from the Form, not
+// present with an empty value. The two are different requests — only a
+// present StatusCallback asks the provider for anything — so the record must
+// keep them apart. The whole-Form comparison also keeps the absence check from
+// passing on a record with no Form at all.
+func TestCapture_StatusCallbackAbsentWhenNotSent(t *testing.T) {
+	capture := newCapture(t)
+
+	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL}
+	sms := twilio.OutboundSMS{From: "+15105559999", To: "+15551234567", Body: "no callback"}
+	if _, err := rest.SendSMS(context.Background(), sms); err != nil {
+		t.Fatalf("SendSMS: %v", err)
+	}
+
+	msgs := capture.Captured()
+	if len(msgs) != 1 {
+		t.Fatalf("got %d recorded messages, want 1", len(msgs))
+	}
+	if vs, present := msgs[0].Form["StatusCallback"]; present {
+		t.Errorf("recorded Form has StatusCallback = %q, want the key absent — none was sent", vs)
+	}
+	want := url.Values{"From": {sms.From}, "To": {sms.To}, "Body": {sms.Body}}
+	if got := msgs[0].Form; !reflect.DeepEqual(got, want) {
+		t.Errorf("recorded Form = %v, want %v", got, want)
+	}
+}
+
+// TestCapture_ArrivalTimestampBracketsThePost pins that ReceivedAt is the
+// moment of recording. It must lie between a clock read before the POST and
+// one after it; Captured is read only once the bracket has closed, so a
+// timestamp taken when the record is read rather than when it was made lands
+// after the bracket. A second read and a subscriber's copy must carry the same
+// instant: re-stamping on any read shows up as a difference.
+func TestCapture_ArrivalTimestampBracketsThePost(t *testing.T) {
+	capture := newCapture(t)
+	msgs, unsubscribe := capture.Subscribe()
+	defer unsubscribe()
+
+	before := time.Now()
+	postMessage(t, capture, subscribeAccount, url.Values{"Body": {"when"}})
+	after := time.Now()
+
+	recorded := capture.Captured()
+	if len(recorded) != 1 {
+		t.Fatalf("got %d recorded messages, want 1", len(recorded))
+	}
+	at := recorded[0].ReceivedAt
+	if at.Before(before) || at.After(after) {
+		t.Errorf("ReceivedAt = %v, want it within the POST: after %v and before %v", at, before, after)
+	}
+	if again := capture.Captured()[0].ReceivedAt; !again.Equal(at) {
+		t.Errorf("a second Captured has ReceivedAt = %v, the first had %v; want the one instant of recording", again, at)
+	}
+
+	delivered, err := collect(msgs, 1)
+	if err != nil {
+		t.Fatalf("subscriber: %v", err)
+	}
+	if got := delivered[0].ReceivedAt; !got.Equal(at) {
+		t.Errorf("subscriber's ReceivedAt = %v, Captured's = %v; want the one instant of recording", got, at)
+	}
+}
+
+// TestCapture_FanOutAllSubscribersSeeAll pins fan-out: three subscribers,
+// each reading on its own goroutine while ten messages are posted, each
+// receive all ten — as the messages themselves, in posted order.
+func TestCapture_FanOutAllSubscribersSeeAll(t *testing.T) {
+	const subscribers, messages = 3, 10
+	capture := newCapture(t)
+
+	type feed struct {
+		got []smsfake.Message
+		err error
+	}
+	feeds := make([]chan feed, subscribers)
+	for i := range feeds {
+		msgs, unsubscribe := capture.Subscribe()
+		defer unsubscribe()
+		feeds[i] = make(chan feed, 1)
+		go func() {
+			got, err := collect(msgs, messages)
+			feeds[i] <- feed{got, err}
+		}()
+	}
+
+	posted := numbered("fan-out", messages)
+	if err := postBodies(capture, posted); err != nil {
+		t.Fatal(err)
+	}
+
+	for i, ch := range feeds {
+		f := <-ch
+		if f.err != nil {
+			t.Errorf("subscriber %d: %v", i, f.err)
+			continue
+		}
+		if got := bodiesOf(f.got); !reflect.DeepEqual(got, posted) {
+			t.Errorf("subscriber %d received %q, want %q in posted order", i, got, posted)
+		}
+	}
+}
+
+// TestCapture_ConcurrentPostsSameOrderForEverySubscriber pins that "posted
+// order" has one meaning even when POSTs race: whatever order the server
+// records concurrent arrivals in, every subscriber receives them in that same
+// order, the order Captured lists them.
+func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
+	const subscribers, messages = 3, 40
+	capture := newCapture(t)
+
+	feeds := make([]<-chan smsfake.Message, subscribers)
+	for i := range feeds {
+		msgs, unsubscribe := capture.Subscribe()
+		defer unsubscribe()
+		feeds[i] = msgs
+	}
+
+	errs := make(chan error, messages)
+	returnsWithin(t, fmt.Sprintf("%d concurrent POSTs", messages), func() {
+		var wg sync.WaitGroup
+		for _, body := range numbered("concurrent", messages) {
+			wg.Go(func() { errs <- postBodies(capture, []string{body}) })
+		}
+		wg.Wait()
+	})
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	recorded := bodiesOf(capture.Captured())
+	if len(recorded) != messages {
+		t.Fatalf("recorded %d messages, want %d", len(recorded), messages)
+	}
+	for i, msgs := range feeds {
+		got, err := collect(msgs, messages)
+		if err != nil {
+			t.Errorf("subscriber %d: %v", i, err)
+			continue
+		}
+		if bodies := bodiesOf(got); !reflect.DeepEqual(bodies, recorded) {
+			t.Errorf("subscriber %d received %q, want Captured's order %q", i, bodies, recorded)
+		}
+	}
+}
+
+// TestCapture_SlowSubscriberDoesNotBlock pins that a subscriber which never
+// reads costs nobody else anything: with it subscribed throughout, every POST
+// is still answered, and the two subscribers that are reading still receive
+// every message within a bounded wait.
+func TestCapture_SlowSubscriberDoesNotBlock(t *testing.T) {
+	capture := newCapture(t)
+	_, unsubscribeSlow := capture.Subscribe() // never read
+	defer unsubscribeSlow()
+
+	type feed struct {
+		got []smsfake.Message
+		err error
+	}
+	fast := make([]chan feed, 2)
+	for i := range fast {
+		msgs, unsubscribe := capture.Subscribe()
+		defer unsubscribe()
+		fast[i] = make(chan feed, 1)
+		go func() {
+			got, err := collect(msgs, backlog)
+			fast[i] <- feed{got, err}
+		}()
+	}
+
+	posted := numbered("past the slow one", backlog)
+	var postErr error
+	returnsWithin(t, fmt.Sprintf("%d POSTs with a subscriber that never reads", backlog), func() {
+		postErr = postBodies(capture, posted)
+	})
+	if postErr != nil {
+		t.Fatal(postErr)
+	}
+
+	for i, ch := range fast {
+		f := <-ch
+		if f.err != nil {
+			t.Errorf("reading subscriber %d, alongside one that never reads: %v", i, f.err)
+			continue
+		}
+		if got := bodiesOf(f.got); !reflect.DeepEqual(got, posted) {
+			t.Errorf("reading subscriber %d received its %d messages out of posted order", i, len(got))
+		}
+	}
+}
+
+// TestCapture_SlowSubscriberLosesNothing pins the other half of not blocking:
+// a subscriber that falls behind only falls behind. Everything posted while it
+// was not reading waits for it, and once it starts reading it receives all of
+// it, in posted order, with nothing dropped.
+func TestCapture_SlowSubscriberLosesNothing(t *testing.T) {
+	capture := newCapture(t)
+	msgs, unsubscribe := capture.Subscribe()
+	defer unsubscribe()
+
+	posted := numbered("backlog", backlog)
+	var postErr error
+	returnsWithin(t, fmt.Sprintf("%d POSTs to a subscriber not yet reading", backlog), func() {
+		postErr = postBodies(capture, posted)
+	})
+	if postErr != nil {
+		t.Fatal(postErr)
+	}
+
+	got, err := collect(msgs, backlog)
+	if err != nil {
+		t.Fatalf("subscriber that started reading late: %v", err)
+	}
+	if bodies := bodiesOf(got); !reflect.DeepEqual(bodies, posted) {
+		t.Errorf("subscriber that started reading late received its backlog out of posted order")
+	}
+}
+
+// TestCapture_UnsubscribeStopsDelivery pins that unsubscribing releases the
+// subscription: nothing posted afterwards reaches it, and its channel is
+// closed. A second subscriber, still subscribed, receives the later message,
+// which shows it was recorded and fanned out — so the first subscriber's
+// silence is the unsubscribe's doing and not an empty server's.
+func TestCapture_UnsubscribeStopsDelivery(t *testing.T) {
+	capture := newCapture(t)
+	msgs, unsubscribe := capture.Subscribe()
+	defer unsubscribe()
+	witness, unsubscribeWitness := capture.Subscribe()
+	defer unsubscribeWitness()
+
+	if err := postBodies(capture, []string{"before"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := collect(msgs, 1)
+	if err != nil {
+		t.Fatalf("subscriber, before unsubscribing: %v", err)
+	}
+	if got[0].Body != "before" {
+		t.Fatalf("subscriber received %q, want %q", got[0].Body, "before")
+	}
+
+	unsubscribe()
+	if err := postBodies(capture, []string{"after"}); err != nil {
+		t.Fatal(err)
+	}
+
+	seen, err := collect(witness, 2)
+	if err != nil {
+		t.Fatalf("witness subscriber: %v", err)
+	}
+	if bodies, want := bodiesOf(seen), []string{"before", "after"}; !reflect.DeepEqual(bodies, want) {
+		t.Fatalf("witness subscriber received %q, want %q", bodies, want)
+	}
+	requireClosed(t, msgs, "the unsubscribed subscription")
+}
+
+// TestCapture_UnsubscribeIsIdempotent pins that unsubscribe may be called
+// again, including from several goroutines at once, without panicking or
+// blocking, and that releasing one subscription leaves the server recording
+// and delivering to the next.
+func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
+	capture := newCapture(t)
+	msgs, unsubscribe := capture.Subscribe()
+
+	unsubscribe()
+	returnsWithin(t, "a second unsubscribe", unsubscribe)
+	returnsWithin(t, "three concurrent unsubscribes", func() {
+		var wg sync.WaitGroup
+		for range 3 {
+			wg.Go(unsubscribe)
+		}
+		wg.Wait()
+	})
+	requireClosed(t, msgs, "the unsubscribed subscription")
+
+	next, unsubscribeNext := capture.Subscribe()
+	defer unsubscribeNext()
+	if err := postBodies(capture, []string{"still serving"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collect(next, 1); err != nil {
+		t.Errorf("a subscriber after the repeated unsubscribes: %v", err)
+	}
+}
+
+// TestCapture_UnsubscribeWhileBacklogged pins that unsubscribing a subscriber
+// with messages queued and unread returns promptly — its feed is not left
+// waiting for a reader that has gone — and that the queued messages are not
+// delivered afterwards: its channel is closed.
+func TestCapture_UnsubscribeWhileBacklogged(t *testing.T) {
+	capture := newCapture(t)
+	msgs, unsubscribe := capture.Subscribe()
+
+	if err := postBodies(capture, numbered("unread", 20)); err != nil {
+		t.Fatal(err)
+	}
+
+	returnsWithin(t, "unsubscribe with 20 messages queued and unread", unsubscribe)
+	requireClosed(t, msgs, "the unsubscribed subscription")
+}
+
+// TestCapture_LateSubscriberGetsNoReplay pins that a subscription starts when
+// it is made: a subscriber joining after three messages receives the fourth
+// onward — and first receives the fourth, not a replay of the three. History
+// is Captured's to give, not the subscription's.
+func TestCapture_LateSubscriberGetsNoReplay(t *testing.T) {
+	capture := newCapture(t)
+	if err := postBodies(capture, numbered("early", 3)); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, unsubscribe := capture.Subscribe()
+	defer unsubscribe()
+	late := numbered("late", 2)
+	if err := postBodies(capture, late); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := collect(msgs, len(late))
+	if err != nil {
+		t.Fatalf("late subscriber: %v", err)
+	}
+	if bodies := bodiesOf(got); !reflect.DeepEqual(bodies, late) {
+		t.Errorf("late subscriber received %q, want %q — only what was recorded after it subscribed", bodies, late)
+	}
+	if n := len(capture.Captured()); n != 5 {
+		t.Errorf("Captured holds %d messages, want all 5", n)
+	}
+}
+
+// TestCapture_CloseEndsEverySubscription pins that shutting the server down
+// ends its subscriptions rather than leaving their feeds running: after Close
+// returns, the channel of a subscriber with nothing queued and the channel of
+// one with messages queued and unread are both closed. Subscribing to a closed
+// server yields a closed channel, and every unsubscribe stays safe to call.
+// The channel is closed by the feed as it exits, so a closed channel is the
+// observable sign that the feed is gone.
+func TestCapture_CloseEndsEverySubscription(t *testing.T) {
+	capture := newCapture(t)
+	backlogged, unsubscribeBacklogged := capture.Subscribe()
+	if err := postBodies(capture, numbered("never read", 3)); err != nil {
+		t.Fatal(err)
+	}
+	idle, unsubscribeIdle := capture.Subscribe()
+
+	returnsWithin(t, "Close with live subscribers", capture.Close)
+	requireClosed(t, idle, "a subscription with nothing queued")
+	requireClosed(t, backlogged, "a subscription with messages queued")
+
+	afterClose, unsubscribeAfterClose := capture.Subscribe()
+	requireClosed(t, afterClose, "a subscription to a closed server")
+
+	returnsWithin(t, "unsubscribe after Close", func() {
+		unsubscribeBacklogged()
+		unsubscribeIdle()
+		unsubscribeAfterClose()
+	})
+}
+
+// TestCapture_FormsAreNotShared pins that every reader gets a Form of its
+// own. Two subscribers and Captured each receive the same message; editing one
+// copy — a value in place, or the set of keys — must change neither the
+// other subscriber's copy nor what a later Captured returns.
+func TestCapture_FormsAreNotShared(t *testing.T) {
+	capture := newCapture(t)
+	a, unsubscribeA := capture.Subscribe()
+	defer unsubscribeA()
+	b, unsubscribeB := capture.Subscribe()
+	defer unsubscribeB()
+
+	posted := url.Values{
+		"Body":     {"original"},
+		"MediaUrl": {"https://example.com/1.png", "https://example.com/2.png"},
+	}
+	postMessage(t, capture, subscribeAccount, posted)
+
+	fromA, err := collect(a, 1)
+	if err != nil {
+		t.Fatalf("subscriber A: %v", err)
+	}
+	fromB, err := collect(b, 1)
+	if err != nil {
+		t.Fatalf("subscriber B: %v", err)
+	}
+	snapshot := capture.Captured()
+	if len(snapshot) != 1 {
+		t.Fatalf("got %d recorded messages, want 1", len(snapshot))
+	}
+
+	fromA[0].Form["Body"][0] = "edited through subscriber A"
+	fromA[0].Form.Set("Added", "by subscriber A")
+	snapshot[0].Form["MediaUrl"][1] = "edited through Captured"
+	snapshot[0].Form.Del("Body")
+
+	if got := fromB[0].Form; !reflect.DeepEqual(got, posted) {
+		t.Errorf("subscriber B's Form = %v after the others edited theirs, want %v", got, posted)
+	}
+	if got := capture.Captured()[0].Form; !reflect.DeepEqual(got, posted) {
+		t.Errorf("a later Captured's Form = %v after readers edited theirs, want %v", got, posted)
 	}
 }
