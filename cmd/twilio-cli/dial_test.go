@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -59,6 +60,13 @@ func waitStubWSServer(t *testing.T, done <-chan struct{}) {
 	}
 }
 
+// mzSID is the shape of the stream SID dial mints for a call: "MZ" followed by
+// 32 lowercase hex characters, the prefix real Twilio gives a Media Stream.
+var mzSID = regexp.MustCompile(`^MZ[0-9a-f]{32}$`)
+
+// TestDial_SendsStartEvent pins the start frame dial opens the stream with,
+// including the SIDs that identify it: an MZ stream SID, the caller-supplied
+// call SID, and smsfake.DefaultAccountSID as the account.
 func TestDial_SendsStartEvent(t *testing.T) {
 	var received []byte
 	srv, done := stubWSServer(t, &received)
@@ -89,6 +97,12 @@ func TestDial_SendsStartEvent(t *testing.T) {
 	callSID, ok := startObj["callSid"].(string)
 	if !ok || callSID != callSid {
 		t.Errorf("start.callSid: got %v, want %q", startObj["callSid"], callSid)
+	}
+	if !mzSID.MatchString(streamSID) {
+		t.Errorf("streamSid = %q, want %q followed by 32 lowercase hex characters", streamSID, "MZ")
+	}
+	if got := startObj["accountSid"]; got != smsfake.DefaultAccountSID {
+		t.Errorf("start.accountSid: got %v, want %q", got, smsfake.DefaultAccountSID)
 	}
 }
 
@@ -238,7 +252,9 @@ func TestDial_StartEventSIDsAreDistinct(t *testing.T) {
 }
 
 // TestDial_SendsStopFrameOnCancel asserts that cancelling ctx (as SIGINT
-// does) causes dial to send a stop frame before closing the WebSocket.
+// does) causes dial to send a stop frame before closing the WebSocket, and
+// pins the SIDs that stop carries: an MZ stream SID, the caller-supplied call
+// SID, and smsfake.DefaultAccountSID as the account.
 func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	// On the fake mic, for the reason withFakeMic exists: this is a claim about
 	// frame ORDER -- the frame after cancel is the stop -- and the real mic
@@ -264,11 +280,12 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 		stopReceived <- msg
 	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+	callSid := smsfake.NewSID("CA")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	dialErrCh := make(chan error, 1)
 	go func() {
-		dialErrCh <- dial(ctx, smsfake.NewSID("CA"), addr)
+		dialErrCh <- dial(ctx, callSid, addr)
 	}()
 
 	select {
@@ -294,6 +311,19 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	}
 	if m["event"] != "stop" {
 		t.Errorf("frame after cancel: event = %v, want stop", m["event"])
+	}
+	if streamSID, _ := m["streamSid"].(string); !mzSID.MatchString(streamSID) {
+		t.Errorf("stop streamSid = %v, want %q followed by 32 lowercase hex characters", m["streamSid"], "MZ")
+	}
+	stopObj, ok := m["stop"].(map[string]any)
+	if !ok {
+		t.Fatalf("stop field missing or wrong type: %q", stopMsg)
+	}
+	if got := stopObj["callSid"]; got != callSid {
+		t.Errorf("stop.callSid: got %v, want %q", got, callSid)
+	}
+	if got := stopObj["accountSid"]; got != smsfake.DefaultAccountSID {
+		t.Errorf("stop.accountSid: got %v, want %q", got, smsfake.DefaultAccountSID)
 	}
 }
 
