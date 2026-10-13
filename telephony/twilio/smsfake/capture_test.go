@@ -1297,6 +1297,58 @@ func TestCapture_UnsubscribeWhileBacklogged(t *testing.T) {
 	})
 }
 
+// TestCapture_ClosedByTheTimeUnsubscribeReturns pins, over many subscriptions,
+// that unsubscribe returns only once msgs is closed, and that Subscribe on a
+// closed server, which ends the subscription before returning it, does the
+// same. A feed closes msgs as it exits, and ending a subscription waits for
+// the feed to exit, so this holds only if the feed closes msgs before it
+// signals that it has exited. Done the other way round, msgs stays open for a
+// few instructions after the end has returned, which one check sees only by
+// chance. This makes rounds of them on each path, so it catches that by
+// weight of numbers rather than by construction: reliably under -race on
+// several CPUs, on most runs without -race, and seldom if ever on one CPU,
+// where the feed usually runs on to close msgs before the caller it woke is
+// scheduled.
+func TestCapture_ClosedByTheTimeUnsubscribeReturns(t *testing.T) {
+	const rounds = 20000
+	capture := newCapture(t)
+	stillOpen := func(msgs <-chan smsfake.Message) bool {
+		select {
+		case _, ok := <-msgs:
+			return ok
+		default:
+			return true
+		}
+	}
+
+	open := 0
+	returnsWithin(t, fmt.Sprintf("%d rounds of Subscribe and unsubscribe", rounds), func() {
+		for range rounds {
+			msgs, unsubscribe := capture.Subscribe()
+			unsubscribe()
+			if stillOpen(msgs) {
+				open++
+			}
+		}
+	})
+	if open != 0 {
+		t.Errorf("%d of %d subscriptions were still open when unsubscribe returned, want none", open, rounds)
+	}
+
+	returnsWithin(t, "Close", capture.Close)
+	open = 0
+	returnsWithin(t, fmt.Sprintf("%d rounds of Subscribe to a closed server", rounds), func() {
+		for range rounds {
+			if msgs, _ := capture.Subscribe(); stillOpen(msgs) {
+				open++
+			}
+		}
+	})
+	if open != 0 {
+		t.Errorf("%d of %d subscriptions to a closed server were still open when Subscribe returned, want none", open, rounds)
+	}
+}
+
 // TestCapture_LateSubscriberGetsNoReplay pins that a subscription starts when
 // it is made: a subscriber joining after three messages receives the fourth
 // onward — and first receives the fourth, not a replay of the three. History
