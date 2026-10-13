@@ -42,16 +42,22 @@ func freeTCPPort(t *testing.T) int {
 }
 
 // newCapture starts a capture server on a free port and closes it when the
-// test ends.
+// test ends, within subscribeWait.
 func newCapture(t *testing.T) *smsfake.CaptureServer {
 	t.Helper()
 	capture, err := smsfake.NewCaptureServer(freeTCPPort(t))
 	if err != nil {
 		t.Fatalf("NewCaptureServer: %v", err)
 	}
-	t.Cleanup(capture.Close)
+	t.Cleanup(func() { returnsWithin(t, "Close at the end of the test", capture.Close) })
 	return capture
 }
+
+// postClient makes the tests' POSTs. Its Timeout bounds each one by
+// subscribeWait, so a handler that never answers fails the POST rather than
+// hanging the test. It uses http.DefaultTransport, whose idle connections
+// httptest's Close drops, so a POST after Close dials afresh.
+var postClient = &http.Client{Timeout: subscribeWait}
 
 // messagesPath is the path of accountSID's Messages.json endpoint, the one
 // RESTClient.SendSMS POSTs to.
@@ -65,7 +71,7 @@ func messagesPath(accountSID string) string {
 // other than the test's own can call it.
 func sendMessage(capture *smsfake.CaptureServer, accountSID string, form url.Values) (*http.Response, []byte, error) {
 	endpoint := capture.URL + messagesPath(accountSID)
-	resp, err := http.PostForm(endpoint, form)
+	resp, err := postClient.PostForm(endpoint, form)
 	if err != nil {
 		return nil, nil, fmt.Errorf("POST %s: %v", endpoint, err)
 	}
@@ -293,8 +299,9 @@ func TestCaptureServer_NotifyIsBufferedByOneAndReceiveOnly(t *testing.T) {
 // Nothing they assert depends on it.
 const subscribeAccount = "ACsubscribe00000000000000000000"
 
-// subscribeWait bounds every wait on a subscription, a POST or a shutdown in
-// the tests below. It is a failure detector only: a correct server delivers in
+// subscribeWait bounds every wait in the tests below — on a subscription, a
+// POST, an unsubscribe or a Close — through collect, postClient and
+// returnsWithin. It is a failure detector only: a correct server delivers in
 // milliseconds, and no test sleeps to let delivery happen.
 const subscribeWait = 5 * time.Second
 
@@ -417,16 +424,14 @@ type feed struct {
 	err error
 }
 
-// collectEach makes readers subscriptions and starts, for each, a goroutine
-// that collects n messages from it. It returns one channel per subscriber,
-// which delivers that subscriber's feed once. Every subscription is ended when
-// the test is, before newCapture's Close: cleanups run last in, first out.
+// collectEach makes readers subscriptions through subscribe and starts, for
+// each, a goroutine that collects n messages from it. It returns one channel
+// per subscriber, which delivers that subscriber's feed once.
 func collectEach(t *testing.T, capture *smsfake.CaptureServer, readers, n int) []chan feed {
 	t.Helper()
 	feeds := make([]chan feed, readers)
 	for i := range feeds {
-		msgs, unsubscribe := capture.Subscribe()
-		t.Cleanup(unsubscribe)
+		msgs, _ := subscribe(t, capture)
 		feeds[i] = make(chan feed, 1)
 		go func() {
 			got, err := collect(msgs, n)
@@ -484,6 +489,26 @@ func requireSubscribers(t *testing.T, capture *smsfake.CaptureServer, want int, 
 	}
 }
 
+// subscribe is capture.Subscribe for a test that does not exercise
+// unsubscribe's own edges. The unsubscribe it returns is bounded by
+// returnsWithin, and it also runs when the test ends — before newCapture's
+// Close, as cleanups run last in, first out — so a feed that will not stop
+// fails the run within subscribeWait, naming the test, rather than hanging it
+// until go test's -timeout.
+func subscribe(t *testing.T, capture *smsfake.CaptureServer) (<-chan smsfake.Message, func()) {
+	t.Helper()
+	msgs, unsubscribe := capture.Subscribe()
+	return msgs, boundedUnsubscribe(t, unsubscribe)
+}
+
+// boundedUnsubscribe returns unsubscribe bounded by returnsWithin, and
+// registers that bounded call to run when the test ends.
+func boundedUnsubscribe(t *testing.T, unsubscribe func()) func() {
+	bounded := func() { returnsWithin(t, "unsubscribe", unsubscribe) }
+	t.Cleanup(bounded)
+	return bounded
+}
+
 // returnsWithin runs fn on a goroutine of its own and, if it has not returned
 // within subscribeWait, crashes the test binary with a panic naming the test
 // and what stalled. Anything fn writes is safe to read once returnsWithin has
@@ -491,10 +516,11 @@ func requireSubscribers(t *testing.T, capture *smsfake.CaptureServer, want int, 
 //
 // It does not fail through t. The stall it guards against is a handler stuck
 // while holding the server's lock. A t.Fatalf there, or a panic on the test's
-// own goroutine, would first run the test's deferred unsubscribes, which block
-// on that lock, and its capture.Close cleanup, which waits on a stuck POST, so
-// the run would stall until go test's -timeout and lose the message. A panic
-// on a fresh goroutine runs none of the test's defers, so it reports at once.
+// own goroutine, would first run the test's cleanups — its unsubscribes, which
+// block on that lock, and its Close, which waits on a stuck POST — and the
+// first of those to stall would report itself instead, a subscribeWait later,
+// losing this message. A panic on a fresh goroutine runs none of the test's
+// cleanups, so it reports at once.
 func returnsWithin(t *testing.T, what string, fn func()) {
 	done := make(chan struct{})
 	go func() {
@@ -517,7 +543,7 @@ func returnsWithin(t *testing.T, what string, fn func()) {
 func TestCapture_RetainsWholePostedForm(t *testing.T) {
 	capture := newCapture(t)
 
-	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL}
+	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL, HTTPClient: postClient}
 	sms := twilio.OutboundSMS{
 		From:           "+15105559999",
 		To:             "+15551234567",
@@ -576,7 +602,7 @@ func TestCapture_RetainsFieldsItDoesNotKnow(t *testing.T) {
 func TestCapture_StatusCallbackAbsentWhenNotSent(t *testing.T) {
 	capture := newCapture(t)
 
-	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL}
+	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL, HTTPClient: postClient}
 	sms := twilio.OutboundSMS{From: "+15105559999", To: "+15551234567", Body: "no callback"}
 	if _, err := rest.SendSMS(context.Background(), sms); err != nil {
 		t.Fatalf("SendSMS: %v", err)
@@ -602,8 +628,7 @@ func TestCapture_StatusCallbackAbsentWhenNotSent(t *testing.T) {
 // and a subscriber each get a copy made on its own, so both are checked.
 func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 	capture := newCapture(t)
-	msgs, unsubscribe := capture.Subscribe()
-	defer unsubscribe()
+	msgs, _ := subscribe(t, capture)
 
 	posted := url.Values{"Body": {"empty callback"}, "StatusCallback": {""}}
 	postMessage(t, capture, subscribeAccount, posted)
@@ -638,10 +663,9 @@ func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 // posted next shows nothing was queued for it, without waiting on a silence.
 func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
 	capture := newCapture(t)
-	msgs, unsubscribe := capture.Subscribe()
-	defer unsubscribe()
+	msgs, _ := subscribe(t, capture)
 
-	resp, err := http.Post(capture.URL+messagesPath(subscribeAccount), "application/x-www-form-urlencoded", strings.NewReader("From=a&Body=%zz&To=b"))
+	resp, err := postClient.Post(capture.URL+messagesPath(subscribeAccount), "application/x-www-form-urlencoded", strings.NewReader("From=a&Body=%zz&To=b"))
 	if err != nil {
 		t.Fatalf("POST a malformed form: %v", err)
 	}
@@ -678,8 +702,7 @@ func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
 // instant: re-stamping on any read shows up as a difference.
 func TestCapture_ArrivalTimestampBracketsThePost(t *testing.T) {
 	capture := newCapture(t)
-	msgs, unsubscribe := capture.Subscribe()
-	defer unsubscribe()
+	msgs, _ := subscribe(t, capture)
 
 	before := time.Now()
 	postMessage(t, capture, subscribeAccount, url.Values{"Body": {"when"}})
@@ -732,9 +755,7 @@ func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
 
 	feeds := make([]<-chan smsfake.Message, subscribers)
 	for i := range feeds {
-		msgs, unsubscribe := capture.Subscribe()
-		defer unsubscribe()
-		feeds[i] = msgs
+		feeds[i], _ = subscribe(t, capture)
 	}
 
 	errs := make(chan error, messages)
@@ -801,10 +822,11 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 			}
 		})
 	}
-	stop := sync.OnceFunc(func() {
+	stopOnce := sync.OnceFunc(func() {
 		close(stopChurn)
 		churn.Wait()
 	})
+	stop := func() { returnsWithin(t, "stopping the subscribers that join and leave", stopOnce) }
 	t.Cleanup(stop)
 
 	errs := make(chan error, posters)
@@ -845,7 +867,7 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 		}
 	})
 	for _, j := range joined {
-		t.Cleanup(j.unsubscribe)
+		boundedUnsubscribe(t, j.unsubscribe)
 	}
 	returnsWithin(t, fmt.Sprintf("%d concurrent posters", posters), func() { <-postingDone })
 	close(errs)
@@ -896,8 +918,7 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 // every message within a bounded wait.
 func TestCapture_SlowSubscriberDoesNotBlock(t *testing.T) {
 	capture := newCapture(t)
-	_, unsubscribeSlow := capture.Subscribe() // never read
-	defer unsubscribeSlow()
+	subscribe(t, capture) // never read
 	fast := collectEach(t, capture, 2, backlog)
 
 	posted := numbered("past the slow one", backlog)
@@ -918,8 +939,7 @@ func TestCapture_SlowSubscriberDoesNotBlock(t *testing.T) {
 // it, in posted order, with nothing dropped.
 func TestCapture_SlowSubscriberLosesNothing(t *testing.T) {
 	capture := newCapture(t)
-	msgs, unsubscribe := capture.Subscribe()
-	defer unsubscribe()
+	msgs, _ := subscribe(t, capture)
 
 	posted := numbered("backlog", backlog)
 	var postErr error
@@ -948,10 +968,8 @@ func TestCapture_SlowSubscriberLosesNothing(t *testing.T) {
 // server's.
 func TestCapture_UnsubscribeStopsDelivery(t *testing.T) {
 	capture := newCapture(t)
-	msgs, unsubscribe := capture.Subscribe()
-	defer unsubscribe()
-	witness, unsubscribeWitness := capture.Subscribe()
-	defer unsubscribeWitness()
+	msgs, unsubscribe := subscribe(t, capture)
+	witness, unsubscribeWitness := subscribe(t, capture)
 	requireSubscribers(t, capture, 2, "with two subscribed")
 
 	if err := postBodies(capture, []string{"before"}); err != nil {
@@ -1003,8 +1021,7 @@ func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
 	})
 	requireClosed(t, msgs, "the unsubscribed subscription")
 
-	next, unsubscribeNext := capture.Subscribe()
-	defer unsubscribeNext()
+	next, _ := subscribe(t, capture)
 	if err := postBodies(capture, []string{"still serving"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1039,8 +1056,7 @@ func TestCapture_LateSubscriberGetsNoReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs, unsubscribe := capture.Subscribe()
-	defer unsubscribe()
+	msgs, _ := subscribe(t, capture)
 	late := numbered("late", 2)
 	if err := postBodies(capture, late); err != nil {
 		t.Fatal(err)
@@ -1144,10 +1160,8 @@ func TestCapture_ConcurrentClosesEachEndEverySubscription(t *testing.T) {
 // other subscriber's copy nor what a later Captured returns.
 func TestCapture_FormsAreNotShared(t *testing.T) {
 	capture := newCapture(t)
-	a, unsubscribeA := capture.Subscribe()
-	defer unsubscribeA()
-	b, unsubscribeB := capture.Subscribe()
-	defer unsubscribeB()
+	a, _ := subscribe(t, capture)
+	b, _ := subscribe(t, capture)
 
 	posted := url.Values{
 		"Body":     {"original"},
