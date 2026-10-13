@@ -71,6 +71,11 @@ type CaptureServer struct {
 	subs   map[*subscription]struct{}
 	closed bool
 
+	// closeOnce runs Close's work exactly once. Once.Do returns to no caller
+	// before that work has finished, so a Close racing another returns only
+	// once every subscription has ended, just as the one doing the work does.
+	closeOnce sync.Once
+
 	// notify carries a wake-up on every recorded message, so a waiter is woken
 	// by the arrival itself rather than by polling for it.
 	//
@@ -238,19 +243,23 @@ func (c *CaptureServer) Subscribe() (msgs <-chan Message, unsubscribe func()) {
 // unsubscribe would: messages a subscriber had not yet received are not
 // delivered — Captured still holds them — and no subscription's goroutine
 // outlives the server. Close the CaptureServer rather than its embedded
-// Server, which knows nothing of subscriptions. Calling Close again is safe.
+// Server, which knows nothing of subscriptions. Calling Close again is safe,
+// and so is calling it from several goroutines at once: every call returns
+// only once the server is down and every subscription has ended.
 func (c *CaptureServer) Close() {
-	c.Server.Close()
+	c.closeOnce.Do(func() {
+		c.Server.Close()
 
-	c.mu.Lock()
-	c.closed = true
-	subs := c.subs
-	c.subs = nil
-	c.mu.Unlock()
+		c.mu.Lock()
+		c.closed = true
+		subs := c.subs
+		c.subs = nil
+		c.mu.Unlock()
 
-	for s := range subs {
-		s.end()
-	}
+		for s := range subs {
+			s.end()
+		}
+	})
 }
 
 // subscription is one Subscribe caller's feed. The handler appends to queue
