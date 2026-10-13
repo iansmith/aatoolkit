@@ -341,7 +341,8 @@ func postBodies(capture *smsfake.CaptureServer, bodies []string) error {
 
 // serveBodies is postBodies without the network: each POST is handed straight
 // to capture's handler on the calling goroutine. It is what lets the
-// slow-subscriber tests queue backlog messages in well under a second. It
+// slow-subscriber tests queue backlog messages in well under a second, and the
+// ordering test race hundreds of POSTs without a connection apiece. It
 // drives the same handler a POST reaches, so a handler that blocks blocks
 // serveBodies' caller just as it would hold up a POST's response.
 func serveBodies(capture *smsfake.CaptureServer, bodies []string) error {
@@ -749,20 +750,23 @@ func TestCapture_FanOutAllSubscribersSeeAll(t *testing.T) {
 // order" has one meaning even when POSTs race: whatever order the server
 // records concurrent arrivals in, every subscriber receives them in that same
 // order, the order Captured lists them.
+//
+// It is the guard on the handler's lock scope: a message is recorded and
+// queued for every subscriber under one hold of the server's lock. A handler
+// that queued after letting the lock go would let two racing arrivals reach a
+// subscriber in the opposite order to Captured's. That needs many arrivals
+// racing to show on every run, so the POSTs go straight to the handler, as
+// serveBodies does, rather than opening a connection apiece.
 func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
-	const subscribers, messages = 3, 40
+	const subscribers, messages = 3, 400
 	capture := newCapture(t)
-
-	feeds := make([]<-chan smsfake.Message, subscribers)
-	for i := range feeds {
-		feeds[i], _ = subscribe(t, capture)
-	}
+	feeds := collectEach(t, capture, subscribers, messages)
 
 	errs := make(chan error, messages)
 	returnsWithin(t, fmt.Sprintf("%d concurrent POSTs", messages), func() {
 		var wg sync.WaitGroup
 		for _, body := range numbered("concurrent", messages) {
-			wg.Go(func() { errs <- postBodies(capture, []string{body}) })
+			wg.Go(func() { errs <- serveBodies(capture, []string{body}) })
 		}
 		wg.Wait()
 	})
@@ -777,16 +781,7 @@ func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
 	if len(recorded) != messages {
 		t.Fatalf("recorded %d messages, want %d", len(recorded), messages)
 	}
-	for i, msgs := range feeds {
-		got, err := collect(msgs, messages)
-		if err != nil {
-			t.Errorf("subscriber %d: %v", i, err)
-			continue
-		}
-		if bodies := bodiesOf(got); !reflect.DeepEqual(bodies, recorded) {
-			t.Errorf("subscriber %d received %q, want Captured's order %q", i, bodies, recorded)
-		}
-	}
+	requireEachReceived(t, feeds, recorded, "subscriber")
 }
 
 // TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun pins the locking
