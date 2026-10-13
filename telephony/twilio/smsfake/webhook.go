@@ -50,6 +50,11 @@ func InboundForm(accountSID, apiVersion, messageSID, from, to, body string) url.
 // (signed over webhookURL, the exact URL posted to) and returns an error if
 // the request fails or the server rejects it (e.g. a 403 from a signature
 // mismatch caused by a wrong path or auth token).
+//
+// Whenever a response arrived it also returns that response's status code and
+// body: on success, alongside the error when the status was not 200, and —
+// with whatever part of the body was read — when reading the body failed.
+// When no response arrived at all, status is 0 and body is nil.
 func PostWebhook(ctx context.Context, webhookURL, authToken string, form url.Values) (status int, body []byte, err error) {
 	sig := twilio.ComputeSignature(authToken, webhookURL, form)
 
@@ -68,11 +73,11 @@ func PostWebhook(ctx context.Context, webhookURL, authToken string, form url.Val
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, nil, fmt.Errorf("read SMS webhook response: %w", err)
+		return resp.StatusCode, respBody, fmt.Errorf("read SMS webhook response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, nil, fmt.Errorf("SMS webhook %s returned status %d: %s", webhookURL, resp.StatusCode, respBody)
+		return resp.StatusCode, respBody, fmt.Errorf("SMS webhook %s returned status %d: %s", webhookURL, resp.StatusCode, respBody)
 	}
 
-	return 0, nil, nil
+	return resp.StatusCode, respBody, nil
 }
