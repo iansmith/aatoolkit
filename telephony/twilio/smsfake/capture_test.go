@@ -489,13 +489,12 @@ func requireSubscribers(t *testing.T, capture *smsfake.CaptureServer, want int, 
 // and what stalled. Anything fn writes is safe to read once returnsWithin has
 // returned.
 //
-// It does not fail through t. What it guards against is a handler stuck while
-// holding the server's lock, and then a t.Fatalf — or a panic on the test's own
-// goroutine — runs the test's deferred unsubscribes, which block on that lock,
-// and its capture.Close cleanup, which waits on the stuck POST, before anything
-// is reported: the run would stall until go test's -timeout with the message
-// lost. A panic on a fresh goroutine runs none of the test's defers, so it
-// reports at once.
+// It does not fail through t. The stall it guards against is a handler stuck
+// while holding the server's lock. A t.Fatalf there, or a panic on the test's
+// own goroutine, would first run the test's deferred unsubscribes, which block
+// on that lock, and its capture.Close cleanup, which waits on a stuck POST, so
+// the run would stall until go test's -timeout and lose the message. A panic
+// on a fresh goroutine runs none of the test's defers, so it reports at once.
 func returnsWithin(t *testing.T, what string, fn func()) {
 	done := make(chan struct{})
 	go func() {
@@ -825,26 +824,29 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 	// read stays pending, so none is missed.
 	type joiner struct {
 		msgs          <-chan smsfake.Message
+		unsubscribe   func()
 		before, after int // messages recorded just before and just after Subscribe
 	}
 	joined := make([]joiner, joiners)
 	returnsWithin(t, "subscribing while POSTs are in flight", func() {
 		for i := range joined {
 			target := (i + 1) * posters * perPoster / (joiners + 1)
-			for posting := true; posting && len(capture.Captured()) < target; {
+			for waiting := true; waiting && len(capture.Captured()) < target; {
 				select {
 				case <-capture.Notify():
 				case <-postingDone:
-					posting = false
+					waiting = false
 				}
 			}
 			before := len(capture.Captured())
 			msgs, unsubscribe := capture.Subscribe()
 			after := len(capture.Captured())
-			t.Cleanup(unsubscribe)
-			joined[i] = joiner{msgs, before, after}
+			joined[i] = joiner{msgs, unsubscribe, before, after}
 		}
 	})
+	for _, j := range joined {
+		t.Cleanup(j.unsubscribe)
+	}
 	returnsWithin(t, fmt.Sprintf("%d concurrent posters", posters), func() { <-postingDone })
 	close(errs)
 	for err := range errs {
@@ -876,7 +878,7 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 			continue
 		}
 		if bodies := bodiesOf(got); !reflect.DeepEqual(bodies, recorded[from:]) {
-			t.Errorf("subscriber %d's %d messages are not the last %d Captured lists, in its order", i, len(got), len(got))
+			t.Errorf("subscriber %d received %d messages that are not Captured's last %[2]d, in Captured's order", i, len(got))
 		}
 	}
 
