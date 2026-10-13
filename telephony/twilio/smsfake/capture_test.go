@@ -1099,9 +1099,12 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 }
 
 // TestCapture_SlowSubscriberDoesNotBlock pins that a subscriber which never
-// reads costs nobody else anything: with it subscribed throughout, every POST
-// is still answered, and the two subscribers that are reading still receive
-// every message within a bounded wait.
+// reads does not hold up the handler or the other subscribers: with it
+// subscribed throughout, all backlog POSTs are answered within subscribeWait,
+// and the two subscribers that are reading still receive every message within
+// a bounded wait. The bound covers the whole backlog, so a handler that waited
+// on the idle subscriber for as little as half a millisecond a message would
+// miss it; a wait shorter than that is not seen.
 func TestCapture_SlowSubscriberDoesNotBlock(t *testing.T) {
 	capture := newCapture(t)
 	subscribe(t, capture) // never read
