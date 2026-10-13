@@ -660,6 +660,11 @@ func TestCapture_StatusCallbackIsNeverCalled(t *testing.T) {
 // SendSMS never sends is kept, and a repeated field keeps every value in the
 // order posted. The values are posted out of sorted order, so a capture that
 // sorts or otherwise normalises them is caught.
+//
+// The POST's URL also carries a query string, which is not part of the posted
+// form. It repeats the posted Body and adds a From that was never posted, so a
+// record that mixed the query in would show a second Body value in its Form, a
+// From key in its Form, or a From read back out of the query.
 func TestCapture_RetainsFieldsItDoesNotKnow(t *testing.T) {
 	capture := newCapture(t)
 
@@ -668,14 +673,25 @@ func TestCapture_RetainsFieldsItDoesNotKnow(t *testing.T) {
 		"MediaUrl":        {"https://example.com/2.png", "https://example.com/1.png"},
 		"ProvideFeedback": {"true"},
 	}
-	postMessage(t, capture, subscribeAccount, posted)
+	endpoint := capture.URL + messagesPath(subscribeAccount) + "?Body=from-the-query&From=from-the-query"
+	resp, err := postClient.PostForm(endpoint, posted)
+	if err != nil {
+		t.Fatalf("POST %s: %v", endpoint, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST %s: status %d, want %d", endpoint, resp.StatusCode, http.StatusCreated)
+	}
 
 	msgs := capture.Captured()
 	if len(msgs) != 1 {
 		t.Fatalf("got %d recorded messages, want 1", len(msgs))
 	}
 	if got := msgs[0].Form; !reflect.DeepEqual(got, posted) {
-		t.Errorf("recorded Form = %v, want exactly what was posted: %v", got, posted)
+		t.Errorf("recorded Form = %v, want exactly what was posted, without the URL's query: %v", got, posted)
+	}
+	if got := msgs[0].From; got != "" {
+		t.Errorf("recorded From = %q, want it empty: no From was posted, only put in the URL's query", got)
 	}
 }
 
