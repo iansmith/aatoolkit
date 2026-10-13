@@ -510,6 +510,12 @@ func requireEachReceived(t *testing.T, feeds []chan feed, posted []string, who s
 // must report the channel closed at once — not deliver a message, and not
 // block. It does not wait, because unsubscribe and Close promise the channel
 // is closed by the time they return.
+//
+// To hold them to that, call it on the goroutine that called unsubscribe or
+// Close, straight after the call returns. Waking another goroutine to check
+// instead gives an unsubscribe or Close that returned early, leaving the
+// closing to goroutines of its own, time to finish it, and so passes it. It
+// fails only through t.Errorf, so any goroutine may call it.
 func requireClosed(t *testing.T, msgs <-chan smsfake.Message, which string) {
 	t.Helper()
 	select {
@@ -1090,11 +1096,13 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 		}
 	}
 
-	returnsWithin(t, "Close while subscribers join and leave", capture.Close)
+	returnsWithin(t, "Close while subscribers join and leave", func() {
+		capture.Close()
+		for i, j := range joined {
+			requireClosed(t, j.msgs, fmt.Sprintf("subscriber %d, after Close", i))
+		}
+	})
 	stop()
-	for i, j := range joined {
-		requireClosed(t, j.msgs, fmt.Sprintf("subscriber %d, after Close", i))
-	}
 	requireSubscribers(t, capture, 0, "after Close")
 }
 
@@ -1199,22 +1207,24 @@ func TestCapture_UnsubscribeStopsDelivery(t *testing.T) {
 // The concurrent calls are each subscription's first: all of them wait at one
 // start line, so they race to end a live subscription rather than finding it
 // already ended. Under -race, ending it other than once and only once is
-// reported as a data race; it can also close a channel twice outright. A call
-// made after the subscription has ended must return too.
+// reported as a data race; it can also close a channel twice outright. Each
+// caller finds the channel closed once its own call returns, whichever call
+// did the work. A call made after the subscription has ended must return too.
 func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
 	const subscriptions, callers = 100, 4
 	capture := newCapture(t)
 
 	start := make(chan struct{})
-	feeds := make([]<-chan smsfake.Message, subscriptions)
 	unsubscribes := make([]func(), subscriptions)
 	var wg sync.WaitGroup
-	for i := range feeds {
-		feeds[i], unsubscribes[i] = capture.Subscribe()
-		for range callers {
+	for i := range unsubscribes {
+		msgs, unsubscribe := capture.Subscribe()
+		unsubscribes[i] = unsubscribe
+		for c := range callers {
 			wg.Go(func() {
 				<-start
-				unsubscribes[i]()
+				unsubscribe()
+				requireClosed(t, msgs, fmt.Sprintf("subscription %d, after caller %d's unsubscribe", i, c))
 			})
 		}
 	}
@@ -1222,9 +1232,6 @@ func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
 		close(start)
 		wg.Wait()
 	})
-	for i, msgs := range feeds {
-		requireClosed(t, msgs, fmt.Sprintf("subscription %d", i))
-	}
 	requireSubscribers(t, capture, 0, "after every subscription was unsubscribed")
 	returnsWithin(t, "an unsubscribe after the subscription had ended", unsubscribes[0])
 
@@ -1239,24 +1246,25 @@ func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
 
 // TestCapture_UnsubscribeRacesClose pins that a subscription's unsubscribe and
 // the server's Close may end it at the same moment — a consumer's deferred
-// unsubscribe running while its server shuts down — and that both return with
-// it ended and released. Each round holds every subscription's unsubscribe and
-// a Close at one start line on a fresh server, so that some unsubscribe finds
-// its subscription already taken by Close and the two end it together: under
-// -race, ending it other than once and only once is reported as a data race.
+// unsubscribe running while its server shuts down — and that both return,
+// leaving it ended and released. Each round holds every subscription's
+// unsubscribe and a Close at one start line on a fresh server, so that some
+// unsubscribe finds its subscription already taken by Close and the two end it
+// together: under -race, ending it other than once and only once is reported
+// as a data race. Each unsubscribe must return with its channel closed,
+// whether it or Close did the work.
 func TestCapture_UnsubscribeRacesClose(t *testing.T) {
 	const rounds, subscriptions = 50, 8
 	for round := range rounds {
 		capture := newCapture(t)
 		start := make(chan struct{})
-		feeds := make([]<-chan smsfake.Message, subscriptions)
 		var wg sync.WaitGroup
-		for i := range feeds {
+		for i := range subscriptions {
 			msgs, unsubscribe := capture.Subscribe()
-			feeds[i] = msgs
 			wg.Go(func() {
 				<-start
 				unsubscribe()
+				requireClosed(t, msgs, fmt.Sprintf("round %d, subscription %d", round, i))
 			})
 		}
 		wg.Go(func() {
@@ -1267,9 +1275,6 @@ func TestCapture_UnsubscribeRacesClose(t *testing.T) {
 			close(start)
 			wg.Wait()
 		})
-		for i, msgs := range feeds {
-			requireClosed(t, msgs, fmt.Sprintf("round %d, subscription %d", round, i))
-		}
 		requireSubscribers(t, capture, 0, fmt.Sprintf("round %d, after Close and every unsubscribe", round))
 	}
 }
@@ -1286,8 +1291,10 @@ func TestCapture_UnsubscribeWhileBacklogged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	returnsWithin(t, "unsubscribe with 20 messages queued and unread", unsubscribe)
-	requireClosed(t, msgs, "the unsubscribed subscription")
+	returnsWithin(t, "unsubscribe with 20 messages queued and unread", func() {
+		unsubscribe()
+		requireClosed(t, msgs, "the unsubscribed subscription")
+	})
 }
 
 // TestCapture_LateSubscriberGetsNoReplay pins that a subscription starts when
@@ -1325,7 +1332,9 @@ func TestCapture_LateSubscriberGetsNoReplay(t *testing.T) {
 // neither. Subscribing to a closed server yields a closed channel and leaves
 // nothing held, and every unsubscribe stays safe to call.
 // The channel is closed by the feed as it exits, so a closed channel is the
-// observable sign that the feed is gone.
+// observable sign that the feed is gone. Each channel is checked on the
+// goroutine that called Close or Subscribe, as soon as it returns, as
+// requireClosed says it must be.
 func TestCapture_CloseEndsEverySubscription(t *testing.T) {
 	capture := newCapture(t)
 	backlogged, unsubscribeBacklogged := capture.Subscribe()
@@ -1334,13 +1343,19 @@ func TestCapture_CloseEndsEverySubscription(t *testing.T) {
 	}
 	idle, unsubscribeIdle := capture.Subscribe()
 
-	returnsWithin(t, "Close with live subscribers", capture.Close)
-	requireClosed(t, idle, "a subscription with nothing queued")
-	requireClosed(t, backlogged, "a subscription with messages queued")
+	returnsWithin(t, "Close with live subscribers", func() {
+		capture.Close()
+		requireClosed(t, idle, "a subscription with nothing queued")
+		requireClosed(t, backlogged, "a subscription with messages queued")
+	})
 	requireSubscribers(t, capture, 0, "after Close")
 
-	afterClose, unsubscribeAfterClose := capture.Subscribe()
-	requireClosed(t, afterClose, "a subscription to a closed server")
+	var unsubscribeAfterClose func()
+	returnsWithin(t, "Subscribe to a closed server", func() {
+		var afterClose <-chan smsfake.Message
+		afterClose, unsubscribeAfterClose = capture.Subscribe()
+		requireClosed(t, afterClose, "a subscription to a closed server")
+	})
 	requireSubscribers(t, capture, 0, "after subscribing to a closed server")
 
 	returnsWithin(t, "unsubscribe after Close", func() {
