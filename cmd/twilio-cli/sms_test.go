@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -115,6 +117,8 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 
 // TestSMSForm_Fields pins the SMS webhook form field set: MessageSid (plus
 // its SmsMessageSid/SmsSid aliases), AccountSid, From, To, Body, ApiVersion.
+// It builds the form itself; TestRunSMS_PostsTheDefaultsOnTheWire pins the
+// form runSMS actually posts.
 func TestSMSForm_Fields(t *testing.T) {
 	form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0001", "+15551234567", "+15105559999", "hello there")
 
@@ -141,6 +145,76 @@ func TestSMSForm_Fields(t *testing.T) {
 	}
 	if form.Get("ApiVersion") == "" {
 		t.Error("ApiVersion is empty, want a non-empty value")
+	}
+}
+
+// TestRunSMS_PostsTheDefaultsOnTheWire pins the inbound form twilio-cli itself
+// posts. TestSMSForm_Fields builds its form with arguments it supplies, so it
+// never sees runSMS's call site; and the real inbound-SMS handler reads neither
+// AccountSid nor ApiVersion, so a call site passing them empty or swapped would
+// pass every round-trip test here. Recording the form the handler received
+// pins all eight fields: the two smsfake defaults, the arguments runSMS was
+// given, and one fresh SM-prefixed SID under all three of its names.
+func TestRunSMS_PostsTheDefaultsOnTheWire(t *testing.T) {
+	const authToken = "test-auth-token"
+	const from, to, body = "+15551234567", "+15105559999", "hello there"
+
+	capture, err := smsfake.NewCaptureServer(freeTCPPort(t))
+	if err != nil {
+		t.Fatalf("smsfake.NewCaptureServer: %v", err)
+	}
+	defer capture.Close()
+
+	rest := &twilio.RESTClient{AccountSID: smsfake.DefaultAccountSID, BaseURL: capture.URL}
+	srv := &twilio.Server{
+		AuthToken:    authToken,
+		StreamScheme: "ws",
+		HandleSMS: func(ctx context.Context, msg twilio.InboundSMS) {
+			if _, err := rest.SendSMS(ctx, replyTo(msg, "hi back")); err != nil {
+				t.Errorf("stub HandleSMS: SendSMS: %v", err)
+			}
+		},
+	}
+	posted := make(chan url.Values, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sms/inbound", func(w http.ResponseWriter, r *http.Request) {
+		srv.ServeSMS(w, r)
+		posted <- r.PostForm // ServeSMS parsed it to check the signature
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if _, err := runSMS(context.Background(), ts.URL+"/sms/inbound", authToken, from, to, body, capture); err != nil {
+		t.Fatalf("runSMS: %v", err)
+	}
+	form := <-posted
+
+	if got := form.Get("AccountSid"); got != smsfake.DefaultAccountSID {
+		t.Errorf("posted AccountSid = %q, want smsfake.DefaultAccountSID %q", got, smsfake.DefaultAccountSID)
+	}
+	if got := form.Get("ApiVersion"); got != smsfake.DefaultAPIVersion {
+		t.Errorf("posted ApiVersion = %q, want smsfake.DefaultAPIVersion %q", got, smsfake.DefaultAPIVersion)
+	}
+	if got := form.Get("From"); got != from {
+		t.Errorf("posted From = %q, want the FROM argument %q", got, from)
+	}
+	if got := form.Get("To"); got != to {
+		t.Errorf("posted To = %q, want the to argument %q", got, to)
+	}
+	if got := form.Get("Body"); got != body {
+		t.Errorf("posted Body = %q, want the body argument %q", got, body)
+	}
+	sid := form.Get("MessageSid")
+	if !regexp.MustCompile(`^SM[0-9a-f]{32}$`).MatchString(sid) {
+		t.Errorf("posted MessageSid = %q, want SM followed by 32 lowercase hex characters", sid)
+	}
+	for _, alias := range []string{"SmsMessageSid", "SmsSid"} {
+		if got := form.Get(alias); got != sid {
+			t.Errorf("posted %s = %q, want MessageSid's %q", alias, got, sid)
+		}
+	}
+	if got := len(form); got != 8 {
+		t.Errorf("posted form has %d fields, want exactly the eight above: %v", got, form)
 	}
 }
 
