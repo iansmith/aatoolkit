@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,8 +19,36 @@ type Message struct {
 	From       string
 	To         string
 	Body       string
-	Form       url.Values
+
+	// Form is the whole posted form, every field and every value exactly as
+	// sent: a StatusCallback is present when the sender set one and absent —
+	// not empty — when it did not. Capture is full fidelity because a record
+	// thinned when it is made cannot be enriched later. Fields are recorded,
+	// never acted on: the capture server calls no StatusCallback back.
+	//
+	// Every Message the server hands out, from Captured or a subscription,
+	// carries a Form of its own, so a reader editing it changes no other
+	// reader's view.
+	Form url.Values
+
+	// ReceivedAt is when the capture server recorded the message: read inside
+	// the handler at the moment of recording, not when a reader looks at it,
+	// so every copy of one message carries the same instant.
 	ReceivedAt time.Time
+}
+
+// clone returns m with a Form of its own: a fresh map holding fresh value
+// slices, so neither the key set nor a value can be edited through one copy
+// and seen through another.
+func (m Message) clone() Message {
+	if m.Form != nil {
+		form := make(url.Values, len(m.Form))
+		for key, values := range m.Form {
+			form[key] = slices.Clone(values)
+		}
+		m.Form = form
+	}
+	return m
 }
 
 // CaptureServer implements the Twilio Messages API shape used by
@@ -27,11 +56,20 @@ type Message struct {
 // minimal JSON), recording every call it receives. It stands in for a real
 // Twilio account so a server's outbound SMS reply can be captured and
 // asserted on without one.
+//
+// A caller reads what was recorded in one of three ways: Captured for a
+// snapshot of everything so far, Notify for a bare wake-up on each arrival,
+// or Subscribe for each arriving message itself.
 type CaptureServer struct {
 	*httptest.Server
 
-	mu   sync.Mutex
-	msgs []Message
+	// mu guards msgs, subs and closed together. A message is appended to msgs
+	// and queued for every subscriber under one hold of mu, which is what
+	// makes every subscriber's order the order of msgs.
+	mu     sync.Mutex
+	msgs   []Message
+	subs   map[*subscription]struct{}
+	closed bool
 
 	// notify carries a wake-up on every recorded message, so a waiter is woken
 	// by the arrival itself rather than by polling for it.
@@ -69,7 +107,10 @@ func NewCaptureServer(port int) (*CaptureServer, error) {
 		return nil, fmt.Errorf("bind SMS capture server on port %d: %w (pick a free port with -capture-port)", port, err)
 	}
 
-	c := &CaptureServer{notify: make(chan struct{}, 1)}
+	c := &CaptureServer{
+		subs:   make(map[*subscription]struct{}),
+		notify: make(chan struct{}, 1),
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/2010-04-01/Accounts/", c.handleMessages)
 
@@ -90,6 +131,10 @@ func NewCaptureServer(port int) (*CaptureServer, error) {
 // handleMessages records the outbound SMS-send POST and answers with the
 // minimal 201 JSON shape SendSMS treats as success.
 //
+// Recording takes the whole posted form and the arrival time, appends the
+// message, and queues a copy for every subscriber — all without waiting on
+// any reader, so no subscriber, however slow, can hold up the response.
+//
 // The "sid" key is a contract, not decoration: RESTClient.SendSMS parses it to
 // return the message id, and a 2xx carrying none yields an empty id rather than
 // an error — so dropping it here would go unnoticed.
@@ -106,10 +151,15 @@ func (c *CaptureServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 		From:       r.PostForm.Get("From"),
 		To:         r.PostForm.Get("To"),
 		Body:       r.PostForm.Get("Body"),
-	}
+		Form:       r.PostForm,
+	}.clone()
 
 	c.mu.Lock()
+	msg.ReceivedAt = time.Now()
 	c.msgs = append(c.msgs, msg)
+	for s := range c.subs {
+		s.enqueue(msg.clone())
+	}
 	c.mu.Unlock()
 
 	select {
@@ -130,7 +180,9 @@ func (c *CaptureServer) Captured() []Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]Message, len(c.msgs))
-	copy(out, c.msgs)
+	for i, msg := range c.msgs {
+		out[i] = msg.clone()
+	}
 	return out
 }
 
@@ -144,7 +196,146 @@ func (c *CaptureServer) Notify() <-chan struct{} {
 	return c.notify
 }
 
-// Subscribe is not implemented yet.
+// Subscribe starts a subscription to arrivals. msgs delivers every message
+// recorded after Subscribe returns, as the Message itself, in the order the
+// server recorded them — the order Captured lists them, which is the same for
+// every subscriber. There is no replay: a subscriber joining after N messages
+// receives the N+1th onward, and the earlier ones are Captured's to give.
+//
+// Each subscription has a queue of its own with no bound. A subscriber that
+// reads slowly, or not at all, only falls behind: nothing is dropped from its
+// queue, and it never blocks the handler or any other subscriber.
+//
+// unsubscribe ends the subscription. Once it returns, nothing more is
+// delivered: anything still queued is discarded, the goroutine feeding msgs
+// has exited, and msgs is closed. It is safe to call more than once, and from
+// several goroutines. Close ends every subscription the same way, so a
+// subscriber ranging over msgs stops when the server does; subscribing to a
+// closed server yields a msgs that is already closed.
 func (c *CaptureServer) Subscribe() (msgs <-chan Message, unsubscribe func()) {
-	return make(chan Message), func() {}
+	s := newSubscription()
+
+	c.mu.Lock()
+	closed := c.closed
+	if !closed {
+		c.subs[s] = struct{}{}
+	}
+	c.mu.Unlock()
+
+	if closed {
+		s.end()
+	}
+	return s.out, func() {
+		c.mu.Lock()
+		delete(c.subs, s)
+		c.mu.Unlock()
+		s.end()
+	}
+}
+
+// Close shuts the server down, waiting for in-flight POSTs to finish as
+// httptest.Server.Close does, and then ends every subscription as its
+// unsubscribe would: messages a subscriber had not yet received are not
+// delivered — Captured still holds them — and no subscription's goroutine
+// outlives the server. Close the CaptureServer rather than its embedded
+// Server, which knows nothing of subscriptions. Calling Close again is safe.
+func (c *CaptureServer) Close() {
+	c.Server.Close()
+
+	c.mu.Lock()
+	c.closed = true
+	subs := c.subs
+	c.subs = nil
+	c.mu.Unlock()
+
+	for s := range subs {
+		s.end()
+	}
+}
+
+// subscription is one Subscribe caller's feed. The handler appends to queue
+// and returns at once; pump hands queue on to out at whatever pace the
+// subscriber reads, so a subscriber that falls behind only lengthens its own
+// queue.
+type subscription struct {
+	out  chan Message  // unbuffered: pump hands each message straight to the reader
+	wake chan struct{} // buffered by one: queue may have grown since pump last looked
+	stop chan struct{} // closed, once, to end the subscription
+	done chan struct{} // closed when pump has returned
+	once sync.Once
+
+	mu    sync.Mutex
+	queue []Message
+}
+
+// newSubscription returns a subscription with its pump already running.
+func newSubscription() *subscription {
+	s := &subscription{
+		out:  make(chan Message),
+		wake: make(chan struct{}, 1),
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
+	}
+	go s.pump()
+	return s
+}
+
+// enqueue adds msg to the queue and wakes pump, without ever waiting: the
+// queue has no bound, and a wake-up already pending covers this one too.
+func (s *subscription) enqueue(msg Message) {
+	s.mu.Lock()
+	s.queue = append(s.queue, msg)
+	s.mu.Unlock()
+
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// pump delivers the queue to out in order until the subscription ends. It
+// closes out as it returns, so a closed out means pump has gone.
+func (s *subscription) pump() {
+	defer close(s.done)
+	defer close(s.out)
+
+	for {
+		// Checked first, so a subscription that has ended stops here rather
+		// than racing a ready reader for one more delivery.
+		select {
+		case <-s.stop:
+			return
+		default:
+		}
+
+		s.mu.Lock()
+		if len(s.queue) == 0 {
+			s.queue = nil // let a drained backlog's array go
+			s.mu.Unlock()
+			select {
+			case <-s.wake:
+				continue
+			case <-s.stop:
+				return
+			}
+		}
+		next := s.queue[0]
+		s.queue[0] = Message{}
+		s.queue = s.queue[1:]
+		s.mu.Unlock()
+
+		select {
+		case s.out <- next:
+		case <-s.stop:
+			return
+		}
+	}
+}
+
+// end stops the subscription and returns once pump has: whatever is still
+// queued is never delivered, and out is closed. Safe to call any number of
+// times, from any goroutine.
+func (s *subscription) end() {
+	s.once.Do(func() { close(s.stop) })
+	<-s.done
 }
