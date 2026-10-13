@@ -229,7 +229,9 @@ func (c *CaptureServer) Captured() []Message {
 // reaches one receiver only, so wait on it from one goroutine at a time. A
 // second concurrent waiter can miss the wake-up for a message that was
 // recorded, and block until a later arrival or its own timeout. Waiters that
-// take turns, each re-reading Captured, are fine.
+// take turns, each re-reading Captured, are fine. Several waiters at once
+// should each use Subscribe instead: every subscription receives every message
+// recorded after it was made.
 func (c *CaptureServer) Notify() <-chan struct{} {
 	return c.notify
 }
