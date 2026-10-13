@@ -371,11 +371,19 @@ func requireClosed(t *testing.T, msgs <-chan smsfake.Message, which string) {
 	}
 }
 
-// returnsWithin runs fn on a goroutine of its own and fails the test if it
-// has not returned within subscribeWait. Anything fn writes is safe to read
-// once returnsWithin has returned.
+// returnsWithin runs fn on a goroutine of its own and, if it has not returned
+// within subscribeWait, crashes the test binary with a panic naming the test
+// and what stalled. Anything fn writes is safe to read once returnsWithin has
+// returned.
+//
+// It does not fail through t. What it guards against is a handler stuck while
+// holding the server's lock, and then a t.Fatalf — or a panic on the test's own
+// goroutine — runs the test's deferred unsubscribes, which block on that lock,
+// and its capture.Close cleanup, which waits on the stuck POST, before anything
+// is reported: the run would stall until go test's -timeout with the message
+// lost. A panic on a fresh goroutine runs none of the test's defers, so it
+// reports at once.
 func returnsWithin(t *testing.T, what string, fn func()) {
-	t.Helper()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -384,7 +392,9 @@ func returnsWithin(t *testing.T, what string, fn func()) {
 	select {
 	case <-done:
 	case <-time.After(subscribeWait):
-		t.Fatalf("%s did not return within %s", what, subscribeWait)
+		msg := fmt.Sprintf("%s: %s did not return within %s", t.Name(), what, subscribeWait)
+		go func() { panic(msg) }()
+		select {} // the panic ends the process; returning would run the blocking defers
 	}
 }
 
