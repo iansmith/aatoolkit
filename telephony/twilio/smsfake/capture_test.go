@@ -797,12 +797,14 @@ func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
 	}
 }
 
-// TestCapture_ArrivalTimestampBracketsThePost pins that ReceivedAt is the
-// moment of recording. It must lie between a clock read before the POST and
-// one after it; Captured is read only once the bracket has closed, so a
-// timestamp taken when the record is read rather than when it was made lands
-// after the bracket. A second read and a subscriber's copy must carry the same
-// instant: re-stamping on any read shows up as a difference.
+// TestCapture_ArrivalTimestampBracketsThePost pins that ReceivedAt is read
+// while the POST is handled, not when the record is read. It must lie between
+// a clock read before the POST and one after it; Captured is read only once
+// the bracket has closed, so a timestamp taken when the record is read rather
+// than when it was made lands after the bracket. A second read and a
+// subscriber's copy must carry the same instant: re-stamping on any read shows
+// up as a difference. Which moment of the POST it is read at, the bracket
+// cannot see; TestCapture_ArrivalTimestampFollowsRecordingOrder pins that.
 func TestCapture_ArrivalTimestampBracketsThePost(t *testing.T) {
 	capture := newCapture(t)
 	msgs, _ := subscribe(t, capture)
@@ -829,6 +831,72 @@ func TestCapture_ArrivalTimestampBracketsThePost(t *testing.T) {
 	}
 	if got := delivered[0].ReceivedAt; !got.Equal(at) {
 		t.Errorf("subscriber's ReceivedAt = %v, Captured's = %v; want the one instant of recording", got, at)
+	}
+}
+
+// heldBody is a request body whose content is held back until released is
+// closed. reading is closed at the handler's first Read, which shows the
+// handler has begun and is waiting on the form.
+type heldBody struct {
+	content  io.Reader
+	reading  chan struct{}
+	released chan struct{}
+	once     sync.Once
+}
+
+func newHeldBody(content string) *heldBody {
+	return &heldBody{
+		content:  strings.NewReader(content),
+		reading:  make(chan struct{}),
+		released: make(chan struct{}),
+	}
+}
+
+func (b *heldBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.reading) })
+	<-b.released
+	return b.content.Read(p)
+}
+
+// TestCapture_ArrivalTimestampFollowsRecordingOrder pins that ReceivedAt is
+// read when the message is recorded, not when its POST reaches the handler.
+// POST A reaches the handler first, but its body is held back until POST B
+// has been recorded, so A is recorded second, and its ReceivedAt must be no
+// earlier than B's. A stamp read as A's handler began, before its form was
+// read, would put A first by time and second in Captured.
+func TestCapture_ArrivalTimestampFollowsRecordingOrder(t *testing.T) {
+	capture := newCapture(t)
+
+	held := newHeldBody(url.Values{"Body": {"A"}}.Encode())
+	req := httptest.NewRequest(http.MethodPost, messagesPath(subscribeAccount), held)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		capture.Config.Handler.ServeHTTP(rec, req)
+	}()
+
+	returnsWithin(t, "POST A's handler reading its body", func() { <-held.reading })
+	var postErr error
+	returnsWithin(t, "POST B while A's body is held back", func() {
+		postErr = serveBodies(capture, []string{"B"})
+	})
+	if postErr != nil {
+		t.Fatal(postErr)
+	}
+	close(held.released)
+	returnsWithin(t, "POST A once its body is released", func() { <-served })
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST A: status %d, want %d", rec.Code, http.StatusCreated)
+	}
+
+	recorded := capture.Captured()
+	if bodies := bodiesOf(recorded); !reflect.DeepEqual(bodies, []string{"B", "A"}) {
+		t.Fatalf("Captured holds %q, want B then A: A's body was held back until B was recorded", bodies)
+	}
+	if a, b := recorded[1].ReceivedAt, recorded[0].ReceivedAt; a.Before(b) {
+		t.Errorf("A, recorded after B, has ReceivedAt %v, before B's %v; want it read when A was recorded, not when its POST began", a, b)
 	}
 }
 
@@ -859,6 +927,13 @@ func TestCapture_FanOutAllSubscribersSeeAll(t *testing.T) {
 // subscriber in the opposite order to Captured's. That needs many arrivals
 // racing to show on every run, so the POSTs go straight to the handler, as
 // serveBodies does, rather than opening a connection apiece.
+//
+// It also checks that ReceivedAt never decreases along Captured, which a
+// stamp read under that same hold of the lock guarantees. A stamp read before
+// the lock is taken lets a racing arrival record in between and break it, but
+// only when the scheduler interleaves them so: this catches that by weight of
+// numbers rather than by construction — reliably on several CPUs, seldom on
+// one.
 func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
 	const subscribers, messages = 3, 400
 	capture := newCapture(t)
@@ -879,11 +954,25 @@ func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
 		}
 	}
 
-	recorded := bodiesOf(capture.Captured())
+	captured := capture.Captured()
+	recorded := bodiesOf(captured)
 	if len(recorded) != messages {
 		t.Fatalf("recorded %d messages, want %d", len(recorded), messages)
 	}
 	requireEachReceived(t, feeds, recorded, "subscriber")
+
+	decreases, first := 0, 0
+	for i := 1; i < len(captured); i++ {
+		if captured[i].ReceivedAt.Before(captured[i-1].ReceivedAt) {
+			if decreases == 0 {
+				first = i
+			}
+			decreases++
+		}
+	}
+	if decreases > 0 {
+		t.Errorf("ReceivedAt decreases at %d of the %d steps along Captured, the first from Captured[%d] to Captured[%d]; want it never to decrease", decreases, len(captured)-1, first-1, first)
+	}
 }
 
 // TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun pins the locking
