@@ -288,10 +288,9 @@ func TestPostWebhook_TruncatedResponseReturnsStatusAndWhatArrived(t *testing.T) 
 }
 
 // TestPostWebhook_RedirectLoopReturnsTheLastStatus pins the one failure in
-// which the client both received a response and returned an error: it gave up
-// on a redirect chain. The server did answer, so its last status comes back
-// and a zero status keeps meaning nobody answered; the body is nil, because
-// the client has already closed it.
+// which net/http hands back a response together with an error: its redirect
+// policy gave up on the chain. That last redirect's status comes back; the
+// body is nil, because the client has already closed it.
 func TestPostWebhook_RedirectLoopReturnsTheLastStatus(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/sms/inbound", http.StatusTemporaryRedirect)
@@ -314,19 +313,29 @@ func TestPostWebhook_RedirectLoopReturnsTheLastStatus(t *testing.T) {
 	}
 }
 
-// TestPostWebhook_NoResponseReturnsNoStatus pins the two failures in which no
-// response ever arrives — a request that cannot be built, and one nobody
-// answers: an error carrying the matching text, a zero status and a nil body.
+// TestPostWebhook_NoResponseReturnsNoStatus pins the failures in which the
+// client hands no response back — a request that cannot be built, one nobody
+// answers, and a redirect whose next hop nobody answers: an error carrying the
+// matching text, a zero status and a nil body. In the last case the server did
+// answer, with a 307, but net/http discards that response when the next hop
+// fails, so a zero status means no response was handed back, not that nobody
+// answered.
 func TestPostWebhook_NoResponseReturnsNoStatus(t *testing.T) {
 	closed := httptest.NewServer(http.NotFoundHandler())
 	closedURL := closed.URL + "/sms/inbound"
 	closed.Close()
+
+	redirectsToClosed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, closedURL, http.StatusTemporaryRedirect)
+	}))
+	defer redirectsToClosed.Close()
 
 	for _, tc := range []struct {
 		name, webhookURL, wantPrefix string
 	}{
 		{"unbuildable request", "http://[::1/sms/inbound", "build SMS webhook request: "},
 		{"nobody listening", closedURL, "post SMS webhook: "},
+		{"redirect to nobody listening", redirectsToClosed.URL + "/sms/inbound", "post SMS webhook: "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0009", "+15551234567", "+15105559999", "hello there")
@@ -338,10 +347,10 @@ func TestPostWebhook_NoResponseReturnsNoStatus(t *testing.T) {
 				t.Errorf("error = %q, want it to start %q", got, tc.wantPrefix)
 			}
 			if status != 0 {
-				t.Errorf("status = %d, want 0 when no response arrived", status)
+				t.Errorf("status = %d, want 0 when no response was handed back", status)
 			}
 			if body != nil {
-				t.Errorf("body = %q, want nil when no response arrived", body)
+				t.Errorf("body = %q, want nil when no response was handed back", body)
 			}
 		})
 	}
