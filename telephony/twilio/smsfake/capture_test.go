@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -539,8 +540,9 @@ func returnsWithin(t *testing.T, what string, fn func()) {
 
 // TestCapture_RetainsWholePostedForm pins full-fidelity capture: a send
 // carrying From, To, Body and StatusCallback is recorded with every one of
-// those fields in its Form, exactly as posted — the StatusCallback included,
-// recorded though never acted on.
+// those fields in its Form, exactly as posted — the StatusCallback included.
+// TestCapture_StatusCallbackIsNeverCalled pins that it is recorded and nothing
+// more.
 func TestCapture_RetainsWholePostedForm(t *testing.T) {
 	capture := newCapture(t)
 
@@ -567,6 +569,49 @@ func TestCapture_RetainsWholePostedForm(t *testing.T) {
 	}
 	if got := msgs[0].Form; !reflect.DeepEqual(got, want) {
 		t.Errorf("recorded Form = %v, want every posted field: %v", got, want)
+	}
+}
+
+// TestCapture_StatusCallbackIsNeverCalled pins that a StatusCallback is
+// recorded and nothing more: the capture server is not the party a delivery
+// status is addressed to, so it never requests the callback URL. The URL
+// points at a listener that counts every request it receives. A callback made
+// while the send is handled has been counted by the time SendSMS returns. One
+// started on a goroutine of its own can land later, so once the capture server
+// has closed, the listener is given callbackGrace — the bound on a negative
+// check, not a wait for delivery — and then closed, which waits for any
+// request it has begun.
+func TestCapture_StatusCallbackIsNeverCalled(t *testing.T) {
+	const callbackGrace = 200 * time.Millisecond
+	var calls atomic.Int32
+	callback := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer callback.Close()
+	capture := newCapture(t)
+
+	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL, HTTPClient: postClient}
+	sms := twilio.OutboundSMS{
+		From:           "+15105559999",
+		To:             "+15551234567",
+		Body:           "track me",
+		StatusCallback: callback.URL + "/status?ref=never-called",
+	}
+	if _, err := rest.SendSMS(context.Background(), sms); err != nil {
+		t.Fatalf("SendSMS: %v", err)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("the capture server requested the StatusCallback %d time(s) while handling the send, want never", n)
+	}
+
+	returnsWithin(t, "Close", capture.Close)
+	time.Sleep(callbackGrace)
+	returnsWithin(t, "closing the StatusCallback listener", callback.Close)
+	if n := calls.Load(); n != 0 {
+		t.Errorf("the capture server requested the StatusCallback %d time(s) by the time it had closed, want never", n)
+	}
+	if recorded := capture.Captured(); len(recorded) != 1 || recorded[0].Form.Get("StatusCallback") != sms.StatusCallback {
+		t.Errorf("Captured = %+v, want the one message, its StatusCallback %q recorded", recorded, sms.StatusCallback)
 	}
 }
 
