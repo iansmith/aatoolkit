@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 func TestWebhookCeremony_AcceptedByRealServer(t *testing.T) {
@@ -125,7 +126,7 @@ func TestCallSid_SingleSourcedAcrossWebhookAndStart(t *testing.T) {
 		t.Fatalf("webhook POST CallSid = %q, want %q", gotWebhookCallSid, callSid)
 	}
 
-	startMsg, err := twilio.EncodeStart("SStest0001", callSid, defaultAccountSid, 1)
+	startMsg, err := twilio.EncodeStart("SStest0001", callSid, smsfake.DefaultAccountSID, 1)
 	if err != nil {
 		t.Fatalf("EncodeStart: %v", err)
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 // replyTo builds the outbound answer to an inbound message by swapping the two
@@ -49,14 +50,14 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 	const from, to, body = "+15551234567", "+15105559999", "hello there"
 	const replyBody = "hi back"
 
-	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	capture, err := smsfake.NewCaptureServer(freeTCPPort(t))
 	if err != nil {
-		t.Fatalf("newSMSCaptureServer: %v", err)
+		t.Fatalf("smsfake.NewCaptureServer: %v", err)
 	}
 	defer capture.Close()
 
 	rest := &twilio.RESTClient{
-		AccountSID: defaultAccountSid,
+		AccountSID: smsfake.DefaultAccountSID,
 		BaseURL:    capture.URL,
 	}
 
@@ -86,7 +87,7 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 		t.Fatalf("runSMS: %v", err)
 	}
 
-	msgs := capture.captured()
+	msgs := capture.Captured()
 	if len(msgs) != 1 {
 		t.Fatalf("capture server: got %d Messages.json POSTs, want 1", len(msgs))
 	}
@@ -115,7 +116,7 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 // TestSMSForm_Fields pins the SMS webhook form field set: MessageSid (plus
 // its SmsMessageSid/SmsSid aliases), AccountSid, From, To, Body, ApiVersion.
 func TestSMSForm_Fields(t *testing.T) {
-	form := smsForm("SMtest0001", "+15551234567", "+15105559999", "hello there")
+	form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0001", "+15551234567", "+15105559999", "hello there")
 
 	if got := form.Get("MessageSid"); got != "SMtest0001" {
 		t.Errorf("MessageSid = %q, want SMtest0001", got)
@@ -160,7 +161,7 @@ func TestPostSMSWebhook_SignatureURLMismatch403s(t *testing.T) {
 
 	realURL := ts.URL + "/sms/inbound"
 	wrongURLForSigning := ts.URL + "/sms"
-	form := smsForm("SMtest0002", "+15551234567", "+15105559999", "hello there")
+	form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0002", "+15551234567", "+15105559999", "hello there")
 	sig := twilio.ComputeSignature(authToken, wrongURLForSigning, form)
 
 	req, err := http.NewRequest(http.MethodPost, realURL, strings.NewReader(form.Encode()))
@@ -189,9 +190,9 @@ func TestPostSMSWebhook_SignatureURLMismatch403s(t *testing.T) {
 func TestNewSMSCaptureServer_BindsRequestedPort(t *testing.T) {
 	port := freeTCPPort(t)
 
-	capture, err := newSMSCaptureServer(port)
+	capture, err := smsfake.NewCaptureServer(port)
 	if err != nil {
-		t.Fatalf("newSMSCaptureServer(%d): %v", port, err)
+		t.Fatalf("smsfake.NewCaptureServer(%d): %v", port, err)
 	}
 	defer capture.Close()
 
@@ -213,10 +214,10 @@ func TestNewSMSCaptureServer_PortInUseNamesThePort(t *testing.T) {
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	capture, err := newSMSCaptureServer(port)
+	capture, err := smsfake.NewCaptureServer(port)
 	if err == nil {
 		capture.Close()
-		t.Fatalf("newSMSCaptureServer(%d) succeeded against a held port, want a bind error", port)
+		t.Fatalf("smsfake.NewCaptureServer(%d) succeeded against a held port, want a bind error", port)
 	}
 	if got := err.Error(); !strings.Contains(got, strconv.Itoa(port)) {
 		t.Errorf("bind error %q does not name the port %d", got, port)
@@ -240,13 +241,13 @@ func TestRunSMS_CapturesReplyPostedAfterWebhookReturns(t *testing.T) {
 	const replyBody = "hi back, later"
 
 	// A margin over the loopback webhook round trip: an implementation that
-	// checks the capture the instant postSMSWebhook returns must observe zero
+	// checks the capture the instant smsfake.PostWebhook returns must observe zero
 	// messages, even though the reply is on its way.
 	const replyDelay = 200 * time.Millisecond
 
-	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	capture, err := smsfake.NewCaptureServer(freeTCPPort(t))
 	if err != nil {
-		t.Fatalf("newSMSCaptureServer: %v", err)
+		t.Fatalf("smsfake.NewCaptureServer: %v", err)
 	}
 	defer capture.Close()
 
@@ -262,7 +263,7 @@ func TestRunSMS_CapturesReplyPostedAfterWebhookReturns(t *testing.T) {
 			go func() {
 				<-webhookReturned
 				time.Sleep(replyDelay)
-				rest := &twilio.RESTClient{AccountSID: defaultAccountSid, BaseURL: capture.URL}
+				rest := &twilio.RESTClient{AccountSID: smsfake.DefaultAccountSID, BaseURL: capture.URL}
 				_, err := rest.SendSMS(context.Background(), replyTo(msg, replyBody))
 				sendErr <- err
 			}()
@@ -305,9 +306,9 @@ func TestRunSMS_TimesOutWithActionableError(t *testing.T) {
 	// path is exercised without waiting it out.
 	const wait = 50 * time.Millisecond
 
-	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	capture, err := smsfake.NewCaptureServer(freeTCPPort(t))
 	if err != nil {
-		t.Fatalf("newSMSCaptureServer: %v", err)
+		t.Fatalf("smsfake.NewCaptureServer: %v", err)
 	}
 	defer capture.Close()
 
@@ -388,9 +389,9 @@ func TestRunSMS_CancelledContextDuringWaitReturnsPromptly(t *testing.T) {
 	// completed and the cancellation lands in the wait, not in the request.
 	const cancelDelay = 200 * time.Millisecond
 
-	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	capture, err := smsfake.NewCaptureServer(freeTCPPort(t))
 	if err != nil {
-		t.Fatalf("newSMSCaptureServer: %v", err)
+		t.Fatalf("smsfake.NewCaptureServer: %v", err)
 	}
 	defer capture.Close()
 
@@ -435,9 +436,9 @@ func TestRunSMS_ReturnsFirstReplyWhenMoreArrive(t *testing.T) {
 	const from, to, body = "+15551234567", "+15105559999", "hello there"
 	const firstReply, secondReply = "first out", "second out"
 
-	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	capture, err := smsfake.NewCaptureServer(freeTCPPort(t))
 	if err != nil {
-		t.Fatalf("newSMSCaptureServer: %v", err)
+		t.Fatalf("smsfake.NewCaptureServer: %v", err)
 	}
 	defer capture.Close()
 
@@ -450,7 +451,7 @@ func TestRunSMS_ReturnsFirstReplyWhenMoreArrive(t *testing.T) {
 		HandleSMS: func(_ context.Context, msg twilio.InboundSMS) {
 			go func() {
 				<-webhookReturned
-				rest := &twilio.RESTClient{AccountSID: defaultAccountSid, BaseURL: capture.URL}
+				rest := &twilio.RESTClient{AccountSID: smsfake.DefaultAccountSID, BaseURL: capture.URL}
 				// Sequential sends, so the capture order is deterministic.
 				_, firstErr := rest.SendSMS(context.Background(), replyTo(msg, firstReply))
 				sendErrs <- firstErr
@@ -492,7 +493,8 @@ func TestPostSMSWebhook_WrongAuthToken403s(t *testing.T) {
 	defer ts.Close()
 
 	webhookURL := ts.URL + "/sms/inbound"
-	err := postSMSWebhook(context.Background(), webhookURL, "wrong-client-token", "SMtest0003", "+15551234567", "+15105559999", "hello there")
+	form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0003", "+15551234567", "+15105559999", "hello there")
+	_, _, err := smsfake.PostWebhook(context.Background(), webhookURL, "wrong-client-token", form)
 	if err == nil {
 		t.Fatal("expected an error POSTing with a mismatched auth token, got nil")
 	}
@@ -507,10 +509,10 @@ func TestPostSMSWebhook_WrongAuthToken403s(t *testing.T) {
 func TestNewSMSCaptureServer_RejectsUnusablePorts(t *testing.T) {
 	for _, port := range []int{0, -1, 65536} {
 		t.Run(fmt.Sprintf("port %d", port), func(t *testing.T) {
-			capture, err := newSMSCaptureServer(port)
+			capture, err := smsfake.NewCaptureServer(port)
 			if err == nil {
 				capture.Close()
-				t.Fatalf("newSMSCaptureServer(%d) succeeded, want a rejection", port)
+				t.Fatalf("smsfake.NewCaptureServer(%d) succeeded, want a rejection", port)
 			}
 			if got := err.Error(); !strings.Contains(got, strconv.Itoa(port)) {
 				t.Errorf("error %q does not name the offending port %d", got, port)
@@ -535,9 +537,9 @@ func TestRunSMS_SecondCallWaitsForItsOwnReply(t *testing.T) {
 	// call takes its watermark.
 	const replyDelay = 150 * time.Millisecond
 
-	capture, err := newSMSCaptureServer(freeTCPPort(t))
+	capture, err := smsfake.NewCaptureServer(freeTCPPort(t))
 	if err != nil {
-		t.Fatalf("newSMSCaptureServer: %v", err)
+		t.Fatalf("smsfake.NewCaptureServer: %v", err)
 	}
 	defer capture.Close()
 
@@ -551,7 +553,7 @@ func TestRunSMS_SecondCallWaitsForItsOwnReply(t *testing.T) {
 			reply := fmt.Sprintf("reply-%d", turns)
 			go func() {
 				time.Sleep(replyDelay)
-				rest := &twilio.RESTClient{AccountSID: defaultAccountSid, BaseURL: capture.URL}
+				rest := &twilio.RESTClient{AccountSID: smsfake.DefaultAccountSID, BaseURL: capture.URL}
 				_, err := rest.SendSMS(context.Background(), replyTo(msg, reply))
 				sendErrs <- err
 			}()
@@ -609,7 +611,7 @@ func TestStartCapture_GuidanceNamesThePortActuallyBound(t *testing.T) {
 	if !strings.Contains(guidance, capture.URL) {
 		t.Errorf("guidance %q does not name the URL actually bound (%s) — the printed port and the listening port must agree", guidance, capture.URL)
 	}
-	if want := captureBaseURLEnv(capture.URL); !strings.Contains(guidance, want) {
+	if want := smsfake.BaseURLEnv(capture.URL); !strings.Contains(guidance, want) {
 		t.Errorf("guidance %q does not contain the copy-pasteable assignment %q", guidance, want)
 	}
 	if !strings.Contains(guidance, strconv.Itoa(port)) {
@@ -618,7 +620,7 @@ func TestStartCapture_GuidanceNamesThePortActuallyBound(t *testing.T) {
 }
 
 // TestStartCapture_PropagatesBindFailure pins the error path: a held port must
-// surface newSMSCaptureServer's message verbatim rather than being wrapped into
+// surface smsfake.NewCaptureServer's message verbatim rather than being wrapped into
 // something that no longer names -capture-port, and must not hand back a
 // half-built capture server for the caller to close.
 func TestStartCapture_PropagatesBindFailure(t *testing.T) {
