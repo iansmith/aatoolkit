@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 // streamMic is the frame-source entry point dial() calls through. It defaults to
@@ -231,7 +231,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 	micCtx, cancelMic := context.WithCancel(ctx)
 	defer cancelMic() // fires before CloseNow (LIFO); signals goroutine to stop
 
-	streamSID := newSID("MZ")
+	streamSID := smsfake.NewSID("MZ")
 
 	// seqNum is this call's single, unified Twilio sequenceNumber counter: it
 	// starts at 1 for the start frame, the media encoder advances it per media
@@ -258,7 +258,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 			// goroutine has fully returned (natural end runs it inline after
 			// streamMic; the ctx-cancel path waits on micStopped first).
 			seqNum++
-			stopMsg, err := twilio.EncodeStop(streamSID, callSid, defaultAccountSid, seqNum)
+			stopMsg, err := twilio.EncodeStop(streamSID, callSid, smsfake.DefaultAccountSID, seqNum)
 			if err != nil {
 				log.Printf("twilio-cli: encode stop: %v", err)
 				return
@@ -315,7 +315,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 		return ignoreHandshakeHangup(err)
 	}
 
-	startMsg, err := twilio.EncodeStart(streamSID, callSid, defaultAccountSid, seqNum)
+	startMsg, err := twilio.EncodeStart(streamSID, callSid, smsfake.DefaultAccountSID, seqNum)
 	if err != nil {
 		return fmt.Errorf("encode start: %w", err)
 	}
@@ -754,10 +754,4 @@ func duplexMode(gate *micGate) string {
 		return "full duplex (--full-duplex: the mic is never gated)"
 	}
 	return "half duplex (the mic is gated while the server speaks)"
-}
-
-func newSID(prefix string) string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%s%x", prefix, b)
 }

@@ -13,7 +13,12 @@ import (
 	"time"
 )
 
-// Message is one outbound Messages.json POST recorded by CaptureServer.
+// Message is one request recorded by CaptureServer, which records every
+// request under /2010-04-01/Accounts/, whatever its method or resource — not
+// only the Messages.json POST twilio.RESTClient.SendSMS makes. AccountSID is
+// the path after that prefix with any /Messages.json suffix trimmed, so for
+// any other resource it holds the rest of the path; From, To and Body are
+// empty unless the request posted them.
 type Message struct {
 	AccountSID string
 	From       string
@@ -57,9 +62,9 @@ func (m Message) clone() Message {
 }
 
 // CaptureServer implements the Twilio Messages API shape used by
-// RESTClient.SendSMS (POST /2010-04-01/Accounts/{sid}/Messages.json -> 201 +
-// minimal JSON), recording every call it receives. It stands in for a real
-// Twilio account so a server's outbound SMS reply can be captured and
+// twilio.RESTClient.SendSMS (POST /2010-04-01/Accounts/{sid}/Messages.json ->
+// 201 + minimal JSON), recording every call it receives. It stands in for a
+// real Twilio account so a server's outbound SMS reply can be captured and
 // asserted on without one.
 //
 // A caller reads what was recorded in one of three ways: Captured for a
@@ -86,29 +91,39 @@ type CaptureServer struct {
 	// by the arrival itself rather than by polling for it.
 	//
 	// It signals "something arrived", not "your message arrived" — the waiter
-	// re-reads the recorded count to decide. That is what lets a second waiter
-	// against the same server (twilio-cli's runSMS, for one) wait for its own
-	// reply instead of re-reading the first one. Buffered by one and sent to
-	// without blocking: a dropped send only ever means a wake-up is already
-	// pending, and recording a message must never block the handler on nobody
-	// listening.
+	// re-reads the recorded count to decide. That is what lets a later waiter
+	// against the same server (twilio-cli's runSMS, for one), once the earlier
+	// one has finished, wait for its own reply instead of re-reading the first
+	// one. Buffered by one and sent to without blocking: a dropped send only
+	// ever means a wake-up is already pending, and recording a message must
+	// never block the handler on nobody listening.
 	notify chan struct{}
 }
 
 // NewCaptureServer starts a new capture server listening on the requested
 // port of 127.0.0.1, returning an error naming that port if the bind fails.
 //
-// The bind is deliberately explicit rather than ephemeral: the server whose
-// reply is being captured reads TWILIO_API_BASE_URL once at startup, so the
-// capture URL has to be nameable before this process runs at all. It keeps the
-// embedded *httptest.Server — only the listener is swapped — so URL and Close
-// behave exactly as callers already expect, and a bind failure returns an error
-// instead of the panic httptest.NewServer would raise.
+// The bind is deliberately explicit rather than ephemeral, so the capture URL
+// can be named before the capture server exists. The server whose reply is
+// being captured reads TWILIO_API_BASE_URL once at startup, so when it is
+// launched first (twilio-cli's flow, where the operator starts it before the
+// CLI) it has to be given that URL in advance. It keeps the embedded
+// *httptest.Server — only the listener is swapped — so URL and Close behave
+// exactly as callers already expect, and a failure to bind the requested port
+// returns an error instead of the panic httptest.NewServer would raise. It
+// does not remove httptest's own bind: NewUnstartedServer still binds a
+// throwaway ephemeral listener before the swap, and if even that bind fails
+// it panics, leaving the requested port held.
+//
+// The port-range and bind errors name -capture-port, the flag twilio-cli
+// exposes this port as. A caller without such a flag should reword them rather
+// than pass the hint on.
 func NewCaptureServer(port int) (*CaptureServer, error) {
 	// Port 0 is the one value net.Listen would accept while defeating the whole
-	// point: it binds an ephemeral port, so the URL is again unknowable before
-	// this process runs, and the guidance would print a :0 the operator cannot
-	// use. Everything else out of range net.Listen rejects for us.
+	// point: it binds an ephemeral port, so a URL named in advance from the
+	// requested port (as twilio-cli's guidance names it) would end in a :0
+	// nothing can be pointed at. Everything else out of range net.Listen
+	// rejects for us.
 	if port < 1 || port > 65535 {
 		return nil, fmt.Errorf("SMS capture port %d is not a usable port (want 1-65535; -capture-port 0 would bind an ephemeral port, which the server cannot be pointed at in advance)", port)
 	}
@@ -140,15 +155,15 @@ func NewCaptureServer(port int) (*CaptureServer, error) {
 }
 
 // handleMessages records the outbound SMS-send POST and answers with the
-// minimal 201 JSON shape SendSMS treats as success.
+// minimal 201 JSON shape twilio.RESTClient.SendSMS treats as success.
 //
 // Recording takes the whole posted form and the arrival time, appends the
 // message, and queues a copy for every subscriber — all without waiting on
 // any reader, so no subscriber, however slow, can hold up the response.
 //
-// The "sid" key is a contract, not decoration: RESTClient.SendSMS parses it to
-// return the message id, and a 2xx carrying none yields an empty id rather than
-// an error — so dropping it here would go unnoticed.
+// The "sid" key is a contract, not decoration: twilio.RESTClient.SendSMS
+// parses it to return the message id, and a 2xx carrying none yields an empty
+// id rather than an error — so dropping it here would go unnoticed.
 // TestCaptureServer_SendSMSGetsTheSIDBack asserts the id makes it back, which
 // is what keeps the two ends honest.
 func (c *CaptureServer) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +201,7 @@ func (c *CaptureServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Captured returns a snapshot of every Messages.json POST recorded so far.
+// Captured returns a snapshot of every request recorded so far (see Message).
 func (c *CaptureServer) Captured() []Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -198,11 +213,18 @@ func (c *CaptureServer) Captured() []Message {
 }
 
 // Notify returns the server's one wake-up channel, so a waiter is woken by an
-// arrival itself rather than by polling for it. Every recorded message sends a wake-up on it without blocking; it is
-// buffered by one, so arrivals while a wake-up is already pending coalesce
-// into that one. A wake-up signals "something arrived", not "your message
-// arrived", so a waiter re-reads Captured to decide. It is receive-only to
-// callers; only the capture server sends on it.
+// arrival itself rather than by polling for it. Every recorded message sends a
+// wake-up on it without blocking; it is buffered by one, so arrivals while a
+// wake-up is already pending coalesce into that one. A wake-up signals
+// "something arrived", not "your message arrived", so a waiter re-reads
+// Captured to decide. It is receive-only to callers; only the capture server
+// sends on it.
+//
+// It is single-consumer: every caller gets the same channel and each wake-up
+// reaches one receiver only, so wait on it from one goroutine at a time. A
+// second concurrent waiter can miss the wake-up for a message that was
+// recorded, and block until a later arrival or its own timeout. Waiters that
+// take turns, each re-reading Captured, are fine.
 func (c *CaptureServer) Notify() <-chan struct{} {
 	return c.notify
 }

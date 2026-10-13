@@ -13,6 +13,7 @@ import (
 
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 // AATK-127. twilio-cli plays inbound audio to the speakers and captures the
@@ -330,7 +331,7 @@ func runGatedDial(t *testing.T, srv *httptest.Server, opts ...dialOption) {
 	t.Helper()
 	withFakePlayer(t)
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
-	if err := dial(dialCtx(t, 15*time.Second), newSID("CA"), addr, opts...); err != nil {
+	if err := dial(dialCtx(t, 15*time.Second), smsfake.NewSID("CA"), addr, opts...); err != nil {
 		t.Errorf("dial: %v", err)
 	}
 }

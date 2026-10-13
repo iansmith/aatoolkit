@@ -2,6 +2,7 @@ package smsfake_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
@@ -125,22 +127,28 @@ func TestPostWebhook_SignatureURLMismatch403s(t *testing.T) {
 }
 
 // TestPostWebhook_SignsTheFormOverTheExactURL pins the ceremony's wire shape
-// from the receiving side: the form arrives intact, form-encoded, and carrying
-// the X-Twilio-Signature twilio.ComputeSignature yields for the auth token,
-// the exact URL posted to, and that form — which is what a real server checks.
+// from the receiving side: the form arrives intact, form-encoded, POSTed, and
+// carrying the X-Twilio-Signature twilio.ComputeSignature yields for the auth
+// token, the exact URL posted to, and that form — which is what a real server
+// checks.
+//
+// The method is asserted here because nothing downstream would notice it
+// change: twilio.Server.ServeSMS reads the form whatever the method, so a PUT
+// passes every test that goes through it, and only a consuming server that
+// routes by method would answer it 405.
 func TestPostWebhook_SignsTheFormOverTheExactURL(t *testing.T) {
 	const authToken = "test-auth-token"
 
 	type seen struct {
-		contentType, signature string
-		form                   url.Values
+		method, contentType, signature string
+		form                           url.Values
 	}
 	got := make(chan seen, 1)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Errorf("parse posted form: %v", err)
 		}
-		got <- seen{r.Header.Get("Content-Type"), r.Header.Get("X-Twilio-Signature"), r.PostForm}
+		got <- seen{r.Method, r.Header.Get("Content-Type"), r.Header.Get("X-Twilio-Signature"), r.PostForm}
 	}))
 	defer ts.Close()
 
@@ -151,6 +159,9 @@ func TestPostWebhook_SignsTheFormOverTheExactURL(t *testing.T) {
 	}
 
 	s := <-got
+	if s.method != http.MethodPost {
+		t.Errorf("method = %q, want %q", s.method, http.MethodPost)
+	}
 	if want := "application/x-www-form-urlencoded"; s.contentType != want {
 		t.Errorf("Content-Type = %q, want %q", s.contentType, want)
 	}
@@ -287,19 +298,55 @@ func TestPostWebhook_TruncatedResponseReturnsStatusAndWhatArrived(t *testing.T) 
 	}
 }
 
-// TestPostWebhook_NoResponseReturnsNoStatus pins the two failures in which no
-// response ever arrives — a request that cannot be built, and one nobody
-// answers: an error carrying the matching text, a zero status and a nil body.
+// TestPostWebhook_RedirectLoopReturnsTheLastStatus pins the one failure in
+// which net/http hands back a response together with an error: its redirect
+// policy gave up on the chain. That last redirect's status comes back; the
+// body is nil, because the client has already closed it.
+func TestPostWebhook_RedirectLoopReturnsTheLastStatus(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/sms/inbound", http.StatusTemporaryRedirect)
+	}))
+	defer ts.Close()
+
+	form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0010", "+15551234567", "+15105559999", "hello there")
+	status, body, err := smsfake.PostWebhook(context.Background(), ts.URL+"/sms/inbound", "test-auth-token", form)
+	if err == nil {
+		t.Fatal("PostWebhook succeeded against a redirect loop, want an error")
+	}
+	if got := err.Error(); !strings.HasPrefix(got, "post SMS webhook: ") {
+		t.Errorf("error = %q, want the post-failure text", got)
+	}
+	if status != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want %d — the server answered, with a redirect the client stopped following", status, http.StatusTemporaryRedirect)
+	}
+	if body != nil {
+		t.Errorf("body = %q, want nil — the client closed it before handing the response back", body)
+	}
+}
+
+// TestPostWebhook_NoResponseReturnsNoStatus pins the failures in which the
+// client hands no response back — a request that cannot be built, one nobody
+// answers, and a redirect whose next hop nobody answers: an error carrying the
+// matching text, a zero status and a nil body. In the last case the server did
+// answer, with a 307, but net/http discards that response when the next hop
+// fails, so a zero status means no response was handed back, not that nobody
+// answered.
 func TestPostWebhook_NoResponseReturnsNoStatus(t *testing.T) {
 	closed := httptest.NewServer(http.NotFoundHandler())
 	closedURL := closed.URL + "/sms/inbound"
 	closed.Close()
+
+	redirectsToClosed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, closedURL, http.StatusTemporaryRedirect)
+	}))
+	defer redirectsToClosed.Close()
 
 	for _, tc := range []struct {
 		name, webhookURL, wantPrefix string
 	}{
 		{"unbuildable request", "http://[::1/sms/inbound", "build SMS webhook request: "},
 		{"nobody listening", closedURL, "post SMS webhook: "},
+		{"redirect to nobody listening", redirectsToClosed.URL + "/sms/inbound", "post SMS webhook: "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0009", "+15551234567", "+15105559999", "hello there")
@@ -311,11 +358,70 @@ func TestPostWebhook_NoResponseReturnsNoStatus(t *testing.T) {
 				t.Errorf("error = %q, want it to start %q", got, tc.wantPrefix)
 			}
 			if status != 0 {
-				t.Errorf("status = %d, want 0 when no response arrived", status)
+				t.Errorf("status = %d, want 0 when no response was handed back", status)
 			}
 			if body != nil {
-				t.Errorf("body = %q, want nil when no response arrived", body)
+				t.Errorf("body = %q, want nil when no response was handed back", body)
 			}
 		})
+	}
+}
+
+// TestPostWebhook_CancellingCtxAbandonsTheInFlightPOST pins that ctx bounds
+// the request itself. http.DefaultClient has no timeout of its own, so a
+// webhook server that takes the request and never answers would hold
+// PostWebhook forever if ctx were not on the request. The cancel lands only
+// once the server holds the request, so it is the in-flight POST that ctx
+// abandons, not one that was never sent.
+func TestPostWebhook_CancellingCtxAbandonsTheInFlightPOST(t *testing.T) {
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		select { // never answers; released only so ts.Close can return
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer ts.Close()
+	defer close(release) // runs before ts.Close, which waits for the handler
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		status int
+		body   []byte
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		form := smsfake.InboundForm(smsfake.DefaultAccountSID, smsfake.DefaultAPIVersion, "SMtest0011", "+15551234567", "+15105559999", "hello there")
+		status, body, err := smsfake.PostWebhook(ctx, ts.URL+"/sms/inbound", "test-auth-token", form)
+		done <- result{status, body, err}
+	}()
+
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the webhook server never received the POST")
+	}
+	cancel()
+
+	select {
+	case r := <-done:
+		if !errors.Is(r.err, context.Canceled) {
+			t.Errorf("error = %v, want one wrapping context.Canceled", r.err)
+		}
+		if r.err != nil && !strings.HasPrefix(r.err.Error(), "post SMS webhook: ") {
+			t.Errorf("error = %q, want the post-failure text", r.err)
+		}
+		if r.status != 0 {
+			t.Errorf("status = %d, want 0 — no response was handed back", r.status)
+		}
+		if r.body != nil {
+			t.Errorf("body = %q, want nil — no response was handed back", r.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("PostWebhook still blocked 5s after its ctx was cancelled mid-POST")
 	}
 }

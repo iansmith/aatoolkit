@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 const (
@@ -19,8 +20,6 @@ const (
 	// FROM is omitted. Same reserved 555 block as defaultTo: a throwaway
 	// source for a local validation call, never a number that can be reached.
 	defaultFrom       = "+15105557890"
-	defaultAccountSid = "ACtwiliocli0000000000000000000000"
-	defaultAPIVersion = "2010-04-01"
 	defaultCallStatus = "ringing"
 	defaultDirection  = "inbound"
 	// defaultCallerName is the CallerName alias placeholder. On a real call
@@ -36,12 +35,12 @@ const (
 func webhookForm(callSid, from, to string) url.Values {
 	return url.Values{
 		"CallSid":    {callSid},
-		"AccountSid": {defaultAccountSid},
+		"AccountSid": {smsfake.DefaultAccountSID},
 		"From":       {from},
 		"To":         {to},
 		"CallStatus": {defaultCallStatus},
 		"Direction":  {defaultDirection},
-		"ApiVersion": {defaultAPIVersion},
+		"ApiVersion": {smsfake.DefaultAPIVersion},
 		"Caller":     {from},
 		"Called":     {to},
 		"CallerName": {defaultCallerName},
