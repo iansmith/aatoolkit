@@ -108,12 +108,17 @@ type CaptureServer struct {
 // being captured reads TWILIO_API_BASE_URL once at startup, so when it is
 // launched first (twilio-cli's flow, where the operator starts it before the
 // CLI) it has to be given that URL in advance. It keeps the embedded
-// *httptest.Server — only the listener is swapped — so URL and Close behave
-// exactly as callers already expect, and a failure to bind the requested port
-// returns an error instead of the panic httptest.NewServer would raise. It
-// does not remove httptest's own bind: NewUnstartedServer still binds a
-// throwaway ephemeral listener before the swap, and if even that bind fails
-// it panics, leaving the requested port held.
+// *httptest.Server — only the listener is swapped — so URL behaves exactly as
+// callers already expect, and a failure to bind the requested port returns an
+// error instead of the panic httptest.NewServer would raise. It does not
+// remove httptest's own bind: NewUnstartedServer still binds a throwaway
+// ephemeral listener before the swap, and if even that bind fails it panics,
+// leaving the requested port held.
+//
+// Close, unlike URL, is not the embedded server's: CaptureServer has its own,
+// which shuts that server down and also ends every subscription. Shut the
+// server down with CaptureServer.Close; the embedded Server's Close leaves
+// every subscription open, its feed still running.
 //
 // The port-range and bind errors name -capture-port, the flag twilio-cli
 // exposes this port as. A caller without such a flag should reword them rather
@@ -270,8 +275,10 @@ func (c *CaptureServer) Subscribe() (msgs <-chan Message, unsubscribe func()) {
 // httptest.Server.Close does, and then ends every subscription as its
 // unsubscribe would: messages a subscriber had not yet received are not
 // delivered — Captured still holds them — and no subscription's goroutine
-// outlives the server. Close the CaptureServer rather than its embedded
-// Server, which knows nothing of subscriptions. Calling Close again is safe,
+// outlives the server. Call CaptureServer.Close, not the embedded Server's
+// Close: that one knows nothing of subscriptions, so it shuts the server down
+// and leaves every subscription open, its feed still running, until
+// CaptureServer.Close ends them. Calling Close again is safe,
 // and so is calling it from several goroutines at once: every call returns
 // only once the server is down and every subscription has ended.
 func (c *CaptureServer) Close() {
