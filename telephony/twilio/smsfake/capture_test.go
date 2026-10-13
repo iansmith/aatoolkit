@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -999,6 +1000,15 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 	const posters, perPoster, churners, joiners = 8, 40, 4, 8
 	capture := newCapture(t)
 
+	// Each churner yields after every join and leave. Without that, on one CPU
+	// the churners took nearly all of it: unsubscribe parks on the feed it
+	// ends, the feed wakes it straight back, and a pair handing the CPU back
+	// and forth like that keeps running ahead of the goroutines the network
+	// wakes, which carry every POST. The posters managed some thirty messages
+	// a second, and the joins below, waiting on them, overran subscribeWait.
+	// Yielding sends each churner to the back of the queue those goroutines
+	// wait in, so the churn still overlaps the POSTs and Close without
+	// crowding them out.
 	stopChurn := make(chan struct{})
 	var churn sync.WaitGroup
 	for range churners {
@@ -1011,6 +1021,7 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 				}
 				_, unsubscribe := capture.Subscribe()
 				unsubscribe()
+				runtime.Gosched()
 			}
 		})
 	}
