@@ -263,10 +263,8 @@ func TestCaptureServer_NotifyIsBufferedByOneAndReceiveOnly(t *testing.T) {
 
 	// The handler sends the wake-up before it writes the response, so once a
 	// POST has been answered its wake-up is already pending.
-	for _, body := range []string{"one", "two"} {
-		if resp, _ := postMessage(t, capture, "ACnotify0000000000000000000000", url.Values{"Body": {body}}); resp.StatusCode != http.StatusCreated {
-			t.Fatalf("POST %q: status %d, want %d", body, resp.StatusCode, http.StatusCreated)
-		}
+	if err := postBodies(capture, []string{"one", "two"}); err != nil {
+		t.Fatal(err)
 	}
 
 	select {
@@ -284,8 +282,8 @@ func TestCaptureServer_NotifyIsBufferedByOneAndReceiveOnly(t *testing.T) {
 	}
 }
 
-// subscribeAccount is the account the fan-out tests post as. Nothing they
-// assert depends on it.
+// subscribeAccount is the account postBodies and the fan-out tests post as.
+// Nothing they assert depends on it.
 const subscribeAccount = "ACsubscribe00000000000000000000"
 
 // subscribeWait bounds every wait on a subscription, a POST or a shutdown in
@@ -353,6 +351,55 @@ func bodiesOf(msgs []smsfake.Message) []string {
 		out[i] = msg.Body
 	}
 	return out
+}
+
+// feed is one subscriber's result from collect: what it received, and the
+// error collect returned.
+type feed struct {
+	got []smsfake.Message
+	err error
+}
+
+// collectEach makes readers subscriptions and starts, for each, a goroutine
+// that collects n messages from it. It returns one channel per subscriber,
+// which delivers that subscriber's feed once. Every subscription is ended when
+// the test is, before newCapture's Close: cleanups run last in, first out.
+func collectEach(t *testing.T, capture *smsfake.CaptureServer, readers, n int) []chan feed {
+	t.Helper()
+	feeds := make([]chan feed, readers)
+	for i := range feeds {
+		msgs, unsubscribe := capture.Subscribe()
+		t.Cleanup(unsubscribe)
+		feeds[i] = make(chan feed, 1)
+		go func() {
+			got, err := collect(msgs, n)
+			feeds[i] <- feed{got, err}
+		}()
+	}
+	return feeds
+}
+
+// requireEachReceived waits for every feed and fails the test unless each
+// received exactly posted, in posted order. who names a subscriber in a
+// failure.
+func requireEachReceived(t *testing.T, feeds []chan feed, posted []string, who string) {
+	t.Helper()
+	for i, ch := range feeds {
+		f := <-ch
+		if f.err != nil {
+			t.Errorf("%s %d: %v", who, i, f.err)
+			continue
+		}
+		got := bodiesOf(f.got)
+		if reflect.DeepEqual(got, posted) {
+			continue
+		}
+		first := 0
+		for first < len(got) && first < len(posted) && got[first] == posted[first] {
+			first++
+		}
+		t.Errorf("%s %d received %d messages, want the %d posted, in posted order; they differ from message %d", who, i, len(got), len(posted), first)
+	}
 }
 
 // requireClosed fails the test unless msgs is already closed: a receive on it
@@ -524,37 +571,14 @@ func TestCapture_ArrivalTimestampBracketsThePost(t *testing.T) {
 func TestCapture_FanOutAllSubscribersSeeAll(t *testing.T) {
 	const subscribers, messages = 3, 10
 	capture := newCapture(t)
-
-	type feed struct {
-		got []smsfake.Message
-		err error
-	}
-	feeds := make([]chan feed, subscribers)
-	for i := range feeds {
-		msgs, unsubscribe := capture.Subscribe()
-		defer unsubscribe()
-		feeds[i] = make(chan feed, 1)
-		go func() {
-			got, err := collect(msgs, messages)
-			feeds[i] <- feed{got, err}
-		}()
-	}
+	feeds := collectEach(t, capture, subscribers, messages)
 
 	posted := numbered("fan-out", messages)
 	if err := postBodies(capture, posted); err != nil {
 		t.Fatal(err)
 	}
 
-	for i, ch := range feeds {
-		f := <-ch
-		if f.err != nil {
-			t.Errorf("subscriber %d: %v", i, f.err)
-			continue
-		}
-		if got := bodiesOf(f.got); !reflect.DeepEqual(got, posted) {
-			t.Errorf("subscriber %d received %q, want %q in posted order", i, got, posted)
-		}
-	}
+	requireEachReceived(t, feeds, posted, "subscriber")
 }
 
 // TestCapture_ConcurrentPostsSameOrderForEverySubscriber pins that "posted
@@ -611,21 +635,7 @@ func TestCapture_SlowSubscriberDoesNotBlock(t *testing.T) {
 	capture := newCapture(t)
 	_, unsubscribeSlow := capture.Subscribe() // never read
 	defer unsubscribeSlow()
-
-	type feed struct {
-		got []smsfake.Message
-		err error
-	}
-	fast := make([]chan feed, 2)
-	for i := range fast {
-		msgs, unsubscribe := capture.Subscribe()
-		defer unsubscribe()
-		fast[i] = make(chan feed, 1)
-		go func() {
-			got, err := collect(msgs, backlog)
-			fast[i] <- feed{got, err}
-		}()
-	}
+	fast := collectEach(t, capture, 2, backlog)
 
 	posted := numbered("past the slow one", backlog)
 	var postErr error
@@ -636,16 +646,7 @@ func TestCapture_SlowSubscriberDoesNotBlock(t *testing.T) {
 		t.Fatal(postErr)
 	}
 
-	for i, ch := range fast {
-		f := <-ch
-		if f.err != nil {
-			t.Errorf("reading subscriber %d, alongside one that never reads: %v", i, f.err)
-			continue
-		}
-		if got := bodiesOf(f.got); !reflect.DeepEqual(got, posted) {
-			t.Errorf("reading subscriber %d received its %d messages out of posted order", i, len(got))
-		}
-	}
+	requireEachReceived(t, fast, posted, "reading subscriber")
 }
 
 // TestCapture_SlowSubscriberLosesNothing pins the other half of not blocking:
