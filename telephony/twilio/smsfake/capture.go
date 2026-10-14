@@ -371,7 +371,9 @@ func (s *subscription) enqueue(msg Message) {
 // it, and the queue with it. Nothing is queued after the end — unsubscribe and
 // Close take the subscription out of the server's set before ending it, and
 // only members of that set are queued to — so nothing refills it.
-// TestCapture_SubscriptionLeavesTheSetBeforeItEnds pins that order.
+// TestCapture_SubscriptionLeavesTheSetBeforeItEnds pins only part of that
+// order: that the end waits for the recording lock. An end that took the lock,
+// let it go, and left the set only afterwards would pass it.
 //
 // While it runs, it keeps nothing it has handed on: it clears each message's
 // slot in the queue's array as it takes the message, and lets the array go

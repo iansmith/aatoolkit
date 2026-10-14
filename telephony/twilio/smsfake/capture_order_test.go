@@ -55,15 +55,17 @@ func TestCaptureServer_RecordsBeforeItWakes(t *testing.T) {
 	}
 }
 
-// TestCapture_SubscriptionLeavesTheSetBeforeItEnds pins the order unsubscribe
-// and Close end a subscription in: they take it out of the server's set, under
-// the recording lock, and only then end it. The handler queues a message for
-// every member of that set under the same lock, so a subscription ended while
-// still a member could be queued to after its feed had gone. Nothing would
-// deliver that message or discard it, and the unsubscribe func would keep it
-// alive for as long as its caller kept the func.
-// TestSubscription_EndReleasesItsQueue pins that ending discards what was
-// queued before the end; this pins that nothing is queued after it.
+// TestCapture_SubscriptionLeavesTheSetBeforeItEnds guards the order
+// unsubscribe and Close end a subscription in: they take it out of the
+// server's set, under the recording lock, and only then end it. The handler
+// queues a message for every member of that set under the same lock, so a
+// subscription ended while still a member could be queued to after its feed
+// had gone. Nothing would deliver that message or discard it, and the
+// unsubscribe func would keep it alive for as long as its caller kept the
+// func. TestSubscription_EndReleasesItsQueue pins that ending discards what
+// was queued before the end. This test does not pin that nothing is queued
+// after it, only that the end waits for the recording lock, as the last
+// paragraph says.
 //
 // It holds the recording lock, then unsubscribes or closes. While the lock is
 // held the subscription cannot leave the set, so it must not end: msgs must
