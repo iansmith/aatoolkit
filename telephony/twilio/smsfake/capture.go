@@ -372,6 +372,12 @@ func (s *subscription) enqueue(msg Message) {
 // Close take the subscription out of the server's set before ending it, and
 // only members of that set are queued to — so nothing refills it.
 // TestCapture_SubscriptionLeavesTheSetBeforeItEnds pins that order.
+//
+// While it runs, it keeps nothing it has handed on: it clears each message's
+// slot in the queue's array as it takes the message, and lets the array go
+// once the queue is empty, so a subscriber that fell behind and then caught up
+// does not keep its backlog reachable. TestSubscription_DeliveryClearsItsSlot
+// and TestSubscription_DrainReleasesItsQueue pin the two.
 func (s *subscription) pump() {
 	defer func() {
 		s.mu.Lock()

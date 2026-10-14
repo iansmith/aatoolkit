@@ -2,6 +2,8 @@ package smsfake
 
 import (
 	"fmt"
+	"net/url"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -84,5 +86,91 @@ func TestSubscription_EndReleasesItsQueue(t *testing.T) {
 	defer s.mu.Unlock()
 	if s.queue != nil {
 		t.Errorf("an ended subscription still holds its queue (length %d, capacity %d), want it nil: released, not merely emptied", len(s.queue), cap(s.queue))
+	}
+}
+
+// TestSubscription_DrainReleasesItsQueue is TestSubscription_EndReleasesItsQueue
+// for a subscription that goes on: once its reader has caught up, it lets go of
+// its queue. A subscriber that fell behind by a large backlog and then caught
+// up would otherwise keep an array sized for that backlog for as long as
+// nothing more arrived to outgrow it.
+//
+// Every queued message is received, so the queue is empty, and must then be
+// nil, not merely empty: an emptied slice still holds its array. The feed lets
+// the array go when it next finds the queue empty, which is after it has
+// handed on the last message, so the test waits for that, bounded by
+// SubscribeWait.
+func TestSubscription_DrainReleasesItsQueue(t *testing.T) {
+	const queued = 5
+	s := newSubscription()
+	defer s.end()
+	for i := range queued {
+		s.enqueue(Message{Body: fmt.Sprintf("read %d", i)})
+	}
+	for i := range queued {
+		select {
+		case <-s.out:
+		case <-time.After(SubscribeWait):
+			t.Fatalf("received %d of %d queued messages within %s", i, queued, SubscribeWait)
+		}
+	}
+
+	deadline := time.Now().Add(SubscribeWait)
+	for {
+		s.mu.Lock()
+		queue := s.queue
+		s.mu.Unlock()
+		if queue == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a drained subscription still holds its queue (length %d, capacity %d) %s after its last message was received, want it nil: released, not merely emptied", len(queue), cap(queue), SubscribeWait)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestSubscription_DeliveryClearsItsSlot pins that the feed, taking a message
+// from the queue, clears the slot it held in the queue's array. Taking it
+// moves the queue's start past that slot, but the array still holds it, and
+// with it the message and its Form, for as long as the rest of the queue
+// keeps the array alive — while a subscriber that fell behind works through
+// its backlog, every message it has already been handed would stay reachable.
+//
+// The queue cannot be seen past its start, so the test loads it with two
+// messages in one hold of the lock, in an array it keeps a view of, and wakes
+// the feed. Whenever the feed first looks, it takes both from that array. Once
+// both have been received, both slots must be empty. The feed clears a slot
+// before it hands its message on, so neither side can flake.
+func TestSubscription_DeliveryClearsItsSlot(t *testing.T) {
+	s := newSubscription()
+	defer s.end()
+
+	slots := []Message{
+		{Body: "first", Form: url.Values{"Body": {"first"}}},
+		{Body: "second", Form: url.Values{"Body": {"second"}}},
+	}
+	s.mu.Lock()
+	s.queue = slots
+	s.mu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+
+	for i := range slots {
+		select {
+		case <-s.out:
+		case <-time.After(SubscribeWait):
+			t.Fatalf("received %d of %d queued messages within %s", i, len(slots), SubscribeWait)
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, slot := range slots {
+		if !reflect.ValueOf(slot).IsZero() {
+			t.Errorf("slot %d of the queue's array still holds %q once it was received, want it cleared so the array keeps no delivered message", i, slot.Body)
+		}
 	}
 }
