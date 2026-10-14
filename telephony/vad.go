@@ -9,8 +9,8 @@ import (
 )
 
 // TurnSink receives turn-taking boundaries dispatched from a session's VAD
-// events. OnSpeechStart fires when the caller starts talking (originally
-// wired as a no-op stub — barge-in behavior beyond that is out of scope);
+// events. OnSpeechStart fires when the caller starts talking (wired as a
+// no-op stub — barge-in behavior beyond that is out of scope);
 // OnEndOfUtterance fires when the caller's utterance is judged complete.
 // TurnTrigger names which of completeTurn's eight call sites (state.go, seven
 // distinct trigger values — silence-turn-end covers two of the eight: the
