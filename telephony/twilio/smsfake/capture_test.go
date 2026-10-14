@@ -1086,7 +1086,8 @@ func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
 // recorded and fanned out, and go on doing so while Close runs. Under -race,
 // an unlocked Subscribe, unsubscribe or Close is reported as a data race; it
 // can also fault the map outright. Close cannot race the handler itself —
-// httptest's Close waits for in-flight POSTs — so it is the joining and
+// httptest's Close waits for in-flight POSTs, as
+// TestCapture_CloseWaitsForInFlightPost pins — so it is the joining and
 // leaving that Close must be locked against.
 //
 // It also pins what a subscriber joining mid-stream receives: exactly the

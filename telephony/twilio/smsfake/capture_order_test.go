@@ -1,6 +1,11 @@
 package smsfake_test
 
 import (
+	"bufio"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"testing"
 	"time"
@@ -97,5 +102,79 @@ func TestCapture_SubscriptionLeavesTheSetBeforeItEnds(t *testing.T) {
 			release()
 			returnsWithin(t, tc.name+" once the recording lock was released", func() { <-ended })
 		})
+	}
+}
+
+// TestCapture_CloseWaitsForInFlightPost pins that Close does not return while
+// a POST's handler is still running: it waits for the POST to be answered,
+// and returns with its message recorded. A Close that shut only the listener,
+// or cut the connections too, would return at once, and the POST would be
+// recorded after it or dropped.
+//
+// The POST goes over a connection of the test's own, sent with Expect:
+// 100-continue and its body held back. The server sends 100 Continue only
+// when the handler first reads the body, so its arrival shows the handler has
+// begun and is waiting on its form. A body held back by the client gives no
+// such sign: the client's transport sends nothing until it can read the body,
+// so the server has no request yet, and httptest's Close cuts a connection
+// that has not sent one.
+//
+// Once 100 Continue has arrived, Close must not return within the hold window;
+// once the body is sent, it must, with the POST answered 201 and its message
+// in Captured. The pass side cannot flake: httptest's Close waits for every
+// connection with a request in progress to end. The fail side relies on a
+// Close that does not wait returning within the hold window, which it does
+// with plenty to spare.
+func TestCapture_CloseWaitsForInFlightPost(t *testing.T) {
+	capture := newCapture(t)
+
+	conn, err := net.Dial("tcp", capture.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the capture server: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(smsfake.SubscribeWait)); err != nil {
+		t.Fatalf("bound the connection: %v", err)
+	}
+
+	body := url.Values{"Body": {"in flight"}}.Encode()
+	if _, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nExpect: 100-continue\r\n\r\n",
+		messagesPath(subscribeAccount), capture.Listener.Addr(), urlencoded, len(body)); err != nil {
+		t.Fatalf("send the POST's headers: %v", err)
+	}
+	reply := bufio.NewReader(conn)
+	interim, err := http.ReadResponse(reply, nil)
+	if err != nil {
+		t.Fatalf("read the server's reply to the headers: %v", err)
+	}
+	if interim.StatusCode != http.StatusContinue {
+		t.Fatalf("the server replied %d to the headers, want %d, sent when the handler reads the body", interim.StatusCode, http.StatusContinue)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		capture.Close()
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a POST's handler was still reading its form, want it to wait for the POST")
+	case <-time.After(smsfake.HoldWindow):
+	}
+
+	if _, err := io.WriteString(conn, body); err != nil {
+		t.Fatalf("send the POST's body: %v", err)
+	}
+	returnsWithin(t, "Close once the in-flight POST's body was sent", func() { <-closed })
+	if got := requireOneRecorded(t, capture)[0].Body; got != "in flight" {
+		t.Errorf("recorded Body = %q, want %q, the POST in flight when Close was called", got, "in flight")
+	}
+	resp, err := http.ReadResponse(reply, nil)
+	if err != nil {
+		t.Fatalf("read the response to the in-flight POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("the in-flight POST was answered %d, want %d", resp.StatusCode, http.StatusCreated)
 	}
 }
