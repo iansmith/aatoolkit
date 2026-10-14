@@ -23,9 +23,9 @@ const pendingSettleTimeout = 30 * time.Second
 const replayTimerBoundMS = 10 * 60 * 1000
 
 // ReplayResult is one utterance's FullPass transcript from a replay run
-// ("emits the ordered FullPass
-// transcripts as JSON" -- one per utterance, the same granularity `build`
-// structures its cumulative-prefix rows over, not one per fused turn).
+// ("emits the ordered FullPass transcripts as JSON" -- one per utterance, the
+// same granularity `build` structures its cumulative-prefix rows over, not one
+// per fused turn).
 type ReplayResult struct {
 	Text string `json:"text"`
 }
@@ -470,9 +470,8 @@ func RowsFromUtterances(recordingID string, recLabel RecordingLabel, utterances 
 }
 
 // VerifierOutcome is one of the four outcomes score reports for a row, in
-// place of raw accuracy (accuracy
-// averages over an asymmetry where one error truncates a caller and the
-// other costs a re-ask).
+// place of raw accuracy (accuracy averages over an asymmetry where one error
+// truncates a caller and the other costs a re-ask).
 type VerifierOutcome string
 
 const (
