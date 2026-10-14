@@ -156,6 +156,17 @@ func requireOneRecorded(t *testing.T, capture *smsfake.CaptureServer) []smsfake.
 	return recorded
 }
 
+// TestDefaultCapturePort_IsTheValueTwilioCLIDeclared pins DefaultCapturePort
+// to 9750, the -capture-port default twilio-cli declared before the constant
+// moved here. A server launched for twilio-cli's round trip is pointed at this
+// port before twilio-cli runs, so a changed value is a changed contract with
+// every such launch, not a cosmetic edit.
+func TestDefaultCapturePort_IsTheValueTwilioCLIDeclared(t *testing.T) {
+	if got, want := smsfake.DefaultCapturePort, 9750; got != want {
+		t.Errorf("DefaultCapturePort = %d, want %d", got, want)
+	}
+}
+
 // TestNewCaptureServer_BindsRequestedPort pins that the capture server binds
 // the port it was asked for, rather than an ephemeral one, so the capture URL
 // can be named before the capture server exists. A server under test that is
