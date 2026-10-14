@@ -791,43 +791,57 @@ func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 	}
 }
 
-// TestCapture_MalformedPostIsRejectedNotRecorded pins that a POST whose form
-// does not parse is refused with 400 and goes nowhere: it is not recorded, it
-// sends no wake-up, and no subscriber receives it. Go's form parser keeps the
-// pairs it could read alongside its error, so a handler that ignored the error
-// would record a thinned message — here without its Body, the pair that fails
-// to parse. The subscriber's first delivery being the well-formed message
-// posted next shows nothing was queued for it, without waiting on a silence.
+// TestCapture_MalformedPostIsRejectedNotRecorded pins that a POST whose URL
+// query or posted form does not parse is refused with 400 and goes nowhere: it
+// is not recorded, it sends no wake-up, and no subscriber receives it. Each
+// case breaks one of the two and leaves the other well formed, so only that
+// one can be what is refused. Go's form parser keeps the pairs it could read
+// alongside its error, so a handler that ignored the error would record a
+// thinned message — for the malformed body, one without its Body, the pair
+// that fails to parse — and a handler that parsed only the body would record
+// the POST whose query does not parse, whole. The subscriber's first delivery
+// being the well-formed message posted next shows nothing was queued for it,
+// without waiting on a silence.
 func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
-	capture := newCapture(t)
-	msgs, _ := subscribe(t, capture)
+	for _, tc := range []struct {
+		name, query, body string
+	}{
+		{"a body that does not parse", "", "From=a&Body=%zz&To=b"},
+		{"a URL query that does not parse", "?Body=%zz", "From=a&Body=ok&To=b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := newCapture(t)
+			msgs, _ := subscribe(t, capture)
 
-	resp, err := postClient.Post(capture.URL+messagesPath(subscribeAccount), "application/x-www-form-urlencoded", strings.NewReader("From=a&Body=%zz&To=b"))
-	if err != nil {
-		t.Fatalf("POST a malformed form: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("malformed form: status %d, want %d", resp.StatusCode, http.StatusBadRequest)
-	}
-	if recorded := capture.Captured(); len(recorded) != 0 {
-		t.Errorf("Captured holds %d messages after a malformed POST, want none: %+v", len(recorded), recorded)
-	}
-	select {
-	case <-capture.Notify():
-		t.Error("a malformed POST sent a wake-up, want none")
-	default:
-	}
+			endpoint := capture.URL + messagesPath(subscribeAccount) + tc.query
+			resp, err := postClient.Post(endpoint, "application/x-www-form-urlencoded", strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatalf("POST %s: %v", endpoint, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+			if recorded := capture.Captured(); len(recorded) != 0 {
+				t.Errorf("Captured holds %d messages after a malformed POST, want none: %+v", len(recorded), recorded)
+			}
+			select {
+			case <-capture.Notify():
+				t.Error("a malformed POST sent a wake-up, want none")
+			default:
+			}
 
-	if err := postBodies(capture, []string{"well formed"}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := collect(msgs, 1)
-	if err != nil {
-		t.Fatalf("subscriber: %v", err)
-	}
-	if got[0].Body != "well formed" {
-		t.Errorf("subscriber's first delivery has Body %q and Form %v, want the well-formed message posted after the malformed one", got[0].Body, got[0].Form)
+			if err := postBodies(capture, []string{"well formed"}); err != nil {
+				t.Fatal(err)
+			}
+			got, err := collect(msgs, 1)
+			if err != nil {
+				t.Fatalf("subscriber: %v", err)
+			}
+			if got[0].Body != "well formed" {
+				t.Errorf("subscriber's first delivery has Body %q and Form %v, want the well-formed message posted after the malformed one", got[0].Body, got[0].Form)
+			}
+		})
 	}
 }
 
