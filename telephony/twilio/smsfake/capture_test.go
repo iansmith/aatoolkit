@@ -397,6 +397,18 @@ func serveBodies(capture *smsfake.CaptureServer, bodies []string) error {
 	})
 }
 
+// serveWithin is serveBodies bounded by returnsWithin, for the test's own
+// goroutine: a POST answered other than 201 fails the test. what names the
+// POSTs if they stall.
+func serveWithin(t *testing.T, capture *smsfake.CaptureServer, what string, bodies []string) {
+	t.Helper()
+	var err error
+	returnsWithin(t, what, func() { err = serveBodies(capture, bodies) })
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // eachCreated sends one message per body, in order, through send, which
 // returns the response status, and returns the first failure: an error from
 // send or a status other than 201.
@@ -526,6 +538,21 @@ func requireClosed(t *testing.T, msgs <-chan smsfake.Message, which string) {
 		}
 	default:
 		t.Errorf("%s is still open, want it closed by the time unsubscribe or Close returned", which)
+	}
+}
+
+// stillOpen reports whether msgs is not yet closed: a receive on it delivers a
+// message or would block, rather than reporting the channel closed at once.
+// It is requireClosed for a test that counts many channels rather than
+// reporting each one, and is called as requireClosed says to be: without
+// waiting, on the goroutine whose call was to have closed msgs, straight after
+// that call returns.
+func stillOpen(msgs <-chan smsfake.Message) bool {
+	select {
+	case _, ok := <-msgs:
+		return ok
+	default:
+		return true
 	}
 }
 
@@ -885,13 +912,7 @@ func TestCapture_ArrivalTimestampFollowsRecordingOrder(t *testing.T) {
 	}()
 
 	returnsWithin(t, "POST A's handler reading its body", func() { <-held.reading })
-	var postErr error
-	returnsWithin(t, "POST B while A's body is held back", func() {
-		postErr = serveBodies(capture, []string{"B"})
-	})
-	if postErr != nil {
-		t.Fatal(postErr)
-	}
+	serveWithin(t, capture, "POST B while A's body is held back", []string{"B"})
 	close(held.released)
 	returnsWithin(t, "POST A once its body is released", func() { <-served })
 	if rec.Code != http.StatusCreated {
@@ -1134,13 +1155,7 @@ func TestCapture_SlowSubscriberDoesNotBlock(t *testing.T) {
 	fast := collectEach(t, capture, 2, backlog)
 
 	posted := numbered("past the slow one", backlog)
-	var postErr error
-	returnsWithin(t, fmt.Sprintf("%d POSTs with a subscriber that never reads", backlog), func() {
-		postErr = serveBodies(capture, posted)
-	})
-	if postErr != nil {
-		t.Fatal(postErr)
-	}
+	serveWithin(t, capture, fmt.Sprintf("%d POSTs with a subscriber that never reads", backlog), posted)
 
 	requireEachReceived(t, fast, posted, "reading subscriber")
 }
@@ -1154,13 +1169,7 @@ func TestCapture_SlowSubscriberLosesNothing(t *testing.T) {
 	msgs, _ := subscribe(t, capture)
 
 	posted := numbered("backlog", backlog)
-	var postErr error
-	returnsWithin(t, fmt.Sprintf("%d POSTs to a subscriber not yet reading", backlog), func() {
-		postErr = serveBodies(capture, posted)
-	})
-	if postErr != nil {
-		t.Fatal(postErr)
-	}
+	serveWithin(t, capture, fmt.Sprintf("%d POSTs to a subscriber not yet reading", backlog), posted)
 
 	got, err := collect(msgs, backlog)
 	if err != nil {
@@ -1327,14 +1336,6 @@ func TestCapture_UnsubscribeWhileBacklogged(t *testing.T) {
 func TestCapture_ClosedByTheTimeUnsubscribeReturns(t *testing.T) {
 	const rounds = 20000
 	capture := newCapture(t)
-	stillOpen := func(msgs <-chan smsfake.Message) bool {
-		select {
-		case _, ok := <-msgs:
-			return ok
-		default:
-			return true
-		}
-	}
 
 	open := 0
 	returnsWithin(t, fmt.Sprintf("%d rounds of Subscribe and unsubscribe", rounds), func() {
@@ -1476,7 +1477,7 @@ func TestCapture_ConcurrentClosesEachEndEverySubscription(t *testing.T) {
 	}
 
 	start := make(chan struct{})
-	stillOpen := make(chan int, closers)
+	openCounts := make(chan int, closers)
 	returnsWithin(t, fmt.Sprintf("%d concurrent Closes", closers), func() {
 		var wg sync.WaitGroup
 		for range closers {
@@ -1485,23 +1486,18 @@ func TestCapture_ConcurrentClosesEachEndEverySubscription(t *testing.T) {
 				capture.Close()
 				open := 0
 				for _, msgs := range feeds {
-					select {
-					case _, ok := <-msgs:
-						if ok {
-							open++
-						}
-					default:
+					if stillOpen(msgs) {
 						open++
 					}
 				}
-				stillOpen <- open
+				openCounts <- open
 			})
 		}
 		close(start)
 		wg.Wait()
 	})
-	close(stillOpen)
-	for open := range stillOpen {
+	close(openCounts)
+	for open := range openCounts {
 		if open != 0 {
 			t.Errorf("a Close racing another returned with %d of %d subscriptions still open, want every one closed", open, subscribers)
 		}
