@@ -9,12 +9,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 // stubWSServer uses raw HTTP hijacking so no external WS library is needed in
@@ -58,12 +60,19 @@ func waitStubWSServer(t *testing.T, done <-chan struct{}) {
 	}
 }
 
+// mzSID is the shape of the stream SID dial mints for a call: "MZ" followed by
+// 32 lowercase hex characters, the prefix real Twilio gives a Media Stream.
+var mzSID = regexp.MustCompile(`^MZ[0-9a-f]{32}$`)
+
+// TestDial_SendsStartEvent pins the start frame dial opens the stream with,
+// including the SIDs that identify it: an MZ stream SID, the caller-supplied
+// call SID, and smsfake.DefaultAccountSID as the account.
 func TestDial_SendsStartEvent(t *testing.T) {
 	var received []byte
 	srv, done := stubWSServer(t, &received)
 	defer srv.Close()
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
-	callSid := newSID("CA")
+	callSid := smsfake.NewSID("CA")
 
 	if err := dial(context.Background(), callSid, addr); err != nil {
 		t.Fatalf("dial: %v", err)
@@ -88,6 +97,12 @@ func TestDial_SendsStartEvent(t *testing.T) {
 	callSID, ok := startObj["callSid"].(string)
 	if !ok || callSID != callSid {
 		t.Errorf("start.callSid: got %v, want %q", startObj["callSid"], callSid)
+	}
+	if !mzSID.MatchString(streamSID) {
+		t.Errorf("streamSid = %q, want %q followed by 32 lowercase hex characters", streamSID, "MZ")
+	}
+	if got := startObj["accountSid"]; got != smsfake.DefaultAccountSID {
+		t.Errorf("start.accountSid: got %v, want %q", got, smsfake.DefaultAccountSID)
 	}
 }
 
@@ -120,7 +135,7 @@ func TestDial_SendsConnectedBeforeStart(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := dial(context.Background(), newSID("CA"), "ws"+strings.TrimPrefix(srv.URL, "http")); err != nil {
+	if err := dial(context.Background(), smsfake.NewSID("CA"), "ws"+strings.TrimPrefix(srv.URL, "http")); err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 
@@ -176,13 +191,13 @@ func TestDial_ReturnsOnServerClose(t *testing.T) {
 	defer srv.Close()
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+	if err := dial(context.Background(), smsfake.NewSID("CA"), addr); err != nil {
 		t.Errorf("dial after server close: %v", err)
 	}
 }
 
 func TestDial_RefusedConnectionReturnsError(t *testing.T) {
-	err := dial(context.Background(), newSID("CA"), "ws://127.0.0.1:1")
+	err := dial(context.Background(), smsfake.NewSID("CA"), "ws://127.0.0.1:1")
 	if err == nil {
 		t.Error("dial to refused port must return an error")
 	}
@@ -191,7 +206,7 @@ func TestDial_RefusedConnectionReturnsError(t *testing.T) {
 func TestDial_CancelledContextReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := dial(ctx, newSID("CA"), "ws://127.0.0.1:1")
+	err := dial(ctx, smsfake.NewSID("CA"), "ws://127.0.0.1:1")
 	if err == nil {
 		t.Error("dial with cancelled context must return an error")
 	}
@@ -201,7 +216,7 @@ func TestDial_CancelledContextReturnsError(t *testing.T) {
 // across separate dials, now that CallSid is caller-supplied (single-sourced
 // per PRD D12) rather than internally minted by dial.
 func TestDial_StartEventSIDsAreDistinct(t *testing.T) {
-	callSid := newSID("CA")
+	callSid := smsfake.NewSID("CA")
 
 	var received1 []byte
 	srv1, done1 := stubWSServer(t, &received1)
@@ -237,7 +252,9 @@ func TestDial_StartEventSIDsAreDistinct(t *testing.T) {
 }
 
 // TestDial_SendsStopFrameOnCancel asserts that cancelling ctx (as SIGINT
-// does) causes dial to send a stop frame before closing the WebSocket.
+// does) causes dial to send a stop frame before closing the WebSocket, and
+// pins the SIDs that stop carries: an MZ stream SID, the caller-supplied call
+// SID, and smsfake.DefaultAccountSID as the account.
 func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	// On the fake mic, for the reason withFakeMic exists: this is a claim about
 	// frame ORDER -- the frame after cancel is the stop -- and the real mic
@@ -263,11 +280,12 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 		stopReceived <- msg
 	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+	callSid := smsfake.NewSID("CA")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	dialErrCh := make(chan error, 1)
 	go func() {
-		dialErrCh <- dial(ctx, newSID("CA"), addr)
+		dialErrCh <- dial(ctx, callSid, addr)
 	}()
 
 	select {
@@ -293,6 +311,19 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	}
 	if m["event"] != "stop" {
 		t.Errorf("frame after cancel: event = %v, want stop", m["event"])
+	}
+	if streamSID, _ := m["streamSid"].(string); !mzSID.MatchString(streamSID) {
+		t.Errorf("stop streamSid = %v, want %q followed by 32 lowercase hex characters", m["streamSid"], "MZ")
+	}
+	stopObj, ok := m["stop"].(map[string]any)
+	if !ok {
+		t.Fatalf("stop field missing or wrong type: %q", stopMsg)
+	}
+	if got := stopObj["callSid"]; got != callSid {
+		t.Errorf("stop.callSid: got %v, want %q", got, callSid)
+	}
+	if got := stopObj["accountSid"]; got != smsfake.DefaultAccountSID {
+		t.Errorf("stop.accountSid: got %v, want %q", got, smsfake.DefaultAccountSID)
 	}
 }
 
@@ -346,7 +377,7 @@ func TestDial_MicErrorPropagatesUnlessTheCallSimplyEnded(t *testing.T) {
 
 			srv := mediaConsumingServer(t)
 			addr := "ws" + strings.TrimPrefix(srv.URL, "http")
-			err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr)
+			err := dial(dialCtx(t, 5*time.Second), smsfake.NewSID("CA"), addr)
 
 			if tc.wantErr == nil {
 				if err != nil {
@@ -391,7 +422,7 @@ func TestDial_NoStopFrameOnServerClose(t *testing.T) {
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	out := captureLog(t, func() {
-		if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+		if err := dial(context.Background(), smsfake.NewSID("CA"), addr); err != nil {
 			t.Errorf("dial after server close: %v", err)
 		}
 		time.Sleep(100 * time.Millisecond) // let any stray stop goroutine (mis)fire into the captured log
@@ -470,7 +501,7 @@ func TestCLI_MarkEcho(t *testing.T) {
 
 	ctx := dialCtx(t, 5*time.Second)
 	dialErrCh := make(chan error, 1)
-	go func() { dialErrCh <- dial(ctx, newSID("CA"), addr) }()
+	go func() { dialErrCh <- dial(ctx, smsfake.NewSID("CA"), addr) }()
 
 	select {
 	case echoRaw := <-echoReceived:
@@ -549,7 +580,7 @@ func TestCLI_MarkEchoRepeats(t *testing.T) {
 
 	ctx := dialCtx(t, 5*time.Second)
 	dialErrCh := make(chan error, 1)
-	go func() { dialErrCh <- dial(ctx, newSID("CA"), addr) }()
+	go func() { dialErrCh <- dial(ctx, smsfake.NewSID("CA"), addr) }()
 
 	wantNames := []string{"mark1", "mark2"}
 	for i, want := range wantNames {
@@ -613,7 +644,7 @@ func TestCLI_ServerClose(t *testing.T) {
 
 	ctx := dialCtx(t, 5*time.Second)
 	dialErrCh := make(chan error, 1)
-	go func() { dialErrCh <- dial(ctx, newSID("CA"), addr) }()
+	go func() { dialErrCh <- dial(ctx, smsfake.NewSID("CA"), addr) }()
 
 	select {
 	case err := <-dialErrCh:
@@ -651,7 +682,7 @@ func TestCLI_CallerHangup(t *testing.T) {
 
 	ctx := dialCtx(t, 5*time.Second)
 	dialErrCh := make(chan error, 1)
-	go func() { dialErrCh <- dial(ctx, newSID("CA"), addr) }()
+	go func() { dialErrCh <- dial(ctx, smsfake.NewSID("CA"), addr) }()
 
 	var stopMsg []byte
 	select {
@@ -723,7 +754,7 @@ func TestCLI_NoEchoMarks(t *testing.T) {
 
 		ctx := dialCtx(t, 5*time.Second)
 		dialErrCh := make(chan error, 1)
-		go func() { dialErrCh <- dial(ctx, newSID("CA"), addr, opts...) }()
+		go func() { dialErrCh <- dial(ctx, smsfake.NewSID("CA"), addr, opts...) }()
 
 		select {
 		case <-gotEcho:
@@ -784,7 +815,7 @@ func TestDial_PeerClosesBetweenHandshakeFrames(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := dial(context.Background(), newSID("CA"), "ws"+strings.TrimPrefix(srv.URL, "http"))
+	err := dial(context.Background(), smsfake.NewSID("CA"), "ws"+strings.TrimPrefix(srv.URL, "http"))
 
 	select {
 	case <-gotConnected:

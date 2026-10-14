@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/iansmith/aatoolkit/config"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 // e164Pattern matches an E.164 number: a leading '+', a non-zero first digit,
@@ -106,11 +107,8 @@ const (
 // consumer's config; an error naming both ways to supply one is more use than
 // a name the engine invented.
 func resolveServerName(flagValue, envValue string) (string, error) {
-	if flagValue != "" {
-		return flagValue, nil
-	}
-	if envValue != "" {
-		return envValue, nil
+	if name := smsfake.Resolve(flagValue, envValue, ""); name != "" {
+		return name, nil
 	}
 	return "", fmt.Errorf("no server name: pass -server <name>, set %s, or skip config resolution entirely with -webhook <url>", serverEnvVar)
 }
@@ -146,11 +144,8 @@ func resolveFrom(positional string) (from, warning string) {
 // path resolves from any directory; an error naming both ways to supply one is
 // more use than a filename the engine invented.
 func resolveConfigPath(flagValue, envValue string) (string, error) {
-	if flagValue != "" {
-		return flagValue, nil
-	}
-	if envValue != "" {
-		return envValue, nil
+	if path := smsfake.Resolve(flagValue, envValue, ""); path != "" {
+		return path, nil
 	}
 	return "", fmt.Errorf("no config path: pass -config <file>, set %s, or skip config resolution entirely with -webhook <url>", configEnvVar)
 }
@@ -222,13 +217,13 @@ const defaultCapturePort = 9750
 // startup, so naming an internal Go field told them to do something impossible.
 func smsCaptureGuidance(port int) string {
 	return fmt.Sprintf("capture server listening on port %d — launch the server with %s",
-		port, captureBaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", port)))
+		port, smsfake.BaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", port)))
 }
 
 // startCapture binds the reply-capture server on port and returns it together
 // with the guidance line naming that same port.
 //
-// The pairing is the point. When runSMSMode called newSMSCaptureServer and
+// The pairing is the point. When runSMSMode called smsfake.NewCaptureServer and
 // smsCaptureGuidance separately, nothing stopped them being given different
 // ports — and nothing could catch it, because runSMSMode ends in
 // log.Fatalf/os.Exit and cannot be driven from a test at all. The two would then
@@ -236,8 +231,8 @@ func smsCaptureGuidance(port int) string {
 // instruction naming one port while the CLI listens on another, and gets a
 // timeout with no hint why. One port in, both artifacts out, and a test can
 // assert they agree.
-func startCapture(port int) (*smsCaptureServer, string, error) {
-	capture, err := newSMSCaptureServer(port)
+func startCapture(port int) (*smsfake.CaptureServer, string, error) {
+	capture, err := smsfake.NewCaptureServer(port)
 	if err != nil {
 		return nil, "", err
 	}
@@ -273,7 +268,7 @@ func runSMSMode(args []string) {
 			"  2. run this command; it prints the reply the server sends back\n\n"+
 			"The server reads that variable once at startup, so step 1 cannot be skipped\n"+
 			"or reordered. Requires TWILIO_AUTH_TOKEN in the environment.\n\n",
-			captureBaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", defaultCapturePort)))
+			smsfake.BaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", defaultCapturePort)))
 		fs.PrintDefaults()
 		os.Exit(1)
 	}
@@ -370,7 +365,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	callSid := newSID("CA")
+	callSid := smsfake.NewSID("CA")
 
 	streamURL, err := fetchStreamURL(ctx, target, authToken, callSid, from, *toNumber)
 	if err != nil {

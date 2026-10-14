@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 func TestWebhookCeremony_AcceptedByRealServer(t *testing.T) {
@@ -72,6 +73,22 @@ func TestWebhookForm_Aliases(t *testing.T) {
 	}
 }
 
+// TestWebhookForm_AccountSidAndApiVersionAreTheDefaults pins the two voice-form
+// fields read from smsfake's exported defaults. The two constants sit side by
+// side under one package prefix, and the receiving server accepts the signed
+// POST whatever they hold, so a swap or a wrong value would otherwise reach the
+// wire unnoticed. smsfake's own tests pin the constants' literal values.
+func TestWebhookForm_AccountSidAndApiVersionAreTheDefaults(t *testing.T) {
+	form := webhookForm("CAdefaults0001", "+15551234567", "+15559876543")
+
+	if got := form.Get("AccountSid"); got != smsfake.DefaultAccountSID {
+		t.Errorf("AccountSid = %q, want smsfake.DefaultAccountSID %q", got, smsfake.DefaultAccountSID)
+	}
+	if got := form.Get("ApiVersion"); got != smsfake.DefaultAPIVersion {
+		t.Errorf("ApiVersion = %q, want smsfake.DefaultAPIVersion %q", got, smsfake.DefaultAPIVersion)
+	}
+}
+
 func TestWebhookCeremony_ExtractsStreamURL(t *testing.T) {
 	t.Run("good TwiML extracts stream URL", func(t *testing.T) {
 		twiml := []byte(`<Response><Connect><Stream url="ws://example.com/streams"/></Connect></Response>`)
@@ -125,7 +142,7 @@ func TestCallSid_SingleSourcedAcrossWebhookAndStart(t *testing.T) {
 		t.Fatalf("webhook POST CallSid = %q, want %q", gotWebhookCallSid, callSid)
 	}
 
-	startMsg, err := twilio.EncodeStart("SStest0001", callSid, defaultAccountSid, 1)
+	startMsg, err := twilio.EncodeStart("SStest0001", callSid, smsfake.DefaultAccountSID, 1)
 	if err != nil {
 		t.Fatalf("EncodeStart: %v", err)
 	}
