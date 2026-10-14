@@ -797,27 +797,34 @@ func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 }
 
 // TestCapture_MalformedPostIsRejectedNotRecorded pins that a POST whose URL
-// query or posted form does not parse is refused with 400 and goes nowhere: it
-// is not recorded, it sends no wake-up, and no subscriber receives it. Each
-// case breaks one part of the POST and leaves the rest well formed, so only
-// that part can be what is refused: the body, the URL query, or a parameter of
-// the Content-Type. Go's form parser reads what it can alongside its error, so
-// a handler that ignored the error would still record each POST: for the
-// malformed body, a thinned message without its Body, the pair that fails to
-// parse; for the other two, the whole message. The query is not part of the
-// posted form, and a malformed parameter leaves the media type naming a
-// urlencoded body, which the parser reads in full; for both, the error it
-// reports is all that refuses the POST. A handler that parsed only the body
-// would likewise record the POST whose query does not parse, whole. The
+// query or posted form does not parse, or whose urlencoded body is over the
+// 10 MiB ParseForm accepts, is refused with 400 and goes nowhere: it is not
+// recorded, it sends no wake-up, and no subscriber receives it. Each case
+// breaks one part of the POST and leaves the rest well formed, so only that
+// part can be what is refused: the body, the URL query, a parameter of the
+// Content-Type, or the body's length. Go's form parser reads what it can
+// alongside its error, so a handler that ignored the error would still record
+// each POST: for the malformed body, a thinned message without its Body, the
+// pair that fails to parse; for the body over the cap, a message with an empty
+// Form, as the parser keeps nothing of a body over it; for the other two, the
+// whole message. The query is not part of the posted form, and a malformed
+// parameter leaves the media type naming a urlencoded body, which the parser
+// reads in full; for both, the error it reports is all that refuses the POST.
+// A handler that parsed only the body would likewise record the POST whose
+// query does not parse, whole, and one that lifted the cap, as
+// http.MaxBytesReader with a larger limit does, the body over it. That body is
+// one byte over, so the server reads all of it before it answers. The
 // subscriber's first delivery being the well-formed message posted next shows
 // nothing was queued for it, without waiting on a silence.
 func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
+	overCap := "Body=" + strings.Repeat("x", 10<<20+1-len("Body="))
 	for _, tc := range []struct {
 		name, query, contentType, body string
 	}{
 		{"a body that does not parse", "", urlencoded, "From=a&Body=%zz&To=b"},
 		{"a URL query that does not parse", "?Body=%zz", urlencoded, "From=a&Body=ok&To=b"},
 		{"a Content-Type that does not parse", "", urlencoded + "; charset", "From=a&Body=ok&To=b"},
+		{"a well-formed body over 10 MiB", "", urlencoded, overCap},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := newCapture(t)
@@ -835,10 +842,12 @@ func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
 // msgs subscribed, went nowhere: Captured holds nothing, no wake-up is pending,
 // and nothing was queued for msgs. It shows the last by posting a well-formed
 // message, which must be msgs' first delivery, without waiting on a silence.
+// What it reports of a message is clipped, as the body over 10 MiB would
+// otherwise fill the failure.
 func requireWentNowhere(t *testing.T, capture *smsfake.CaptureServer, msgs <-chan smsfake.Message, what string) {
 	t.Helper()
 	if recorded := capture.Captured(); len(recorded) != 0 {
-		t.Errorf("Captured holds %d messages after %s, want none: %+v", len(recorded), what, recorded)
+		t.Errorf("Captured holds %d messages after %s, want none: %s", len(recorded), what, clip(fmt.Sprintf("%+v", recorded)))
 	}
 	select {
 	case <-capture.Notify():
@@ -854,8 +863,18 @@ func requireWentNowhere(t *testing.T, capture *smsfake.CaptureServer, msgs <-cha
 		t.Fatalf("subscriber: %v", err)
 	}
 	if got[0].Body != "well formed" {
-		t.Errorf("subscriber's first delivery has Body %q and Form %v, want the well-formed message posted after %s", got[0].Body, got[0].Form, what)
+		t.Errorf("subscriber's first delivery has Body %s and Form %s, want the well-formed message posted after %s", clip(strconv.Quote(got[0].Body)), clip(fmt.Sprint(got[0].Form)), what)
 	}
+}
+
+// clip returns s whole if it is at most 512 bytes, and otherwise its first 512
+// followed by a note of its length.
+func clip(s string) string {
+	const most = 512
+	if len(s) <= most {
+		return s
+	}
+	return fmt.Sprintf("%s... (%d bytes in all)", s[:most], len(s))
 }
 
 // TestCapture_UnroutedRequestIsNotRecorded pins the requests the capture

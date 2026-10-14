@@ -33,7 +33,10 @@ import (
 // ParseForm reports that error, and the request is refused as one that does
 // not parse. That holds even when the form was read: a malformed parameter on
 // an application/x-www-form-urlencoded type leaves the media type standing, so
-// ParseForm reads the whole form and still reports the error.
+// ParseForm reads the whole form and still reports the error. An
+// application/x-www-form-urlencoded body over 10 MiB is refused the same way,
+// however well formed: ParseForm accepts none longer, and reports the POST too
+// large.
 type Message struct {
 	AccountSID string
 	From       string
@@ -79,13 +82,14 @@ func (m Message) clone() Message {
 // CaptureServer implements the Twilio Messages API shape used by
 // twilio.RESTClient.SendSMS (POST /2010-04-01/Accounts/{sid}/Messages.json ->
 // 201 + minimal JSON), recording every request under /2010-04-01/Accounts/
-// (see Message), except one whose URL query or posted form does not parse:
-// that one it answers 400 and goes no further with — it is not recorded,
-// sends no wake-up on Notify, and reaches no subscriber. Nor does a request
-// its mux does not route there. One outside that prefix is answered 404,
-// except /2010-04-01/Accounts itself, the prefix without its trailing slash,
-// which is redirected to the prefix. One whose path is not clean, such as one
-// with an empty segment, is redirected to the cleaned path. Whatever a
+// (see Message), except one whose URL query or posted form does not parse, or
+// whose urlencoded body, however well formed, is over the 10 MiB ParseForm
+// accepts: that one it answers 400 and goes no further with — it is not
+// recorded, sends no wake-up on Notify, and reaches no subscriber. Nor does a
+// request its mux does not route there. One outside that prefix is answered
+// 404, except /2010-04-01/Accounts itself, the prefix without its trailing
+// slash, which is redirected to the prefix. One whose path is not clean, such
+// as one with an empty segment, is redirected to the cleaned path. Whatever a
 // redirected request's client then sends is a request of its own. So SendSMS
 // from a client whose BaseURL carries a path prefix such as /twilio is
 // answered 404 and misses the capture server. One whose BaseURL is URL with a
@@ -199,8 +203,9 @@ func NewCaptureServer(port int) (*CaptureServer, error) {
 // Recording takes the whole posted form and the arrival time, appends the
 // message, and queues a copy for every subscriber — all without waiting on
 // any reader, so no subscriber, however slow, can hold up the response. A
-// request whose URL query or posted form does not parse is answered 400
-// before any of that.
+// request whose URL query or posted form does not parse, or whose urlencoded
+// body is over the 10 MiB ParseForm accepts, is answered 400 before any of
+// that.
 //
 // The "sid" key is a contract, not decoration: twilio.RESTClient.SendSMS
 // parses it to return the message id, and a 2xx carrying none yields an empty
