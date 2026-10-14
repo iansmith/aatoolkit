@@ -335,14 +335,14 @@ func readDatasetRows(path string) ([]telephony.DatasetRow, error) {
 // implemented and independently tested (TestScore_ReportsOutcomes) against
 // a fixed fake Verifier -- not the verifier's actual prompt-calling
 // semantics, which the ticket's own Out of scope section assigns
-// elsewhere ("Do NOT wire the verifier into the server" -- SOP-151). This stub
+// elsewhere ("Do NOT wire the verifier into the server"). This stub
 // exists so `probeset score`'s CLI is otherwise complete (flags, dataset
 // loading, prompt-file loading, N-pass looping) and fails loudly with a
-// clear, actionable message instead of fabricating verdicts, until SOP-151
-// supplies the real one.
+// clear, actionable message instead of fabricating verdicts, until a real
+// verifier is supplied.
 func promptVerifier(prompt string) telephony.Verifier {
-	_ = prompt // real verifier (SOP-151) will use this; the stub doesn't
+	_ = prompt // a real verifier will use this; the stub doesn't
 	return func(_ context.Context, promptFile string, _ telephony.DatasetRow) (telephony.VerifierOutcome, error) {
-		return "", fmt.Errorf("no verifier wired for %s: SOP-151 owns the real prompt-calling verifier; this harness ticket (SOP-153) stops at Score's aggregation", promptFile)
+		return "", fmt.Errorf("no verifier wired for %s: the real prompt-calling verifier is not part of this harness, which stops at Score's aggregation", promptFile)
 	}
 }
