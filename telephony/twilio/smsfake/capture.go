@@ -69,7 +69,9 @@ func (m Message) clone() Message {
 // query or posted form does not parse: that one it answers 400 and goes no
 // further with — it is not recorded, sends no wake-up on Notify, and reaches
 // no subscriber. It stands in for a real Twilio account so a server's outbound
-// SMS reply can be captured and asserted on without one.
+// SMS reply can be captured and asserted on without one. A twilio.RESTClient
+// is pointed at it through its BaseURL field, set to URL; the client reads no
+// environment.
 //
 // A caller reads what was recorded in one of three ways: Captured for a
 // snapshot of everything so far, Notify for a bare wake-up when something has
@@ -108,16 +110,20 @@ type CaptureServer struct {
 // port of 127.0.0.1, returning an error naming that port if the bind fails.
 //
 // The bind is deliberately explicit rather than ephemeral, so the capture URL
-// can be named before the capture server exists. The server whose reply is
-// being captured reads TWILIO_API_BASE_URL once at startup, so when it is
-// launched first (twilio-cli's flow, where the operator starts it before the
-// CLI) it has to be given that URL in advance. It keeps the embedded
-// *httptest.Server — only the listener is swapped — so URL behaves exactly as
-// callers already expect, and a failure to bind the requested port returns an
-// error instead of the panic httptest.NewServer would raise. It does not
-// remove httptest's own bind: NewUnstartedServer still binds a throwaway
-// ephemeral listener before the swap, and if even that bind fails it panics,
-// leaving the requested port held.
+// can be named before the capture server exists. A server under test that
+// runs in a process of its own and fixes its RESTClient's BaseURL at startup
+// has to be given that URL in advance when it is launched first. That is
+// twilio-cli's flow: the operator starts the server under BaseURLEnv's
+// assignment before the CLI, and the server is expected to copy it into
+// BaseURL. A test that builds its own client needs no such step: it sets
+// BaseURL to URL once the capture server is up.
+//
+// It keeps the embedded *httptest.Server — only the listener is swapped — so
+// URL behaves exactly as callers already expect, and a failure to bind the
+// requested port returns an error instead of the panic httptest.NewServer
+// would raise. It does not remove httptest's own bind: NewUnstartedServer
+// still binds a throwaway ephemeral listener before the swap, and if even that
+// bind fails it panics, leaving the requested port held.
 //
 // Close, unlike URL, is not the embedded server's: CaptureServer has its own,
 // which shuts that server down and also ends every subscription. Shut the

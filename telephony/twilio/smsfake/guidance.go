@@ -5,11 +5,19 @@ import (
 	"fmt"
 )
 
-// BaseURLEnv renders the environment assignment that points a server's
-// outbound Twilio REST client at captureURL. Single-sourced here because every
-// sentence that quotes it has to agree on it exactly: twilio-cli's guidance
-// and usage text, which the operator copies before launching the server, and
-// its timeout error reminding them they didn't.
+// BaseURLEnv renders the TWILIO_API_BASE_URL=captureURL assignment that
+// twilio-cli's guidance tells the operator to launch the server under test
+// with. It is a convention between twilio-cli and that server, not one the
+// engine keeps: nothing in this module reads the variable, and
+// twilio.RESTClient reads no environment at all, so the assignment redirects
+// only a server that copies it into its RESTClient's BaseURL itself. A test
+// that builds its own client sets that field to the capture server's URL
+// instead.
+//
+// Single-sourced here because every sentence that quotes it has to agree on it
+// exactly: twilio-cli's guidance and usage text, which the operator copies
+// before launching the server, and its timeout error reminding them they
+// didn't.
 func BaseURLEnv(captureURL string) string {
 	return "TWILIO_API_BASE_URL=" + captureURL
 }
