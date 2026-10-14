@@ -17,6 +17,23 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
+// receiveWithin receives one value from ch and returns it, failing the test
+// unless it arrives within SubscribeWait. what names the value in a failure.
+// The webhook tests wait through it on what a webhook server or its handler
+// sends, so a PostWebhook or ServeSMS that answers without doing its part
+// fails the test, naming what never came, rather than hanging it.
+func receiveWithin[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(smsfake.SubscribeWait):
+		t.Fatalf("no %s within %s", what, smsfake.SubscribeWait)
+		var zero T
+		return zero
+	}
+}
+
 // TestDefaults_AreTheValuesTwilioCLIDeclared pins the two exported defaults to
 // the values twilio-cli declared before they moved here. They are on the wire
 // of every fake round trip — AccountSid and ApiVersion in the signed webhook
@@ -158,7 +175,7 @@ func TestPostWebhook_SignsTheFormOverTheExactURL(t *testing.T) {
 		t.Fatalf("PostWebhook: %v", err)
 	}
 
-	s := <-got
+	s := receiveWithin(t, got, "request at the webhook server")
 	if s.method != http.MethodPost {
 		t.Errorf("method = %q, want %q", s.method, http.MethodPost)
 	}
@@ -221,7 +238,7 @@ func TestPostWebhook_AcceptedByRealServerReturnsStatusAndBody(t *testing.T) {
 		t.Errorf("body = %q, want the server's empty TwiML %q", body, want)
 	}
 
-	msg := <-got
+	msg := receiveWithin(t, got, "message passed to HandleSMS")
 	if msg.MessageSID != "SMtest0006" || msg.From != "+15551234567" || msg.To != "+15105559999" || msg.Body != "hello there" {
 		t.Errorf("server parsed %+v, want MessageSID SMtest0006, From +15551234567, To +15105559999, Body %q", msg, "hello there")
 	}
@@ -400,28 +417,20 @@ func TestPostWebhook_CancellingCtxAbandonsTheInFlightPOST(t *testing.T) {
 		done <- result{status, body, err}
 	}()
 
-	select {
-	case <-arrived:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the webhook server never received the POST")
-	}
+	receiveWithin(t, arrived, "POST at the webhook server")
 	cancel()
 
-	select {
-	case r := <-done:
-		if !errors.Is(r.err, context.Canceled) {
-			t.Errorf("error = %v, want one wrapping context.Canceled", r.err)
-		}
-		if r.err != nil && !strings.HasPrefix(r.err.Error(), "post SMS webhook: ") {
-			t.Errorf("error = %q, want the post-failure text", r.err)
-		}
-		if r.status != 0 {
-			t.Errorf("status = %d, want 0 — no response was handed back", r.status)
-		}
-		if r.body != nil {
-			t.Errorf("body = %q, want nil — no response was handed back", r.body)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("PostWebhook still blocked 5s after its ctx was cancelled mid-POST")
+	r := receiveWithin(t, done, "return from PostWebhook after its ctx was cancelled mid-POST")
+	if !errors.Is(r.err, context.Canceled) {
+		t.Errorf("error = %v, want one wrapping context.Canceled", r.err)
+	}
+	if r.err != nil && !strings.HasPrefix(r.err.Error(), "post SMS webhook: ") {
+		t.Errorf("error = %q, want the post-failure text", r.err)
+	}
+	if r.status != 0 {
+		t.Errorf("status = %d, want 0 — no response was handed back", r.status)
+	}
+	if r.body != nil {
+		t.Errorf("body = %q, want nil — no response was handed back", r.body)
 	}
 }

@@ -2,10 +2,18 @@ package smsfake
 
 import "time"
 
-// SubscribeWait bounds every wait in these tests — on a subscription, a
-// wake-up, a POST, an unsubscribe or a Close — through collect, postClient and
-// returnsWithin, or directly. It is a failure detector only: a correct server
-// delivers in milliseconds, and no test sleeps to let delivery happen.
+// SubscribeWait bounds the tests' waits on a subscription, a wake-up, a POST
+// to the capture server, an unsubscribe or a Close, through collect,
+// postClient and returnsWithin, or directly, and their waits on what a
+// webhook server or its handler sends, through receiveWithin. It is a failure
+// detector only: a correct server delivers in milliseconds, and no test
+// sleeps to let delivery happen.
+//
+// Not every wait has a bound. A webhook test's POST through PostWebhook is
+// bounded by its ctx alone, mostly context.Background(); the internal tests
+// end a subscription unbounded; and the tests moved here from twilio-cli,
+// TestNewCaptureServer_* and the two 403 tests, keep the unbounded waits they
+// had there.
 const SubscribeWait = 5 * time.Second
 
 // SubscriberCount reports how many subscriptions c holds. It is for the tests,
