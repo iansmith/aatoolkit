@@ -432,12 +432,19 @@ func postBodies(capture *smsfake.CaptureServer, bodies []string) error {
 // serveBodies' caller just as it would hold up a POST's response.
 func serveBodies(capture *smsfake.CaptureServer, bodies []string) error {
 	return eachCreated(bodies, func(form url.Values) (int, error) {
-		req := httptest.NewRequest(http.MethodPost, messagesPath(subscribeAccount), strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", urlencoded)
-		rec := httptest.NewRecorder()
-		capture.Config.Handler.ServeHTTP(rec, req)
-		return rec.Code, nil
+		return serveForm(capture, messagesPath(subscribeAccount), strings.NewReader(form.Encode())).Code, nil
 	})
+}
+
+// serveForm hands one POST to path, its body read from form and sent as
+// urlencoded, straight to capture's mux on the calling goroutine — no
+// connection, so nothing follows a redirect — and returns the response it got.
+func serveForm(capture *smsfake.CaptureServer, path string, form io.Reader) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, form)
+	req.Header.Set("Content-Type", urlencoded)
+	rec := httptest.NewRecorder()
+	capture.Config.Handler.ServeHTTP(rec, req)
+	return rec
 }
 
 // serveWithin is serveBodies bounded by returnsWithin, for the test's own
@@ -835,25 +842,67 @@ func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
 			if resp := postRaw(t, capture, tc.query, tc.contentType, tc.body); resp.StatusCode != http.StatusBadRequest {
 				t.Errorf("status %d, want %d", resp.StatusCode, http.StatusBadRequest)
 			}
-			if recorded := capture.Captured(); len(recorded) != 0 {
-				t.Errorf("Captured holds %d messages after a malformed POST, want none: %+v", len(recorded), recorded)
-			}
-			select {
-			case <-capture.Notify():
-				t.Error("a malformed POST sent a wake-up, want none")
-			default:
-			}
+			requireWentNowhere(t, capture, msgs, "a malformed POST")
+		})
+	}
+}
 
-			if err := postBodies(capture, []string{"well formed"}); err != nil {
-				t.Fatal(err)
+// requireWentNowhere fails the test unless the request what names, made after
+// msgs subscribed, went nowhere: Captured holds nothing, no wake-up is pending,
+// and nothing was queued for msgs. It shows the last by posting a well-formed
+// message, which must be msgs' first delivery, without waiting on a silence.
+func requireWentNowhere(t *testing.T, capture *smsfake.CaptureServer, msgs <-chan smsfake.Message, what string) {
+	t.Helper()
+	if recorded := capture.Captured(); len(recorded) != 0 {
+		t.Errorf("Captured holds %d messages after %s, want none: %+v", len(recorded), what, recorded)
+	}
+	select {
+	case <-capture.Notify():
+		t.Errorf("%s sent a wake-up, want none", what)
+	default:
+	}
+
+	if err := postBodies(capture, []string{"well formed"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := collect(msgs, 1)
+	if err != nil {
+		t.Fatalf("subscriber: %v", err)
+	}
+	if got[0].Body != "well formed" {
+		t.Errorf("subscriber's first delivery has Body %q and Form %v, want the well-formed message posted after %s", got[0].Body, got[0].Form, what)
+	}
+}
+
+// TestCapture_UnroutedRequestIsNotRecorded pins the requests the capture
+// server's mux does not route to its handler, which go nowhere either: one
+// outside /2010-04-01/Accounts/ is answered 404 — among them SendSMS's POST
+// from a client whose BaseURL carries a path of its own — and one under it
+// whose path is not clean, here one with an empty account, is redirected to
+// the cleaned path. Each is recorded nowhere, sends no wake-up and reaches no
+// subscriber. The POSTs go straight to the mux, so the redirect is answered
+// and not followed: a client that follows it makes a request of its own.
+func TestCapture_UnroutedRequestIsNotRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		redirected bool
+	}{
+		{"a path outside the prefix", "/2010-04-01/Messages.json", false},
+		{"the endpoint behind a path of its own", "/twilio" + messagesPath(subscribeAccount), false},
+		{"a path that is not clean", messagesPath(""), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := newCapture(t)
+			msgs, _ := subscribe(t, capture)
+
+			rec := serveForm(capture, tc.path, strings.NewReader(url.Values{"Body": {"unrouted"}}.Encode()))
+			switch {
+			case tc.redirected && (rec.Code/100 != 3 || rec.Header().Get("Location") == ""):
+				t.Errorf("POST %s: status %d, Location %q; want a redirect to the cleaned path", tc.path, rec.Code, rec.Header().Get("Location"))
+			case !tc.redirected && rec.Code != http.StatusNotFound:
+				t.Errorf("POST %s: status %d, want %d", tc.path, rec.Code, http.StatusNotFound)
 			}
-			got, err := collect(msgs, 1)
-			if err != nil {
-				t.Fatalf("subscriber: %v", err)
-			}
-			if got[0].Body != "well formed" {
-				t.Errorf("subscriber's first delivery has Body %q and Form %v, want the well-formed message posted after the malformed one", got[0].Body, got[0].Form)
-			}
+			requireWentNowhere(t, capture, msgs, "a POST to "+tc.path)
 		})
 	}
 }
@@ -974,13 +1023,11 @@ func TestCapture_ArrivalTimestampFollowsRecordingOrder(t *testing.T) {
 	capture := newCapture(t)
 
 	held := newHeldBody(url.Values{"Body": {"A"}}.Encode())
-	req := httptest.NewRequest(http.MethodPost, messagesPath(subscribeAccount), held)
-	req.Header.Set("Content-Type", urlencoded)
-	rec := httptest.NewRecorder()
+	var rec *httptest.ResponseRecorder
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
-		capture.Config.Handler.ServeHTTP(rec, req)
+		rec = serveForm(capture, messagesPath(subscribeAccount), held)
 	}()
 
 	returnsWithin(t, "POST A's handler reading its body", func() { <-held.reading })

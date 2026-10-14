@@ -16,11 +16,11 @@ import (
 // Message is one request recorded by CaptureServer, which records every
 // request under /2010-04-01/Accounts/ whose URL query and posted form parse,
 // whatever its method or resource — not only the Messages.json POST
-// twilio.RESTClient.SendSMS makes. One that does not parse is answered 400 and
-// not recorded (see CaptureServer). AccountSID is
-// the path after that prefix with any /Messages.json suffix trimmed, so for
-// any other resource it holds the rest of the path; From, To and Body are
-// empty unless the posted form holds them.
+// twilio.RESTClient.SendSMS makes. One that does not parse is answered 400,
+// and one whose path is not clean is redirected; neither is recorded (see
+// CaptureServer). AccountSID is the path after that prefix with any
+// /Messages.json suffix trimmed, so for any other resource it holds the rest
+// of the path; From, To and Body are empty unless the posted form holds them.
 //
 // The posted form is the body of a POST, PUT or PATCH sent as
 // application/x-www-form-urlencoded, as http.Request.ParseForm reads it — the
@@ -75,13 +75,19 @@ func (m Message) clone() Message {
 
 // CaptureServer implements the Twilio Messages API shape used by
 // twilio.RESTClient.SendSMS (POST /2010-04-01/Accounts/{sid}/Messages.json ->
-// 201 + minimal JSON), recording every call it receives, except one whose URL
-// query or posted form does not parse: that one it answers 400 and goes no
-// further with — it is not recorded, sends no wake-up on Notify, and reaches
-// no subscriber. It stands in for a real Twilio account so a server's outbound
-// SMS reply can be captured and asserted on without one. A twilio.RESTClient
-// is pointed at it through its BaseURL field, set to URL; the client reads no
-// environment.
+// 201 + minimal JSON), recording every request under /2010-04-01/Accounts/
+// (see Message), except one whose URL query or posted form does not parse:
+// that one it answers 400 and goes no further with — it is not recorded,
+// sends no wake-up on Notify, and reaches no subscriber. Nor does a request
+// its mux does not route there: one outside that prefix is answered 404, and
+// one whose path is not clean, such as one with an empty segment, is
+// redirected to the cleaned path; whatever its client then sends there is a
+// request of its own. So a client whose BaseURL carries a path of its own
+// misses the capture server.
+//
+// It stands in for a real Twilio account so a server's outbound SMS reply can
+// be captured and asserted on without one. A twilio.RESTClient is pointed at
+// it through its BaseURL field, set to URL; the client reads no environment.
 //
 // A caller reads what was recorded in one of three ways: Captured for a
 // snapshot of everything so far, Notify for a bare wake-up when something has
