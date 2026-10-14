@@ -20,7 +20,17 @@ import (
 // not recorded (see CaptureServer). AccountSID is
 // the path after that prefix with any /Messages.json suffix trimmed, so for
 // any other resource it holds the rest of the path; From, To and Body are
-// empty unless the request posted them.
+// empty unless the posted form holds them.
+//
+// The posted form is the body of a POST, PUT or PATCH sent as
+// application/x-www-form-urlencoded, as http.Request.ParseForm reads it — the
+// encoding SendSMS sends. No other body is read: not multipart/form-data, not
+// JSON, not one sent without a Content-Type, and not the body of any other
+// method. Unread, such a body cannot fail to parse, so the request is answered
+// 201 and recorded like any other, whatever the body holds, with an empty Form
+// and empty From, To and Body. A POST, PUT or PATCH whose Content-Type
+// mime.ParseMediaType rejects is the exception: its posted form cannot be
+// read, and it is refused as one that does not parse.
 type Message struct {
 	AccountSID string
 	From       string

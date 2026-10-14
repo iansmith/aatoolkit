@@ -1,10 +1,12 @@
 package smsfake_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -794,27 +796,30 @@ func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 // TestCapture_MalformedPostIsRejectedNotRecorded pins that a POST whose URL
 // query or posted form does not parse is refused with 400 and goes nowhere: it
 // is not recorded, it sends no wake-up, and no subscriber receives it. Each
-// case breaks one of the two and leaves the other well formed, so only that
-// one can be what is refused. Go's form parser keeps the pairs it could read
-// alongside its error, so a handler that ignored the error would record a
-// thinned message — for the malformed body, one without its Body, the pair
-// that fails to parse — and a handler that parsed only the body would record
-// the POST whose query does not parse, whole. The subscriber's first delivery
-// being the well-formed message posted next shows nothing was queued for it,
-// without waiting on a silence.
+// case breaks one part of the POST and leaves the rest well formed, so only
+// that part can be what is refused: the body, the URL query, or the
+// Content-Type, which the posted form cannot be read without. Go's form parser
+// keeps the pairs it could read alongside its error, so a handler that ignored
+// the error would record a thinned message — for the malformed body, one
+// without its Body, the pair that fails to parse — and a handler that parsed
+// only the body would record the POST whose query does not parse, whole. The
+// subscriber's first delivery being the well-formed message posted next shows
+// nothing was queued for it, without waiting on a silence.
 func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
+	const urlencoded = "application/x-www-form-urlencoded"
 	for _, tc := range []struct {
-		name, query, body string
+		name, query, contentType, body string
 	}{
-		{"a body that does not parse", "", "From=a&Body=%zz&To=b"},
-		{"a URL query that does not parse", "?Body=%zz", "From=a&Body=ok&To=b"},
+		{"a body that does not parse", "", urlencoded, "From=a&Body=%zz&To=b"},
+		{"a URL query that does not parse", "?Body=%zz", urlencoded, "From=a&Body=ok&To=b"},
+		{"a Content-Type that does not parse", "", urlencoded + "; charset", "From=a&Body=ok&To=b"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := newCapture(t)
 			msgs, _ := subscribe(t, capture)
 
 			endpoint := capture.URL + messagesPath(subscribeAccount) + tc.query
-			resp, err := postClient.Post(endpoint, "application/x-www-form-urlencoded", strings.NewReader(tc.body))
+			resp, err := postClient.Post(endpoint, tc.contentType, strings.NewReader(tc.body))
 			if err != nil {
 				t.Fatalf("POST %s: %v", endpoint, err)
 			}
@@ -840,6 +845,72 @@ func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
 			}
 			if got[0].Body != "well formed" {
 				t.Errorf("subscriber's first delivery has Body %q and Form %v, want the well-formed message posted after the malformed one", got[0].Body, got[0].Form)
+			}
+		})
+	}
+}
+
+// TestCapture_OtherBodiesAreRecordedEmpty pins what the capture server makes of
+// a body that is not application/x-www-form-urlencoded, the encoding SendSMS
+// sends: it does not read it. The request is answered 201 and recorded like
+// any other, with an empty Form and empty From, To and Body. Each body carries
+// From, To and Body in its own encoding, so a capture that read it, or read
+// every body as urlencoded whatever its type, would record them. Unread, a
+// multipart body that does not parse is answered 201 too, and so is a
+// urlencoded body sent without a Content-Type.
+func TestCapture_OtherBodiesAreRecordedEmpty(t *testing.T) {
+	fields := map[string]string{"From": "+15105559999", "To": "+15551234567", "Body": "hi back"}
+	form := url.Values{}
+	var multipartBody bytes.Buffer
+	mw := multipart.NewWriter(&multipartBody)
+	for key, value := range fields {
+		form.Set(key, value)
+		if err := mw.WriteField(key, value); err != nil {
+			t.Fatalf("write multipart field %s: %v", key, err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("finish the multipart body: %v", err)
+	}
+	jsonBody, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("encode the JSON body: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name, contentType, body string
+	}{
+		{"multipart/form-data", mw.FormDataContentType(), multipartBody.String()},
+		{"multipart/form-data that does not parse", "multipart/form-data; boundary=absent", form.Encode()},
+		{"JSON", "application/json", string(jsonBody)},
+		{"no Content-Type", "", form.Encode()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := newCapture(t)
+
+			endpoint := capture.URL + messagesPath(subscribeAccount)
+			req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatalf("build the POST to %s: %v", endpoint, err)
+			}
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			resp, err := postClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST %s: %v", endpoint, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusCreated {
+				t.Errorf("status %d, want %d, as for any request whose body is not read", resp.StatusCode, http.StatusCreated)
+			}
+
+			recorded := capture.Captured()
+			if len(recorded) != 1 {
+				t.Fatalf("got %d recorded messages, want 1", len(recorded))
+			}
+			if msg := recorded[0]; len(msg.Form) != 0 || msg.From != "" || msg.To != "" || msg.Body != "" {
+				t.Errorf("recorded Form %v, From %q, To %q, Body %q; want all of them empty, the body unread", msg.Form, msg.From, msg.To, msg.Body)
 			}
 		})
 	}
