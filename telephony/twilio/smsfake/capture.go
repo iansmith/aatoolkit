@@ -247,8 +247,9 @@ func (c *CaptureServer) Notify() <-chan struct{} {
 // queue, and it never blocks the handler or any other subscriber.
 //
 // unsubscribe ends the subscription. Once it returns, nothing more is
-// delivered: anything still queued is discarded, the goroutine feeding msgs
-// has exited, and msgs is closed. It is safe to call more than once, and from
+// delivered: anything still queued is discarded — let go, not kept alive by
+// a caller that holds on to unsubscribe — the goroutine feeding msgs has
+// exited, and msgs is closed. It is safe to call more than once, and from
 // several goroutines. Close ends every subscription the same way, so a
 // subscriber ranging over msgs stops when the server does; subscribing to a
 // closed server yields a msgs that is already closed.
@@ -340,11 +341,20 @@ func (s *subscription) enqueue(msg Message) {
 }
 
 // pump delivers the queue to out in order until the subscription ends. As it
-// returns it closes out and only then done, so a closed done means out is
-// closed: end returns on done and promises that.
+// returns it discards whatever is still queued, then closes out and only then
+// done, so a closed done means both: end returns on done and promises them.
+//
+// Discarding is what lets an ended subscription's backlog go. The unsubscribe
+// func Subscribe returns holds the subscription for as long as its caller keeps
+// it, and the queue with it. Nothing is queued after the end — unsubscribe and
+// Close take the subscription out of the server's set before ending it, and
+// only members of that set are queued to — so nothing refills it.
 func (s *subscription) pump() {
 	defer func() {
-		close(s.out) // first: once done is closed, end returns, promising out closed
+		s.mu.Lock()
+		s.queue = nil
+		s.mu.Unlock()
+		close(s.out) // before done: once done is closed, end returns, promising out closed
 		close(s.done)
 	}()
 
@@ -382,8 +392,8 @@ func (s *subscription) pump() {
 }
 
 // end stops the subscription and returns once pump has: whatever is still
-// queued is never delivered, and out is closed. Safe to call any number of
-// times, from any goroutine.
+// queued is discarded, never delivered, and out is closed. Safe to call any
+// number of times, from any goroutine.
 func (s *subscription) end() {
 	s.once.Do(func() { close(s.stop) })
 	<-s.done
