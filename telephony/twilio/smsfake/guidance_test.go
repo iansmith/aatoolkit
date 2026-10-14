@@ -46,13 +46,20 @@ func TestResolve_FlagThenEnvThenConfig(t *testing.T) {
 	}
 }
 
+// sidShape is the shape of a SID minted with prefix: the prefix followed by 32
+// lowercase hex characters, the shape of a real Twilio SID. The capture
+// server's message ids are sidShape("SM").
+func sidShape(prefix string) *regexp.Regexp {
+	return regexp.MustCompile(`^` + prefix + `[0-9a-f]{32}$`)
+}
+
 // TestNewSID_PrefixThen32LowercaseHex pins the SID shape for each prefix the
 // module mints — "SM" for messages, "CA" for calls, "MZ" for media streams —
 // and that two mints are distinct.
 func TestNewSID_PrefixThen32LowercaseHex(t *testing.T) {
 	for _, prefix := range []string{"SM", "CA", "MZ"} {
 		t.Run(prefix, func(t *testing.T) {
-			shape := regexp.MustCompile(`^` + prefix + `[0-9a-f]{32}$`)
+			shape := sidShape(prefix)
 
 			first, second := smsfake.NewSID(prefix), smsfake.NewSID(prefix)
 			for _, sid := range []string{first, second} {

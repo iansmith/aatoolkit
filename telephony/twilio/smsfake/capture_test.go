@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,10 +23,6 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
-
-// smSID is the shape of the message id the capture server mints: "SM"
-// followed by 32 lowercase hex characters, the shape of a real Twilio SID.
-var smSID = regexp.MustCompile(`^SM[0-9a-f]{32}$`)
 
 // freeTCPPort returns a port that was bindable on 127.0.0.1 a moment ago, by
 // binding one and closing it again. Used to exercise an *explicit* bind
@@ -255,7 +250,7 @@ func TestCaptureServer_RespondsCreatedWithQueuedSID(t *testing.T) {
 	if len(got) != 2 {
 		t.Errorf("response body %q has %d keys, want exactly sid and status", body, len(got))
 	}
-	if sid := got["sid"]; !smSID.MatchString(sid) {
+	if sid := got["sid"]; !sidShape("SM").MatchString(sid) {
 		t.Errorf("sid = %q, want %q followed by 32 lowercase hex characters", sid, "SM")
 	}
 	if status := got["status"]; status != "queued" {
@@ -274,7 +269,7 @@ func TestCaptureServer_SendSMSGetsTheSIDBack(t *testing.T) {
 	capture := newCapture(t)
 
 	sid := sendSMS(t, capture, accountSID, twilio.OutboundSMS{From: "+15105559999", To: "+15551234567", Body: "hi back"})
-	if !smSID.MatchString(sid) {
+	if !sidShape("SM").MatchString(sid) {
 		t.Errorf("SendSMS returned message SID %q, want the capture server's SM-prefixed id — the fake's response shape and SendSMS's parse have diverged", sid)
 	}
 

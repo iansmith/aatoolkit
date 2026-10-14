@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -206,7 +205,7 @@ func TestRunSMS_PostsTheDefaultsOnTheWire(t *testing.T) {
 		t.Errorf("posted Body = %q, want the body argument %q", got, body)
 	}
 	sid := form.Get("MessageSid")
-	if !regexp.MustCompile(`^SM[0-9a-f]{32}$`).MatchString(sid) {
+	if !sidShape("SM").MatchString(sid) {
 		t.Errorf("posted MessageSid = %q, want SM followed by 32 lowercase hex characters", sid)
 	}
 	for _, alias := range []string{"SmsMessageSid", "SmsSid"} {
