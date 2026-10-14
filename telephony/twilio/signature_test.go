@@ -184,7 +184,12 @@ func TestPostSignedForm_ReturnsWhatTheClientHandedBack(t *testing.T) {
 			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 		}
 	}
-	// Port 1 is privileged, so no test process can be listening on it.
+	// Nothing is expected to listen on port 1, and ephemeral allocation never
+	// hands it out, so the dial is refused. That is an assumption about the
+	// machine, not a guarantee: macOS lets an unprivileged process bind the
+	// port on the wildcard address, and root can bind it anywhere. Each case's
+	// ctx deadline keeps a listener there that takes the POST and never
+	// answers from holding the case until go test's own timeout.
 	const unanswered = "http://127.0.0.1:1/sms/status"
 
 	okURL := serve(answer(http.StatusOK, "<Response></Response>"))
@@ -239,7 +244,9 @@ func TestPostSignedForm_ReturnsWhatTheClientHandedBack(t *testing.T) {
 		{"redirect Location that will not parse", badLocationURL, 0, nil, "post " + statusCallback + ": ", true, wrapsURLError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status, body, err := twilio.PostSignedForm(context.Background(), statusCallback, tc.webhookURL, "authtoken", url.Values{"MessageSid": {"SM123"}})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			status, body, err := twilio.PostSignedForm(ctx, statusCallback, tc.webhookURL, "authtoken", url.Values{"MessageSid": {"SM123"}})
 			got := ""
 			if err != nil {
 				got = err.Error()

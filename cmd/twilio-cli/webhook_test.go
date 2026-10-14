@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
@@ -213,7 +214,12 @@ func TestWebhookCeremony_ErrorTextsNameTheWebhook(t *testing.T) {
 	if parseErr == nil {
 		t.Fatalf("url.Parse(%q) succeeded; the build case below would not fail", unbuildable)
 	}
-	// Port 1 is privileged, so no test process can be listening on it.
+	// Nothing is expected to listen on port 1, and ephemeral allocation never
+	// hands it out, so the dial is refused. That is an assumption about the
+	// machine, not a guarantee: macOS lets an unprivileged process bind the
+	// port on the wildcard address, and root can bind it anywhere. Each case's
+	// ctx deadline keeps a listener there that takes the POST and never
+	// answers from holding the case until go test's own timeout.
 	const unanswered = "http://127.0.0.1:1/webhook"
 	rejectingURL := rejecting.URL + "/webhook"
 
@@ -228,7 +234,9 @@ func TestWebhookCeremony_ErrorTextsNameTheWebhook(t *testing.T) {
 		{"read", truncating.URL + "/webhook", "read webhook response: " + io.ErrUnexpectedEOF.Error(), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := fetchStreamURL(context.Background(), tc.webhookURL, "test-auth-token", "CAtest0003", "+15551234567", "+15559876543")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := fetchStreamURL(ctx, tc.webhookURL, "test-auth-token", "CAtest0003", "+15551234567", "+15559876543")
 			if err == nil {
 				t.Fatal("fetchStreamURL succeeded, want an error")
 			}
