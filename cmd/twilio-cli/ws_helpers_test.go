@@ -77,14 +77,23 @@ func readHandshake(t *testing.T, buf *bufio.ReadWriter) []byte {
 //
 // Five servers still build their own, each because it has to do something
 // before or instead of this prologue: stubWSServer checks the Upgrade header
-// first and needs the start frame back, TestDial_SendsConnectedBeforeStart and
+// first, TestDial_SendsConnectedBeforeStart and
 // TestDial_PeerClosesBetweenHandshakeFrames read the handshake themselves
 // because asserting on it is the point, TestCLI_ServerClose closes without
-// reading it at all, and TestDial_ReturnsOnServerClose needs only the conn.
+// reading it at all, and TestDial_ReturnsOnServerClose needs only the conn. A
+// server that needs the start frame back uses hijackedWSServerWithStart.
 // Two others -- TestDial_NoStopFrameOnServerClose and TestCLI_NoEchoMarks --
 // do match this shape and have not been migrated; that is worth doing, and is
 // not this change.
 func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWriter)) *httptest.Server {
+	t.Helper()
+	return hijackedWSServerWithStart(t, func(conn net.Conn, buf *bufio.ReadWriter, _ []byte) { serve(conn, buf) })
+}
+
+// hijackedWSServerWithStart is hijackedWSServer for a far end that needs the
+// start frame the handshake consumed: serve is handed its raw JSON as well,
+// as readHandshake returned it.
+func hijackedWSServerWithStart(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWriter, start []byte)) *httptest.Server {
 	t.Helper()
 	served := make(chan struct{})
 	var mu sync.Mutex
@@ -105,8 +114,8 @@ func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWri
 		mu.Unlock()
 		defer conn.Close()
 		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // connected + start
-		serve(conn, buf)
+		start := readHandshake(t, buf) // connected + start
+		serve(conn, buf, start)
 	}))
 	t.Cleanup(func() {
 		// Bounded, and it closes either way. A test that failed before it ever
