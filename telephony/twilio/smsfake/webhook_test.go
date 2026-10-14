@@ -158,7 +158,7 @@ func TestPostWebhook_SignsTheFormOverTheExactURL(t *testing.T) {
 		t.Fatalf("PostWebhook: %v", err)
 	}
 
-	s := <-got
+	s := smsfake.ReceiveWithin(t, got, "request at the webhook server")
 	if s.method != http.MethodPost {
 		t.Errorf("method = %q, want %q", s.method, http.MethodPost)
 	}
@@ -221,7 +221,7 @@ func TestPostWebhook_AcceptedByRealServerReturnsStatusAndBody(t *testing.T) {
 		t.Errorf("body = %q, want the server's empty TwiML %q", body, want)
 	}
 
-	msg := <-got
+	msg := smsfake.ReceiveWithin(t, got, "message passed to HandleSMS")
 	if msg.MessageSID != "SMtest0006" || msg.From != "+15551234567" || msg.To != "+15105559999" || msg.Body != "hello there" {
 		t.Errorf("server parsed %+v, want MessageSID SMtest0006, From +15551234567, To +15105559999, Body %q", msg, "hello there")
 	}
@@ -402,26 +402,24 @@ func TestPostWebhook_CancellingCtxAbandonsTheInFlightPOST(t *testing.T) {
 
 	select {
 	case <-arrived:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the webhook server never received the POST")
+	case r := <-done: // the server never answers, so only a POST that failed to reach it returns
+		t.Fatalf("PostWebhook returned before the webhook server held the POST: %v", r.err)
+	case <-time.After(smsfake.SubscribeWait):
+		t.Fatalf("no POST at the webhook server within %s", smsfake.SubscribeWait)
 	}
 	cancel()
 
-	select {
-	case r := <-done:
-		if !errors.Is(r.err, context.Canceled) {
-			t.Errorf("error = %v, want one wrapping context.Canceled", r.err)
-		}
-		if r.err != nil && !strings.HasPrefix(r.err.Error(), "post SMS webhook: ") {
-			t.Errorf("error = %q, want the post-failure text", r.err)
-		}
-		if r.status != 0 {
-			t.Errorf("status = %d, want 0 — no response was handed back", r.status)
-		}
-		if r.body != nil {
-			t.Errorf("body = %q, want nil — no response was handed back", r.body)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("PostWebhook still blocked 5s after its ctx was cancelled mid-POST")
+	r := smsfake.ReceiveWithin(t, done, "return from PostWebhook after its ctx was cancelled mid-POST")
+	if !errors.Is(r.err, context.Canceled) {
+		t.Errorf("error = %v, want one wrapping context.Canceled", r.err)
+	}
+	if r.err != nil && !strings.HasPrefix(r.err.Error(), "post SMS webhook: ") {
+		t.Errorf("error = %q, want the post-failure text", r.err)
+	}
+	if r.status != 0 {
+		t.Errorf("status = %d, want 0 — no response was handed back", r.status)
+	}
+	if r.body != nil {
+		t.Errorf("body = %q, want nil — no response was handed back", r.body)
 	}
 }

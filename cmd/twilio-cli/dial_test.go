@@ -60,9 +60,13 @@ func waitStubWSServer(t *testing.T, done <-chan struct{}) {
 	}
 }
 
-// mzSID is the shape of the stream SID dial mints for a call: "MZ" followed by
-// 32 lowercase hex characters, the prefix real Twilio gives a Media Stream.
-var mzSID = regexp.MustCompile(`^MZ[0-9a-f]{32}$`)
+// sidShape is the shape of a SID twilio-cli mints with prefix: the prefix
+// followed by 32 lowercase hex characters, the shape of a real Twilio SID —
+// "MZ" for the stream SID dial mints for a call, the prefix real Twilio gives
+// a Media Stream, and "SM" for the message SID runSMS posts.
+func sidShape(prefix string) *regexp.Regexp {
+	return regexp.MustCompile(`^` + prefix + `[0-9a-f]{32}$`)
+}
 
 // TestDial_SendsStartEvent pins the start frame dial opens the stream with,
 // including the SIDs that identify it: an MZ stream SID, the caller-supplied
@@ -98,7 +102,7 @@ func TestDial_SendsStartEvent(t *testing.T) {
 	if !ok || callSID != callSid {
 		t.Errorf("start.callSid: got %v, want %q", startObj["callSid"], callSid)
 	}
-	if !mzSID.MatchString(streamSID) {
+	if !sidShape("MZ").MatchString(streamSID) {
 		t.Errorf("streamSid = %q, want %q followed by 32 lowercase hex characters", streamSID, "MZ")
 	}
 	if got := startObj["accountSid"]; got != smsfake.DefaultAccountSID {
@@ -253,8 +257,11 @@ func TestDial_StartEventSIDsAreDistinct(t *testing.T) {
 
 // TestDial_SendsStopFrameOnCancel asserts that cancelling ctx (as SIGINT
 // does) causes dial to send a stop frame before closing the WebSocket, and
-// pins the SIDs that stop carries: an MZ stream SID, the caller-supplied call
-// SID, and smsfake.DefaultAccountSID as the account.
+// pins the SIDs that stop carries: the MZ stream SID the start frame opened
+// the stream with, the caller-supplied call SID, and smsfake.DefaultAccountSID
+// as the account. A stop naming any other stream SID names a stream that was
+// never started, and a far end that looks the stream up by it never ends the
+// one that was.
 func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	// On the fake mic, for the reason withFakeMic exists: this is a claim about
 	// frame ORDER -- the frame after cancel is the stop -- and the real mic
@@ -266,11 +273,11 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	// the next frame really is the stop.
 	withFakeMic(t, blockingMic)
 
-	startReceived := make(chan struct{})
+	startReceived := make(chan []byte, 1)
 	stopReceived := make(chan []byte, 1)
 
-	srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
-		close(startReceived)
+	srv := hijackedWSServerWithStart(t, func(conn net.Conn, buf *bufio.ReadWriter, start []byte) {
+		startReceived <- start
 
 		msg, err := readWSFrame(buf)
 		if err != nil {
@@ -288,8 +295,9 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 		dialErrCh <- dial(ctx, callSid, addr)
 	}()
 
+	var startMsg []byte
 	select {
-	case <-startReceived:
+	case startMsg = <-startReceived:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for start frame")
 	}
@@ -312,8 +320,14 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	if m["event"] != "stop" {
 		t.Errorf("frame after cancel: event = %v, want stop", m["event"])
 	}
-	if streamSID, _ := m["streamSid"].(string); !mzSID.MatchString(streamSID) {
+	if streamSID, _ := m["streamSid"].(string); !sidShape("MZ").MatchString(streamSID) {
 		t.Errorf("stop streamSid = %v, want %q followed by 32 lowercase hex characters", m["streamSid"], "MZ")
+	}
+	var start map[string]any
+	if err := json.Unmarshal(startMsg, &start); err != nil {
+		t.Errorf("start frame is not JSON: %q: %v", startMsg, err)
+	} else if got, want := m["streamSid"], start["streamSid"]; got != want {
+		t.Errorf("stop streamSid = %v, want %v, the stream SID the start frame opened the stream with", got, want)
 	}
 	stopObj, ok := m["stop"].(map[string]any)
 	if !ok {

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -154,7 +153,8 @@ func TestSMSForm_Fields(t *testing.T) {
 // AccountSid nor ApiVersion, so a call site passing them empty or swapped would
 // pass every round-trip test here. Recording the form the handler received
 // pins all eight fields: the two smsfake defaults, the arguments runSMS was
-// given, and one fresh SM-prefixed SID under all three of its names.
+// given, and one fresh SM-prefixed SID under all three of its names — fresh
+// because a second runSMS posts a different one.
 func TestRunSMS_PostsTheDefaultsOnTheWire(t *testing.T) {
 	const authToken = "test-auth-token"
 	const from, to, body = "+15551234567", "+15105559999", "hello there"
@@ -205,7 +205,7 @@ func TestRunSMS_PostsTheDefaultsOnTheWire(t *testing.T) {
 		t.Errorf("posted Body = %q, want the body argument %q", got, body)
 	}
 	sid := form.Get("MessageSid")
-	if !regexp.MustCompile(`^SM[0-9a-f]{32}$`).MatchString(sid) {
+	if !sidShape("SM").MatchString(sid) {
 		t.Errorf("posted MessageSid = %q, want SM followed by 32 lowercase hex characters", sid)
 	}
 	for _, alias := range []string{"SmsMessageSid", "SmsSid"} {
@@ -215,6 +215,13 @@ func TestRunSMS_PostsTheDefaultsOnTheWire(t *testing.T) {
 	}
 	if got := len(form); got != 8 {
 		t.Errorf("posted form has %d fields, want exactly the eight above: %v", got, form)
+	}
+
+	if _, err := runSMS(context.Background(), ts.URL+"/sms/inbound", authToken, from, to, body, capture); err != nil {
+		t.Fatalf("second runSMS: %v", err)
+	}
+	if again := (<-posted).Get("MessageSid"); again == sid {
+		t.Errorf("two runSMS calls both posted MessageSid %q, want a fresh SID per call", sid)
 	}
 }
 
