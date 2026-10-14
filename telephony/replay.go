@@ -427,7 +427,7 @@ const (
 
 // HarnessVersion tags every row this build of the harness produces (DoD:
 // "rows carry provenance: recording id, VAD config, harness version").
-const HarnessVersion = "SOP-153-v1"
+const HarnessVersion = "replay-harness-v1"
 
 // DatasetRow is one cumulative-prefix row of a replayed recording's FullPass
 // transcripts, labelled structurally rather than by hand.
