@@ -107,6 +107,49 @@ func TestCapture_SubscriptionLeavesTheSetBeforeItEnds(t *testing.T) {
 	}
 }
 
+// TestCapture_SubscribeWhileCloseRunsIsEndedByClose pins that Close's promise
+// covers a subscription made while Close is running: once Close returns, that
+// subscription has ended too, and the server holds nothing. The code keeps it
+// by a pairing. Close marks the server closed in the same hold of the lock in
+// which it takes the subscription set, and Subscribe checks for that and joins
+// the set in one hold. So a Subscribe either joins before the set is taken,
+// and Close ends it, or finds the server closed and ends its own subscription.
+// A Close that took the set, ended what it took, and only then marked itself
+// closed would let a Subscribe made in between join a set nobody ends: its
+// msgs would stay open, and a subscriber ranging over it would never stop.
+//
+// It stops Close partway. One subscription's feed cannot finish ending while
+// the test holds its lock, so Close, ending it, waits. Once Close has told it
+// to stop, Close has taken the set, and the test subscribes. Then it lets
+// Close finish, and on Close's goroutine, straight after Close returns, the
+// new subscription must be closed. Neither side relies on timing: the
+// Subscribe is made after Close has taken the set and before it can return.
+// Subscribe's half of the pairing is not pinned by construction, because
+// there is no point between its check and its join at which a test can stop
+// it.
+func TestCapture_SubscribeWhileCloseRunsIsEndedByClose(t *testing.T) {
+	capture := newCapture(t)
+	held, _ := capture.Subscribe() // Close ends it
+	stopping, release := capture.HoldEnding(t, held)
+
+	madeDuringClose := make(chan (<-chan smsfake.Message), 1)
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		capture.Close()
+		requireClosed(t, <-madeDuringClose, "a subscription made while Close ran, once Close returned")
+	}()
+
+	returnsWithin(t, "Close telling the held subscription to stop", func() { <-stopping })
+	var msgs <-chan smsfake.Message
+	returnsWithin(t, "Subscribe while Close is held", func() { msgs, _ = capture.Subscribe() })
+	madeDuringClose <- msgs
+
+	release()
+	returnsWithin(t, "Close once the held subscription could end", func() { <-closed })
+	requireSubscribers(t, capture, 0, "after Close")
+}
+
 // TestCapture_CloseWaitsForInFlightPost pins that Close does not return while
 // a POST's handler is still running: it waits for the POST to be answered,
 // and returns with its message recorded. A Close that shut only the listener,

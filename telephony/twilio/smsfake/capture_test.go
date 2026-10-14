@@ -1132,9 +1132,9 @@ func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
 }
 
 // TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun pins the locking
-// around the server's subscription set, which no other test can see: each of
-// them subscribes before posting and closes after the last POST is answered.
-// Here subscribers join and leave, over and over, while concurrent POSTs are
+// around the server's subscription set where no other test reaches it: none
+// of them has subscribers join or leave while POSTs are being recorded. Here
+// subscribers join and leave, over and over, while concurrent POSTs are
 // recorded and fanned out, and go on doing so while Close runs. Under -race,
 // an unlocked Subscribe, unsubscribe or Close is reported as a data race; it
 // can also fault the map outright. Close cannot race the handler itself —

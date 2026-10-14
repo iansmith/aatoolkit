@@ -319,6 +319,10 @@ func (c *CaptureServer) Close() {
 	c.closeOnce.Do(func() {
 		c.Server.Close()
 
+		// Marked closed in the same hold that takes the set, so a Subscribe,
+		// which checks and joins in one hold, either joins before the set is
+		// taken and is ended below, or finds the server closed and ends its own.
+		// TestCapture_SubscribeWhileCloseRunsIsEndedByClose pins the outcome.
 		c.mu.Lock()
 		c.closed = true
 		subs := c.subs
