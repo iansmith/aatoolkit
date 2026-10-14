@@ -35,31 +35,23 @@ func TestSubscription_EnqueueLeavesAWakeUpPendingOnceQueued(t *testing.T) {
 	s := newSubscription()
 	s.end()
 
-	s.mu.Lock()
-	released := false
-	defer func() {
-		if !released {
-			s.mu.Unlock()
-		}
-	}()
-
+	release := holdLock(t, &s.mu)
 	enqueued := make(chan struct{})
 	go func() {
 		defer close(enqueued)
 		s.enqueue(Message{Body: "announced"})
 	}()
 
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(HoldWindow)
 	if n := len(s.wake); n != 0 {
 		t.Fatalf("%d wake-up(s) pending while the message could not yet be queued, want none: queue first, then wake", n)
 	}
 
-	s.mu.Unlock()
-	released = true
+	release()
 	select {
 	case <-enqueued:
-	case <-time.After(5 * time.Second):
-		t.Fatal("enqueue did not return within 5s of the lock being released, want it never to wait")
+	case <-time.After(SubscribeWait):
+		t.Fatalf("enqueue did not return within %s of the lock being released, want it never to wait", SubscribeWait)
 	}
 	if n := len(s.wake); n != 1 {
 		t.Errorf("%d wake-up(s) pending once the message was queued with no feed parked, want 1 kept for the feed to find", n)

@@ -46,7 +46,7 @@ func freeTCPPort(t *testing.T) int {
 }
 
 // newCapture starts a capture server on a free port and closes it when the
-// test ends, within subscribeWait.
+// test ends, within SubscribeWait.
 func newCapture(t *testing.T) *smsfake.CaptureServer {
 	t.Helper()
 	capture, err := smsfake.NewCaptureServer(freeTCPPort(t))
@@ -58,10 +58,10 @@ func newCapture(t *testing.T) *smsfake.CaptureServer {
 }
 
 // postClient makes the tests' POSTs. Its Timeout bounds each one by
-// subscribeWait, so a handler that never answers fails the POST rather than
+// SubscribeWait, so a handler that never answers fails the POST rather than
 // hanging the test. It uses http.DefaultTransport, whose idle connections
 // httptest's Close drops, so a POST after Close dials afresh.
-var postClient = &http.Client{Timeout: subscribeWait}
+var postClient = &http.Client{Timeout: smsfake.SubscribeWait}
 
 // messagesPath is the path of accountSID's Messages.json endpoint, the one
 // RESTClient.SendSMS POSTs to.
@@ -101,7 +101,7 @@ func postMessage(t *testing.T, capture *smsfake.CaptureServer, accountSID string
 // sendSMS sends sms to capture as accountSID through twilio.RESTClient.SendSMS,
 // the client the capture server stands in for, and returns the message SID
 // SendSMS parsed from the response. The client POSTs through postClient, so a
-// handler that never answers fails the send within subscribeWait. A failed
+// handler that never answers fails the send within SubscribeWait. A failed
 // send fails the test.
 func sendSMS(t *testing.T, capture *smsfake.CaptureServer, accountSID string, sms twilio.OutboundSMS) string {
 	t.Helper()
@@ -359,12 +359,6 @@ func TestCaptureServer_NotifyFiresWithSubscribersAttached(t *testing.T) {
 // Nothing they assert depends on it.
 const subscribeAccount = "ACsubscribe00000000000000000000"
 
-// subscribeWait bounds every wait in these tests — on a subscription, a
-// wake-up, a POST, an unsubscribe or a Close — through collect, postClient and
-// returnsWithin, or directly. It is a failure detector only: a correct server
-// delivers in milliseconds, and no test sleeps to let delivery happen.
-const subscribeWait = 5 * time.Second
-
 // backlog is how many messages the slow-subscriber tests queue for a
 // subscriber that is not reading. Its feed holds one of them in hand, so its
 // queue reaches backlog-1: a queue bounded below that which blocks or drops
@@ -444,7 +438,7 @@ func eachCreated(bodies []string, send func(form url.Values) (status int, err er
 }
 
 // collect receives exactly n messages from msgs, and returns an error if the
-// channel closes first or they have not all arrived within subscribeWait. It
+// channel closes first or they have not all arrived within SubscribeWait. It
 // reports through its error, so any goroutine can call it.
 func collect(msgs <-chan smsfake.Message, n int) ([]smsfake.Message, error) {
 	return collectUntil(msgs, fmt.Sprintf("all %d messages", n), func(got []smsfake.Message) bool {
@@ -462,9 +456,9 @@ func collectThrough(msgs <-chan smsfake.Message, last string) ([]smsfake.Message
 
 // collectUntil receives from msgs until done reports true of everything
 // received so far, and returns an error if the channel closes first or done
-// has not been met within subscribeWait. want names what done waits for.
+// has not been met within SubscribeWait. want names what done waits for.
 func collectUntil(msgs <-chan smsfake.Message, want string, done func(got []smsfake.Message) bool) ([]smsfake.Message, error) {
-	deadline := time.NewTimer(subscribeWait)
+	deadline := time.NewTimer(smsfake.SubscribeWait)
 	defer deadline.Stop()
 	var got []smsfake.Message
 	for !done(got) {
@@ -475,7 +469,7 @@ func collectUntil(msgs <-chan smsfake.Message, want string, done func(got []smsf
 			}
 			got = append(got, msg)
 		case <-deadline.C:
-			return got, fmt.Errorf("received %d messages within %s, not %s", len(got), subscribeWait, want)
+			return got, fmt.Errorf("received %d messages within %s, not %s", len(got), smsfake.SubscribeWait, want)
 		}
 	}
 	return got, nil
@@ -587,7 +581,7 @@ func requireSubscribers(t *testing.T, capture *smsfake.CaptureServer, want int, 
 // unsubscribe's own edges. The unsubscribe it returns is bounded by
 // returnsWithin, and it also runs when the test ends — before newCapture's
 // Close, as cleanups run last in, first out — so a feed that will not stop
-// fails the run within subscribeWait, naming the test, rather than hanging it
+// fails the run within SubscribeWait, naming the test, rather than hanging it
 // until go test's -timeout.
 func subscribe(t *testing.T, capture *smsfake.CaptureServer) (<-chan smsfake.Message, func()) {
 	t.Helper()
@@ -604,7 +598,7 @@ func boundedUnsubscribe(t *testing.T, unsubscribe func()) func() {
 }
 
 // returnsWithin runs fn on a goroutine of its own and, if it has not returned
-// within subscribeWait, crashes the test binary with a panic naming the test
+// within SubscribeWait, crashes the test binary with a panic naming the test
 // and what stalled. Anything fn writes is safe to read once returnsWithin has
 // returned.
 //
@@ -612,7 +606,7 @@ func boundedUnsubscribe(t *testing.T, unsubscribe func()) func() {
 // while holding the server's lock. A t.Fatalf there, or a panic on the test's
 // own goroutine, would first run the test's cleanups — its unsubscribes, which
 // block on that lock, and its Close, which waits on a stuck POST — and the
-// first of those to stall would report itself instead, a subscribeWait later,
+// first of those to stall would report itself instead, a SubscribeWait later,
 // losing this message. A panic on a fresh goroutine runs none of the test's
 // cleanups, so it reports at once.
 func returnsWithin(t *testing.T, what string, fn func()) {
@@ -623,8 +617,8 @@ func returnsWithin(t *testing.T, what string, fn func()) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(subscribeWait):
-		msg := fmt.Sprintf("%s: %s did not return within %s", t.Name(), what, subscribeWait)
+	case <-time.After(smsfake.SubscribeWait):
+		msg := fmt.Sprintf("%s: %s did not return within %s", t.Name(), what, smsfake.SubscribeWait)
 		go func() { panic(msg) }()
 		select {} // the panic ends the process; returning would run the blocking defers
 	}
@@ -1102,7 +1096,7 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 	// ends, the feed wakes it straight back, and a pair handing the CPU back
 	// and forth like that keeps running ahead of the goroutines the network
 	// wakes, which carry every POST. The posters managed some thirty messages
-	// a second, and the joins below, waiting on them, overran subscribeWait.
+	// a second, and the joins below, waiting on them, overran SubscribeWait.
 	// Yielding sends each churner to the back of the queue those goroutines
 	// wait in, so the churn still overlaps the POSTs and Close without
 	// crowding them out.
@@ -1216,7 +1210,7 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 
 // TestCapture_SlowSubscriberDoesNotBlock pins that a subscriber which never
 // reads does not hold up the handler or the other subscribers: with it
-// subscribed throughout, all backlog POSTs are answered within subscribeWait,
+// subscribed throughout, all backlog POSTs are answered within SubscribeWait,
 // and the two subscribers that are reading still receive every message within
 // a bounded wait. The bound covers the whole backlog, so a handler that waited
 // on the idle subscriber for as little as half a millisecond a message would

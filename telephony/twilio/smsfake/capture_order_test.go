@@ -8,12 +8,6 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
-// holdWindow is how long the tests below hold the recording lock, watching for
-// something that must wait for the lock and so must not happen while it is
-// held. It is the window in which the fail side has to show, not a wait for
-// delivery: the pass side cannot flake, however short the window.
-const holdWindow = 300 * time.Millisecond
-
 // TestCaptureServer_RecordsBeforeItWakes pins the order Notify's contract rests
 // on: a message is recorded before its wake-up is sent, so a waiter it wakes
 // always finds it in Captured. A waiter woken first would re-read the old
@@ -27,14 +21,7 @@ const holdWindow = 300 * time.Millisecond
 // with plenty to spare.
 func TestCaptureServer_RecordsBeforeItWakes(t *testing.T) {
 	capture := newCapture(t)
-
-	release := capture.HoldRecording()
-	released := false
-	defer func() {
-		if !released {
-			release()
-		}
-	}()
+	release := capture.HoldRecording(t)
 
 	posted := make(chan error, 1)
 	go func() {
@@ -45,16 +32,15 @@ func TestCaptureServer_RecordsBeforeItWakes(t *testing.T) {
 	select {
 	case <-capture.Notify():
 		t.Fatal("woken while the message could not yet be recorded, want the record before the wake-up")
-	case <-time.After(holdWindow):
+	case <-time.After(smsfake.HoldWindow):
 	}
 
 	release()
-	released = true
 
 	select {
 	case <-capture.Notify():
-	case <-time.After(subscribeWait):
-		t.Fatalf("no wake-up within %s of the message being free to record", subscribeWait)
+	case <-time.After(smsfake.SubscribeWait):
+		t.Fatalf("no wake-up within %s of the message being free to record", smsfake.SubscribeWait)
 	}
 	if got := requireOneRecorded(t, capture)[0].Body; got != "recorded first" {
 		t.Errorf("recorded Body = %q, want %q, the one message whose wake-up arrived", got, "recorded first")
@@ -94,14 +80,7 @@ func TestCapture_SubscriptionLeavesTheSetBeforeItEnds(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := newCapture(t)
 			msgs, unsubscribe := capture.Subscribe()
-
-			release := capture.HoldRecording()
-			released := false
-			defer func() {
-				if !released {
-					release()
-				}
-			}()
+			release := capture.HoldRecording(t)
 
 			ended := make(chan struct{})
 			go func() {
@@ -110,13 +89,12 @@ func TestCapture_SubscriptionLeavesTheSetBeforeItEnds(t *testing.T) {
 				requireClosed(t, msgs, "the subscription, once "+tc.name+" returned")
 			}()
 
-			time.Sleep(holdWindow)
+			time.Sleep(smsfake.HoldWindow)
 			if !stillOpen(msgs) {
 				t.Fatalf("%s ended the subscription while the recording lock was held, before it could leave the server's set; want it out of the set first, then ended", tc.name)
 			}
 
 			release()
-			released = true
 			returnsWithin(t, tc.name+" once the recording lock was released", func() { <-ended })
 		})
 	}
