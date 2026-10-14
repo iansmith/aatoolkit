@@ -826,10 +826,10 @@ func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 // parse; for the other two, the whole message. The query is not part of the
 // posted form, and a malformed parameter leaves the media type naming a
 // urlencoded body, which the parser reads in full; for both, the error it
-// reports is all that refuses the POST. A handler that parsed only the body would likewise record
-// the POST whose query does not parse, whole. The subscriber's first delivery
-// being the well-formed message posted next shows nothing was queued for it,
-// without waiting on a silence.
+// reports is all that refuses the POST. A handler that parsed only the body
+// would likewise record the POST whose query does not parse, whole. The
+// subscriber's first delivery being the well-formed message posted next shows
+// nothing was queued for it, without waiting on a silence.
 func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
 	for _, tc := range []struct {
 		name, query, contentType, body string
