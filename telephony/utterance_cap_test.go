@@ -10,7 +10,7 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/assets"
 )
 
-// SOP-156 Phase 0. These tests pin the max-utterance cutoff: a single
+// These tests pin the max-utterance cutoff: a single
 // continuous utterance is capped, and on the cap the engine plays a forced-stop
 // clip and hangs up through the same mark-echo flow as the farewell. They also
 // pin the reconciliation of the idle timer, whose reset-on-onset-only behavior

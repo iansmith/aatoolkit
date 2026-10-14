@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// TestAwaitingMarkEcho_AbsorbsInboundDataPlane pins SOP-169: while the farewell
+// TestAwaitingMarkEcho_AbsorbsInboundDataPlane pins teardown absorption: while the farewell
 // clip plays and the session waits for the mark echo (StateAwaitingMarkEcho),
 // the caller keeps streaming media until the socket closes, so inbound
 // data/VAD/STT are expected -- they must be absorbed silently, not logged as an
@@ -229,10 +229,10 @@ func TestSpeechOnsetDoesNotChangeState(t *testing.T) {
 // The original trigger was AwaitingMarkEcho taking inbound media for the
 // farewell clip's whole 2s playout (build/logs/server-2026-07-16-12-45-12.log:
 // 100 identical "state=AwaitingMarkEcho source=TwilioData" lines at 50
-// frames/sec). SOP-169 later absorbed that data plane during teardown, so it no
+// frames/sec). A later change absorbed that data plane during teardown, so it no
 // longer stubs -- but the per-pair suppression is a general guard for any
 // still-stubbed termination row, exercised here via StateTerminating (which
-// still stubs every source, SOP-115/G,H).
+// still stubs every source).
 //
 // Frame count and log content only; no clock is read.
 func TestNotImplementedLogsOncePerStateSourcePair(t *testing.T) {
@@ -266,7 +266,7 @@ func TestNotImplementedLogsOncePerStateSourcePair(t *testing.T) {
 
 // TestNotImplementedLogsEachDistinctPair guards the other half: collapsing
 // repeats must not collapse *different* gaps into one. Each (state, source)
-// pair SOP-115/G,H has yet to drive still has to report itself, or wiring one
+// pair not yet driven still has to report itself, or wiring one
 // state would silently hide the next.
 func TestNotImplementedLogsEachDistinctPair(t *testing.T) {
 	var buf bytes.Buffer
@@ -278,8 +278,8 @@ func TestNotImplementedLogsEachDistinctPair(t *testing.T) {
 	defer s.Close()
 
 	// Two distinct stub pairs, each driven twice. Both live in StateTerminating
-	// (still stubs every source, SOP-115/G,H); AwaitingMarkEcho's data plane is
-	// now absorbed (SOP-169), so it no longer offers a stubbed data pair.
+	// (still stubs every source); AwaitingMarkEcho's data plane is
+	// now absorbed, so it no longer offers a stubbed data pair.
 	for i := 0; i < 2; i++ {
 		s.setState(StateTerminating)
 		s.dispatch(SourceTwilioData, []byte{0xFF})
@@ -423,7 +423,7 @@ func TestEachUtteranceSendsOnlyItsOwnAudio(t *testing.T) {
 	}
 }
 
-// TestSessionStart_OrderingInvariant pins SOP-154 Observable behavior #4 at
+// TestSessionStart_OrderingInvariant pins the VAD ordering invariant at
 // the real production entry point: Start returns an error if the resolved
 // VAD config violates EndSilenceMS < TurnEndSilenceMS < MaxSilenceMS,
 // matching Start's existing convention of returning (not panicking on) a
@@ -674,7 +674,7 @@ func TestTurnFusion_NoPolicyFlushesOnCallEnd(t *testing.T) {
 	}
 }
 
-// --- Turn lifecycle (SOP-154 Observable behavior #6) ---
+// --- Turn lifecycle ---
 
 // TestTurnLifecycle_ActiveOnOnsetClearedOnComplete pins the turn lifecycle:
 // turnActive is the source of truth for "a turn is in progress." The first
