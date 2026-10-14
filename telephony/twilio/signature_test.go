@@ -111,22 +111,24 @@ func TestComputeSignature_AcceptedByValidate(t *testing.T) {
 // an error text naming a caller's label in place of what fails here.
 const statusCallback = "status callback"
 
-// The request, from the receiving side: POSTed, form-encoded, the form intact,
-// and carrying the X-Twilio-Signature ComputeSignature yields over the exact
-// URL posted to. The URL carries a query string because the signature covers
-// it, so a poster that signed the URL without its query would fail here.
+// The request, from the receiving side: POSTed to webhookURL, form-encoded,
+// the form intact, and carrying the X-Twilio-Signature ComputeSignature yields
+// over that same URL. The URL carries a query string because the signature
+// covers it, so a poster that signed the URL without its query, or POSTed
+// without it, would fail here. The URL posted to is rebuilt the way Server
+// rebuilds the one it validates a signature over.
 func TestPostSignedForm_SignsTheFormOverTheExactURL(t *testing.T) {
 	const token = "authtoken"
 	type seen struct {
-		method, contentType, signature string
-		form                           url.Values
+		target, method, contentType, signature string
+		form                                   url.Values
 	}
 	got := make(chan seen, 1)
 	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Errorf("ParseForm: %v", err)
 		}
-		got <- seen{r.Method, r.Header.Get("Content-Type"), r.Header.Get("X-Twilio-Signature"), r.PostForm}
+		got <- seen{"http://" + r.Host + r.URL.RequestURI(), r.Method, r.Header.Get("Content-Type"), r.Header.Get("X-Twilio-Signature"), r.PostForm}
 	}))
 	defer ts.Close()
 
@@ -141,6 +143,9 @@ func TestPostSignedForm_SignsTheFormOverTheExactURL(t *testing.T) {
 	case s = <-got:
 	case <-time.After(2 * time.Second):
 		t.Fatal("no request reached the server")
+	}
+	if s.target != rawURL {
+		t.Errorf("POSTed to %q, want %q, the URL signed over", s.target, rawURL)
 	}
 	if s.method != http.MethodPost {
 		t.Errorf("method = %q, want %q", s.method, http.MethodPost)
