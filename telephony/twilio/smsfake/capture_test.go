@@ -156,10 +156,11 @@ func requireOneRecorded(t *testing.T, capture *smsfake.CaptureServer) []smsfake.
 }
 
 // TestNewCaptureServer_BindsRequestedPort pins that the capture server binds
-// the port it was asked for, rather than an ephemeral one. The whole point is
-// that the operator must be able to name the URL before the CLI runs — an
-// ephemeral port makes that impossible, because the server reads
-// TWILIO_API_BASE_URL once at startup.
+// the port it was asked for, rather than an ephemeral one, so the capture URL
+// can be named before the capture server exists. A server under test that is
+// launched first and fixes its RESTClient's BaseURL at startup, as in
+// twilio-cli's flow, has to be given that URL in advance, and an ephemeral
+// port makes that impossible.
 func TestNewCaptureServer_BindsRequestedPort(t *testing.T) {
 	port := freeTCPPort(t)
 
@@ -203,9 +204,10 @@ func TestNewCaptureServer_PortInUseNamesThePort(t *testing.T) {
 // TestNewCaptureServer_RejectsUnusablePorts pins that port 0 does not fail
 // open. net.Listen accepts it and assigns an ephemeral port, which is
 // precisely the defect an explicit port exists to remove: the URL becomes
-// unknowable before this process runs, and the guidance prints a ":0" the
-// operator cannot point anything at. Out-of-range values net.Listen rejects on
-// its own, but they are asserted here too so the boundary is pinned in one place.
+// unknowable before the capture server exists, and a URL named in advance from
+// the requested port, as twilio-cli's guidance names it, ends in a ":0"
+// nothing can be pointed at. Out-of-range values net.Listen rejects on its
+// own, but they are asserted here too so the boundary is pinned in one place.
 func TestNewCaptureServer_RejectsUnusablePorts(t *testing.T) {
 	for _, port := range []int{0, -1, 65536} {
 		t.Run(fmt.Sprintf("port %d", port), func(t *testing.T) {
