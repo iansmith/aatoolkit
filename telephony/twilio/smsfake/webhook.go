@@ -11,11 +11,7 @@ package smsfake
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
@@ -46,49 +42,13 @@ func InboundForm(accountSID, apiVersion, messageSID, from, to, body string) url.
 	}
 }
 
-// PostWebhook performs the signed Twilio SMS-webhook ceremony: it POSTs form
-// (signed over webhookURL, the exact URL posted to) and returns an error if
-// the request fails or the server rejects it (e.g. a 403 from a signature
-// mismatch caused by a wrong path or auth token).
+// PostWebhook performs the signed Twilio SMS-webhook ceremony: it POSTs form,
+// signed over webhookURL (the exact URL posted to), and returns an error if the
+// request fails or the server rejects it.
 //
-// Whenever the client hands a response back it also returns that response's
-// status code and body: on success, alongside the error when the status was
-// not 200, and — with whatever part of the body was read — when reading the
-// body failed. When the client gives up on a redirect chain (net/http's
-// default policy stops after 10), the last redirect's status comes back with
-// the error and a nil body, because the client has already closed it. Every
-// other failure returns status 0 and a nil body. That includes a redirect
-// whose next hop could not be reached or whose Location would not parse,
-// because net/http discards that redirect's response, so a zero status means
-// no response was handed back, not that the server never answered.
+// It is twilio.PostSignedForm with every error text labelled "SMS webhook"
+// ("post SMS webhook: ...", "SMS webhook <webhookURL> returned status ...");
+// see twilio.PostSignedForm for when the status code and body come back.
 func PostWebhook(ctx context.Context, webhookURL, authToken string, form url.Values) (status int, body []byte, err error) {
-	sig := twilio.ComputeSignature(authToken, webhookURL, form)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return 0, nil, fmt.Errorf("build SMS webhook request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Twilio-Signature", sig)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		// Do returns a response with its error only when it stopped following
-		// redirects, and has closed that response's body already.
-		if resp != nil {
-			status = resp.StatusCode
-		}
-		return status, nil, fmt.Errorf("post SMS webhook: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp.StatusCode, respBody, fmt.Errorf("read SMS webhook response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, respBody, fmt.Errorf("SMS webhook %s returned status %d: %s", webhookURL, resp.StatusCode, respBody)
-	}
-
-	return resp.StatusCode, respBody, nil
+	return twilio.PostSignedForm(ctx, "SMS webhook", webhookURL, authToken, form)
 }
