@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
@@ -399,7 +400,13 @@ func TestPostWebhook_CancellingCtxAbandonsTheInFlightPOST(t *testing.T) {
 		done <- result{status, body, err}
 	}()
 
-	smsfake.ReceiveWithin(t, arrived, "POST at the webhook server")
+	select {
+	case <-arrived:
+	case r := <-done: // the server never answers, so only a POST that failed to reach it returns
+		t.Fatalf("PostWebhook returned before the webhook server held the POST: %v", r.err)
+	case <-time.After(smsfake.SubscribeWait):
+		t.Fatalf("no POST at the webhook server within %s", smsfake.SubscribeWait)
+	}
 	cancel()
 
 	r := smsfake.ReceiveWithin(t, done, "return from PostWebhook after its ctx was cancelled mid-POST")

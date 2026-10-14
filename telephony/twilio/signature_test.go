@@ -289,6 +289,8 @@ func TestPostSignedForm_CancellingCtxAbandonsTheInFlightPOST(t *testing.T) {
 
 	select {
 	case <-arrived:
+	case err := <-done: // the server never answers, so only a POST that failed to reach it returns
+		t.Fatalf("PostSignedForm returned before the server held the POST: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("the POST never reached the server")
 	}

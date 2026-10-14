@@ -9,7 +9,8 @@ import (
 // SubscribeWait bounds the tests' waits on a subscription, a wake-up, a POST
 // to the capture server, an unsubscribe or a Close, through Collect,
 // postClient, returnsWithin and ReceiveWithin, or directly, and their waits on
-// what a webhook server or its handler sends, through ReceiveWithin. It is a
+// what a webhook server or its handler sends, through ReceiveWithin or, where
+// the wait also watches PostWebhook's return, directly. It is a
 // failure detector only: a correct server delivers in milliseconds, and no
 // test sleeps to let delivery happen.
 //
