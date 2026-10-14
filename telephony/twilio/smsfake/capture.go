@@ -26,13 +26,13 @@ import (
 // application/x-www-form-urlencoded, as http.Request.ParseForm reads it — the
 // encoding SendSMS sends. No other body is read: not multipart/form-data, not
 // JSON, not one sent without a Content-Type, and not the body of any other
-// method. Unread, such a body cannot fail to parse, so the request is answered
-// 201 and recorded like any other, whatever the body holds, with an empty Form
-// and empty From, To and Body. A POST, PUT or PATCH whose Content-Type
-// mime.ParseMediaType rejects is the exception: ParseForm reports that error,
-// and the request is refused as one that does not parse. That holds even when
-// the form was read: a malformed parameter on an
-// application/x-www-form-urlencoded type leaves the media type standing, so
+// method. Unread, such a body cannot fail to parse, so, provided its URL query
+// parses, the request is answered 201 and recorded like any other, whatever
+// the body holds, with an empty Form and empty From, To and Body. A POST, PUT
+// or PATCH whose Content-Type mime.ParseMediaType rejects is the exception:
+// ParseForm reports that error, and the request is refused as one that does
+// not parse. That holds even when the form was read: a malformed parameter on
+// an application/x-www-form-urlencoded type leaves the media type standing, so
 // ParseForm reads the whole form and still reports the error.
 type Message struct {
 	AccountSID string
@@ -82,11 +82,12 @@ func (m Message) clone() Message {
 // (see Message), except one whose URL query or posted form does not parse:
 // that one it answers 400 and goes no further with — it is not recorded,
 // sends no wake-up on Notify, and reaches no subscriber. Nor does a request
-// its mux does not route there: one outside that prefix is answered 404, and
-// one whose path is not clean, such as one with an empty segment, is
-// redirected to the cleaned path; whatever its client then sends there is a
-// request of its own. So a client whose BaseURL carries a path of its own
-// misses the capture server.
+// its mux does not route there. One outside that prefix is answered 404,
+// except /2010-04-01/Accounts itself, the prefix without its trailing slash,
+// which is redirected to the prefix. One whose path is not clean, such as one
+// with an empty segment, is redirected to the cleaned path. Whatever a
+// redirected request's client then sends is a request of its own. So a client
+// whose BaseURL carries a path of its own misses the capture server.
 //
 // It stands in for a real Twilio account so a server's outbound SMS reply can
 // be captured and asserted on without one. A twilio.RESTClient is pointed at

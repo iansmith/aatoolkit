@@ -880,13 +880,14 @@ func requireWentNowhere(t *testing.T, capture *smsfake.CaptureServer, msgs <-cha
 }
 
 // TestCapture_UnroutedRequestIsNotRecorded pins the requests the capture
-// server's mux does not route to its handler, which go nowhere either: one
+// server's mux does not route to its handler, which go nowhere either. One
 // outside /2010-04-01/Accounts/ is answered 404 — among them SendSMS's POST
-// from a client whose BaseURL carries a path of its own — and one under it
+// from a client whose BaseURL carries a path of its own — except the prefix
+// without its trailing slash, which is redirected to the prefix. One under it
 // whose path is not clean, here one with an empty account, is redirected to
 // the cleaned path. Each is recorded nowhere, sends no wake-up and reaches no
-// subscriber. The POSTs go straight to the mux, so the redirect is answered
-// and not followed: a client that follows it makes a request of its own.
+// subscriber. The POSTs go straight to the mux, so a redirect is answered and
+// not followed: a client that follows it makes a request of its own.
 func TestCapture_UnroutedRequestIsNotRecorded(t *testing.T) {
 	for _, tc := range []struct {
 		name, path string
@@ -894,6 +895,7 @@ func TestCapture_UnroutedRequestIsNotRecorded(t *testing.T) {
 	}{
 		{"a path outside the prefix", "/2010-04-01/Messages.json", false},
 		{"the endpoint behind a path of its own", "/twilio" + messagesPath(subscribeAccount), false},
+		{"the prefix without its trailing slash", "/2010-04-01/Accounts", true},
 		{"a path that is not clean", messagesPath(""), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -903,7 +905,7 @@ func TestCapture_UnroutedRequestIsNotRecorded(t *testing.T) {
 			rec := serveForm(capture, tc.path, strings.NewReader(url.Values{"Body": {"unrouted"}}.Encode()))
 			switch {
 			case tc.redirected && (rec.Code/100 != 3 || rec.Header().Get("Location") == ""):
-				t.Errorf("POST %s: status %d, Location %q; want a redirect to the cleaned path", tc.path, rec.Code, rec.Header().Get("Location"))
+				t.Errorf("POST %s: status %d, Location %q; want a redirect", tc.path, rec.Code, rec.Header().Get("Location"))
 			case !tc.redirected && rec.Code != http.StatusNotFound:
 				t.Errorf("POST %s: status %d, want %d", tc.path, rec.Code, http.StatusNotFound)
 			}
