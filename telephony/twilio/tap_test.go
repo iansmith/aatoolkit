@@ -17,7 +17,7 @@ import (
 	"github.com/iansmith/aatoolkit/telephony"
 )
 
-// These tests describe the audio tap's expected
+// Phase 0 (rev 3). These tests describe the audio tap's expected
 // behavior and fail against the stubs in tap.go.
 //
 // The tap exists to capture real telephony audio for the probe dataset:
