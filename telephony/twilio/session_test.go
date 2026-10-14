@@ -274,7 +274,7 @@ func TestDefaultHandleStream_SkipsUndecodableAndIgnoredFrames(t *testing.T) {
 	// dtmf: unknown event type, DecodeFrame errors — must not be fatal.
 	h.sendRaw([]byte(`{"event":"dtmf","streamSid":"SS` + t.Name() + `"}`))
 
-	// mark: decodes fine and is now routed to the control plane (SOP-115
+	// mark: decodes fine and is now routed to the control plane (the
 	// drift-check fix), but the session isn't in AwaitingMarkEcho here, so
 	// it's an unexpected-input transition: logged loudly, state unchanged,
 	// not fatal.
@@ -296,7 +296,7 @@ func TestDefaultHandleStream_SkipsUndecodableAndIgnoredFrames(t *testing.T) {
 // TestDefaultHandleStream_WiresRealOutputsAndClose verifies handleStream
 // itself -- not just a test factory -- unconditionally supplies
 // WithTwilioDataOutput, WithTwilioControlOutput, and WithCloseFunc to every
-// session it constructs (SOP-125 code review: these were previously wired
+// session it constructs (code review: these were previously wired
 // only by test-injected factories, so the whole termination flow was dead
 // code on a real call). It drives the idle timer to fire over a real
 // WebSocket connection and checks that the farewell clip and its mark
@@ -386,7 +386,7 @@ func TestDefaultHandleStream_WiresRealOutputsAndClose(t *testing.T) {
 }
 
 // TestDefaultHandleStream_MarkEchoReceivedClosesPromptly is the regression
-// test for the SOP-115 umbrella drift check: handleStream's read loop used
+// test for the drift check: handleStream's read loop used
 // to special-case only EventMedia/EventStop, so an inbound "mark" fell into
 // a default branch that just logged and never reached demux.RouteFrame --
 // the session's AwaitingMarkEcho control handler could only ever be
