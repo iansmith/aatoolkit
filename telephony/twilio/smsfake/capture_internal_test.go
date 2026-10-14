@@ -67,11 +67,7 @@ func TestSubscription_EnqueueLeavesAWakeUpPendingOnceQueued(t *testing.T) {
 	}
 
 	release()
-	select {
-	case <-enqueued:
-	case <-time.After(SubscribeWait):
-		t.Fatalf("enqueue did not return within %s of the lock being released, want it never to wait", SubscribeWait)
-	}
+	ReceiveWithin(t, enqueued, "return from enqueue once the lock was released")
 	if n := len(s.wake); n != 1 {
 		t.Errorf("%d wake-up(s) pending once the message was queued with no feed parked, want 1 kept for the feed to find", n)
 	}

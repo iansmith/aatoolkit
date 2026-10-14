@@ -1,13 +1,16 @@
 package smsfake
 
-import "time"
+import (
+	"testing"
+	"time"
+)
 
 // SubscribeWait bounds the tests' waits on a subscription, a wake-up, a POST
 // to the capture server, an unsubscribe or a Close, through collect,
-// postClient, returnsWithin and receiveN, or directly, and their waits on
-// what a webhook server or its handler sends, through receiveWithin. It is a
-// failure detector only: a correct server delivers in milliseconds, and no
-// test sleeps to let delivery happen.
+// postClient, returnsWithin, receiveN and ReceiveWithin, or directly, and
+// their waits on what a webhook server or its handler sends, through
+// ReceiveWithin. It is a failure detector only: a correct server delivers in
+// milliseconds, and no test sleeps to let delivery happen.
 //
 // Not every wait has a bound. A webhook test's POST through PostWebhook is
 // bounded by its ctx alone, mostly context.Background(); the internal tests
@@ -15,6 +18,25 @@ import "time"
 // TestNewCaptureServer_* and the two 403 tests, keep the unbounded waits they
 // had there.
 const SubscribeWait = 5 * time.Second
+
+// ReceiveWithin receives one value from ch and returns it, failing the test
+// unless it arrives within SubscribeWait. what names the value in a failure.
+// The webhook tests wait through it on what a webhook server or its handler
+// sends, so a PostWebhook or ServeSMS that answers without doing its part
+// fails the test, naming what never came, rather than hanging it; the capture
+// tests wait through it on a wake-up, and the internal tests on enqueue's
+// return. It is here, in package smsfake, so the internal tests reach it too.
+func ReceiveWithin[T any](t testing.TB, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(SubscribeWait):
+		t.Fatalf("no %s within %s", what, SubscribeWait)
+		var zero T
+		return zero
+	}
+}
 
 // SubscriberCount reports how many subscriptions c holds. It is for the tests,
 // which otherwise cannot see that unsubscribe and Close release what they end:

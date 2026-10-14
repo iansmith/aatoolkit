@@ -42,11 +42,7 @@ func TestCaptureServer_RecordsBeforeItWakes(t *testing.T) {
 
 	release()
 
-	select {
-	case <-capture.Notify():
-	case <-time.After(smsfake.SubscribeWait):
-		t.Fatalf("no wake-up within %s of the message being free to record", smsfake.SubscribeWait)
-	}
+	smsfake.ReceiveWithin(t, capture.Notify(), "wake-up once the message was free to record")
 	if got := requireOneRecorded(t, capture)[0].Body; got != "recorded first" {
 		t.Errorf("recorded Body = %q, want %q, the one message whose wake-up arrived", got, "recorded first")
 	}
