@@ -14,8 +14,10 @@ import (
 )
 
 // Message is one request recorded by CaptureServer, which records every
-// request under /2010-04-01/Accounts/, whatever its method or resource — not
-// only the Messages.json POST twilio.RESTClient.SendSMS makes. AccountSID is
+// request under /2010-04-01/Accounts/ whose URL query and posted form parse,
+// whatever its method or resource — not only the Messages.json POST
+// twilio.RESTClient.SendSMS makes. One that does not parse is answered 400 and
+// not recorded (see CaptureServer). AccountSID is
 // the path after that prefix with any /Messages.json suffix trimmed, so for
 // any other resource it holds the rest of the path; From, To and Body are
 // empty unless the request posted them.
@@ -63,9 +65,11 @@ func (m Message) clone() Message {
 
 // CaptureServer implements the Twilio Messages API shape used by
 // twilio.RESTClient.SendSMS (POST /2010-04-01/Accounts/{sid}/Messages.json ->
-// 201 + minimal JSON), recording every call it receives. It stands in for a
-// real Twilio account so a server's outbound SMS reply can be captured and
-// asserted on without one.
+// 201 + minimal JSON), recording every call it receives, except one whose URL
+// query or posted form does not parse: that one it answers 400 and goes no
+// further with — it is not recorded, sends no wake-up on Notify, and reaches
+// no subscriber. It stands in for a real Twilio account so a server's outbound
+// SMS reply can be captured and asserted on without one.
 //
 // A caller reads what was recorded in one of three ways: Captured for a
 // snapshot of everything so far, Notify for a bare wake-up when something has
@@ -164,7 +168,9 @@ func NewCaptureServer(port int) (*CaptureServer, error) {
 //
 // Recording takes the whole posted form and the arrival time, appends the
 // message, and queues a copy for every subscriber — all without waiting on
-// any reader, so no subscriber, however slow, can hold up the response.
+// any reader, so no subscriber, however slow, can hold up the response. A
+// request whose URL query or posted form does not parse is answered 400
+// before any of that.
 //
 // The "sid" key is a contract, not decoration: twilio.RESTClient.SendSMS
 // parses it to return the message id, and a 2xx carrying none yields an empty
