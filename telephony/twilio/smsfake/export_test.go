@@ -4,10 +4,10 @@ import "time"
 
 // SubscribeWait bounds the tests' waits on a subscription, a wake-up, a POST
 // to the capture server, an unsubscribe or a Close, through collect,
-// postClient and returnsWithin, or directly, and their waits on what a
-// webhook server or its handler sends, through receiveWithin. It is a failure
-// detector only: a correct server delivers in milliseconds, and no test
-// sleeps to let delivery happen.
+// postClient, returnsWithin and receiveN, or directly, and their waits on
+// what a webhook server or its handler sends, through receiveWithin. It is a
+// failure detector only: a correct server delivers in milliseconds, and no
+// test sleeps to let delivery happen.
 //
 // Not every wait has a bound. A webhook test's POST through PostWebhook is
 // bounded by its ctx alone, mostly context.Background(); the internal tests
