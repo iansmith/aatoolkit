@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -156,5 +157,86 @@ func TestCallSid_SingleSourcedAcrossWebhookAndStart(t *testing.T) {
 
 	if gotWebhookCallSid != f.CallSID {
 		t.Fatalf("CallSid mismatch: webhook=%q start=%q", gotWebhookCallSid, f.CallSID)
+	}
+}
+
+// TestWebhookCeremony_ReturnsTheAnsweredStreamURL pins the success path
+// exactly: the stream URL fetchStreamURL returns is the one the server's TwiML
+// answered with, not merely one shaped like it.
+func TestWebhookCeremony_ReturnsTheAnsweredStreamURL(t *testing.T) {
+	const want = "wss://media.example.test/streams"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<Response><Connect><Stream url="` + want + `"/></Connect></Response>`))
+	}))
+	defer ts.Close()
+
+	got, err := fetchStreamURL(context.Background(), ts.URL+"/webhook", "test-auth-token", "CAtest0002", "+15551234567", "+15559876543")
+	if err != nil {
+		t.Fatalf("fetchStreamURL: %v", err)
+	}
+	if got != want {
+		t.Errorf("stream URL = %q, want %q", got, want)
+	}
+}
+
+// TestWebhookCeremony_ErrorTextsNameTheWebhook pins the voice webhook's error
+// text at each stage that can fail before the TwiML is parsed. twilio-cli
+// prints that text as its fatal error, and
+// TestTwilioCLIRecordSentMustNotClobberTheAudioItReplays reads "post webhook"
+// out of the output to tell whether a run reached the network, so the wording
+// is part of the tool's output, not a detail of how it was produced.
+func TestWebhookCeremony_ErrorTextsNameTheWebhook(t *testing.T) {
+	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("signature mismatch"))
+	}))
+	defer rejecting.Close()
+
+	truncating := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		// A Content-Length the body never reaches, then a dropped connection.
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
+		_ = buf.Flush()
+	}))
+	defer truncating.Close()
+
+	// The URL will not parse, so the request is never built. The parse error
+	// comes from url.Parse rather than being written out, so the test pins the
+	// wording around it and not net/url's.
+	const unbuildable = "http://[::1/webhook"
+	_, parseErr := url.Parse(unbuildable)
+	if parseErr == nil {
+		t.Fatalf("url.Parse(%q) succeeded; the build case below would not fail", unbuildable)
+	}
+	// Port 1 is privileged, so no test process can be listening on it.
+	const unanswered = "http://127.0.0.1:1/webhook"
+	rejectingURL := rejecting.URL + "/webhook"
+
+	for _, tc := range []struct {
+		name, webhookURL string
+		want             string // the whole error text, unless prefixOnly
+		prefixOnly       bool   // the rest is the dial error, whose wording is the OS's
+	}{
+		{"build", unbuildable, "build webhook request: " + parseErr.Error(), false},
+		{"post", unanswered, `post webhook: Post "` + unanswered + `": `, true},
+		{"non-200", rejectingURL, "webhook " + rejectingURL + " returned status 403: signature mismatch", false},
+		{"read", truncating.URL + "/webhook", "read webhook response: " + io.ErrUnexpectedEOF.Error(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := fetchStreamURL(context.Background(), tc.webhookURL, "test-auth-token", "CAtest0003", "+15551234567", "+15559876543")
+			if err == nil {
+				t.Fatal("fetchStreamURL succeeded, want an error")
+			}
+			if got := err.Error(); tc.prefixOnly && !strings.HasPrefix(got, tc.want) {
+				t.Errorf("error = %q, want it to start %q", got, tc.want)
+			} else if !tc.prefixOnly && got != tc.want {
+				t.Errorf("error = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
