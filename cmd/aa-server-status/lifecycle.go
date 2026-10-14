@@ -112,10 +112,9 @@ type Engine interface {
 }
 
 // notImplementedErr is returned by every stub lifecycle verb. It names the
-// tracking ticket so the seam is obvious to whoever wires up the real
-// engine.
+// verb so the seam is obvious to whoever wires up the real engine.
 func notImplementedErr(verb string) error {
-	return fmt.Errorf("not implemented: %s lifecycle engine lands in SOP-11", verb)
+	return fmt.Errorf("not implemented: %s is not supported by this lifecycle engine yet", verb)
 }
 
 // StubEngine is a placeholder lifecycle engine backed directly by the
