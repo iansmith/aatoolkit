@@ -931,16 +931,20 @@ func TestCapture_FanOutAllSubscribersSeeAll(t *testing.T) {
 // It is the guard on the handler's lock scope: a message is recorded and
 // queued for every subscriber under one hold of the server's lock. A handler
 // that queued after letting the lock go would let two racing arrivals reach a
-// subscriber in the opposite order to Captured's. That needs many arrivals
-// racing to show on every run, so the POSTs go straight to the handler, as
-// serveBodies does, rather than opening a connection apiece.
+// subscriber in the opposite order to Captured's. That shows only when many
+// arrivals race, so the POSTs go straight to the handler, as serveBodies does,
+// rather than opening a connection apiece.
 //
 // It also checks that ReceivedAt never decreases along Captured, which a
 // stamp read under that same hold of the lock guarantees. A stamp read before
-// the lock is taken lets a racing arrival record in between and break it, but
-// only when the scheduler interleaves them so: this catches that by weight of
-// numbers rather than by construction — reliably on several CPUs, seldom on
-// one.
+// the lock is taken lets a racing arrival record in between and break it.
+//
+// Either slip shows only when the scheduler runs a racing arrival in the gap
+// it opens, so this catches them by weight of numbers rather than by
+// construction: on every run on several CPUs, but on one CPU only under -race,
+// and even then not on every run. On one CPU without -race the handler is
+// seldom if ever switched out within so short a gap, and no other test here
+// catches either slip there.
 func TestCapture_ConcurrentPostsSameOrderForEverySubscriber(t *testing.T) {
 	const subscribers, messages = 3, 400
 	capture := newCapture(t)
