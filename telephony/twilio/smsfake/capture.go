@@ -283,6 +283,20 @@ func (c *CaptureServer) Notify() <-chan struct{} {
 // every subscriber. There is no replay: a subscriber joining after N messages
 // receives the N+1th onward, and the earlier ones are Captured's to give.
 //
+// To read what came before as well as what arrives, call Subscribe first and
+// Captured second. Subscribe joins the subscription under the lock each
+// message is recorded under, before it returns, so every message is in the
+// snapshot Captured takes, queued for msgs, or both; called the other way
+// round, a message recorded between the two calls is in neither. Those in
+// both were recorded after the join and before the snapshot: they are msgs'
+// first deliveries and the snapshot's last entries, in the same order. To
+// drop them, skip every delivery whose ReceivedAt is at or before that of the
+// snapshot's last entry, or none if the snapshot is empty. That never keeps a
+// message twice, and loses none while ReceivedAt tells messages apart. It
+// never decreases, but nothing makes it differ: on a clock too coarse to
+// separate two arrivals, a message recorded just after the snapshot can share
+// its last entry's ReceivedAt, and is skipped too.
+//
 // Each subscription has a queue of its own with no bound. A subscriber that
 // reads slowly, or not at all, only falls behind: nothing is dropped from its
 // queue, and it never blocks the handler or any other subscriber.
