@@ -29,8 +29,11 @@ import (
 // method. Unread, such a body cannot fail to parse, so the request is answered
 // 201 and recorded like any other, whatever the body holds, with an empty Form
 // and empty From, To and Body. A POST, PUT or PATCH whose Content-Type
-// mime.ParseMediaType rejects is the exception: its posted form cannot be
-// read, and it is refused as one that does not parse.
+// mime.ParseMediaType rejects is the exception: ParseForm reports that error,
+// and the request is refused as one that does not parse. That holds even when
+// the form was read: a malformed parameter on an
+// application/x-www-form-urlencoded type leaves the media type standing, so
+// ParseForm reads the whole form and still reports the error.
 type Message struct {
 	AccountSID string
 	From       string

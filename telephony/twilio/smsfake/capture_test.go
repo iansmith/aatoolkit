@@ -819,14 +819,17 @@ func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 // query or posted form does not parse is refused with 400 and goes nowhere: it
 // is not recorded, it sends no wake-up, and no subscriber receives it. Each
 // case breaks one part of the POST and leaves the rest well formed, so only
-// that part can be what is refused: the body, the URL query, or the
-// Content-Type, which the posted form cannot be read without. Go's form parser
-// keeps the pairs it could read alongside its error, so a handler that ignored
-// the error would record a thinned message — for the malformed body, one
-// without its Body, the pair that fails to parse — and a handler that parsed
-// only the body would record the POST whose query does not parse, whole. The
-// subscriber's first delivery being the well-formed message posted next shows
-// nothing was queued for it, without waiting on a silence.
+// that part can be what is refused: the body, the URL query, or a parameter of
+// the Content-Type. Go's form parser reads what it can alongside its error, so
+// a handler that ignored the error would still record each POST: for the
+// malformed body, a thinned message without its Body, the pair that fails to
+// parse; for the other two, the whole message. The query is not part of the
+// posted form, and a malformed parameter leaves the media type naming a
+// urlencoded body, which the parser reads in full; for both, the error it
+// reports is all that refuses the POST. A handler that parsed only the body would likewise record
+// the POST whose query does not parse, whole. The subscriber's first delivery
+// being the well-formed message posted next shows nothing was queued for it,
+// without waiting on a silence.
 func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
 	for _, tc := range []struct {
 		name, query, contentType, body string
