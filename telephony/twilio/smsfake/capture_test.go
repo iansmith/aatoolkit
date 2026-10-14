@@ -1230,10 +1230,18 @@ func TestCapture_UnsubscribeStopsDelivery(t *testing.T) {
 //
 // The concurrent calls are each subscription's first: all of them wait at one
 // start line, so they race to end a live subscription rather than finding it
-// already ended. Under -race, ending it other than once and only once is
-// reported as a data race; it can also close a channel twice outright. Each
-// caller finds the channel closed once its own call returns, whichever call
-// did the work. A call made after the subscription has ended must return too.
+// already ended. Each caller finds the channel closed once its own call
+// returns, whichever call did the work. A call made after the subscription has
+// ended must return too.
+//
+// What catches an end that is not once and only once depends on its guard.
+// One guarded by an unsynchronised flag is reported by -race as a data race,
+// on every run and even on one CPU. One guarded only by channel operations,
+// such as a select that closes the channel in its default case, draws no race
+// report: it is caught only when two callers both pass the check and the
+// second close panics, which takes callers running in parallel. Measured on
+// twelve CPUs, that happened on 9 of 20 runs under -race and 3 of 20 without;
+// on one CPU, on none of 20 either way.
 func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
 	const subscriptions, callers = 100, 4
 	capture := newCapture(t)
@@ -1274,9 +1282,14 @@ func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
 // leaving it ended and released. Each round holds every subscription's
 // unsubscribe and a Close at one start line on a fresh server, so that some
 // unsubscribe finds its subscription already taken by Close and the two end it
-// together: under -race, ending it other than once and only once is reported
-// as a data race. Each unsubscribe must return with its channel closed,
-// whether it or Close did the work.
+// together. Each unsubscribe must return with its channel closed, whether it
+// or Close did the work.
+//
+// An end that is not once and only once is caught as
+// TestCapture_UnsubscribeIsIdempotent says: on every run under -race when an
+// unsynchronised flag guards it, and only by chance when channel operations
+// alone do. Measured for the latter on twelve CPUs, it was caught on 14 of 20
+// runs under -race and 5 of 20 without; on one CPU, on none of 20 either way.
 func TestCapture_UnsubscribeRacesClose(t *testing.T) {
 	const rounds, subscriptions = 50, 8
 	for round := range rounds {
