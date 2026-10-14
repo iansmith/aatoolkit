@@ -478,44 +478,6 @@ func eachCreated(bodies []string, send func(form url.Values) (status int, err er
 	return nil
 }
 
-// collect receives exactly n messages from msgs, and returns an error if the
-// channel closes first or they have not all arrived within SubscribeWait. It
-// reports through its error, so any goroutine can call it.
-func collect(msgs <-chan smsfake.Message, n int) ([]smsfake.Message, error) {
-	return collectUntil(msgs, fmt.Sprintf("all %d messages", n), func(got []smsfake.Message) bool {
-		return len(got) == n
-	})
-}
-
-// collectThrough receives from msgs up to and including the first message
-// whose Body is last, failing as collect does.
-func collectThrough(msgs <-chan smsfake.Message, last string) ([]smsfake.Message, error) {
-	return collectUntil(msgs, fmt.Sprintf("the message %q", last), func(got []smsfake.Message) bool {
-		return len(got) > 0 && got[len(got)-1].Body == last
-	})
-}
-
-// collectUntil receives from msgs until done reports true of everything
-// received so far, and returns an error if the channel closes first or done
-// has not been met within SubscribeWait. want names what done waits for.
-func collectUntil(msgs <-chan smsfake.Message, want string, done func(got []smsfake.Message) bool) ([]smsfake.Message, error) {
-	deadline := time.NewTimer(smsfake.SubscribeWait)
-	defer deadline.Stop()
-	var got []smsfake.Message
-	for !done(got) {
-		select {
-		case msg, ok := <-msgs:
-			if !ok {
-				return got, fmt.Errorf("subscription closed after %d messages, before %s arrived", len(got), want)
-			}
-			got = append(got, msg)
-		case <-deadline.C:
-			return got, fmt.Errorf("received %d messages within %s, not %s", len(got), smsfake.SubscribeWait, want)
-		}
-	}
-	return got, nil
-}
-
 // bodiesOf returns the Body of each message, in order.
 func bodiesOf(msgs []smsfake.Message) []string {
 	out := make([]string, len(msgs))
@@ -525,8 +487,8 @@ func bodiesOf(msgs []smsfake.Message) []string {
 	return out
 }
 
-// feed is one subscriber's result from collect: what it received, and the
-// error collect returned.
+// feed is one subscriber's result from Collect: what it received, and the
+// error Collect returned.
 type feed struct {
 	got []smsfake.Message
 	err error
@@ -558,7 +520,7 @@ func collectFrom(subs []<-chan smsfake.Message, n int) []chan feed {
 	for i, msgs := range subs {
 		feeds[i] = make(chan feed, 1)
 		go func() {
-			got, err := collect(msgs, n)
+			got, err := smsfake.Collect(msgs, n)
 			feeds[i] <- feed{got, err}
 		}()
 	}
@@ -817,7 +779,7 @@ func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 	postMessage(t, capture, subscribeAccount, posted)
 
 	recorded := requireOneRecorded(t, capture)
-	delivered, err := collect(msgs, 1)
+	delivered, err := smsfake.Collect(msgs, 1)
 	if err != nil {
 		t.Fatalf("subscriber: %v", err)
 	}
@@ -887,7 +849,7 @@ func requireWentNowhere(t *testing.T, capture *smsfake.CaptureServer, msgs <-cha
 	if err := postBodies(capture, []string{"well formed"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := collect(msgs, 1)
+	got, err := smsfake.Collect(msgs, 1)
 	if err != nil {
 		t.Fatalf("subscriber: %v", err)
 	}
@@ -1027,7 +989,7 @@ func TestCapture_ArrivalTimestampBracketsThePost(t *testing.T) {
 		t.Errorf("a second Captured has ReceivedAt = %v, the first had %v; want the one instant of recording", again, at)
 	}
 
-	delivered, err := collect(msgs, 1)
+	delivered, err := smsfake.Collect(msgs, 1)
 	if err != nil {
 		t.Fatalf("subscriber: %v", err)
 	}
@@ -1289,7 +1251,7 @@ func TestCapture_SubscribersJoinAndLeaveWhilePostsAndCloseRun(t *testing.T) {
 	}
 
 	for i, j := range joined {
-		got, err := collectThrough(j.msgs, last)
+		got, err := smsfake.CollectThrough(j.msgs, last)
 		if err != nil {
 			t.Errorf("subscriber %d: %v", i, err)
 			continue
@@ -1343,7 +1305,7 @@ func TestCapture_SlowSubscriberLosesNothing(t *testing.T) {
 	posted := numbered("backlog", backlog)
 	serveWithin(t, capture, fmt.Sprintf("%d POSTs to a subscriber not yet reading", backlog), posted)
 
-	got, err := collect(msgs, backlog)
+	got, err := smsfake.Collect(msgs, backlog)
 	if err != nil {
 		t.Fatalf("subscriber that started reading late: %v", err)
 	}
@@ -1368,7 +1330,7 @@ func TestCapture_UnsubscribeStopsDelivery(t *testing.T) {
 	if err := postBodies(capture, []string{"before"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := collect(msgs, 1)
+	got, err := smsfake.Collect(msgs, 1)
 	if err != nil {
 		t.Fatalf("subscriber, before unsubscribing: %v", err)
 	}
@@ -1381,7 +1343,7 @@ func TestCapture_UnsubscribeStopsDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	seen, err := collect(witness, 2)
+	seen, err := smsfake.Collect(witness, 2)
 	if err != nil {
 		t.Fatalf("witness subscriber: %v", err)
 	}
@@ -1443,7 +1405,7 @@ func TestCapture_UnsubscribeIsIdempotent(t *testing.T) {
 	if err := postBodies(capture, []string{"still serving"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := collect(next, 1); err != nil {
+	if _, err := smsfake.Collect(next, 1); err != nil {
 		t.Errorf("a subscriber after the repeated unsubscribes: %v", err)
 	}
 }
@@ -1566,7 +1528,7 @@ func TestCapture_LateSubscriberGetsNoReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := collect(msgs, len(late))
+	got, err := smsfake.Collect(msgs, len(late))
 	if err != nil {
 		t.Fatalf("late subscriber: %v", err)
 	}
@@ -1704,11 +1666,11 @@ func TestCapture_FormsAreNotShared(t *testing.T) {
 	}
 	postMessage(t, capture, subscribeAccount, posted)
 
-	fromA, err := collect(a, 1)
+	fromA, err := smsfake.Collect(a, 1)
 	if err != nil {
 		t.Fatalf("subscriber A: %v", err)
 	}
-	fromB, err := collect(b, 1)
+	fromB, err := smsfake.Collect(b, 1)
 	if err != nil {
 		t.Fatalf("subscriber B: %v", err)
 	}

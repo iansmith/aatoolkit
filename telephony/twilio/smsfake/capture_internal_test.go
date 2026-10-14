@@ -8,23 +8,6 @@ import (
 	"time"
 )
 
-// receiveN receives n messages from s's feed, failing the test if the feed
-// closes first or any one of them has not arrived within SubscribeWait of the
-// one before.
-func receiveN(t *testing.T, s *subscription, n int) {
-	t.Helper()
-	for i := range n {
-		select {
-		case _, ok := <-s.out:
-			if !ok {
-				t.Fatalf("the feed closed after %d of %d queued messages", i, n)
-			}
-		case <-time.After(SubscribeWait):
-			t.Fatalf("received %d of %d queued messages within %s", i, n, SubscribeWait)
-		}
-	}
-}
-
 // TestSubscription_EnqueueLeavesAWakeUpPendingOnceQueued pins the two halves
 // of enqueue that keep a message from stranding in a subscription's queue.
 // pump finds the queue empty, lets the lock go, and only then parks on wake,
@@ -120,7 +103,9 @@ func TestSubscription_DrainReleasesItsQueue(t *testing.T) {
 	for i := range queued {
 		s.enqueue(Message{Body: fmt.Sprintf("read %d", i)})
 	}
-	receiveN(t, s, queued)
+	if _, err := Collect(s.out, queued); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.Now().Add(SubscribeWait)
 	for {
@@ -165,7 +150,9 @@ func TestSubscription_DeliveryClearsItsSlot(t *testing.T) {
 	default:
 	}
 
-	receiveN(t, s, len(slots))
+	if _, err := Collect(s.out, len(slots)); err != nil {
+		t.Fatal(err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

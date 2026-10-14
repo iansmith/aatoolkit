@@ -1,16 +1,17 @@
 package smsfake
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
 
 // SubscribeWait bounds the tests' waits on a subscription, a wake-up, a POST
-// to the capture server, an unsubscribe or a Close, through collect,
-// postClient, returnsWithin, receiveN and ReceiveWithin, or directly, and
-// their waits on what a webhook server or its handler sends, through
-// ReceiveWithin. It is a failure detector only: a correct server delivers in
-// milliseconds, and no test sleeps to let delivery happen.
+// to the capture server, an unsubscribe or a Close, through Collect,
+// postClient, returnsWithin and ReceiveWithin, or directly, and their waits on
+// what a webhook server or its handler sends, through ReceiveWithin. It is a
+// failure detector only: a correct server delivers in milliseconds, and no
+// test sleeps to let delivery happen.
 //
 // Not every wait has a bound. A webhook test's POST through PostWebhook is
 // bounded by its ctx alone, mostly context.Background(); the internal tests
@@ -36,6 +37,46 @@ func ReceiveWithin[T any](t testing.TB, ch <-chan T, what string) T {
 		var zero T
 		return zero
 	}
+}
+
+// Collect receives exactly n messages from msgs, and returns an error if the
+// channel closes first or they have not all arrived within SubscribeWait, one
+// bound on the whole collection. It reports through its error, so any
+// goroutine can call it. Like ReceiveWithin, it is here so the internal tests
+// reach it too.
+func Collect(msgs <-chan Message, n int) ([]Message, error) {
+	return collectUntil(msgs, fmt.Sprintf("all %d messages", n), func(got []Message) bool {
+		return len(got) == n
+	})
+}
+
+// CollectThrough receives from msgs up to and including the first message
+// whose Body is last, failing as Collect does.
+func CollectThrough(msgs <-chan Message, last string) ([]Message, error) {
+	return collectUntil(msgs, fmt.Sprintf("the message %q", last), func(got []Message) bool {
+		return len(got) > 0 && got[len(got)-1].Body == last
+	})
+}
+
+// collectUntil receives from msgs until done reports true of everything
+// received so far, and returns an error if the channel closes first or done
+// has not been met within SubscribeWait. want names what done waits for.
+func collectUntil(msgs <-chan Message, want string, done func(got []Message) bool) ([]Message, error) {
+	deadline := time.NewTimer(SubscribeWait)
+	defer deadline.Stop()
+	var got []Message
+	for !done(got) {
+		select {
+		case msg, ok := <-msgs:
+			if !ok {
+				return got, fmt.Errorf("subscription closed after %d messages, before %s arrived", len(got), want)
+			}
+			got = append(got, msg)
+		case <-deadline.C:
+			return got, fmt.Errorf("received %d messages within %s, not %s", len(got), SubscribeWait, want)
+		}
+	}
+	return got, nil
 }
 
 // SubscriberCount reports how many subscriptions c holds. It is for the tests,
