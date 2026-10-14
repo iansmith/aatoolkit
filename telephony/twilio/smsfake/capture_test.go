@@ -531,14 +531,30 @@ type feed struct {
 	err error
 }
 
-// collectEach makes readers subscriptions through subscribe and starts, for
-// each, a goroutine that collects n messages from it. It returns one channel
-// per subscriber, which delivers that subscriber's feed once.
+// collectEach makes readers subscriptions through subscribeEach and starts
+// collecting n messages from each at once, through collectFrom.
 func collectEach(t *testing.T, capture *smsfake.CaptureServer, readers, n int) []chan feed {
 	t.Helper()
-	feeds := make([]chan feed, readers)
-	for i := range feeds {
-		msgs, _ := subscribe(t, capture)
+	return collectFrom(subscribeEach(t, capture, readers), n)
+}
+
+// subscribeEach makes n subscriptions through subscribe and returns their
+// feeds, none of them yet read.
+func subscribeEach(t *testing.T, capture *smsfake.CaptureServer, n int) []<-chan smsfake.Message {
+	t.Helper()
+	subs := make([]<-chan smsfake.Message, n)
+	for i := range subs {
+		subs[i], _ = subscribe(t, capture)
+	}
+	return subs
+}
+
+// collectFrom starts, for each of subs, a goroutine that collects n messages
+// from it. It returns one channel per subscriber, which delivers that
+// subscriber's feed once.
+func collectFrom(subs []<-chan smsfake.Message, n int) []chan feed {
+	feeds := make([]chan feed, len(subs))
+	for i, msgs := range subs {
 		feeds[i] = make(chan feed, 1)
 		go func() {
 			got, err := collect(msgs, n)
@@ -1055,19 +1071,24 @@ func TestCapture_ArrivalTimestampFollowsRecordingOrder(t *testing.T) {
 }
 
 // TestCapture_FanOutAllSubscribersSeeAll pins fan-out: three subscribers,
-// each reading on its own goroutine while ten messages are posted, each
-// receive all ten — as the messages themselves, in posted order.
+// reading at once, each on its own goroutine, each receive all ten messages
+// posted — as the messages themselves, in posted order.
+//
+// The ten are posted before anyone reads, straight to the handler as
+// serveBodies does, so each feed holds at most one in hand and queues the
+// rest: a feed that delivered its queue out of order is caught. Read while the
+// POSTs went over loopback, each feed would hand its message on before the
+// next arrived, its queue would never hold two, and that order would go
+// unexamined.
 func TestCapture_FanOutAllSubscribersSeeAll(t *testing.T) {
 	const subscribers, messages = 3, 10
 	capture := newCapture(t)
-	feeds := collectEach(t, capture, subscribers, messages)
+	subs := subscribeEach(t, capture, subscribers)
 
 	posted := numbered("fan-out", messages)
-	if err := postBodies(capture, posted); err != nil {
-		t.Fatal(err)
-	}
+	serveWithin(t, capture, fmt.Sprintf("%d POSTs to %d subscribers not yet reading", messages, subscribers), posted)
 
-	requireEachReceived(t, feeds, posted, "subscriber")
+	requireEachReceived(t, collectFrom(subs, messages), posted, "subscriber")
 }
 
 // TestCapture_ConcurrentPostsSameOrderForEverySubscriber pins that "posted
