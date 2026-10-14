@@ -69,22 +69,53 @@ func messagesPath(accountSID string) string {
 	return "/2010-04-01/Accounts/" + accountSID + "/Messages.json"
 }
 
+// urlencoded is the Content-Type RESTClient.SendSMS posts its form as, the one
+// body encoding the capture server reads.
+const urlencoded = "application/x-www-form-urlencoded"
+
+// sendRaw makes one POST through postClient to capture's Messages.json
+// endpoint for accountSID, with query appended to the URL, body sent as given,
+// and a Content-Type of contentType, or none when that is empty. It returns
+// the response with its body read, and reports failure as an error rather than
+// through a *testing.T, so a goroutine other than the test's own can call it.
+func sendRaw(capture *smsfake.CaptureServer, accountSID, query, contentType, body string) (*http.Response, []byte, error) {
+	endpoint := capture.URL + messagesPath(accountSID) + query
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
+	if err != nil {
+		return nil, nil, fmt.Errorf("build the POST to %s: %v", endpoint, err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := postClient.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("POST %s: %v", endpoint, err)
+	}
+	defer resp.Body.Close()
+	read, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read response from %s: %v", endpoint, err)
+	}
+	return resp, read, nil
+}
+
+// postRaw is sendRaw as subscribeAccount, for the test's own goroutine: a
+// failed POST fails the test.
+func postRaw(t *testing.T, capture *smsfake.CaptureServer, query, contentType, body string) *http.Response {
+	t.Helper()
+	resp, _, err := sendRaw(capture, subscribeAccount, query, contentType, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
 // sendMessage makes one Messages.json POST to capture for accountSID, the way
 // RESTClient.SendSMS does, and returns the response with its body read. It
 // reports failure as an error rather than through a *testing.T, so a goroutine
 // other than the test's own can call it.
 func sendMessage(capture *smsfake.CaptureServer, accountSID string, form url.Values) (*http.Response, []byte, error) {
-	endpoint := capture.URL + messagesPath(accountSID)
-	resp, err := postClient.PostForm(endpoint, form)
-	if err != nil {
-		return nil, nil, fmt.Errorf("POST %s: %v", endpoint, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read response from %s: %v", endpoint, err)
-	}
-	return resp, body, nil
+	return sendRaw(capture, accountSID, "", urlencoded, form.Encode())
 }
 
 // postMessage is sendMessage for the test's own goroutine: a failed POST fails
@@ -402,7 +433,7 @@ func postBodies(capture *smsfake.CaptureServer, bodies []string) error {
 func serveBodies(capture *smsfake.CaptureServer, bodies []string) error {
 	return eachCreated(bodies, func(form url.Values) (int, error) {
 		req := httptest.NewRequest(http.MethodPost, messagesPath(subscribeAccount), strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Content-Type", urlencoded)
 		rec := httptest.NewRecorder()
 		capture.Config.Handler.ServeHTTP(rec, req)
 		return rec.Code, nil
@@ -710,14 +741,9 @@ func TestCapture_RetainsFieldsItDoesNotKnow(t *testing.T) {
 		"MediaUrl":        {"https://example.com/2.png", "https://example.com/1.png"},
 		"ProvideFeedback": {"true"},
 	}
-	endpoint := capture.URL + messagesPath(subscribeAccount) + "?Body=from-the-query&From=from-the-query"
-	resp, err := postClient.PostForm(endpoint, posted)
-	if err != nil {
-		t.Fatalf("POST %s: %v", endpoint, err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("POST %s: status %d, want %d", endpoint, resp.StatusCode, http.StatusCreated)
+	const query = "?Body=from-the-query&From=from-the-query"
+	if resp := postRaw(t, capture, query, urlencoded, posted.Encode()); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST with query %s: status %d, want %d", query, resp.StatusCode, http.StatusCreated)
 	}
 
 	msgs := requireOneRecorded(t, capture)
@@ -795,7 +821,6 @@ func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 // subscriber's first delivery being the well-formed message posted next shows
 // nothing was queued for it, without waiting on a silence.
 func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
-	const urlencoded = "application/x-www-form-urlencoded"
 	for _, tc := range []struct {
 		name, query, contentType, body string
 	}{
@@ -807,13 +832,7 @@ func TestCapture_MalformedPostIsRejectedNotRecorded(t *testing.T) {
 			capture := newCapture(t)
 			msgs, _ := subscribe(t, capture)
 
-			endpoint := capture.URL + messagesPath(subscribeAccount) + tc.query
-			resp, err := postClient.Post(endpoint, tc.contentType, strings.NewReader(tc.body))
-			if err != nil {
-				t.Fatalf("POST %s: %v", endpoint, err)
-			}
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusBadRequest {
+			if resp := postRaw(t, capture, tc.query, tc.contentType, tc.body); resp.StatusCode != http.StatusBadRequest {
 				t.Errorf("status %d, want %d", resp.StatusCode, http.StatusBadRequest)
 			}
 			if recorded := capture.Captured(); len(recorded) != 0 {
@@ -877,20 +896,7 @@ func TestCapture_OtherBodiesAreRecordedEmpty(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := newCapture(t)
 
-			endpoint := capture.URL + messagesPath(subscribeAccount)
-			req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(tc.body))
-			if err != nil {
-				t.Fatalf("build the POST to %s: %v", endpoint, err)
-			}
-			if tc.contentType != "" {
-				req.Header.Set("Content-Type", tc.contentType)
-			}
-			resp, err := postClient.Do(req)
-			if err != nil {
-				t.Fatalf("POST %s: %v", endpoint, err)
-			}
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusCreated {
+			if resp := postRaw(t, capture, "", tc.contentType, tc.body); resp.StatusCode != http.StatusCreated {
 				t.Errorf("status %d, want %d, as for any request whose body is not read", resp.StatusCode, http.StatusCreated)
 			}
 
@@ -969,7 +975,7 @@ func TestCapture_ArrivalTimestampFollowsRecordingOrder(t *testing.T) {
 
 	held := newHeldBody(url.Values{"Body": {"A"}}.Encode())
 	req := httptest.NewRequest(http.MethodPost, messagesPath(subscribeAccount), held)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", urlencoded)
 	rec := httptest.NewRecorder()
 	served := make(chan struct{})
 	go func() {
