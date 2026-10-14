@@ -136,7 +136,13 @@ func postMessage(t *testing.T, capture *smsfake.CaptureServer, accountSID string
 // send fails the test.
 func sendSMS(t *testing.T, capture *smsfake.CaptureServer, accountSID string, sms twilio.OutboundSMS) string {
 	t.Helper()
-	rest := &twilio.RESTClient{AccountSID: accountSID, BaseURL: capture.URL, HTTPClient: postClient}
+	return sendSMSVia(t, capture.URL, accountSID, sms)
+}
+
+// sendSMSVia is sendSMS through a client whose BaseURL is baseURL.
+func sendSMSVia(t *testing.T, baseURL, accountSID string, sms twilio.OutboundSMS) string {
+	t.Helper()
+	rest := &twilio.RESTClient{AccountSID: accountSID, BaseURL: baseURL, HTTPClient: postClient}
 	sid, err := rest.SendSMS(context.Background(), sms)
 	if err != nil {
 		t.Fatalf("SendSMS: %v", err)
@@ -898,12 +904,13 @@ func requireWentNowhere(t *testing.T, capture *smsfake.CaptureServer, msgs <-cha
 // TestCapture_UnroutedRequestIsNotRecorded pins the requests the capture
 // server's mux does not route to its handler, which go nowhere either. One
 // outside /2010-04-01/Accounts/ is answered 404 — among them SendSMS's POST
-// from a client whose BaseURL carries a path of its own — except the prefix
-// without its trailing slash, which is redirected to the prefix. One under it
-// whose path is not clean, here one with an empty account, is redirected to
-// the cleaned path. Each is recorded nowhere, sends no wake-up and reaches no
-// subscriber. The POSTs go straight to the mux, so a redirect is answered and
-// not followed: a client that follows it makes a request of its own.
+// from a client whose BaseURL carries a path prefix such as /twilio — except
+// the prefix without its trailing slash, which is redirected to the prefix.
+// One under it whose path is not clean, here one with an empty account, is
+// redirected to the cleaned path. Each is recorded nowhere, sends no wake-up
+// and reaches no subscriber. The POSTs go straight to the mux, so a redirect
+// is answered and not followed: a client that follows it makes a request of
+// its own, as TestCapture_TrailingSlashBaseURLIsRecorded's does.
 func TestCapture_UnroutedRequestIsNotRecorded(t *testing.T) {
 	for _, tc := range []struct {
 		name, path string
@@ -927,6 +934,28 @@ func TestCapture_UnroutedRequestIsNotRecorded(t *testing.T) {
 			}
 			requireWentNowhere(t, capture, msgs, "a POST to "+tc.path)
 		})
+	}
+}
+
+// TestCapture_TrailingSlashBaseURLIsRecorded pins that a BaseURL of URL with
+// a trailing slash still reaches the capture server, though the path it adds
+// is not clean. SendSMS appends its own path to BaseURL, so the slash leaves
+// an empty segment at the front of it. The mux redirects that to the cleaned
+// path, SendSMS's client follows, re-sending its POST there, and the message
+// is recorded under the account in its path, From, To and Body intact.
+func TestCapture_TrailingSlashBaseURLIsRecorded(t *testing.T) {
+	const accountSID = "ACslash000000000000000000000000"
+	capture := newCapture(t)
+
+	sms := twilio.OutboundSMS{From: "+15105559999", To: "+15551234567", Body: "through the slash"}
+	sendSMSVia(t, capture.URL+"/", accountSID, sms)
+
+	msg := requireOneRecorded(t, capture)[0]
+	if msg.AccountSID != accountSID {
+		t.Errorf("captured AccountSID = %q, want %q (the account in the cleaned path)", msg.AccountSID, accountSID)
+	}
+	if got := (twilio.OutboundSMS{From: msg.From, To: msg.To, Body: msg.Body}); got != sms {
+		t.Errorf("captured From %q, To %q, Body %q; want %q, %q, %q as sent", msg.From, msg.To, msg.Body, sms.From, sms.To, sms.Body)
 	}
 }
 

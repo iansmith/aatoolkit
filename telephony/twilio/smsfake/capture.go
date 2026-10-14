@@ -86,8 +86,12 @@ func (m Message) clone() Message {
 // except /2010-04-01/Accounts itself, the prefix without its trailing slash,
 // which is redirected to the prefix. One whose path is not clean, such as one
 // with an empty segment, is redirected to the cleaned path. Whatever a
-// redirected request's client then sends is a request of its own. So a client
-// whose BaseURL carries a path of its own misses the capture server.
+// redirected request's client then sends is a request of its own. So SendSMS
+// from a client whose BaseURL carries a path prefix such as /twilio is
+// answered 404 and misses the capture server. One whose BaseURL is URL with a
+// trailing slash does not: the slash leaves an empty segment in the path, and
+// an http.Client that follows the redirect, as net/http's does unless told
+// otherwise, re-sends the POST to the cleaned path, where it is recorded.
 //
 // It stands in for a real Twilio account so a server's outbound SMS reply can
 // be captured and asserted on without one. A twilio.RESTClient is pointed at
