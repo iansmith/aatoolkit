@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -163,7 +164,9 @@ func TestPostSignedForm_SignsTheFormOverTheExactURL(t *testing.T) {
 
 // Each outcome PostSignedForm's doc names: the status, the body and the error
 // text, which names what at every stage. A nil wantBody means nil, not merely
-// empty.
+// empty. Where a stage fails on an error of its own, err also still wraps that
+// error, so a caller's errors.Is and errors.As see through the label to it; the
+// text alone reads the same whether it is wrapped or flattened.
 func TestPostSignedForm_ReturnsWhatTheClientHandedBack(t *testing.T) {
 	serve := func(h http.HandlerFunc) string {
 		ts := httptest.NewServer(h)
@@ -205,25 +208,35 @@ func TestPostSignedForm_ReturnsWhatTheClientHandedBack(t *testing.T) {
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	})
 
+	// What a failing stage's error must still wrap: the read stage's io error,
+	// and the *url.Error that url.Parse hands the build stage and
+	// http.Client.Do hands the post stage.
+	wrapsUnexpectedEOF := func(err error) bool { return errors.Is(err, io.ErrUnexpectedEOF) }
+	wrapsURLError := func(err error) bool {
+		var ue *url.Error
+		return errors.As(err, &ue)
+	}
+
 	for _, tc := range []struct {
 		name, webhookURL string
 		wantStatus       int
 		wantBody         []byte
-		wantErr          string // the whole error text, unless prefixOnly; "" for none
-		prefixOnly       bool   // the rest is net/http's own error
+		wantErr          string           // the whole error text, unless prefixOnly; "" for none
+		prefixOnly       bool             // the rest is net/http's own error
+		wraps            func(error) bool // nil, or whether err still wraps what the stage failed on
 	}{
-		{"200", okURL, http.StatusOK, []byte("<Response></Response>"), "", false},
+		{"200", okURL, http.StatusOK, []byte("<Response></Response>"), "", false, nil},
 		{"403", forbiddenURL, http.StatusForbidden, []byte("signature mismatch"),
-			statusCallback + " " + forbiddenURL + " returned status 403: signature mismatch", false},
+			statusCallback + " " + forbiddenURL + " returned status 403: signature mismatch", false, nil},
 		{"201", createdURL, http.StatusCreated, []byte("created, which is still not 200"),
-			statusCallback + " " + createdURL + " returned status 201: created, which is still not 200", false},
+			statusCallback + " " + createdURL + " returned status 201: created, which is still not 200", false, nil},
 		{"body cut short", truncatedURL, http.StatusOK, []byte("partial"),
-			"read " + statusCallback + " response: unexpected EOF", false},
-		{"redirect policy gave up", loopURL, http.StatusTemporaryRedirect, nil, "post " + statusCallback + ": ", true},
-		{"unbuildable request", "http://[::1/sms/status", 0, nil, "build " + statusCallback + " request: ", true},
-		{"nobody listening", unanswered, 0, nil, "post " + statusCallback + ": ", true},
-		{"redirect to nobody listening", redirectsToUnansweredURL, 0, nil, "post " + statusCallback + ": ", true},
-		{"redirect Location that will not parse", badLocationURL, 0, nil, "post " + statusCallback + ": ", true},
+			"read " + statusCallback + " response: unexpected EOF", false, wrapsUnexpectedEOF},
+		{"redirect policy gave up", loopURL, http.StatusTemporaryRedirect, nil, "post " + statusCallback + ": ", true, wrapsURLError},
+		{"unbuildable request", "http://[::1/sms/status", 0, nil, "build " + statusCallback + " request: ", true, wrapsURLError},
+		{"nobody listening", unanswered, 0, nil, "post " + statusCallback + ": ", true, wrapsURLError},
+		{"redirect to nobody listening", redirectsToUnansweredURL, 0, nil, "post " + statusCallback + ": ", true, wrapsURLError},
+		{"redirect Location that will not parse", badLocationURL, 0, nil, "post " + statusCallback + ": ", true, wrapsURLError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, body, err := twilio.PostSignedForm(context.Background(), statusCallback, tc.webhookURL, "authtoken", url.Values{"MessageSid": {"SM123"}})
@@ -235,6 +248,9 @@ func TestPostSignedForm_ReturnsWhatTheClientHandedBack(t *testing.T) {
 				t.Errorf("error = %q, want it to start %q", got, tc.wantErr)
 			} else if !tc.prefixOnly && got != tc.wantErr {
 				t.Errorf("error = %q, want %q", got, tc.wantErr)
+			}
+			if tc.wraps != nil && !tc.wraps(err) {
+				t.Errorf("error = %q no longer wraps what the stage failed on, so errors.Is and errors.As cannot reach it", got)
 			}
 			if status != tc.wantStatus {
 				t.Errorf("status = %d, want %d", status, tc.wantStatus)
