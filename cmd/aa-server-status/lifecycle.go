@@ -10,8 +10,8 @@ import (
 // ServerState is the observed lifecycle state of a server — the STATE
 // column's base classification, before the owned-disabled override or the
 // stale override (see render.go's formatStateCell) is applied. Values are
-// the literal display tokens the status table renders (SOP-19 /
-// design/aa-server-status.md §8): StateStray and StateBlocked are uppercase to
+// the literal display tokens the status table renders
+// (design/aa-server-status.md §8): StateStray and StateBlocked are uppercase to
 // match the ticket's inline-annotation examples, the rest lowercase.
 type ServerState string
 
@@ -37,7 +37,7 @@ type PortStatus struct {
 	Unexpected bool
 }
 
-// ServerStatus is one row of the status table (SOP-19 / design/aa-server-status.md
+// ServerStatus is one row of the status table (design/aa-server-status.md
 // §8). PID, Health, Ports, and the anomaly fields are placeholders until the
 // reconciliation engine (a downstream ticket) supplies real observed data —
 // StubEngine.Status() below leaves them zero-valued.
@@ -76,7 +76,7 @@ type ServerStatus struct {
 
 // Engine is the seam between the REPL's command grammar and the lifecycle
 // engine that actually manages child processes. All verbs but Status and
-// TeardownAll are stubbed until SOP-11 lands; StubEngine below implements
+// TeardownAll are stubbed in StubEngine below, which implements
 // them as loud "not implemented" errors rather than silent no-ops.
 type Engine interface {
 	Status() []ServerStatus

@@ -79,7 +79,7 @@ func replayCmd(args []string) {
 // parseReplayFlags parses replay's VAD sweep flags into a full VADConfig
 // (defaults for any knob not overridden) and returns the recording path
 // (fs.Arg(0), "" if none). Each flag threads into the replay session's config
-// so a recording can be re-run at different thresholds (SOP-168). Split out from
+// so a recording can be re-run at different thresholds. Split out from
 // replayCmd so the flag->config threading is unit-testable without os.Exit.
 func parseReplayFlags(args []string) (telephony.VADConfig, string, error) {
 	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
@@ -116,7 +116,7 @@ func replayFileCfg(ctx context.Context, path string, cfg telephony.VADConfig) ([
 	opts := []telephony.SessionOption{
 		telephony.WithVADConfig(cfg),
 		telephony.WithFileDecisionRecorderFromEnv(filepath.Dir(path), callSID, callSID, "", cfg, os.Stderr),
-		// Conversation transcript summary (SOP-168): printed to stderr and written
+		// Conversation transcript summary: printed to stderr and written
 		// to <id>.transcript.txt beside the recording at end of replay. Agent role
 		// label is consumer-injected via AATOOLKIT_AGENT_LABEL.
 		telephony.WithTranscriptOutput(filepath.Dir(path), callSID, os.Stderr),
@@ -141,7 +141,7 @@ func recordingID(path string) string {
 func buildCmd(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	// -1 = unset: seed EndSilenceMS from each recording's captured vad_config
-	// rather than overriding it (SOP-168 behavior 3).
+	// rather than overriding it.
 	endSilenceMS := fs.Int("end-silence-ms", -1, "VAD end-of-utterance silence threshold (ms); default: each recording's captured value")
 	fs.Parse(args)
 
@@ -173,14 +173,14 @@ func buildCmd(args []string) {
 // here regardless (it imports internal/telephony, which cmd/probeset also
 // imports directly for Replay -- an import through twilio would be the
 // long way around). VADConfig is the recording's captured VAD config, the
-// baseline a sweep varies one knob from (SOP-168 behavior 3).
+// baseline a sweep varies one knob from.
 type recordingSidecar struct {
 	Label     string              `json:"label"`
 	VADConfig telephony.VADConfig `json:"vad_config"`
 }
 
 // configForRecording seeds the replay config from the recording's captured
-// vad_config (SOP-168 behavior 3), so a sweep varies one knob from the captured
+// vad_config, so a sweep varies one knob from the captured
 // baseline rather than package defaults. endSilenceOverride >= 0 overrides
 // EndSilenceMS; < 0 (unset) keeps the captured value.
 func configForRecording(sc recordingSidecar, endSilenceOverride int) telephony.VADConfig {

@@ -285,7 +285,7 @@ func TestDrainFrames_PayloadSurvivesTwilioEncodingRoundTrip(t *testing.T) {
 	}
 }
 
-// --- SOP-126: chunk/timestamp on outgoing media frames ---
+// --- chunk/timestamp on outgoing media frames ---
 
 // TestCLI_ChunkTimestamp captures 3 outgoing frames through drainFrames +
 // mediaFrameEncoder and asserts the OUTGOING wire JSON carries monotonic

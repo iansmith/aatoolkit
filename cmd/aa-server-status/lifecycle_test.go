@@ -114,7 +114,7 @@ func TestStubEngine_StatusReflectsConfig(t *testing.T) {
 	}
 }
 
-// --- SOP-19: status table rendering columns ---
+// --- status table rendering columns ---
 
 func TestStubEngine_StatusIncludesConfiguredType(t *testing.T) {
 	// TYPE is the one new column the stub can already populate for free —
