@@ -98,6 +98,32 @@ func postMessage(t *testing.T, capture *smsfake.CaptureServer, accountSID string
 	return resp, body
 }
 
+// sendSMS sends sms to capture as accountSID through twilio.RESTClient.SendSMS,
+// the client the capture server stands in for, and returns the message SID
+// SendSMS parsed from the response. The client POSTs through postClient, so a
+// handler that never answers fails the send within subscribeWait. A failed
+// send fails the test.
+func sendSMS(t *testing.T, capture *smsfake.CaptureServer, accountSID string, sms twilio.OutboundSMS) string {
+	t.Helper()
+	rest := &twilio.RESTClient{AccountSID: accountSID, BaseURL: capture.URL, HTTPClient: postClient}
+	sid, err := rest.SendSMS(context.Background(), sms)
+	if err != nil {
+		t.Fatalf("SendSMS: %v", err)
+	}
+	return sid
+}
+
+// requireOneRecorded returns what Captured holds, failing the test unless it
+// holds exactly one message.
+func requireOneRecorded(t *testing.T, capture *smsfake.CaptureServer) []smsfake.Message {
+	t.Helper()
+	recorded := capture.Captured()
+	if len(recorded) != 1 {
+		t.Fatalf("got %d recorded messages, want 1", len(recorded))
+	}
+	return recorded
+}
+
 // TestNewCaptureServer_BindsRequestedPort pins that the capture server binds
 // the port it was asked for, rather than an ephemeral one. The whole point is
 // that the operator must be able to name the URL before the CLI runs — an
@@ -208,19 +234,12 @@ func TestCaptureServer_SendSMSGetsTheSIDBack(t *testing.T) {
 	const accountSID = "ACsendsms0000000000000000000000"
 	capture := newCapture(t)
 
-	rest := &twilio.RESTClient{AccountSID: accountSID, BaseURL: capture.URL}
-	sid, err := rest.SendSMS(context.Background(), twilio.OutboundSMS{From: "+15105559999", To: "+15551234567", Body: "hi back"})
-	if err != nil {
-		t.Fatalf("SendSMS: %v", err)
-	}
+	sid := sendSMS(t, capture, accountSID, twilio.OutboundSMS{From: "+15105559999", To: "+15551234567", Body: "hi back"})
 	if !smSID.MatchString(sid) {
 		t.Errorf("SendSMS returned message SID %q, want the capture server's SM-prefixed id — the fake's response shape and SendSMS's parse have diverged", sid)
 	}
 
-	msgs := capture.Captured()
-	if len(msgs) != 1 {
-		t.Fatalf("capture server: got %d Messages.json POSTs, want 1", len(msgs))
-	}
+	msgs := requireOneRecorded(t, capture)
 	if got := msgs[0].AccountSID; got != accountSID {
 		t.Errorf("captured AccountSID = %q, want %q (the account in the request path)", got, accountSID)
 	}
@@ -242,10 +261,7 @@ func TestCaptureServer_CapturedIsASnapshot(t *testing.T) {
 	capture := newCapture(t)
 	postMessage(t, capture, "ACsnapshot000000000000000000000", url.Values{"Body": {"first"}})
 
-	first := capture.Captured()
-	if len(first) != 1 {
-		t.Fatalf("got %d recorded messages, want 1", len(first))
-	}
+	first := requireOneRecorded(t, capture)
 	first[0].Body = "edited by the caller"
 
 	if got := capture.Captured()[0].Body; got != "first" {
@@ -343,10 +359,10 @@ func TestCaptureServer_NotifyFiresWithSubscribersAttached(t *testing.T) {
 // Nothing they assert depends on it.
 const subscribeAccount = "ACsubscribe00000000000000000000"
 
-// subscribeWait bounds every wait in the tests below — on a subscription, a
-// POST, an unsubscribe or a Close — through collect, postClient and
-// returnsWithin. It is a failure detector only: a correct server delivers in
-// milliseconds, and no test sleeps to let delivery happen.
+// subscribeWait bounds every wait in these tests — on a subscription, a
+// wake-up, a POST, an unsubscribe or a Close — through collect, postClient and
+// returnsWithin, or directly. It is a failure detector only: a correct server
+// delivers in milliseconds, and no test sleeps to let delivery happen.
 const subscribeWait = 5 * time.Second
 
 // backlog is how many messages the slow-subscriber tests queue for a
@@ -622,21 +638,15 @@ func returnsWithin(t *testing.T, what string, fn func()) {
 func TestCapture_RetainsWholePostedForm(t *testing.T) {
 	capture := newCapture(t)
 
-	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL, HTTPClient: postClient}
 	sms := twilio.OutboundSMS{
 		From:           "+15105559999",
 		To:             "+15551234567",
 		Body:           "hi back",
 		StatusCallback: "http://127.0.0.1:9/status?ref=fidelity",
 	}
-	if _, err := rest.SendSMS(context.Background(), sms); err != nil {
-		t.Fatalf("SendSMS: %v", err)
-	}
+	sendSMS(t, capture, subscribeAccount, sms)
 
-	msgs := capture.Captured()
-	if len(msgs) != 1 {
-		t.Fatalf("got %d recorded messages, want 1", len(msgs))
-	}
+	msgs := requireOneRecorded(t, capture)
 	want := url.Values{
 		"From":           {sms.From},
 		"To":             {sms.To},
@@ -666,16 +676,13 @@ func TestCapture_StatusCallbackIsNeverCalled(t *testing.T) {
 	defer callback.Close()
 	capture := newCapture(t)
 
-	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL, HTTPClient: postClient}
 	sms := twilio.OutboundSMS{
 		From:           "+15105559999",
 		To:             "+15551234567",
 		Body:           "track me",
 		StatusCallback: callback.URL + "/status?ref=never-called",
 	}
-	if _, err := rest.SendSMS(context.Background(), sms); err != nil {
-		t.Fatalf("SendSMS: %v", err)
-	}
+	sendSMS(t, capture, subscribeAccount, sms)
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("the capture server requested the StatusCallback %d time(s) while handling the send, want never", n)
 	}
@@ -686,8 +693,8 @@ func TestCapture_StatusCallbackIsNeverCalled(t *testing.T) {
 	if n := calls.Load(); n != 0 {
 		t.Errorf("the capture server requested the StatusCallback %d time(s) by the time it had closed, want never", n)
 	}
-	if recorded := capture.Captured(); len(recorded) != 1 || recorded[0].Form.Get("StatusCallback") != sms.StatusCallback {
-		t.Errorf("Captured = %+v, want the one message, its StatusCallback %q recorded", recorded, sms.StatusCallback)
+	if got := requireOneRecorded(t, capture)[0].Form.Get("StatusCallback"); got != sms.StatusCallback {
+		t.Errorf("recorded StatusCallback = %q, want %q", got, sms.StatusCallback)
 	}
 }
 
@@ -719,10 +726,7 @@ func TestCapture_RetainsFieldsItDoesNotKnow(t *testing.T) {
 		t.Fatalf("POST %s: status %d, want %d", endpoint, resp.StatusCode, http.StatusCreated)
 	}
 
-	msgs := capture.Captured()
-	if len(msgs) != 1 {
-		t.Fatalf("got %d recorded messages, want 1", len(msgs))
-	}
+	msgs := requireOneRecorded(t, capture)
 	if got := msgs[0].Form; !reflect.DeepEqual(got, posted) {
 		t.Errorf("recorded Form = %v, want exactly what was posted, without the URL's query: %v", got, posted)
 	}
@@ -741,16 +745,10 @@ func TestCapture_RetainsFieldsItDoesNotKnow(t *testing.T) {
 func TestCapture_StatusCallbackAbsentWhenNotSent(t *testing.T) {
 	capture := newCapture(t)
 
-	rest := &twilio.RESTClient{AccountSID: subscribeAccount, BaseURL: capture.URL, HTTPClient: postClient}
 	sms := twilio.OutboundSMS{From: "+15105559999", To: "+15551234567", Body: "no callback"}
-	if _, err := rest.SendSMS(context.Background(), sms); err != nil {
-		t.Fatalf("SendSMS: %v", err)
-	}
+	sendSMS(t, capture, subscribeAccount, sms)
 
-	msgs := capture.Captured()
-	if len(msgs) != 1 {
-		t.Fatalf("got %d recorded messages, want 1", len(msgs))
-	}
+	msgs := requireOneRecorded(t, capture)
 	if vs, present := msgs[0].Form["StatusCallback"]; present {
 		t.Errorf("recorded Form has StatusCallback = %q, want the key absent — none was sent", vs)
 	}
@@ -772,10 +770,7 @@ func TestCapture_StatusCallbackKeptWhenSentEmpty(t *testing.T) {
 	posted := url.Values{"Body": {"empty callback"}, "StatusCallback": {""}}
 	postMessage(t, capture, subscribeAccount, posted)
 
-	recorded := capture.Captured()
-	if len(recorded) != 1 {
-		t.Fatalf("got %d recorded messages, want 1", len(recorded))
-	}
+	recorded := requireOneRecorded(t, capture)
 	delivered, err := collect(msgs, 1)
 	if err != nil {
 		t.Fatalf("subscriber: %v", err)
@@ -905,11 +900,7 @@ func TestCapture_OtherBodiesAreRecordedEmpty(t *testing.T) {
 				t.Errorf("status %d, want %d, as for any request whose body is not read", resp.StatusCode, http.StatusCreated)
 			}
 
-			recorded := capture.Captured()
-			if len(recorded) != 1 {
-				t.Fatalf("got %d recorded messages, want 1", len(recorded))
-			}
-			if msg := recorded[0]; len(msg.Form) != 0 || msg.From != "" || msg.To != "" || msg.Body != "" {
+			if msg := requireOneRecorded(t, capture)[0]; len(msg.Form) != 0 || msg.From != "" || msg.To != "" || msg.Body != "" {
 				t.Errorf("recorded Form %v, From %q, To %q, Body %q; want all of them empty, the body unread", msg.Form, msg.From, msg.To, msg.Body)
 			}
 		})
@@ -932,11 +923,7 @@ func TestCapture_ArrivalTimestampBracketsThePost(t *testing.T) {
 	postMessage(t, capture, subscribeAccount, url.Values{"Body": {"when"}})
 	after := time.Now()
 
-	recorded := capture.Captured()
-	if len(recorded) != 1 {
-		t.Fatalf("got %d recorded messages, want 1", len(recorded))
-	}
-	at := recorded[0].ReceivedAt
+	at := requireOneRecorded(t, capture)[0].ReceivedAt
 	if at.Before(before) || at.After(after) {
 		t.Errorf("ReceivedAt = %v, want it within the POST: after %v and before %v", at, before, after)
 	}
@@ -1625,10 +1612,7 @@ func TestCapture_FormsAreNotShared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("subscriber B: %v", err)
 	}
-	snapshot := capture.Captured()
-	if len(snapshot) != 1 {
-		t.Fatalf("got %d recorded messages, want 1", len(snapshot))
-	}
+	snapshot := requireOneRecorded(t, capture)
 
 	fromA[0].Form["Body"][0] = "edited through subscriber A"
 	fromA[0].Form.Set("Added", "by subscriber A")

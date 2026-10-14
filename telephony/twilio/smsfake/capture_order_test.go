@@ -53,11 +53,11 @@ func TestCaptureServer_RecordsBeforeItWakes(t *testing.T) {
 
 	select {
 	case <-capture.Notify():
-	case <-time.After(5 * time.Second):
-		t.Fatal("no wake-up within 5s of the message being free to record")
+	case <-time.After(subscribeWait):
+		t.Fatalf("no wake-up within %s of the message being free to record", subscribeWait)
 	}
-	if got := capture.Captured(); len(got) != 1 || got[0].Body != "recorded first" {
-		t.Errorf("Captured() = %+v, want the one message whose wake-up arrived", got)
+	if got := requireOneRecorded(t, capture)[0].Body; got != "recorded first" {
+		t.Errorf("recorded Body = %q, want %q, the one message whose wake-up arrived", got, "recorded first")
 	}
 	if err := <-posted; err != nil {
 		t.Fatal(err)
