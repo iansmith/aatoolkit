@@ -31,11 +31,11 @@ func stampOf(path string) fileStamp {
 // disk. It watched a second, gitignored overlay alongside it until AATK-33
 // deleted that mechanism; one path is now the whole story.
 //
-// Detection is mtime-based, per the ticket: a poll on the dispatch path, not a
-// filesystem watcher. That makes the no-change case an os.Stat pair and nothing
-// more — the check runs before every command typed at the prompt, so it has to
-// stay cheap. The tradeoff is that a content change landing inside the
-// filesystem's mtime resolution is invisible; on APFS that resolution is
+// Detection is mtime-based, as AATK-27 specified: a poll on the dispatch path,
+// not a filesystem watcher. That makes the no-change case a single os.Stat and
+// nothing more — the check runs before every command typed at the prompt, so
+// it has to stay cheap. The tradeoff is that a content change landing inside
+// the filesystem's mtime resolution is invisible; on APFS that resolution is
 // nanoseconds, so it is not a practical concern here.
 type configReloader struct {
 	path string

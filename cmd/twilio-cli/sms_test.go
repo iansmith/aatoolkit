@@ -454,11 +454,11 @@ func TestSMSCaptureGuidance_ReflectsNonDefaultPort(t *testing.T) {
 }
 
 // TestRunSMS_CancelledContextDuringWaitReturnsPromptly is the third exit from
-// the wait, and the one no ticket expectation names: Ctrl-C must not leave the
-// operator staring at the command for the rest of a 35s bound. The assertion is
-// on the error identity rather than on elapsed time, so it cannot pass by being
-// slow, and it rejects a cancellation that happened during the webhook POST
-// instead of during the wait.
+// the wait, and the one none of AATK-31's expectations names: Ctrl-C must not
+// leave the operator staring at the command for the rest of a 35s bound. The
+// assertion is on the error identity rather than on elapsed time, so it cannot
+// pass by being slow, and it rejects a cancellation that happened during the
+// webhook POST instead of during the wait.
 func TestRunSMS_CancelledContextDuringWaitReturnsPromptly(t *testing.T) {
 	const authToken = "test-auth-token"
 	const from, to, body = "+15551234567", "+15105559999", "hello there"

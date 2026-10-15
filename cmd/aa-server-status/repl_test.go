@@ -582,7 +582,7 @@ func TestDispatch_Bounce_CallsEngineBounce(t *testing.T) {
 	}
 }
 
-// TestPrintHelp_ListsBounce pins the ticket's Definition-of-Done item that a
+// TestPrintHelp_ListsBounce pins AATK-28's Definition-of-Done item that a
 // verb users cannot discover is a verb that does not exist for them.
 func TestPrintHelp_ListsBounce(t *testing.T) {
 	var out strings.Builder
@@ -720,7 +720,7 @@ func TestPrintSingleStatus_ShowsAQuietDisabledServerAskedForByName(t *testing.T)
 }
 
 func TestPrintStatus_AllServersQuietAndDisabledLeavesHeaderOnly(t *testing.T) {
-	// The end state the ticket describes: a fleet fully switched to
+	// The end state AATK-94 describes: a fleet fully switched to
 	// speech-to-speech, every legacy server disabled and quiet. The table
 	// collapses to its header rather than panicking or emitting a stray row.
 	var out strings.Builder

@@ -263,7 +263,7 @@ func TestTwilioCLIRelativeAudioPathFromOtherCwd(t *testing.T) {
 	})
 }
 
-// TestTwilioCLIWithoutAudioFlagKeepsMicDefault guards the ticket's behavior 4:
+// TestTwilioCLIWithoutAudioFlagKeepsMicDefault guards AATK-56's behavior 4:
 // with no -audio, the mic path stays selected. The whole feature is a
 // reassignment of the streamMic package var (dial.go), so a wiring bug that
 // installed the file source unconditionally — with an empty path — would break
@@ -335,7 +335,7 @@ func TestResolveConfigPath_EnvUsedWhenFlagAbsent(t *testing.T) {
 	}
 }
 
-// TestResolveConfigPath_NeitherSetNamesBothSources is the ticket's core
+// TestResolveConfigPath_NeitherSetNamesBothSources is AATK-97's core
 // requirement. With no source given there is nothing to fall back to: inventing
 // a filename is what broke, and it produced an error the operator could not act
 // on. The error must instead name both ways to supply the path.
@@ -724,7 +724,7 @@ func TestResolveServerName_FlagWinsOverEnv(t *testing.T) {
 }
 
 // TestResolveServerName_EnvUsedWhenFlagAbsent pins the second source. This is
-// the mechanism that removes the friction the ticket names: the operator
+// the mechanism that removes the friction AATK-98 names: the operator
 // exports the name once and every invocation resolves without typing it.
 func TestResolveServerName_EnvUsedWhenFlagAbsent(t *testing.T) {
 	got, err := resolveServerName("", "from-env")
@@ -801,7 +801,7 @@ func TestWebhookTarget_ServerNameFromEnv(t *testing.T) {
 }
 
 // TestWebhookTarget_UnknownServerNamesTheValueLookedUp pins the error text on
-// the value actually looked up. The failure this ticket started from was an
+// the value actually looked up. The failure AATK-98 started from was an
 // error naming a hardcoded server the operator had never configured; an error
 // that quotes the name it searched for is the difference between "typo in
 // -server" and "no idea what this tool wants".
