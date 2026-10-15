@@ -185,14 +185,18 @@ func TestSendStreamContext_OneClientSpanUnderCaller(t *testing.T) {
 
 // TestModelSpan_StartOmitsWhatIsUnknown: a span leaves out a start value it
 // does not have rather than recording it empty. With no Tier.Model the span
-// is named "chat" and has no gen_ai.request.model; with no host in the tier
-// URL it has no server.address or server.port; and with a scheme that has
-// no default port and none given, it has no server.port.
+// is named "chat" and has no gen_ai.request.model; with a tier URL that does
+// not parse, or parses with no host, it has no server.address and so no
+// server.port either, even when the URL gives a port or its scheme has a
+// default one; and with a scheme that has no default port and none given,
+// it has no server.port. The host-less URLs go to an in-memory transport,
+// since a URL with a port and no host would dial this machine.
 func TestModelSpan_StartOmitsWhatIsUnknown(t *testing.T) {
 	srv, _ := newScriptedSSEServer(okSteps()...)
 	defer srv.Close()
 	cases := []struct {
 		name, url, model string
+		inMemory         bool
 		wantName         string
 		want             map[string]any
 		wantAbsent       []string
@@ -204,7 +208,19 @@ func TestModelSpan_StartOmitsWhatIsUnknown(t *testing.T) {
 			wantAbsent: []string{"gen_ai.request.model"},
 		},
 		{
-			name: "no host", url: "http://bad host/v1/chat/completions", model: "test",
+			name: "unparsable URL", url: "http://bad host/v1/chat/completions", model: "test",
+			wantName:   "chat test",
+			want:       map[string]any{"gen_ai.request.model": "test"},
+			wantAbsent: []string{"server.address", "server.port"},
+		},
+		{
+			name: "no host, scheme default port", url: "http:///v1/chat/completions", model: "test", inMemory: true,
+			wantName:   "chat test",
+			want:       map[string]any{"gen_ai.request.model": "test"},
+			wantAbsent: []string{"server.address", "server.port"},
+		},
+		{
+			name: "no host, explicit port", url: "http://:8080/v1/chat/completions", model: "test", inMemory: true,
 			wantName:   "chat test",
 			want:       map[string]any{"gen_ai.request.model": "test"},
 			wantAbsent: []string{"server.address", "server.port"},
@@ -219,6 +235,9 @@ func TestModelSpan_StartOmitsWhatIsUnknown(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h, rec := tracedHost(t, tc.url, Tier{Model: tc.model, MaxTokens: 512})
+			if tc.inMemory {
+				h.client.Transport = &ctxRecordingTransport{}
+			}
 			_, _, _ = h.SendStream(traceWindow, "fast", func(string) {})
 			span := onlyModelSpan(t, rec)
 			if span.Name() != tc.wantName {

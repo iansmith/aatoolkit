@@ -151,7 +151,7 @@ records why it failed.
 | `gen_ai.request.model` | `Tier.Model`, when set |
 | `gen_ai.request.stream` | `true` |
 | `gen_ai.request.max_tokens` | `Tier.MaxTokens`, when above 0 |
-| `server.address`, `server.port` | the tier URL's host, and its port or the scheme's default |
+| `server.address`, `server.port` | the tier URL's host, and its port or the scheme's default; neither when the URL has no host |
 | `aatoolkit.llm.tier` | the tier name the caller passed |
 | `gen_ai.response.model`, `gen_ai.response.id` | the first non-empty values the stream sent |
 | `gen_ai.response.finish_reasons` | the stream's finish reason, or `["error"]` for a failure that had none |

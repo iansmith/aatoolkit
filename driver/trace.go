@@ -84,13 +84,17 @@ func tracer(tp trace.TracerProvider) trace.Tracer {
 // serverAddrPort returns the host and port of rawURL for server.address and
 // server.port: the hostname alone, never userinfo, path or query, and the
 // explicit port, else the scheme's default. An empty addr or a zero port
-// means the attribute is omitted.
+// means the attribute is omitted. A URL with no host gives no port either,
+// because the conventions record server.port only beside server.address.
 func serverAddrPort(rawURL string) (addr string, port int) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", 0
 	}
 	addr = u.Hostname()
+	if addr == "" {
+		return "", 0
+	}
 	if p := u.Port(); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n <= 0 {

@@ -126,6 +126,8 @@ func TestModelSpan_NeverRecordsSecretsOrNumbers(t *testing.T) {
 
 // TestServerAddrPort_StripsUserinfoPathQuery: the address recorded on a span
 // is the URL's host alone, and the port is the explicit one or the scheme's.
+// A URL with no host gives no port either, since server.port is recorded
+// only beside a server.address.
 func TestServerAddrPort_StripsUserinfoPathQuery(t *testing.T) {
 	cases := []struct {
 		raw      string
@@ -139,6 +141,9 @@ func TestServerAddrPort_StripsUserinfoPathQuery(t *testing.T) {
 		{"ftp://files.example.invalid/x", "files.example.invalid", 0},
 		{"http://%zz", "", 0},
 		{"", "", 0},
+		{"http:///v1/chat/completions", "", 0},
+		{"http://:8080/v1/chat/completions", "", 0},
+		{"https://u:pw-secret@:8443/v1", "", 0},
 	}
 	for _, c := range cases {
 		addr, port := serverAddrPort(c.raw)
