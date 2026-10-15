@@ -276,6 +276,37 @@ func TestSendStreamContext_TimeToFirstContentAfterRoleOnlyChunk(t *testing.T) {
 	}
 }
 
+// TestSendStreamContext_FirstArrivalCountsFromSend: the first-arrival times
+// are measured from when the request is sent, not from when the response
+// headers arrive. Many upstreams send their headers only once the first
+// token is ready, as this scripted one does (its headers go out with its
+// first flush), so timing from the headers would report near zero and drop
+// the wait for the first token.
+func TestSendStreamContext_FirstArrivalCountsFromSend(t *testing.T) {
+	const wait = 60 * time.Millisecond
+	srv, _ := newScriptedSSEServer(
+		sseStep{delay: wait, line: textLine("The quick brown fox jumps over the lazy dog.")},
+		sseStep{line: finishLine("stop")},
+		sseStep{line: doneLine},
+	)
+	defer srv.Close()
+	h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+	if _, _, err := h.SendStream(traceWindow, "fast", func(string) {}); err != nil {
+		t.Fatalf("SendStream: %v", err)
+	}
+	attrs := attrMap(onlyModelSpan(t, rec))
+	for _, key := range []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"} {
+		v, ok := attrs[key]
+		if !ok {
+			t.Errorf("%s missing", key)
+			continue
+		}
+		if v.AsFloat64() < wait.Seconds()*0.8 {
+			t.Errorf("%s = %v s; want at least about the %v the upstream took before its headers", key, v.Emit(), wait)
+		}
+	}
+}
+
 // TestSendStreamContext_FirstContentExcludesOnSegment: the first-arrival
 // times are taken before a line is processed, so a slow onSegment fired by
 // the first content line does not count toward time to first content; it
