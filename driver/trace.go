@@ -6,10 +6,15 @@ package driver
 // TestTraceSource_OnlyTraceGoTouchesSpans keeps the package's other files
 // off spans. Its functions are free functions or methods on its own types,
 // handed no type that is or holds a Tier (its APIKey), a Host (its tiers,
-// history and prompt), a request, a header or an error (whose text can echo
-// an upstream body): not as a parameter, a result, a field of a struct it is
-// handed, or under an alias. TestTraceSource_NoSecretsReachSpanCode checks
-// those types. A string or []byte can still carry anything, so
+// history and prompt), a request, a response, a header or an error (whose
+// text can echo an upstream body): not as a parameter, a result, a field of
+// a struct it is handed, or under an alias.
+// TestTraceSource_NoSecretsReachSpanCode checks those types: it refuses any
+// type from outside the package but a short allowlist, any interface or
+// any, and a type parameter, and it refuses a read of a context value. A
+// string or []byte can still carry anything (the tier URL arrives as one,
+// userinfo included, and serverAddrPort keeps only its host and port), and
+// a package variable or a call's result is not followed, so
 // TestModelSpan_NeverRecordsSecretsOrNumbers checks what the spans hold.
 // ---------------------------------------------------------------------------
 
