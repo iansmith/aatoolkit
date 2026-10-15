@@ -135,6 +135,22 @@ func TestServeHTTP_AuthorizeFalseNeverAsksAnswerCall(t *testing.T) {
 	}
 }
 
+// A From that is not E.164 is refused with 403 before the hook is consulted,
+// so a refusing hook never turns it into Say+Hangup.
+func TestServeHTTP_BadFromNeverAsksAnswerCall(t *testing.T) {
+	for _, from := range []string{"5105551234", "anonymous"} {
+		rec := &answerCallRecorder{say: "x", refuse: true}
+		s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss", AnswerCall: rec.hook}
+		form := url.Values{"From": {from}, "To": {"+15105550000"}, "CallSid": {"CA1"}}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, signedWebhookRequest(t, "authtoken", "https", "example.com", form))
+
+		if w.Code != http.StatusForbidden || len(rec.asked) != 0 {
+			t.Fatalf("From=%q: status %d, hook asked %v; want 403 and no hook call", from, w.Code, rec.asked)
+		}
+	}
+}
+
 // Frame.To carries the webhook's dialed number onto the start frame.
 func TestServeStreams_ToThreadedFromWebhook(t *testing.T) {
 	const from, to = "+15105550123", "+15105550999"
@@ -158,6 +174,37 @@ func TestServeStreams_ToThreadedFromWebhook(t *testing.T) {
 	case f := <-received:
 		if f.To != to || f.From != from {
 			t.Fatalf("Frame From/To = %q/%q, want %q/%q", f.From, f.To, from, to)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler not called within 2s")
+	}
+}
+
+// Frame.To is "" when the webhook's To was not E.164: the value recorded for
+// the start frame is the validated one, not the raw form field. From is checked
+// too, so a pass cannot come from the CallSid simply not being found.
+func TestServeStreams_ToEmptyWhenWebhookToInvalid(t *testing.T) {
+	const from = "+15105550123"
+	s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss"}
+	form := url.Values{"From": {from}, "To": {"client:alice"}, "CallSid": {"CA1"}}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, signedWebhookRequest(t, "authtoken", "https", "example.com", form))
+	if w.Code != http.StatusOK {
+		t.Fatalf("webhook status = %d", w.Code)
+	}
+
+	received := make(chan twilio.Frame, 1)
+	s.HandleStream = func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
+		received <- f
+		return nil
+	}
+	conn := dialStreams(t, streamsServer(t, s))
+	sendStart(t, conn, "SS1", "CA1")
+
+	select {
+	case f := <-received:
+		if f.From != from || f.To != "" {
+			t.Fatalf("Frame From/To = %q/%q, want %q/\"\"", f.From, f.To, from)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler not called within 2s")
