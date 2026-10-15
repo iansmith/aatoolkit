@@ -570,13 +570,14 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 // its deadline applies when it is the earlier one. Once ctx is done the call
 // fails at the next read, line or segment, even when the rest of the stream
 // is already buffered: no onSegment call starts after that, though one
-// already running is not interrupted. The error wraps context.Cause(ctx)
-// wherever the call stops, as net/http's does: ctx.Err() itself, or for a
-// context cancelled or timed out with a cause (context.WithCancelCause,
-// WithTimeoutCause, WithDeadlineCause) that cause, which errors.Is then
-// matches instead of context.Canceled or DeadlineExceeded. It is the one
-// implementation of a model request: Send, SendStream and SendContext all
-// end here.
+// already running is not interrupted. Wherever the call stops once ctx is
+// done (sending, waiting for the response headers, reading a non-200 status
+// body or the stream, or between lines), and over HTTP/1 or HTTP/2 alike,
+// the error matches both ctx.Err() and context.Cause(ctx) under errors.Is:
+// for a context cancelled or timed out with a cause (context.WithCancelCause,
+// WithTimeoutCause, WithDeadlineCause), it matches that cause as well as
+// context.Canceled or DeadlineExceeded. It is the one implementation of a
+// model request: Send, SendStream and SendContext all end here.
 //
 // Once its tier is found and its window encodes, a call gets one CLIENT
 // span, a child of ctx's span, from Config.TracerProvider or the global
@@ -618,16 +619,18 @@ func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []
 	call.requestSent()
 	resp, err := h.postStreamRequest(ctx, ep, body)
 	if err != nil {
-		return nil, nil, streamErrorType(ctx, err, errTypeTransport), err
+		return failed(ctx, err, errTypeTransport)
 	}
 	defer resp.Body.Close()
 
 	// A done ctx fails the next network read, but lines the transport has
 	// already buffered need none. So ctx is also checked before each line and
 	// before the end-of-stream flush, and a segment cut once it is done is
-	// dropped: no onSegment call starts after ctx is done. The checks fail
-	// with ctx's cause, as the transport's read does, so the error does not
-	// depend on which of them saw ctx done first.
+	// dropped: no onSegment call starts after ctx is done. Once ctx is done a
+	// read fails with ctx's cause, whatever the transport's read returned
+	// (net/http's HTTP/2 transport returns ctx.Err() where HTTP/1 returns the
+	// cause), so the error does not depend on the protocol or on which site
+	// saw ctx done first.
 	emit := func(seg string) {
 		if ctx.Err() == nil {
 			onSegment(seg)
@@ -637,23 +640,21 @@ func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []
 	scanner.Buffer(make([]byte, 64*1024), 256*1024)
 	for scanner.Scan() {
 		if err := context.Cause(ctx); err != nil {
-			err = streamReadError(err)
-			return nil, nil, streamErrorType(ctx, err, errTypeStreamRead), err
+			return failed(ctx, streamReadError(err), errTypeStreamRead)
 		}
 		at := call.now()
 		hadChunk, hadContent := st.chunks > 0, st.hasContent
 		if err := processSSELine(scanner.Text(), st, emit); err != nil {
-			return nil, nil, streamErrorType(ctx, err, errTypeDecode), err
+			return failed(ctx, err, errTypeDecode)
 		}
 		call.observe(st, hadChunk, hadContent, at)
 	}
 	err = scanner.Err()
-	if err == nil {
-		err = context.Cause(ctx)
+	if cause := context.Cause(ctx); cause != nil {
+		err = cause
 	}
 	if err != nil {
-		err = streamReadError(err)
-		return nil, nil, streamErrorType(ctx, err, errTypeStreamRead), err
+		return failed(ctx, streamReadError(err), errTypeStreamRead)
 	}
 	if !st.hasContent {
 		var err error
@@ -662,7 +663,7 @@ func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []
 		} else {
 			err = fmt.Errorf("no content in SSE stream")
 		}
-		return nil, nil, streamErrorType(ctx, err, errTypeEmpty), err
+		return failed(ctx, err, errTypeEmpty)
 	}
 	// Flush any trailing text that didn't hit a boundary.
 	if seg, ok := st.acc.flush(); ok {
@@ -676,6 +677,35 @@ func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []
 func streamReadError(err error) error {
 	return fmt.Errorf("reading SSE stream: %w", err)
 }
+
+// failed is what streamChat returns for a request that failed with err: no
+// content, the error.type for its span, and the error for the caller. Once
+// ctx is done, that error matches both ctx.Err() and context.Cause(ctx)
+// under errors.Is, whichever site failed: it is err when err already does,
+// and a contextDoneError around err otherwise. ctx must be checked before
+// streamChat's own cancel runs, which the return statement guarantees.
+func failed(ctx context.Context, err error, fallback string) ([]byte, []byte, string, error) {
+	errType := streamErrorType(ctx, err, fallback)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if cause := context.Cause(ctx); !errors.Is(err, ctxErr) || !errors.Is(err, cause) {
+			err = &contextDoneError{err: err, ctxErr: ctxErr, cause: cause}
+		}
+	}
+	return nil, nil, errType, err
+}
+
+// contextDoneError is the error of a request that failed once its context
+// was done. It keeps the failing site's error, text and all, and adds the
+// context's error and cause to what errors.Is and errors.As see: net/http's
+// HTTP/1 transport fails a request cut short by its context with the cause,
+// its HTTP/2 transport with ctx.Err(), and a status error whose body read the
+// context cut short with neither.
+type contextDoneError struct {
+	err, ctxErr, cause error
+}
+
+func (e *contextDoneError) Error() string   { return e.err.Error() }
+func (e *contextDoneError) Unwrap() []error { return []error{e.err, e.ctxErr, e.cause} }
 
 // streamErrorType classifies a failed request for its span's error.type.
 // The context comes first, because a deadline or cancellation surfaces as
