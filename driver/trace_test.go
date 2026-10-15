@@ -757,6 +757,45 @@ func TestModelSpan_EndsOnceAfterLastSegment(t *testing.T) {
 	})
 }
 
+// TestModelSpan_PanickingOnSegmentKeepsFirstArrival: a line's first-arrival
+// marks are taken even when onSegment panics while that line is processed,
+// so the span of a call that failed that way still carries the time to first
+// chunk and the time to first content, which arrived.
+func TestModelSpan_PanickingOnSegmentKeepsFirstArrival(t *testing.T) {
+	cases := map[string][]sseStep{
+		"content first": okSteps(),
+		"after a role-only chunk": {
+			{line: roleOnlyLine},
+			{line: textLine("The quick brown fox jumps over the lazy dog.")},
+			{line: finishLine("stop")},
+			{line: doneLine},
+		},
+	}
+	for name, steps := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := newScriptedSSEServer(steps...)
+			defer srv.Close()
+			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Error("onSegment's panic did not propagate out of SendStream")
+					}
+				}()
+				_, _, _ = h.SendStream(traceWindow, "fast", func(string) { panic("onSegment failed") })
+			}()
+			span := onlyModelSpan(t, rec)
+			requireAttrs(t, span, map[string]any{"error.type": "_OTHER"})
+			attrs := attrMap(span)
+			for _, key := range []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"} {
+				if _, ok := attrs[key]; !ok {
+					t.Errorf("%s missing; the line that panicked carried it", key)
+				}
+			}
+		})
+	}
+}
+
 // TestSendStreamContext_ConcurrentCallsOwnTheirSpans: concurrent calls on one
 // Host each get their own span, under their own caller, carrying their own
 // response. Run it under -race.
