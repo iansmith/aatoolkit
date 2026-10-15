@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
@@ -40,10 +39,11 @@ func closedHostPort() string {
 
 // TestModelSpan_NeverRecordsSecretsOrNumbers (DoD f): whatever the outcome --
 // success, an upstream status echoing the key and the caller's number, an SSE
-// error payload echoing both, a transport failure, a timeout -- no model span
-// holds the API key, URL userinfo or query secrets, an auth header's name or
-// scheme, or an E.164 number. With capture on, the same holds for the secrets
-// and headers, using number-free fixtures.
+// error payload echoing both, a transport failure, a timeout -- no span the
+// call ends, the model span or any other, holds the API key, URL userinfo or
+// query secrets, an auth header's name or scheme, or an E.164 number. With
+// capture on, the same holds for the secrets and headers, using number-free
+// fixtures.
 func TestModelSpan_NeverRecordsSecretsOrNumbers(t *testing.T) {
 	const apiKey = "sk-scan-secret"
 	const number = "+15551234567"
@@ -104,7 +104,7 @@ func TestModelSpan_NeverRecordsSecretsOrNumbers(t *testing.T) {
 		h, rec := tracedHost(t, url, Tier{Model: "test", MaxTokens: 512, APIKey: apiKey})
 		_, _, _ = h.SendStreamContext(ctx, window, "fast", func(string) {})
 		span := onlyModelSpan(t, rec)
-		for _, hit := range scanSpans([]sdktrace.ReadOnlySpan{span}, needles, re) {
+		for _, hit := range scanSpans(rec.Ended(), needles, re) {
 			t.Error(hit)
 		}
 		if _, ok := attrMap(span)["gen_ai.input.messages"]; ok != wantInput {
@@ -342,16 +342,20 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 }
 
 // TestTraceSource_OnlyTraceGoTouchesSpans (DoD f): trace.go is the only
-// non-test file in the package that starts, annotates or ends a span, so the
-// rules TestTraceSource_NoSecretsReachSpanCode holds it to cover every span
-// write. Every other non-test file imports no otel package but
-// go.opentelemetry.io/otel/trace, uses that only to name TracerProvider,
-// never selects a field named span, and never calls RecordError, AddEvent,
-// SetStatus, SetAttributes or SetName. Each rule must find something in
-// trace.go itself, so none of them is vacuous.
+// non-test file in the package that looks up a tracer or starts, annotates
+// or ends a span, so the rules TestTraceSource_NoSecretsReachSpanCode holds
+// it to apply to every span the package makes. Every other non-test file
+// imports no otel package but go.opentelemetry.io/otel/trace, uses that only
+// to name TracerProvider, never selects a field named span, never calls
+// tracer or a Tracer method, and never calls Start, End, RecordError,
+// AddEvent, SetStatus, SetAttributes or SetName. Each rule must find
+// something in trace.go itself, so none of them is vacuous. A call named
+// Start or End on something other than a span, were another file to need
+// one, would trip it too.
 func TestTraceSource_OnlyTraceGoTouchesSpans(t *testing.T) {
 	const traceImport = "go.opentelemetry.io/otel/trace"
 	spanCalls := map[string]bool{"RecordError": true, "AddEvent": true, "SetStatus": true, "SetAttributes": true, "SetName": true}
+	startEnd := map[string]bool{"Start": true, "End": true}
 
 	// spanWrites returns what in path breaks each rule, keyed by the rule.
 	spanWrites := func(t *testing.T, path string) map[string][]string {
@@ -391,8 +395,20 @@ func TestTraceSource_OnlyTraceGoTouchesSpans(t *testing.T) {
 					hit("trace use", x, "uses "+traceName+"."+x.Sel.Name)
 				}
 			case *ast.CallExpr:
-				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && spanCalls[sel.Sel.Name] {
-					hit("span call", x, "calls "+sel.Sel.Name)
+				switch fn := x.Fun.(type) {
+				case *ast.Ident:
+					if fn.Name == "tracer" {
+						hit("tracer lookup", x, "calls tracer")
+					}
+				case *ast.SelectorExpr:
+					switch {
+					case spanCalls[fn.Sel.Name]:
+						hit("span call", x, "calls "+fn.Sel.Name)
+					case startEnd[fn.Sel.Name]:
+						hit("span start or end", x, "calls "+fn.Sel.Name)
+					case fn.Sel.Name == "Tracer":
+						hit("tracer lookup", x, "calls Tracer")
+					}
 				}
 			}
 			return true
@@ -421,7 +437,7 @@ func TestTraceSource_OnlyTraceGoTouchesSpans(t *testing.T) {
 	}
 
 	control := spanWrites(t, "trace.go")
-	for _, rule := range []string{"otel import", "trace use", "span field", "span call"} {
+	for _, rule := range []string{"otel import", "trace use", "span field", "span call", "span start or end", "tracer lookup"} {
 		if len(control[rule]) == 0 {
 			t.Errorf("control: the %q rule finds nothing in trace.go, so it cannot see a span write anywhere", rule)
 		}
