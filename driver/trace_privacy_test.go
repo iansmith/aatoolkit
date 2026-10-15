@@ -543,9 +543,11 @@ func TestModelSpan_ErrorStatusAndType(t *testing.T) {
 	}
 }
 
-// TestSendStreamContext_NoSpanWithoutRequest: a call that sends no request --
-// an unknown tier, or a window that is not valid JSON -- produces no span. The
-// control call shows the same Host does produce one when it sends.
+// TestSendStreamContext_NoSpanWithoutRequest: a call that fails before its
+// span starts -- an unknown tier, or a window that is not valid JSON -- sends
+// no request and produces no span. The control call shows the same Host does
+// produce one when it sends. A call that sends nothing for a later reason
+// still gets a span; see TestSendStreamContext_SpanWhenNothingIsSent.
 func TestSendStreamContext_NoSpanWithoutRequest(t *testing.T) {
 	srv, reqs := newScriptedSSEServer(okSteps()...)
 	defer srv.Close()
@@ -566,5 +568,57 @@ func TestSendStreamContext_NoSpanWithoutRequest(t *testing.T) {
 	}
 	if n := len(modelSpans(rec)); n != 1 {
 		t.Errorf("control call: %d model spans, want 1", n)
+	}
+}
+
+// TestSendStreamContext_SpanWhenNothingIsSent: a call whose tier is found and
+// whose window encodes gets its span even when no request goes out -- its
+// context already done, or its tier URL one no request can be built for --
+// and the span records why it failed.
+func TestSendStreamContext_SpanWhenNothingIsSent(t *testing.T) {
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	cases := []struct {
+		name     string
+		ctx      context.Context
+		badURL   bool
+		wantType string
+		wantIs   error
+	}{
+		{name: "context already canceled", ctx: canceled, wantType: "canceled", wantIs: context.Canceled},
+		{name: "deadline already passed", ctx: expired, wantType: "timeout", wantIs: context.DeadlineExceeded},
+		{name: "URL no request can be built for", ctx: context.Background(), badURL: true, wantType: "transport_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withoutCaptureEnv(t)
+			srv, reqs := newScriptedSSEServer(okSteps()...)
+			defer srv.Close()
+			url := chatURL(srv)
+			if tc.badURL {
+				url = "http://bad host/v1/chat/completions"
+			}
+			h, rec := tracedHost(t, url, Tier{Model: "test", MaxTokens: 512})
+			_, _, err := h.SendStreamContext(tc.ctx, traceWindow, "fast", func(string) {})
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("error %q does not wrap %v", err, tc.wantIs)
+			}
+			if n := reqs.Count(); n != 0 {
+				t.Errorf("%d requests reached the upstream; want 0", n)
+			}
+			span := onlyModelSpan(t, rec)
+			requireAttrs(t, span, map[string]any{
+				"error.type":                     tc.wantType,
+				"gen_ai.response.finish_reasons": []string{"error"},
+			})
+			if st := span.Status(); st.Code != codes.Error || st.Description != "" {
+				t.Errorf("status = %v %q, want Error with an empty description", st.Code, st.Description)
+			}
+		})
 	}
 }

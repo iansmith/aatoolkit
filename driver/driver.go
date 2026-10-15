@@ -108,14 +108,16 @@ type Config struct {
 	// here, it is the consumer's to inject.
 	RealtimeURL string
 
-	// TracerProvider supplies the tracer for the span each model request
-	// produces (AATK-159): one CLIENT span per chat-completions request that
-	// is actually sent, named "chat <Tier.Model>". Nil, the default, means
-	// otel.GetTracerProvider() is resolved at each call, so a consumer that
-	// installs its SDK globally, before or after New, gets spans. With nothing
-	// installed, the no-op provider records and sends nothing. The engine
-	// never installs a provider, exporter or propagator, and never adds trace
-	// headers to the upstream request.
+	// TracerProvider supplies the tracer for the span each model call
+	// produces (AATK-159): one CLIENT span, named "chat <Tier.Model>", per
+	// call whose tier is found and whose window encodes. That includes a call
+	// that sends nothing because its context is already done or its tier URL
+	// cannot be requested; its span records why it failed. Nil, the default,
+	// means otel.GetTracerProvider() is resolved at each call, so a consumer
+	// that installs its SDK globally, before or after New, gets spans. With
+	// nothing installed, the no-op provider records and sends nothing. The
+	// engine never installs a provider, exporter or propagator, and never adds
+	// trace headers to the upstream request.
 	//
 	// Message content stays off the span by default: it is personal data (the
 	// system prompt, the user-context block, the history and the user's own
@@ -541,12 +543,14 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 // when it is the earlier one. It is the one implementation of a model
 // request: Send, SendStream and SendContext all end here.
 //
-// A request that is sent gets one CLIENT span, a child of ctx's span, from
-// Config.TracerProvider or the global provider. It covers the whole call,
-// onSegment's time included, and ends after the last segment; a call that
-// fails before sending (an unknown tier, a window that is not JSON) gets
-// none. The span is ended by a defer, so a panicking onSegment still ends it,
-// as an error of type _OTHER; the panic is not recovered.
+// Once its tier is found and its window encodes, a call gets one CLIENT
+// span, a child of ctx's span, from Config.TracerProvider or the global
+// provider; an unknown tier or a window that is not JSON gets none. A call
+// that then sends nothing, because ctx is already done or the tier URL
+// cannot be requested, still gets its span, which records why it failed.
+// The span covers the whole call, onSegment's time included, and ends after
+// the last segment. It is ended by a defer, so a panicking onSegment still
+// ends it, as an error of type _OTHER; the panic is not recovered.
 func (h *Host) SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) (content, reasoning []byte, err error) {
 	ep, ok := h.tiers[tier]
 	if !ok {
