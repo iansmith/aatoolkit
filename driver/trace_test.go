@@ -208,6 +208,35 @@ func TestSendStreamContext_TimeToFirstContentAfterRoleOnlyChunk(t *testing.T) {
 	}
 }
 
+// TestSendStreamContext_FirstContentExcludesOnSegment: the first-arrival
+// times are taken before a line is processed, so a slow onSegment fired by
+// the first content line does not count toward time to first content; it
+// does count toward the span's duration, which covers the whole call.
+func TestSendStreamContext_FirstContentExcludesOnSegment(t *testing.T) {
+	const slow = 80 * time.Millisecond
+	srv, _ := newScriptedSSEServer(okSteps()...)
+	defer srv.Close()
+	h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+	segments := 0
+	if _, _, err := h.SendStream(traceWindow, "fast", func(string) { segments++; time.Sleep(slow) }); err != nil {
+		t.Fatalf("SendStream: %v", err)
+	}
+	if segments != 1 {
+		t.Fatalf("got %d segments, want 1 from the first content line", segments)
+	}
+	span := onlyModelSpan(t, rec)
+	firstContent, ok := attrMap(span)["aatoolkit.llm.time_to_first_content"]
+	if !ok {
+		t.Fatal("aatoolkit.llm.time_to_first_content missing")
+	}
+	if firstContent.AsFloat64() >= slow.Seconds() {
+		t.Errorf("time_to_first_content = %v s; want under the %v onSegment took", firstContent.Emit(), slow)
+	}
+	if d := span.EndTime().Sub(span.StartTime()); d < slow {
+		t.Errorf("span lasted %v; want at least the %v onSegment took", d, slow)
+	}
+}
+
 // TestSendAndSendStream_ProduceOrphanRootSpan (DoD c): the context-free
 // methods run on the traced path with no caller span, so each gives one model
 // span with no parent and the same start attributes.
