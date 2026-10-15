@@ -1406,10 +1406,11 @@ func (s *Session) openTurnToRouteVerdict(trigger TurnTrigger) {
 // and the stopword turn-end -- all of which take their audio
 // position from the last VAD window, not a triggering event. The utterance,
 // turn, and response caps record their resolved (operator-tunable) bound; the
-// idle timeout's decision also follows its resolved bound (D8's silence-knob
-// production-ization) -- this is the idle cap DECISION RECORDING, distinct
-// from validateOrdering at Session.Start, which still validates against the
-// bare MaxSilenceMS constant unconditionally. The stopword records a
+// idle timeout's decision also follows its resolved bound (AATK-24 made the
+// silence knob, WithMaxSilenceMS, a production setting) -- this is the idle
+// cap DECISION RECORDING, distinct from validateOrdering at Session.Start,
+// which still validates against the bare MaxSilenceMS constant
+// unconditionally. The stopword records a
 // turn-end decision naming its cause. Silence-turn-end is NOT here: it needs
 // the triggering VADEvent (prob/silence/position), so it is recorded at its
 // own site (recordTurnEnd). Call-end records nothing (a mid-turn hangup).
