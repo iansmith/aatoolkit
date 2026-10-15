@@ -19,13 +19,22 @@ var policyInject = interp.Inject{
 	},
 }
 
+// hostOnlyInject is a consumer's Inject from before ContextSender existed:
+// the Host interface alone. Recipe R1 asks for no change to it.
+var hostOnlyInject = interp.Inject{
+	"github.com/iansmith/aatoolkit/host/host": {
+		"Host": reflect.ValueOf((*host.Host)(nil)),
+	},
+}
+
 // TestPolicy_ReachesContextFormsThroughInterp: an interpreted policy, loaded
 // with the real interp.Load, sends under the caller's context both ways the
 // release notes describe. R1: the policy is unchanged and the caller hands it
-// a WithContext view. R2: the policy takes a ctx and asserts
-// host.ContextSender. Either way the upstream request carries the caller's
-// context value; an unbound host, or a context without the value, carries
-// none.
+// a WithContext view; that works with the consumer's Inject unchanged too,
+// with Host alone and no ContextSender. R2: the policy takes a ctx and
+// asserts host.ContextSender. Either way the upstream request carries the
+// caller's context value; an unbound host, or a context without the value,
+// carries none.
 func TestPolicy_ReachesContextFormsThroughInterp(t *testing.T) {
 	window := []byte(`[{"role":"user","content":"hi"}]`)
 	withValue := func(v string) context.Context {
@@ -39,6 +48,15 @@ func TestPolicy_ReachesContextFormsThroughInterp(t *testing.T) {
 	r1, ok := v.Interface().(func(host.Host, []byte) (string, error))
 	if !ok {
 		t.Fatalf("boundpolicy.Turn has type %T", v.Interface())
+	}
+
+	v, err = interp.Load("testdata/boundpolicy", "policy", hostOnlyInject, "policy.Turn")
+	if err != nil {
+		t.Fatalf("Load boundpolicy with a Host-only Inject: %v", err)
+	}
+	r1HostOnly, ok := v.Interface().(func(host.Host, []byte) (string, error))
+	if !ok {
+		t.Fatalf("boundpolicy.Turn with a Host-only Inject has type %T", v.Interface())
 	}
 
 	v, err = interp.Load("testdata/ctxpolicy", "policy", policyInject, "policy.Turn")
@@ -57,6 +75,10 @@ func TestPolicy_ReachesContextFormsThroughInterp(t *testing.T) {
 	}{
 		{"R1 WithContext view", func(h *Host) (string, error) { return r1(h.WithContext(withValue("policy")), window) }, "policy"},
 		{"R1 unbound host", func(h *Host) (string, error) { return r1(h, window) }, nil},
+		{"R1 WithContext view, Host-only Inject", func(h *Host) (string, error) {
+			return r1HostOnly(h.WithContext(withValue("policy")), window)
+		}, "policy"},
+		{"R1 unbound host, Host-only Inject", func(h *Host) (string, error) { return r1HostOnly(h, window) }, nil},
 		{"R2 explicit context", func(h *Host) (string, error) { return r2(withValue("policy"), h, window) }, "policy"},
 		{"R2 context without the value", func(h *Host) (string, error) { return r2(context.Background(), h, window) }, nil},
 		{"R2 explicit context on a bound view", func(h *Host) (string, error) {
