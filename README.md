@@ -75,12 +75,12 @@ handler := twilio.NewStreamHandler("ws://localhost:8765/v1/realtime",
 
 ## Tracing
 
-The driver starts one OpenTelemetry CLIENT span for each chat-completions request it sends.
-The engine never installs a provider, exporter or propagator: install your SDK and the spans
-appear. Wired end to end, an inbound SMS's model call nests under the webhook's server span:
+The driver starts one OpenTelemetry CLIENT span for each model call it makes. The engine never
+installs a provider, exporter or propagator: install your SDK and the spans appear. Wired end
+to end, an inbound SMS's model call nests under the webhook's server span:
 
 ```go
-otel.SetTracerProvider(tp) // or driver.Config{TracerProvider: tp}
+otel.SetTracerProvider(tp)
 h := driver.New(cfg)
 
 srv.HandleSMS = func(ctx context.Context, m twilio.InboundSMS) {
@@ -98,7 +98,10 @@ driver.StartTwilioServer(addr, srv, driver.WithHandlerWrapper(
 
 - **Provider.** A nil `Config.TracerProvider` (the default) means the global provider, looked
   up at each call, so installing it before or after `driver.New` both work. With nothing
-  installed, the no-op provider records nothing.
+  installed, the no-op provider records nothing. Setting `driver.Config{TracerProvider: tp}`
+  instead reaches the driver alone: otelhttp still uses the global provider unless it is given
+  `otelhttp.WithTracerProvider(tp)`, so without that the webhook span goes unrecorded and the
+  model span becomes a root.
 - **Context.** `host.ContextSender` adds `SendContext` and `SendStreamContext`, which take a
   `context.Context`: its span parents the model span, and its deadline and cancellation bound
   the call (the driver's own 300 s ceiling still applies). `Send` and `SendStream` run under
@@ -133,8 +136,9 @@ driver.StartTwilioServer(addr, srv, driver.WithHandlerWrapper(
 
 The span is named `chat {Tier.Model}` (`chat` when the model is empty), with scope
 `github.com/iansmith/aatoolkit/driver` and schema `https://opentelemetry.io/schemas/1.41.0`.
-It covers the whole call, `onSegment` time included. A call that fails before sending (an
-unknown tier, a window that is not JSON) gets no span.
+It covers the whole call, `onSegment` time included. An unknown tier or a window that is not
+JSON gets no span. A call that sends nothing because its context is already done, or because
+its tier URL cannot be requested, still gets one, which records why it failed.
 
 | Attribute | Value |
 |---|---|
