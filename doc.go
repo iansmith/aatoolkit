@@ -7,6 +7,5 @@
 // and policy of any given assistant live in a separate, private repository that
 // depends on this module — never the reverse.
 //
-// Extraction of the reusable packages from their original monorepo is in progress;
-// see design/ for the architecture and the split plan.
+// See design/ for design notes on individual subsystems.
 package aatoolkit
