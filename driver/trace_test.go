@@ -563,6 +563,28 @@ func TestCaptureMessageContent_OnRecordsGenAIMessages(t *testing.T) {
 		}
 	})
 
+	// The output-messages schema requires finish_reason, as a string. A
+	// stream that succeeds without sending one gets the empty string: the key
+	// is kept and no reason is invented.
+	t.Run("a stream with no finish reason keeps the key empty", func(t *testing.T) {
+		endings := map[string][]sseStep{
+			"ended by [DONE]":  {{line: textLine("The quick brown fox jumps over the lazy dog.")}, {line: doneLine}},
+			"ended by a close": {{line: textLine("The quick brown fox jumps over the lazy dog.")}},
+		}
+		for name, steps := range endings {
+			t.Run(name, func(t *testing.T) {
+				r := run(t, "1", traceWindow, steps...)
+				if r.errType != "" {
+					t.Fatalf("error.type = %q; want a successful call", r.errType)
+				}
+				want := `[{"role":"assistant","parts":[{"type":"text","content":"The quick brown fox jumps over the lazy dog."}],"finish_reason":""}]`
+				if r.output != want {
+					t.Errorf("gen_ai.output.messages =\n%s\nwant\n%s", r.output, want)
+				}
+			})
+		}
+	})
+
 	t.Run("partial output on a mid-stream error", func(t *testing.T) {
 		r := run(t, "1", traceWindow,
 			sseStep{line: textLine("Partial answer")},

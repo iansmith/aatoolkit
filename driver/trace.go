@@ -254,17 +254,26 @@ func captureMessageContent() bool {
 	return err == nil && on
 }
 
-// genAIPart and genAIMessage are the GenAI conventions' message shape for
-// gen_ai.input.messages and gen_ai.output.messages.
+// genAIPart, genAIMessage and genAIOutputMessage are the GenAI conventions'
+// message shapes: a part, an input message for gen_ai.input.messages, and an
+// output message for gen_ai.output.messages.
 type genAIPart struct {
 	Type    string `json:"type"`
 	Content string `json:"content"`
 }
 
 type genAIMessage struct {
+	Role  string      `json:"role"`
+	Parts []genAIPart `json:"parts"`
+}
+
+// genAIOutputMessage always carries finish_reason, because the output
+// message schema requires it as a string; it is empty when the stream gave
+// no reason and the call did not fail.
+type genAIOutputMessage struct {
 	Role         string      `json:"role"`
 	Parts        []genAIPart `json:"parts"`
-	FinishReason string      `json:"finish_reason,omitempty"`
+	FinishReason string      `json:"finish_reason"`
 }
 
 // genAIInputMessages renders the request's messages array as GenAI messages:
@@ -330,8 +339,8 @@ func contentParts(content json.RawMessage) []genAIPart {
 
 // genAIOutputMessages renders the model's output as one assistant GenAI
 // message: a reasoning part and a text part, each only when non-empty, and
-// the finish reason when there is one. ok is false when there is no output
-// at all; none is ever invented.
+// the finish reason, which is "" when there is none. ok is false when there
+// is no output at all; none is ever invented, and neither is a reason.
 func genAIOutputMessages(content, reasoning, finishReason string) (string, bool) {
 	if content == "" && reasoning == "" {
 		return "", false
@@ -343,7 +352,7 @@ func genAIOutputMessages(content, reasoning, finishReason string) (string, bool)
 	if content != "" {
 		parts = append(parts, genAIPart{Type: "text", Content: content})
 	}
-	b, err := json.Marshal([]genAIMessage{{Role: "assistant", Parts: parts, FinishReason: finishReason}})
+	b, err := json.Marshal([]genAIOutputMessage{{Role: "assistant", Parts: parts, FinishReason: finishReason}})
 	if err != nil {
 		return "", false
 	}
