@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -328,12 +330,16 @@ func cancelOnFirstSegment() (context.Context, func(), context.CancelFunc) {
 }
 
 // TestSendStreamContext_DoneContextFailsWithItsCause: a context cancelled or
-// timed out with a cause fails the call with that cause, whichever site sees
-// it first: the check before an already-buffered line, a network read
-// blocked on a stalled upstream, or the request still waiting for its
-// response headers. So errors.Is against the cause tells the caller's own
-// stop apart from an upstream failure in every case. The span still records
-// canceled or timeout.
+// timed out with a cause fails the call with an error that matches both that
+// cause and the context's own error (context.Canceled or DeadlineExceeded),
+// whichever site sees it first: the check before an already-buffered line,
+// the check at the end of the stream, a network read blocked on a stalled
+// upstream, or the request still waiting for its response headers. So
+// errors.Is against the cause tells the caller's own stop apart from an
+// upstream failure in every case, and errors.Is against context.Canceled or
+// DeadlineExceeded still holds. The span still records canceled or timeout.
+// TestSendStreamContext_DoneContextErrorOverHTTP1AndHTTP2 runs the network
+// sites over both protocols.
 func TestSendStreamContext_DoneContextFailsWithItsCause(t *testing.T) {
 	errStop := errors.New("caller stopped the turn")
 	errSlow := errors.New("caller gave up waiting")
@@ -409,11 +415,127 @@ func TestSendStreamContext_DoneContextFailsWithItsCause(t *testing.T) {
 			if !errors.Is(err, tc.wantCause) {
 				t.Errorf("error %q does not wrap the context's cause %q", err, tc.wantCause)
 			}
+			if ctxErr := ctx.Err(); !errors.Is(err, ctxErr) {
+				t.Errorf("error %q does not wrap the context's error %v", err, ctxErr)
+			}
 			if !strings.HasPrefix(err.Error(), tc.wantText) {
 				t.Errorf("error = %q; want it to start %q", err, tc.wantText)
 			}
 			requireAttrs(t, onlyModelSpan(t, rec), map[string]any{"error.type": tc.wantType})
 		})
+	}
+}
+
+// TestSendStreamContext_DoneContextErrorOverHTTP1AndHTTP2: when the context
+// is done while the call waits on the network -- for the response headers,
+// in a read blocked on a stalled stream, or reading a non-200 status body --
+// the error matches both the context's cause and its own error under
+// errors.Is, over HTTP/1 and HTTP/2 alike. net/http's HTTP/1 transport fails
+// such a wait with the cause and its HTTP/2 transport with ctx.Err(), and a
+// status body cut short fails with neither, so the answer would otherwise
+// depend on the protocol and the site. A stream read fails with the cause's
+// own text over both protocols, and a status error keeps its text. The span
+// records canceled or timeout. The context ends 50ms in, from another
+// goroutine, while the wait is blocked.
+func TestSendStreamContext_DoneContextErrorOverHTTP1AndHTTP2(t *testing.T) {
+	errStop := errors.New("caller stopped the turn")
+	errSlow := errors.New("caller gave up waiting")
+	const s1, s2 = "The quick brown fox jumps over the lazy dog.", " A second sentence follows the first one here."
+	protocols := []struct {
+		name  string
+		major int
+		start func(http.Handler) *httptest.Server
+	}{
+		{"HTTP/1", 1, httptest.NewServer},
+		{"HTTP/2", 2, func(h http.Handler) *httptest.Server {
+			srv := httptest.NewUnstartedServer(h)
+			srv.EnableHTTP2 = true
+			srv.StartTLS()
+			return srv
+		}},
+	}
+	noHeaders := func() http.Handler {
+		return scriptedSSEHandler(&sseRequestLog{}, sseStep{delay: 5 * time.Second, line: textLine(s1)})
+	}
+	stalled := func() http.Handler {
+		return scriptedSSEHandler(&sseRequestLog{}, sseStep{line: textLine(s1)}, sseStep{delay: 5 * time.Second, line: textLine(s2)})
+	}
+	statusBody := func() http.Handler { return stalledStatusHandler(http.StatusTooManyRequests) }
+	// Each returns the call's context and its cleanup; the context is done
+	// 50ms in.
+	cancelCause := func() (context.Context, func()) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		timer := time.AfterFunc(50*time.Millisecond, func() { cancel(errStop) })
+		return ctx, func() { timer.Stop(); cancel(nil) }
+	}
+	timeoutCause := func() (context.Context, func()) {
+		ctx, cancel := context.WithTimeoutCause(context.Background(), 50*time.Millisecond, errSlow)
+		return ctx, cancel
+	}
+	readText := func(cause error) func(string) string {
+		return func(string) string { return "reading SSE stream: " + cause.Error() }
+	}
+	statusText := func(url string) string { return "llm " + url + ": status 429 ()" }
+	cases := []struct {
+		name      string
+		upstream  func() http.Handler
+		ctx       func() (context.Context, func())
+		wantCause error
+		wantType  string
+		// wantText is the error's text: exactly, or as a prefix when the
+		// rest comes from the network stack.
+		wantText   func(url string) string
+		prefixOnly bool
+	}{
+		{"cancel cause, waiting for the response headers", noHeaders, cancelCause, errStop, "canceled",
+			func(url string) string { return "calling " + url + ": " }, true},
+		{"timeout cause, waiting for the response headers", noHeaders, timeoutCause, errSlow, "timeout",
+			func(url string) string { return "calling " + url + ": " }, true},
+		{"cancel cause, read blocked on a stalled stream", stalled, cancelCause, errStop, "canceled", readText(errStop), false},
+		{"timeout cause, read blocked on a stalled stream", stalled, timeoutCause, errSlow, "timeout", readText(errSlow), false},
+		{"cancel cause, reading a status body", statusBody, cancelCause, errStop, "canceled", statusText, false},
+		{"timeout cause, reading a status body", statusBody, timeoutCause, errSlow, "timeout", statusText, false},
+	}
+	for _, p := range protocols {
+		for _, tc := range cases {
+			t.Run(p.name+"/"+tc.name, func(t *testing.T) {
+				withoutCaptureEnv(t)
+				var major atomic.Int32
+				upstream := tc.upstream()
+				srv := p.start(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					major.Store(int32(r.ProtoMajor))
+					upstream.ServeHTTP(w, r)
+				}))
+				defer srv.Close()
+				h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+				h.client.Transport = srv.Client().Transport
+				ctx, cleanup := tc.ctx()
+				defer cleanup()
+
+				_, _, err := h.SendStreamContext(ctx, traceWindow, "fast", func(string) {})
+				if got := major.Load(); got != int32(p.major) {
+					t.Fatalf("the upstream saw HTTP/%d; want HTTP/%d", got, p.major)
+				}
+				if err == nil {
+					t.Fatal("no error after the context was done")
+				}
+				if !errors.Is(err, tc.wantCause) {
+					t.Errorf("error %q does not wrap the context's cause %q", err, tc.wantCause)
+				}
+				if ctxErr := ctx.Err(); !errors.Is(err, ctxErr) {
+					t.Errorf("error %q does not wrap the context's error %v", err, ctxErr)
+				}
+				want := tc.wantText(chatURL(srv))
+				if tc.prefixOnly {
+					if !strings.HasPrefix(err.Error(), want) {
+						t.Errorf("error = %q; want it to start %q", err, want)
+					}
+				} else if err.Error() != want {
+					t.Errorf("error = %q; want exactly %q", err, want)
+				}
+				requireAttrs(t, onlyModelSpan(t, rec), map[string]any{"error.type": tc.wantType})
+			})
+		}
 	}
 }
 

@@ -88,14 +88,20 @@ func (l *sseRequestLog) Count() int {
 	return l.count
 }
 
-// newScriptedSSEServer starts an upstream that answers every request by
-// replaying steps in order: for each, it waits the step's delay (giving up if
-// the client goes away), writes the line and a newline, and flushes, so the
-// client sees each line arrive at its scripted time. It reads and records each
-// request first. The caller closes the server.
+// newScriptedSSEServer starts an upstream that answers every request with
+// scriptedSSEHandler(steps) and records the requests in the log it returns.
+// The caller closes the server.
 func newScriptedSSEServer(steps ...sseStep) (*httptest.Server, *sseRequestLog) {
 	reqs := &sseRequestLog{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(scriptedSSEHandler(reqs, steps...)), reqs
+}
+
+// scriptedSSEHandler answers every request by replaying steps in order: for
+// each, it waits the step's delay (giving up if the client goes away), writes
+// the line and a newline, and flushes, so the client sees each line arrive at
+// its scripted time. It reads each request first and records it in reqs.
+func scriptedSSEHandler(reqs *sseRequestLog, steps ...sseStep) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		reqs.record(r.Header.Clone(), body)
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -117,6 +123,24 @@ func newScriptedSSEServer(steps ...sseStep) (*httptest.Server, *sseRequestLog) {
 				flusher.Flush()
 			}
 		}
-	}))
-	return srv, reqs
+	})
+}
+
+// stalledStatusHandler answers every request with status's headers at once,
+// flushed, and then holds the body back until the client goes away or five
+// seconds pass, so the client is left waiting on the error body.
+func stalledStatusHandler(status int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(status)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-r.Context().Done():
+		}
+	})
 }

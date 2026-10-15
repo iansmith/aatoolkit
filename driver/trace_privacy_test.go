@@ -714,6 +714,21 @@ func TestModelSpan_ErrorStatusAndType(t *testing.T) {
 			wantErr: func(string) string { return "reading SSE stream: " }, prefixOnly: true, wantIs: context.Canceled,
 		},
 		{
+			// The status arrives, then the caller's deadline passes while
+			// its body is still awaited: the context still comes first.
+			name: "caller deadline while a status body is still arriving",
+			call: func(t *testing.T, h func(string) *Host) outcome {
+				srv := httptest.NewServer(stalledStatusHandler(http.StatusServiceUnavailable))
+				defer srv.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				defer cancel()
+				_, _, err := h(chatURL(srv)).SendStreamContext(ctx, traceWindow, "fast", func(string) {})
+				return outcome{chatURL(srv), err}
+			},
+			wantType: "timeout", wantFinish: []string{"error"},
+			wantErr: func(url string) string { return fmt.Sprintf("llm %s: status 503 ()", url) }, wantIs: context.DeadlineExceeded,
+		},
+		{
 			name: "status 429",
 			call: func(t *testing.T, h func(string) *Host) outcome {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
