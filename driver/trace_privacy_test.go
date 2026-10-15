@@ -21,8 +21,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// secretURL is srv's chat-completions URL with userinfo and a query, both
-// carrying secrets a span must never hold.
+// secretURL is the chat-completions URL at hostport with userinfo and a
+// query, both carrying secrets a span must never hold.
 func secretURL(hostport string) string {
 	return "http://u:pw-secret@" + hostport + "/v1/chat/completions?k=q-secret"
 }

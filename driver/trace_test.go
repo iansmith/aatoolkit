@@ -117,7 +117,8 @@ func requireNoAttrs(t *testing.T, span sdktrace.ReadOnlySpan, keys ...string) {
 // TestSendStreamContext_OneClientSpanUnderCaller (DoD a): one model request
 // sent under a caller's span produces exactly one CLIENT span, its child,
 // carrying the request and response attributes, the two first-arrival times,
-// and an unset status -- and the call's result is what it was without tracing.
+// and an unset status -- and the call still returns the streamed content and
+// segments.
 func TestSendStreamContext_OneClientSpanUnderCaller(t *testing.T) {
 	const gap = 20 * time.Millisecond
 	srv, _ := newScriptedSSEServer(
