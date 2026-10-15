@@ -75,11 +75,17 @@ func attrMap(span sdktrace.ReadOnlySpan) map[string]attribute.Value {
 	return m
 }
 
+// documentedCaptureEnv is the content-capture variable's name as the Config
+// doc and the README give it. The capture helpers set this literal rather
+// than captureMessageContentEnv, because the name is the contract: were the
+// constant renamed, the capture-on tests must go red.
+const documentedCaptureEnv = "AATOOLKIT_CAPTURE_MESSAGE_CONTENT"
+
 // withCaptureEnv sets the content-capture environment variable to v for the
 // rest of the test. t.Setenv forbids t.Parallel in the calling test.
 func withCaptureEnv(t *testing.T, v string) {
 	t.Helper()
-	t.Setenv(captureMessageContentEnv, v)
+	t.Setenv(documentedCaptureEnv, v)
 }
 
 // withoutCaptureEnv unsets the content-capture environment variable for the
@@ -87,9 +93,9 @@ func withCaptureEnv(t *testing.T, v string) {
 // records the value to restore; the Unsetenv then removes it.
 func withoutCaptureEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv(captureMessageContentEnv, "")
-	if err := os.Unsetenv(captureMessageContentEnv); err != nil {
-		t.Fatalf("unsetting %s: %v", captureMessageContentEnv, err)
+	t.Setenv(documentedCaptureEnv, "")
+	if err := os.Unsetenv(documentedCaptureEnv); err != nil {
+		t.Fatalf("unsetting %s: %v", documentedCaptureEnv, err)
 	}
 }
 
