@@ -249,6 +249,69 @@ func TestModelSpan_StartOmitsWhatIsUnknown(t *testing.T) {
 	}
 }
 
+// TestModelSpan_EndOmitsWhatIsUnknown: a span leaves out an end value the
+// call never had rather than recording it as zero or empty. With no
+// Tier.MaxTokens it has no gen_ai.request.max_tokens; with no model or id in
+// the stream, no gen_ai.response.model or gen_ai.response.id; with no chunk
+// before the call failed, neither first-arrival time; and with chunks but no
+// content, a time to first chunk and no time to first content.
+func TestModelSpan_EndOmitsWhatIsUnknown(t *testing.T) {
+	statusSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "overloaded", http.StatusServiceUnavailable)
+	}))
+	defer statusSrv.Close()
+	toolCalls, _ := newScriptedSSEServer(sseStep{line: roleOnlyLine}, sseStep{line: finishLine("tool_calls")}, sseStep{line: doneLine})
+	defer toolCalls.Close()
+	okSrv, _ := newScriptedSSEServer(okSteps()...)
+	defer okSrv.Close()
+
+	cases := []struct {
+		name       string
+		url        string
+		maxTokens  int
+		want       []string
+		wantAbsent []string
+	}{
+		{
+			name: "no max tokens", url: chatURL(okSrv), maxTokens: 0,
+			want:       []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"},
+			wantAbsent: []string{"gen_ai.request.max_tokens"},
+		},
+		{
+			name: "no model or id in the stream", url: chatURL(okSrv), maxTokens: 512,
+			want:       []string{"gen_ai.request.max_tokens"},
+			wantAbsent: []string{"gen_ai.response.model", "gen_ai.response.id"},
+		},
+		{
+			name: "transport failure before any chunk", url: "http://" + closedHostPort() + "/v1/chat/completions", maxTokens: 512,
+			wantAbsent: []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"},
+		},
+		{
+			name: "status 503 before any chunk", url: chatURL(statusSrv), maxTokens: 512,
+			wantAbsent: []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"},
+		},
+		{
+			name: "chunks but no content", url: chatURL(toolCalls), maxTokens: 512,
+			want:       []string{"gen_ai.response.time_to_first_chunk"},
+			wantAbsent: []string{"aatoolkit.llm.time_to_first_content"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rec := tracedHost(t, tc.url, Tier{Model: "test", MaxTokens: tc.maxTokens})
+			_, _, _ = h.SendStream(traceWindow, "fast", func(string) {})
+			span := onlyModelSpan(t, rec)
+			attrs := attrMap(span)
+			for _, k := range tc.want {
+				if _, ok := attrs[k]; !ok {
+					t.Errorf("attribute %s missing", k)
+				}
+			}
+			requireNoAttrs(t, span, tc.wantAbsent...)
+		})
+	}
+}
+
 // TestSendStreamContext_TimeToFirstContentAfterRoleOnlyChunk: on a role-first
 // upstream the first chunk arrives at once and the first text later; the
 // span's time to first content is the later one, not the first chunk's.
