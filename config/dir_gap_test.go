@@ -7,10 +7,9 @@ import (
 
 // TestDecodeStrict_RejectsMisspelledBaseDir and
 // TestDecodeStrict_RejectsMisspelledServerDir close an adversary-found gap:
-// behavior 5 explicitly names "bas_dir" and "di" as the misspellings that
-// must hard-error, but Phase 0 only had the two generic
-// TestDecodeStrict_* tests (different key names) — neither proves these
-// two specific new fields are covered by strict-decode.
+// the misspellings "bas_dir" and "di" must hard-error, but Phase 0 only had
+// the two generic TestDecodeStrict_* tests (different key names) — neither
+// proves these two specific new fields are covered by strict-decode.
 func TestDecodeStrict_RejectsMisspelledBaseDir(t *testing.T) {
 	data := []byte(`
 [supervisor]

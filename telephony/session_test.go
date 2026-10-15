@@ -139,7 +139,7 @@ func TestNewSession_InitializesFields(t *testing.T) {
 	}
 }
 
-// --- core: the property that defines this ticket ---
+// --- core: data-plane frames reach the VAD ---
 
 // The sequencer must fan a frame arriving on the Twilio data-plane input
 // through to the VAD pipeline, unchanged (observed here via a spy detector).
@@ -201,7 +201,7 @@ func TestSession_ForwardsFramesInOrder(t *testing.T) {
 	}
 }
 
-// SOP-108: the sequencer must not log a line per frame at the default log
+// The sequencer must not log a line per frame at the default log
 // level — at real audio frame rates it drowns out the speech-start/
 // end-of-utterance lines a tail -f session is meant to surface.
 func TestSession_Run_DoesNotLogPerFrameAtDefaultLevel(t *testing.T) {
@@ -582,9 +582,9 @@ func TestTimerMigrationIdle(t *testing.T) {
 	}
 }
 
-// TestSpeechOnsetCancelsIdleTimer verifies SOP-156's reconciliation: speech
-// onset CANCELS the idle/silence timer (it does not re-arm it, as it did under
-// SOP-125). The idle timer measures silence, so it must not be running while the
+// TestSpeechOnsetCancelsIdleTimer verifies the idle-timer reconciliation: speech
+// onset CANCELS the idle/silence timer (it does not re-arm it, as it once
+// did). The idle timer measures silence, so it must not be running while the
 // caller is actively speaking — that is the fix for the mid-utterance hangup.
 // The caller is now bounded by the max-utterance cap instead (default 45s here,
 // well outside this test's window), so the session stays alive past the original
@@ -610,7 +610,7 @@ func TestSpeechOnsetCancelsIdleTimer(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// One voiced frame drives Idle→Listening and, via VADSpeech onset, cancels
-	// the idle timer (SOP-156). No new idle deadline is armed.
+	// the idle timer. No new idle deadline is armed.
 	ctx, cancel := context.WithTimeout(context.Background(), recvTimeout)
 	defer cancel()
 	if err := data.Send(ctx, windowFrame(0x99)); err != nil {
@@ -625,7 +625,7 @@ func TestSpeechOnsetCancelsIdleTimer(t *testing.T) {
 	}
 
 	// And still alive well beyond where the old reset deadline would have been:
-	// unlike SOP-125, onset does NOT re-arm the idle timer, so nothing fires
+	// unlike before, onset does NOT re-arm the idle timer, so nothing fires
 	// mid-utterance. The utterance cap (45s) governs from here.
 	time.Sleep(190 * time.Millisecond)
 	if got := s.State(); got != telephony.StateListening {

@@ -75,7 +75,7 @@ base_dir = "build"
 	}
 }
 
-// TestLoad_BaseDirResolvesRelativeToConfigFile pins behavior 3: base_dir,
+// TestLoad_BaseDirResolvesRelativeToConfigFile pins that base_dir,
 // when relative, resolves against the directory containing the --config
 // file (never against process cwd), and log_dir/lock_file resolve against
 // that resolved base_dir.
@@ -97,7 +97,7 @@ lock_file = "server.lock"
 	}
 }
 
-// TestLoad_BaseDirUnset_MatchesCurrentBehavior pins behavior 4: with
+// TestLoad_BaseDirUnset_MatchesCurrentBehavior pins that with
 // base_dir unset, log_dir/lock_file resolve exactly as they do today
 // (untouched — resolution against the supervisor's own launch cwd is the
 // caller's job, not Load's).

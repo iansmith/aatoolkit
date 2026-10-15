@@ -37,7 +37,7 @@ func TestLivePath_StopwordEndsTurn(t *testing.T) {
 
 	// Feed the first utterance: enough frames to cross EndSilenceWindows and
 	// fire VADEndOfUtterance, the one point STT actually dispatches from
-	// (onset-dispatch was removed -- see the ticket comment for why).
+	// (STT is not dispatched at speech onset).
 	for i := 0; i < telephony.EndSilenceWindows()+2; i++ {
 		sendData(t, dataIn, windowFrame(0x80), 5*time.Second)
 		time.Sleep(2 * time.Millisecond)
@@ -97,10 +97,10 @@ func TestLivePath_StopwordEndsTurn(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Verify turn was completed with fused text. The stopword utterance's own
-	// text ("done") is excluded from the fused turn -- SOP-150's protected
+	// text ("done") is excluded from the fused turn -- turn fusion's protected
 	// contract (TestTurnFusion_StopwordExcluded: feeding "hello" then "Done."
-	// delivers exactly "hello", not "hello Done."). SOP-162 wires the live
-	// path into this pre-existing behavior; it does not redefine it.
+	// delivers exactly "hello", not "hello Done."). The live path is wired
+	// into this pre-existing behavior; it does not redefine it.
 	turns := sink.turnTexts()
 	if len(turns) != 1 {
 		t.Errorf("OnTurnComplete calls: got %d, want 1", len(turns))
@@ -143,7 +143,7 @@ func TestLivePath_SilenceTurnEndCompletesTurn(t *testing.T) {
 
 	// Feed the utterance: enough frames to cross EndSilenceWindows and fire
 	// VADEndOfUtterance, the one point STT actually dispatches from
-	// (onset-dispatch was removed -- see the ticket comment for why).
+	// (STT is not dispatched at speech onset).
 	for i := 0; i < telephony.EndSilenceWindows()+2; i++ {
 		sendData(t, dataIn, windowFrame(0x80), 5*time.Second)
 		time.Sleep(2 * time.Millisecond)
@@ -247,10 +247,10 @@ func TestLivePath_IdleStillTerminates(t *testing.T) {
 
 	// This session never wires WithSTTInput, so nothing is ever accumulated
 	// into turnTranscripts -- idle termination must not deliver a turn on an
-	// empty buffer. SOP-150's protected contract
+	// empty buffer. Turn fusion's protected contract
 	// (TestTurnFusion_EmptyBufferNoEmit_CallEnd: "call end with nothing
-	// accumulated must not deliver"). SOP-162 routes idle termination through
-	// completeTurn(); it does not redefine what an empty buffer does there.
+	// accumulated must not deliver"). Routing idle termination through
+	// completeTurn() does not redefine what an empty buffer does there.
 	if len(sink.turnTexts()) != 0 {
 		t.Errorf("empty buffer must not deliver a turn on idle termination, got %d calls", len(sink.turnTexts()))
 	}
@@ -259,8 +259,8 @@ func TestLivePath_IdleStillTerminates(t *testing.T) {
 	}
 }
 
-// TestLivePath_IdleTerminatesFlushesBeforeClip is the ticket's Test
-// Expectations case TestLivePath_IdleStillTerminates couldn't cover: this
+// TestLivePath_IdleTerminatesFlushesBeforeClip covers the case
+// TestLivePath_IdleStillTerminates can't: this
 // session DOES wire STT, so a real utterance completes and its text sits in
 // turnTranscripts when the idle timer fires. terminateWithClip's sendClip
 // writes the farewell clip to dataOut synchronously, AFTER completeTurn()
@@ -478,7 +478,7 @@ func TestLivePath_UtteranceCapStillTerminates(t *testing.T) {
 	// Same empty-buffer contract as TestLivePath_IdleStillTerminates above:
 	// no WithSTTInput wired here either, so nothing accumulates, and the
 	// forced-stop path must not deliver a turn on an empty buffer
-	// (SOP-150's TestTurnFusion_EmptyBufferNoEmit_CallEnd).
+	// (TestTurnFusion_EmptyBufferNoEmit_CallEnd).
 	if len(sink.turnTexts()) != 0 {
 		t.Errorf("empty buffer must not deliver a turn on utterance-cap termination, got %d calls", len(sink.turnTexts()))
 	}

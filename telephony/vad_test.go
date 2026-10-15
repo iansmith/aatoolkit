@@ -182,7 +182,7 @@ func TestVADMachine_HysteresisDeadZoneNoFlap(t *testing.T) {
 	}
 }
 
-// TestVADMachine_TurnEnd pins SOP-154 Observable behavior #3: a turn-end
+// TestVADMachine_TurnEnd pins that a turn-end
 // signal fires after TurnEndSilenceMS of trailing silence, derived from the
 // same counter that drives EndSilenceMS -- not a second independent clock.
 // EndSilenceMS (96ms/3 windows) fires end-of-utterance first; the same
@@ -317,7 +317,7 @@ func TestRunVAD_StopsAndResetsOnCancel(t *testing.T) {
 	}
 }
 
-// --- vadService (SOP-116 pattern) -----------------------------------------------
+// --- vadService (ServiceInput/ServiceOutput pattern) -----------------------------------------------
 
 // A vadService relays frames sent via VADInput to events received via
 // VADOutput, stamping the constructor-fixed SessionID onto every event.
@@ -363,7 +363,7 @@ func TestVADService_SendRecv(t *testing.T) {
 func TestDefaultVADConfigInvariants(t *testing.T) {
 	c := defaultVADConfig()
 
-	// utterance-end << turn-end (SOP-154 Observable behavior #4). The full
+	// utterance-end << turn-end. The full
 	// EndSilenceMS < TurnEndSilenceMS < MaxSilenceMS ordering invariant,
 	// including rejection of a violating config, is covered by
 	// TestVADConfig_ValidateOrdering below.
@@ -383,7 +383,7 @@ func TestDefaultVADConfigInvariants(t *testing.T) {
 	}
 }
 
-// TestVADConfig_ValidateOrdering pins SOP-154 Observable behavior #4: the
+// TestVADConfig_ValidateOrdering pins the VAD ordering invariant: the
 // utterance-end << turn-end << idle ordering (EndSilenceMS < TurnEndSilenceMS
 // < MaxSilenceMS) is asserted, not assumed, and a config that violates either
 // leg is rejected rather than silently producing a broken timer race.
@@ -406,15 +406,16 @@ func TestVADConfig_ValidateOrdering(t *testing.T) {
 	}
 }
 
-// --- DefaultVADConfig (SOP-152) -----------------------------------------------
+// --- DefaultVADConfig -----------------------------------------------
 
 // DefaultVADConfig is the audio tap's only route to the running VAD config, and
 // the tap stamps it into every recording's sidecar so a later replay knows which
 // thresholds produced that call's log. It must therefore report
 // defaultVADConfig() itself and never its own copy of the values: a copy goes
-// stale the next time a threshold is tuned -- which is not hypothetical, f5cad49
-// moved EndSilenceMS 700 -> 1050 and the turn-end work moves it again -- and a
-// stale copy would mislabel every recording written after the drift, silently.
+// stale the next time a threshold is tuned -- which is not hypothetical: one
+// retune moved EndSilenceMS 700 -> 1050, and later ones (AATK-3 and AATK-9
+// among them) moved it again -- and a stale copy would mislabel every
+// recording written after the drift, silently.
 func TestDefaultVADConfig_MatchesInternal(t *testing.T) {
 	if got, want := DefaultVADConfig(), defaultVADConfig(); got != want {
 		t.Errorf("DefaultVADConfig() = %+v\n            want %+v\n(accessor has drifted from the config it reports)", got, want)

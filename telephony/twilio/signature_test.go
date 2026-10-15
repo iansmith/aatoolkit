@@ -1,12 +1,20 @@
 package twilio_test
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
@@ -96,5 +104,214 @@ func TestComputeSignature_AcceptedByValidate(t *testing.T) {
 	wrongSig := twilio.ComputeSignature("wrongtoken", rawURL, params)
 	if twilio.ValidateSignature(token, rawURL, params, wrongSig) {
 		t.Fatal("signature computed with a different token must be rejected")
+	}
+}
+
+// statusCallback is the what these tests pass PostSignedForm: a webhook Twilio
+// signs like any other, under a label none of PostSignedForm's callers use, so
+// an error text naming a caller's label in place of what fails here.
+const statusCallback = "status callback"
+
+// The request, from the receiving side: POSTed to webhookURL, form-encoded,
+// the form intact, and carrying the X-Twilio-Signature ComputeSignature yields
+// over that same URL. The URL carries a query string because the signature
+// covers it, so a poster that signed the URL without its query, or POSTed
+// without it, would fail here. The URL posted to is rebuilt the way Server
+// rebuilds the one it validates a signature over.
+func TestPostSignedForm_SignsTheFormOverTheExactURL(t *testing.T) {
+	const token = "authtoken"
+	type seen struct {
+		target, method, contentType, signature string
+		form                                   url.Values
+	}
+	got := make(chan seen, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		got <- seen{"http://" + r.Host + r.URL.RequestURI(), r.Method, r.Header.Get("Content-Type"), r.Header.Get("X-Twilio-Signature"), r.PostForm}
+	}))
+	defer ts.Close()
+
+	rawURL := ts.URL + "/sms/status?ref=abc"
+	form := url.Values{"MessageSid": {"SM123"}, "MessageStatus": {"delivered"}}
+	if _, _, err := twilio.PostSignedForm(context.Background(), statusCallback, rawURL, token, form); err != nil {
+		t.Fatalf("PostSignedForm: %v", err)
+	}
+
+	var s seen
+	select {
+	case s = <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no request reached the server")
+	}
+	if s.target != rawURL {
+		t.Errorf("POSTed to %q, want %q, the URL signed over", s.target, rawURL)
+	}
+	if s.method != http.MethodPost {
+		t.Errorf("method = %q, want %q", s.method, http.MethodPost)
+	}
+	if want := "application/x-www-form-urlencoded"; s.contentType != want {
+		t.Errorf("Content-Type = %q, want %q", s.contentType, want)
+	}
+	if want := twilio.ComputeSignature(token, rawURL, form); s.signature != want {
+		t.Errorf("X-Twilio-Signature = %q, want %q (computed over the exact URL posted to)", s.signature, want)
+	}
+	if !reflect.DeepEqual(s.form, form) {
+		t.Errorf("posted form = %v, want %v", s.form, form)
+	}
+}
+
+// Each outcome PostSignedForm's doc names: the status, the body and the error
+// text, which names what at every stage. A nil wantBody means nil, not merely
+// empty. Where a stage fails on an error of its own, err also still wraps that
+// error, so a caller's errors.Is and errors.As see through the label to it; the
+// text alone reads the same whether it is wrapped or flattened.
+func TestPostSignedForm_ReturnsWhatTheClientHandedBack(t *testing.T) {
+	serve := func(h http.HandlerFunc) string {
+		ts := httptest.NewServer(h)
+		t.Cleanup(ts.Close)
+		return ts.URL + "/sms/status"
+	}
+	answer := func(status int, body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}
+	}
+	redirectTo := func(target string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+		}
+	}
+	// Nothing is expected to listen on port 1, and ephemeral allocation never
+	// hands it out, so the dial is refused. That is an assumption about the
+	// machine, not a guarantee: macOS lets an unprivileged process bind the
+	// port on the wildcard address, and root can bind it anywhere. Each case's
+	// ctx deadline keeps a listener there that takes the POST and never
+	// answers from holding the case until go test's own timeout.
+	const unanswered = "http://127.0.0.1:1/sms/status"
+
+	okURL := serve(answer(http.StatusOK, "<Response></Response>"))
+	forbiddenURL := serve(answer(http.StatusForbidden, "signature mismatch"))
+	createdURL := serve(answer(http.StatusCreated, "created, which is still not 200"))
+	truncatedURL := serve(func(w http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		// A Content-Length the body never reaches, then a dropped connection.
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
+		_ = buf.Flush()
+	})
+	loopURL := serve(redirectTo("/sms/status"))
+	redirectsToUnansweredURL := serve(redirectTo(unanswered))
+	badLocationURL := serve(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://[::1/sms/status")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	})
+
+	// What a failing stage's error must still wrap: the read stage's io error,
+	// and the *url.Error that url.Parse hands the build stage and
+	// http.Client.Do hands the post stage.
+	wrapsUnexpectedEOF := func(err error) bool { return errors.Is(err, io.ErrUnexpectedEOF) }
+	wrapsURLError := func(err error) bool {
+		var ue *url.Error
+		return errors.As(err, &ue)
+	}
+
+	for _, tc := range []struct {
+		name, webhookURL string
+		wantStatus       int
+		wantBody         []byte
+		wantErr          string           // the whole error text, unless prefixOnly; "" for none
+		prefixOnly       bool             // the rest is net/http's own error
+		wraps            func(error) bool // nil, or whether err still wraps what the stage failed on
+	}{
+		{"200", okURL, http.StatusOK, []byte("<Response></Response>"), "", false, nil},
+		{"403", forbiddenURL, http.StatusForbidden, []byte("signature mismatch"),
+			statusCallback + " " + forbiddenURL + " returned status 403: signature mismatch", false, nil},
+		{"201", createdURL, http.StatusCreated, []byte("created, which is still not 200"),
+			statusCallback + " " + createdURL + " returned status 201: created, which is still not 200", false, nil},
+		{"body cut short", truncatedURL, http.StatusOK, []byte("partial"),
+			"read " + statusCallback + " response: unexpected EOF", false, wrapsUnexpectedEOF},
+		{"redirect policy gave up", loopURL, http.StatusTemporaryRedirect, nil, "post " + statusCallback + ": ", true, wrapsURLError},
+		{"unbuildable request", "http://[::1/sms/status", 0, nil, "build " + statusCallback + " request: ", true, wrapsURLError},
+		{"nobody listening", unanswered, 0, nil, "post " + statusCallback + ": ", true, wrapsURLError},
+		{"redirect to nobody listening", redirectsToUnansweredURL, 0, nil, "post " + statusCallback + ": ", true, wrapsURLError},
+		{"redirect Location that will not parse", badLocationURL, 0, nil, "post " + statusCallback + ": ", true, wrapsURLError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			status, body, err := twilio.PostSignedForm(ctx, statusCallback, tc.webhookURL, "authtoken", url.Values{"MessageSid": {"SM123"}})
+			got := ""
+			if err != nil {
+				got = err.Error()
+			}
+			if tc.prefixOnly && !strings.HasPrefix(got, tc.wantErr) {
+				t.Errorf("error = %q, want it to start %q", got, tc.wantErr)
+			} else if !tc.prefixOnly && got != tc.wantErr {
+				t.Errorf("error = %q, want %q", got, tc.wantErr)
+			}
+			if tc.wraps != nil && !tc.wraps(err) {
+				t.Errorf("error = %q no longer wraps what the stage failed on, so errors.Is and errors.As cannot reach it", got)
+			}
+			if status != tc.wantStatus {
+				t.Errorf("status = %d, want %d", status, tc.wantStatus)
+			}
+			if !reflect.DeepEqual(body, tc.wantBody) {
+				t.Errorf("body = %q (nil: %t), want %q (nil: %t)", body, body == nil, tc.wantBody, tc.wantBody == nil)
+			}
+		})
+	}
+}
+
+// ctx is on the request. http.DefaultClient has no timeout of its own, so
+// without it a server that takes the POST and never answers would hold
+// PostSignedForm forever. The cancel lands only once the server holds the
+// request, so it is the in-flight POST that ctx abandons, not one never sent.
+func TestPostSignedForm_CancellingCtxAbandonsTheInFlightPOST(t *testing.T) {
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		select { // never answers; released only so ts.Close can return
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer ts.Close()
+	defer close(release) // runs before ts.Close, which waits for the handler
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := twilio.PostSignedForm(ctx, statusCallback, ts.URL+"/sms/status", "authtoken", url.Values{"MessageSid": {"SM123"}})
+		done <- err
+	}()
+
+	select {
+	case <-arrived:
+	case err := <-done: // the server never answers, so only a POST that failed to reach it returns
+		t.Fatalf("PostSignedForm returned before the server held the POST: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the POST never reached the server")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("error = %v, want one wrapping context.Canceled", err)
+		}
+		if want := "post " + statusCallback + ": "; err != nil && !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("error = %q, want it to start %q", err, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PostSignedForm still running 2s after its ctx was cancelled mid-POST")
 	}
 }

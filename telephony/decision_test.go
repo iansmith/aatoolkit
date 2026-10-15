@@ -178,7 +178,7 @@ func TestDecisionRecorder_EndOfUtterance(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // let the record settle after the enqueue
 
 	// A single utterance now records more than the end-of-utterance decision
-	// (M2 added speech-start + silence), so pick out the EOU event rather than
+	// (speech-start and silence too), so pick out the EOU event rather than
 	// asserting a total count.
 	evs := rec.all()
 	eou := filterByKind(evs, telephony.DecisionKindEndOfUtter)
@@ -204,7 +204,7 @@ func TestDecisionRecorder_EndOfUtterance(t *testing.T) {
 // with a deadlock backstop a passing test never reaches. Asserts on the literal
 // wire values ("cap", the kind strings) so the test pins the recorded JSON
 // contract directly and compiles against current code — where nothing records a
-// cap decision, so the backstop is the RED signal (M4 / SOP-166).
+// cap decision, so the backstop is the RED signal (M4).
 func waitCapEvent(t *testing.T, rec *mockRecorder, kind string) telephony.DecisionEvent {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -231,7 +231,7 @@ func waitCapEvent(t *testing.T, rec *mockRecorder, kind string) telephony.Decisi
 // and asserts the forced utterance-end is recorded as a type="cap" decision
 // naming MaxUtteranceMS, its resolved (overridden) value, and an audio position
 // carried from the last VAD window — the cap fires from a timer, not a VADEvent,
-// so the position comes from the session's tracked stream-window (M4 behavior 4).
+// so the position comes from the session's tracked stream-window.
 func TestDecisionRecorder_UtteranceCap(t *testing.T) {
 	rec := &mockRecorder{}
 	clock := newFakeClock()
@@ -324,7 +324,7 @@ func TestDecisionRecorder_TurnCap(t *testing.T) {
 // naming MaxSilenceMS. ParamValue is the production MaxSilenceMS constant, NOT
 // the WithMaxSilenceMS test-seam override (which only exists to make the timer
 // fire fast) — the idle cap is not an operator-tunable knob, unlike the
-// utterance/turn caps (M4 behavior 3). The injected clock fires the timer, so no
+// utterance/turn caps. The injected clock fires the timer, so no
 // real 15 s wait.
 func TestDecisionRecorder_IdleTimeout(t *testing.T) {
 	rec := &mockRecorder{}
@@ -385,7 +385,7 @@ func (f *fakeNow) advance(d time.Duration) {
 // waitEventType blocks until at least one DecisionEvent of the given type has
 // been recorded and returns the first, with a deadlock backstop a passing test
 // never reaches. Used to observe the stt_dispatch / stt_result records, each of
-// which appears once on the single-utterance path (M5 / SOP-167).
+// which appears once on the single-utterance path (M5).
 func waitEventType(t *testing.T, rec *mockRecorder, typ string) telephony.DecisionEvent {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -405,7 +405,7 @@ func waitEventType(t *testing.T, rec *mockRecorder, typ string) telephony.Decisi
 // dispatch, advances the injected clock by a known delta, then delivers the
 // matching STTResult, and asserts both the stt_dispatch and stt_result decisions
 // are recorded -- the latter correlated by request id and carrying the exact
-// latency, the transcript, and whisper's own audio duration (M5 / SOP-167).
+// latency, the transcript, and whisper's own audio duration (M5).
 func TestDecisionRecorder_STTDispatchAndResult(t *testing.T) {
 	const sessionID = "test-sttdec"
 	rec := &mockRecorder{}
@@ -471,7 +471,7 @@ func TestDecisionRecorder_STTDispatchAndResult(t *testing.T) {
 // TestTranscriptSummary_WrittenAtClose drives one full user turn (utterance ->
 // STT result -> silence turn-end) and asserts the conversation transcript
 // summary is both printed to the live writer and written to <sid>.transcript.txt
-// at Close, with the turn's utterance bracketed (SOP-168).
+// at Close, with the turn's utterance bracketed.
 func TestTranscriptSummary_WrittenAtClose(t *testing.T) {
 	dir := t.TempDir()
 	const sid = "test-transcript"
@@ -509,10 +509,10 @@ func TestTranscriptSummary_WrittenAtClose(t *testing.T) {
 }
 
 // TestWithFileDecisionRecorderFromEnv_Gating covers the AATOOLKIT_EVENT_LOG
-// gate (DoD: "no files written and the no-op recorder is used" when off or no
-// dir). Close flushes even a session that never Started, and the recorder
-// writes its header on Close regardless of event count, so no audio-driving is
-// needed to observe whether a recorder was wired.
+// gate: when it is off, or no dir is given, no files are written and the
+// no-op recorder is used. Close flushes even a session that never Started,
+// and the recorder writes its header on Close regardless of event count, so
+// no audio-driving is needed to observe whether a recorder was wired.
 func TestWithFileDecisionRecorderFromEnv_Gating(t *testing.T) {
 	newSess := func(dir string) *telephony.Session {
 		return telephony.NewSession(context.Background(), "CAgate",

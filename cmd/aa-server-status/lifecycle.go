@@ -10,9 +10,9 @@ import (
 // ServerState is the observed lifecycle state of a server — the STATE
 // column's base classification, before the owned-disabled override or the
 // stale override (see render.go's formatStateCell) is applied. Values are
-// the literal display tokens the status table renders (SOP-19 /
-// design/aa-server-status.md §8): StateStray and StateBlocked are uppercase to
-// match the ticket's inline-annotation examples, the rest lowercase.
+// the literal display tokens the status table renders
+// (design/aa-server-status.md §8): StateStray and StateBlocked are uppercase to
+// match §8's inline-annotation examples, the rest lowercase.
 type ServerState string
 
 const (
@@ -37,10 +37,9 @@ type PortStatus struct {
 	Unexpected bool
 }
 
-// ServerStatus is one row of the status table (SOP-19 / design/aa-server-status.md
-// §8). PID, Health, Ports, and the anomaly fields are placeholders until the
-// reconciliation engine (a downstream ticket) supplies real observed data —
-// StubEngine.Status() below leaves them zero-valued.
+// ServerStatus is one row of the status table (design/aa-server-status.md
+// §8). PID, Health, Ports, and the anomaly fields are observed data that
+// RealEngine supplies; StubEngine.Status() below leaves them zero-valued.
 type ServerStatus struct {
 	Name    string
 	Type    config.ServerType
@@ -61,8 +60,8 @@ type ServerStatus struct {
 	// renders "up (disabled)" in yellow rather than red STRAY, which is
 	// reserved for foreign processes occupying a disabled server's slot.
 	OwnedDisabled bool
-	// Stale marks the underlying observation as stale (source-staleness
-	// probe — placeholder until that ticket lands). When true it overrides
+	// Stale marks the underlying observation as stale (the source-staleness
+	// probe, lifecycle.ProbeStaleness). When true it overrides
 	// every other STATE rendering with a plain yellow "STALE".
 	Stale bool
 	// AnomalyDetail is the parenthetical detail text rendered alongside the
@@ -76,7 +75,7 @@ type ServerStatus struct {
 
 // Engine is the seam between the REPL's command grammar and the lifecycle
 // engine that actually manages child processes. All verbs but Status and
-// TeardownAll are stubbed until SOP-11 lands; StubEngine below implements
+// TeardownAll are stubbed in StubEngine below, which implements
 // them as loud "not implemented" errors rather than silent no-ops.
 type Engine interface {
 	Status() []ServerStatus
@@ -112,10 +111,9 @@ type Engine interface {
 }
 
 // notImplementedErr is returned by every stub lifecycle verb. It names the
-// tracking ticket so the seam is obvious to whoever wires up the real
-// engine.
+// verb so the seam is obvious to whoever wires up the real engine.
 func notImplementedErr(verb string) error {
-	return fmt.Errorf("not implemented: %s lifecycle engine lands in SOP-11", verb)
+	return fmt.Errorf("not implemented: %s is not supported by this lifecycle engine yet", verb)
 }
 
 // StubEngine is a placeholder lifecycle engine backed directly by the

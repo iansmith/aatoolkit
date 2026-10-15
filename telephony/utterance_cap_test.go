@@ -10,7 +10,7 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/assets"
 )
 
-// SOP-156 Phase 0. These tests pin the max-utterance cutoff: a single
+// These tests pin the max-utterance cutoff: a single
 // continuous utterance is capped, and on the cap the engine plays a forced-stop
 // clip and hangs up through the same mark-echo flow as the farewell. They also
 // pin the reconciliation of the idle timer, whose reset-on-onset-only behavior
@@ -117,10 +117,9 @@ func startUtteranceSession(t *testing.T, name string, det *fakeDetector, clock *
 	return s, data, dataOut, sink
 }
 
-// TestUtterance_CapForcesStopAfterMaxMs is the point of the ticket: a caller
+// TestUtterance_CapForcesStopAfterMaxMs is the cap's central case: a caller
 // who talks past the cap is cut off with the forced-stop clip, and the session
-// heads into termination. Fails on current code — no utterance timer is armed,
-// so fakeClock finds nothing to fire at the cap duration.
+// heads into termination.
 func TestUtterance_CapForcesStopAfterMaxMs(t *testing.T) {
 	clock := newFakeClock()
 	det := &fakeDetector{probs: voicedProbs(50)}

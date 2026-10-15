@@ -14,7 +14,7 @@ import (
 
 // ControlEvent is a Twilio control-plane signal (e.g. "stop") routed to a
 // Session's controlIn field, decoupled from twilio.Frame to avoid an import
-// cycle (internal/telephony/twilio already imports internal/telephony).
+// cycle (telephony/twilio already imports telephony).
 // Twilio-side adapters translate twilio.Frame into ControlEvent.
 type ControlEvent struct {
 	Kind     string
@@ -25,8 +25,8 @@ type ControlEvent struct {
 // controlKindStop is the ControlEvent.Kind value for a Twilio "stop" signal.
 const controlKindStop = "stop"
 
-// controlKindMark is the ControlEvent.Kind value for a Twilio "mark" echo
-// (SOP-125): Twilio echoes back a mark once it has finished playing the
+// controlKindMark is the ControlEvent.Kind value for a Twilio "mark" echo:
+// Twilio echoes back a mark once it has finished playing the
 // audio queued before it, which is how AwaitingMarkEcho learns the farewell
 // clip actually played.
 const controlKindMark = "mark"
@@ -81,15 +81,15 @@ type ResponseInput = ServiceOutput[ResponseEvent]
 const sttDispatchDepth = 4
 
 // TwilioDataPlaneInput is the receive side of the channel a Session reads
-// inbound media payloads from (SOP-120's demux data plane, adapted).
+// inbound media payloads from (the demux data plane, adapted).
 type TwilioDataPlaneInput = ServiceInput[[]byte]
 
 // TwilioControlPlaneInput is the receive side of the channel a Session reads
-// Twilio control-plane signals from (SOP-120's demux control plane, adapted).
+// Twilio control-plane signals from (the demux control plane, adapted).
 type TwilioControlPlaneInput = ServiceInput[ControlEvent]
 
 // ControlOutKind identifies which Twilio control-plane message a
-// ControlOutMessage carries: EncodeMark or EncodeClear (SOP-125). EncodeStop
+// ControlOutMessage carries: EncodeMark or EncodeClear. EncodeStop
 // is never sent here -- it's a client-side function (twilio/stream.go), not
 // part of the server's outbound vocabulary; the server ends a call by
 // closing the WebSocket instead.
@@ -108,8 +108,8 @@ type ControlOutMessage struct {
 }
 
 // TwilioDataPlaneOutput is the send side of the channel a Session writes
-// outbound media frames to (SOP-116 ServiceOutput pattern). The concrete
-// implementation (internal/telephony/twilio/output.go) encodes each payload
+// outbound media frames to (the ServiceOutput pattern). The concrete
+// implementation (telephony/twilio/output.go) encodes each payload
 // via EncodeMedia and writes it to the WebSocket; this package only sees the
 // generic interface to avoid an import cycle (twilio already imports
 // telephony).
@@ -117,7 +117,7 @@ type TwilioDataPlaneOutput = ServiceOutput[[]byte]
 
 // TwilioControlPlaneOutput is the send side of the channel a Session writes
 // outbound control-plane messages to (mark/clear). The concrete
-// implementation (internal/telephony/twilio/output.go) encodes each message
+// implementation (telephony/twilio/output.go) encodes each message
 // via EncodeMark/EncodeClear and writes it to the WebSocket.
 type TwilioControlPlaneOutput = ServiceOutput[ControlOutMessage]
 
@@ -142,22 +142,22 @@ type Session struct {
 	vadEventObserver func(ev VADEvent, emitted bool)
 
 	// lastStreamWindow is the StreamWindowIndex of the most recent VADEvent the
-	// session dispatched. Cap/timeout decisions (SOP-166) fire from timers, not
+	// session dispatched. Cap/timeout decisions fire from timers, not
 	// from a VADEvent, so they read this to stamp an audio position
 	// (lastStreamWindow * windowMS) the same way VAD-boundary decisions read the
 	// event's own index. Updated at the single VAD-event choke point in run().
 	lastStreamWindow int
 
 	// turnTranscripts accumulates FullPass STT transcript text for the
-	// current turn (SOP-150). Distinct from turnBuf, which is raw audio.
+	// current turn. Distinct from turnBuf, which is raw audio.
 	turnTranscripts []string
 
 	// transcriptTurns accumulates each completed turn's per-utterance
 	// transcripts, captured at the flushTurnTranscripts seam before they are
-	// joined, so Close can render the conversation transcript summary (SOP-168).
+	// joined, so Close can render the conversation transcript summary.
 	transcriptTurns [][]string
 
-	// Transcript summary output, rendered at Close (SOP-168). transcriptLive
+	// Transcript summary output, rendered at Close. transcriptLive
 	// (nil = no print) receives the summary; transcriptDir/transcriptSID
 	// (dir == "" = no file) write <sid>.transcript.txt. Set by WithTranscriptOutput.
 	// transcriptAgentLabel names the response role ("" = the generic default);
@@ -188,7 +188,7 @@ type Session struct {
 	// turnTranscripts before that pass's result arrives, so completion is
 	// deferred until handleSTTResult processes it (state.go). turnEndEvent
 	// carries the triggering VADEvent through the deferral so the turn-end
-	// decision (SOP-165) can be recorded with its audio position when the
+	// decision can be recorded with its audio position when the
 	// deferred completion finally runs.
 	turnEndPending bool
 	turnEndEvent   VADEvent
@@ -203,7 +203,7 @@ type Session struct {
 	sttOut     STTOutput
 	responseIn ResponseInput
 
-	// dataOut and ctlOut are where the SOP-125 termination flow writes the
+	// dataOut and ctlOut are where the termination flow writes the
 	// farewell clip's audio frames and its mark, respectively. Both may be
 	// nil (unwired), in which case sendClip/sendMarkAndArmEcho are no-ops
 	// for that plane.
@@ -221,12 +221,12 @@ type Session struct {
 	// operator may also want a smaller live value.
 	idleTimeoutMS int
 
-	// utteranceTimeoutMS overrides MaxUtteranceMS for this session when > 0
-	// (SOP-156). The 45s production default is impractical to wait out in a
+	// utteranceTimeoutMS overrides MaxUtteranceMS for this session when > 0.
+	// The 45s production default is impractical to wait out in a
 	// test, and the operator sets a small value (e.g. 10s) for live testing.
 	utteranceTimeoutMS int
 
-	// turnTimeoutMS overrides MaxTurnMS for this session when > 0 (SOP-161).
+	// turnTimeoutMS overrides MaxTurnMS for this session when > 0.
 	// The 60s production default is impractical to wait out in a test, and
 	// the operator sets a small value for live testing.
 	turnTimeoutMS int
@@ -236,7 +236,7 @@ type Session struct {
 	// a test.
 	responseTimeoutMS int
 
-	// sttIn is where drainSTTDispatch sends full-pass STTRequests (SOP-124).
+	// sttIn is where drainSTTDispatch sends full-pass STTRequests.
 	// sttDispatchCh is dispatchSTT's non-blocking handoff to the dedicated
 	// drain goroutine -- a single drainer preserves FIFO dispatch order,
 	// which per-call goroutines racing on sttIn.Send cannot.
@@ -254,12 +254,12 @@ type Session struct {
 
 	// sttDispatchTimes records the injected-clock instant each STT request was
 	// dispatched, keyed by request id, so handleSTTResult can report the round-
-	// trip latency (SOP-167). Written in dispatchSTT and read+deleted in
+	// trip latency. Written in dispatchSTT and read+deleted in
 	// handleSTTResult -- both on the sequencer goroutine, so no lock is needed.
 	sttDispatchTimes map[int]time.Time
 
 	// turnBuf accumulates raw inbound μ-law frame bytes for the current
-	// utterance (SOP-124 Observable behavior #1: the state machine owns this
+	// utterance (the state machine owns this
 	// buffer, not a service).
 	turnBuf []byte
 
@@ -279,7 +279,7 @@ type Session struct {
 	clock func(time.Duration) <-chan time.Time
 
 	// now is the injected monotonic clock the decision recorder reads to time
-	// STT round-trip latency (SOP-167). Defaults to time.Now; a test overrides
+	// STT round-trip latency. Defaults to time.Now; a test overrides
 	// it via WithDecisionClock. Distinct from clock, which supplies relative
 	// durations (after) rather than an absolute instant.
 	now func() time.Time
@@ -334,7 +334,7 @@ func WithTurnSink(sink TurnSink) SessionOption {
 }
 
 // WithDecisionRecorder wires the DecisionRecorder that receives one
-// DecisionEvent per parameterized voice-input choice (M1: end-of-utterance).
+// DecisionEvent per parameterized voice-input choice.
 // Unset, a session uses a no-op recorder (NewSession default) and records
 // nothing. The session owns the recorder's lifecycle: Close flushes it.
 func WithDecisionRecorder(r DecisionRecorder) SessionOption {
@@ -402,7 +402,7 @@ func WithTurnEndPolicy(p TurnEndPolicy) SessionOption {
 //
 // Production never calls this -- every live call runs defaultVADConfig(),
 // which is why vad.go's DefaultVADConfig doc says the config is
-// process-wide, not per-session. This option exists for SOP-153's replay
+// process-wide, not per-session. This option exists for the replay
 // harness: `probeset replay --end-silence-ms N` needs to drive one Session
 // at a caller-chosen threshold per invocation without mutating the
 // package-wide default (which would race concurrent replays and leak into
@@ -420,7 +420,7 @@ func WithVADConfig(cfg VADConfig) SessionOption {
 // to see it, not merely once it was computed.
 //
 // Production never calls this either. It exists alongside WithVADConfig for
-// SOP-153's replay harness: Replay needs to know every window it fed has
+// the replay harness: Replay needs to know every window it fed has
 // been fully accounted for -- including any VADEndOfUtterance it produced
 // having actually reached the sequencer -- before it can safely conclude no
 // more STT dispatches are coming and end the call. A real completion signal
@@ -429,14 +429,14 @@ func WithVADEventObserver(f func(ev VADEvent, emitted bool)) SessionOption {
 	return func(s *Session) { s.vadEventObserver = f }
 }
 
-// WithTwilioDataInput wires in the Twilio data-plane demux output (SOP-120)
+// WithTwilioDataInput wires in the Twilio data-plane demux output
 // as this session's source of inbound media payloads.
 func WithTwilioDataInput(in TwilioDataPlaneInput) SessionOption {
 	return func(s *Session) { s.dataIn = in }
 }
 
 // WithTwilioControlInput wires in the Twilio control-plane demux output
-// (SOP-120) as this session's source of control-plane signals.
+// as this session's source of control-plane signals.
 func WithTwilioControlInput(in TwilioControlPlaneInput) SessionOption {
 	return func(s *Session) { s.controlIn = in }
 }
@@ -448,19 +448,19 @@ func WithSTTOutput(out STTOutput) SessionOption {
 }
 
 // WithSTTInput wires in the STT service's request input as the destination
-// for this session's dispatched full-pass STTRequests (SOP-124).
+// for this session's dispatched full-pass STTRequests.
 func WithSTTInput(in STTInput) SessionOption {
 	return func(s *Session) { s.sttIn = in }
 }
 
 // WithTwilioDataOutput wires in the destination for the farewell clip's
-// outbound audio frames (SOP-125).
+// outbound audio frames.
 func WithTwilioDataOutput(out TwilioDataPlaneOutput) SessionOption {
 	return func(s *Session) { s.dataOut = out }
 }
 
 // WithTwilioControlOutput wires in the destination for the outbound mark
-// sent alongside the farewell clip (SOP-125).
+// sent alongside the farewell clip.
 func WithTwilioControlOutput(out TwilioControlPlaneOutput) SessionOption {
 	return func(s *Session) { s.ctlOut = out }
 }
@@ -494,7 +494,7 @@ func WithClock(after func(time.Duration) <-chan time.Time) SessionOption {
 }
 
 // WithDecisionClock replaces the monotonic clock the decision recorder reads to
-// time STT round-trip latency (SOP-167) with now. nil, the default, means the
+// time STT round-trip latency with now. nil, the default, means the
 // wall clock (time.Now). Distinct from WithClock: that seam supplies relative
 // durations for timers; this one supplies absolute instants for latency. Test
 // seam -- a fake now advanced by a known delta makes the recorded latency exact.
@@ -513,13 +513,13 @@ func WithMaxSilenceMS(ms int) SessionOption {
 	return func(s *Session) { s.idleTimeoutMS = ms }
 }
 
-// WithMaxUtteranceMS overrides MaxUtteranceMS for this session (SOP-156).
+// WithMaxUtteranceMS overrides MaxUtteranceMS for this session.
 // Test seam and the live-testing knob behind AATOOLKIT_MAX_UTTERANCE_MS.
 func WithMaxUtteranceMS(ms int) SessionOption {
 	return func(s *Session) { s.utteranceTimeoutMS = ms }
 }
 
-// WithMaxTurnMS overrides MaxTurnMS for this session (SOP-161). Test seam
+// WithMaxTurnMS overrides MaxTurnMS for this session. Test seam
 // and the live-testing knob behind AATOOLKIT_MAX_TURN_MS.
 func WithMaxTurnMS(ms int) SessionOption {
 	return func(s *Session) { s.turnTimeoutMS = ms }
@@ -571,7 +571,7 @@ func NewSession(ctx context.Context, callSID string, opts ...SessionOption) *Ses
 // returning nil.
 //
 // Start constructs the session's vadDetector via its vadFactory (required —
-// wired with WithVADFactory; there is no in-process default since SOP-147),
+// wired with WithVADFactory; there is no in-process default),
 // failing hard: a missing factory or a factory error is returned and nothing is
 // started — no goroutines are spawned, so a caller that gets an error can retry
 // or abandon the session cleanly.
@@ -580,8 +580,8 @@ func (s *Session) Start() error {
 		return nil
 	}
 
-	// VAD runs out-of-process in the sidecar (SOP-147 retired the in-process
-	// ONNX detector), so there is no self-contained default: a consumer must
+	// VAD runs out-of-process in the sidecar (the in-process ONNX detector
+	// was retired), so there is no self-contained default: a consumer must
 	// wire a detector via WithVADFactory (e.g. NewVADClient(url).Detector()).
 	factory := s.vadFactory
 	if factory == nil {
@@ -599,7 +599,7 @@ func (s *Session) Start() error {
 	// Validated against the production MaxSilenceMS constant, not the
 	// session's idleTimeoutMS test-seam override (see WithMaxSilenceMS):
 	// this is a config sanity check on the real 700/5000/15000 ordering the
-	// ticket's design rests on, not a runtime assertion against every
+	// session's timer design rests on, not a runtime assertion against every
 	// possible test override -- several existing tests intentionally
 	// compress idleTimeoutMS to fast-forward termination flows unrelated to
 	// VAD timing, and there is no equivalent per-session override for
@@ -698,8 +698,8 @@ func (s *Session) dispatchIfOpen(source InputSource, payload any, ok bool) bool 
 
 // dispatchVADEvent is dispatchIfOpen for VAD events, which carry one extra
 // obligation: the session tracks the latest audio position so a cap/timeout
-// decision, which fires from a timer rather than a VADEvent, can still stamp one
-// (SOP-166). This is the single point every VADEvent flows through, and the
+// decision, which fires from a timer rather than a VADEvent, can still stamp one.
+// This is the single point every VADEvent flows through, and the
 // tracking must not run for the zero event a closed channel yields.
 func (s *Session) dispatchVADEvent(ev VADEvent, ok bool) bool {
 	if !ok {
@@ -713,8 +713,8 @@ func (s *Session) dispatchVADEvent(ev VADEvent, ok bool) bool {
 // dispatchTimerCompletion drops a superseded completion, then maps a fired
 // TimerFacility timer's name to its InputSource and dispatches it. Split out of
 // run()'s select loop (which must stay a flat, low-complexity dispatcher per
-// Charter R8) as the number of named timers has grown across tickets (SOP-125,
-// SOP-156, SOP-161, AATK-24, AATK-25). The staleness check moved in here with
+// Charter R8) as the number of named timers has grown across tickets (AATK-24,
+// AATK-25 and earlier ones). The staleness check moved in here with
 // it: it is part of "handle a fired timer", and leaving it inline cost run() a
 // branch that the split exists to keep out of it.
 func (s *Session) dispatchTimerCompletion(completion TimerCompletion) {
@@ -780,7 +780,7 @@ func responseChannel(in ResponseInput) <-chan ResponseEvent {
 // armIdleTimer starts the idle timer at idleTimeoutMS (test seam) or
 // MaxSilenceMS (production default). Armed at Start, cancelled at speech onset
 // (the caller is no longer silent), and re-armed by dispatchFullPass when the
-// utterance ends -- so it measures silence, never active speech (SOP-156).
+// utterance ends -- so it measures silence, never active speech.
 func (s *Session) armIdleTimer() {
 	s.timerFacility.Arm(s.ctx, timerIdle, time.Duration(resolvedMS(s.idleTimeoutMS, MaxSilenceMS))*time.Millisecond)
 }
@@ -788,7 +788,7 @@ func (s *Session) armIdleTimer() {
 // resolvedMS returns the effective timer bound: the per-session With* override
 // when set (> 0), else the package default constant. One definition shared by
 // every arm* site and, for the two operator-tunable caps, the cap decision
-// record (SOP-166).
+// record.
 func resolvedMS(override, def int) int {
 	if override > 0 {
 		return override
@@ -801,7 +801,7 @@ func (s *Session) cancelIdleTimer() {
 	s.timerFacility.Cancel(timerIdle)
 }
 
-// armUtteranceTimer starts the max-utterance cap (SOP-156) at utteranceTimeoutMS
+// armUtteranceTimer starts the max-utterance cap at utteranceTimeoutMS
 // (test seam) or MaxUtteranceMS (production default). Called on speech onset --
 // which fires exactly once per utterance, since vadMachine only emits VADSpeech
 // from a non-speaking state and stays speaking until end-of-utterance -- so this
@@ -815,7 +815,7 @@ func (s *Session) cancelUtteranceTimer() {
 	s.timerFacility.Cancel(timerUtterance)
 }
 
-// armTurnTimer starts the max-turn cap (SOP-161) at turnTimeoutMS (test
+// armTurnTimer starts the max-turn cap at turnTimeoutMS (test
 // seam) or MaxTurnMS (production default). Called at a turn's first speech
 // onset (guarded by !turnActive in handleSpeechOnset), so it bounds the whole
 // turn from its start, not any single utterance within it.
@@ -829,7 +829,7 @@ func (s *Session) cancelTurnTimer() {
 }
 
 // armMarkEchoTimer starts the mark-echo timer, derived from the real
-// farewell clip's playout duration (SOP-125 Observable behavior #4).
+// farewell clip's playout duration.
 func (s *Session) armMarkEchoTimer(clip []byte) {
 	s.timerFacility.Arm(s.ctx, timerMarkEcho, MarkEchoTimeout(clip))
 }
@@ -907,7 +907,7 @@ const farewellFrameBytes = SampleRateHz * MuLawFrameMS / 1000
 // sendClip writes a μ-law clip out on dataOut, one MuLawFrameMS-sized frame at
 // a time. A nil dataOut (unwired -- e.g. in tests that don't care about this
 // plane) is a no-op. Used by both terminal clips: the farewell (idle timeout)
-// and the forced-stop (SOP-156 utterance cap). Called synchronously from a
+// and the forced-stop (utterance cap). Called synchronously from a
 // timer handler: a terminal, once-per-call flow, not the steady-state media
 // path run() must never block in (charter R8), and dataOut's buffer is sized
 // generously enough to absorb the whole clip without blocking on a draining
@@ -944,11 +944,11 @@ func (s *Session) sendMarkAndArmEcho(clip []byte) {
 // terminateWithClip plays clip on the data plane and moves the call into
 // AwaitingMarkEcho, sending the termination mark with an echo timeout derived
 // from clip. Shared by the farewell (idle timeout) and the forced-stop
-// (SOP-156 utterance cap) -- they differ only in the clip.
+// (utterance cap) -- they differ only in the clip.
 //
 // setState happens BEFORE the mark send (not after, via dispatch()'s usual
 // post-handler assignment) so an observer that receives the mark on ctlOut can
-// never see a State() that still reads the old state (SOP-125 code review: this
+// never see a State() that still reads the old state (code review: this
 // ordering was the source of a ~1-in-50 flake in TestTermination_MarkEchoReceived).
 func (s *Session) terminateWithClip(clip []byte) SessionState {
 	s.sendClip(clip)
@@ -997,7 +997,7 @@ func (s *Session) dispatchSTT(kind STTPassKind, audio []byte) {
 
 // recordSTTDispatch records an stt_dispatch decision and stores the dispatch
 // instant (from the injected clock) so the matching result can report round-trip
-// latency (SOP-167). audioBytes is the dispatched mu-law buffer length; the audio
+// latency. audioBytes is the dispatched mu-law buffer length; the audio
 // position is the last VAD window, since a dispatch carries no VADEvent of its
 // own. Called only for genuinely enqueued requests (the select's success branch).
 func (s *Session) recordSTTDispatch(requestID, audioBytes int) {
@@ -1013,7 +1013,7 @@ func (s *Session) recordSTTDispatch(requestID, audioBytes int) {
 
 // recordSTTResult records an stt_result decision correlated to its dispatch,
 // reporting the transcript, whisper's own audio duration, and the round-trip
-// latency measured from the injected clock (SOP-167). The stored dispatch instant
+// latency measured from the injected clock. The stored dispatch instant
 // is consumed so the map does not grow across a long call; a result with no
 // recorded dispatch (should not happen on the accepted path) reports 0 latency.
 func (s *Session) recordSTTResult(res STTResult) {
@@ -1042,7 +1042,7 @@ func (s *Session) recordSTTResult(res STTResult) {
 // audio position (StreamWindowIndex * windowMS), the detector probability, and
 // the silence count; the caller names the kind, the gating param and its
 // resolved value, the effect, and the STT request id (0 when none is
-// associated). One record site for every VAD-boundary decision (SOP-164).
+// associated). One record site for every VAD-boundary decision.
 func (s *Session) recordVADDecision(kind, param string, value any, ev VADEvent, effect string, requestID int) {
 	s.decisionRecorder.Record(DecisionEvent{
 		AudioMS:      ev.StreamWindowIndex * s.vadCfg.windowMS(),
@@ -1057,7 +1057,7 @@ func (s *Session) recordVADDecision(kind, param string, value any, ev VADEvent, 
 	})
 }
 
-// recordCap records one cap/timeout DecisionEvent (SOP-166). These fire from a
+// recordCap records one cap/timeout DecisionEvent. These fire from a
 // timer, not a VADEvent, so the audio position comes from the session's
 // last-seen VAD window (lastStreamWindow * windowMS) rather than a triggering
 // event; it is 0 until the first VAD window, which is correct for an idle
@@ -1077,7 +1077,7 @@ func (s *Session) recordCap(kind, param string, value any, effect string) {
 // dispatched distinguishes the two paths an utterance can close on: the normal
 // path that dispatched a FullPass (effect names the request), and the dropped
 // path -- a second utterance closed while a pass was still in flight, so no new
-// pass was sent (SOP-164). sttReqID names the relevant pass either way.
+// pass was sent. sttReqID names the relevant pass either way.
 func (s *Session) recordEndOfUtterance(ev VADEvent, dispatched bool) {
 	var effect string
 	var reqID int
@@ -1093,13 +1093,13 @@ func (s *Session) recordEndOfUtterance(ev VADEvent, dispatched bool) {
 // recordTurnEnd records the silence-driven turn-end (TurnEndSilenceMS) decision.
 // Called on both the immediate path (VADTurnEnd in a live state) and the
 // deferred path (VADTurnEnd that arrived while a pass was in flight, completed
-// later in handleSTTResult), each passing the triggering VADEvent (SOP-165).
+// later in handleSTTResult), each passing the triggering VADEvent.
 func (s *Session) recordTurnEnd(ev VADEvent) {
 	s.recordVADDecision(DecisionKindTurnEnd, DecisionParamTurnEndSilence, s.vadCfg.TurnEndSilenceMS, ev, "turn closed (silence-turn-end)", 0)
 }
 
 // recordStopwordTurnEnd records the turn-end decision for a stopword-completed
-// turn (SOP-168). Unlike the silence-driven turn-end (recordTurnEnd), a stopword
+// turn. Unlike the silence-driven turn-end (recordTurnEnd), a stopword
 // end has no triggering VADEvent -- the turn ended because the STT transcript
 // matched the stopword -- so it takes its audio position from the last VAD
 // window, like the cap decisions. Same DecisionKindTurnEnd as the silence path
@@ -1289,16 +1289,15 @@ func (s *Session) setState(next SessionState) {
 
 // flushTurnTranscripts delivers accumulated turn transcripts through the
 // TurnSink and clears the buffer. Parts are joined with a single space
-// (each was trimmed on accumulation). An empty buffer is a no-op
-// (SOP-150 Observable behavior 4). trigger identifies which completion path
-// (state.go) is flushing, for TurnSink.OnTurnComplete's structured log line
-// (SOP-162 DoD).
+// (each was trimmed on accumulation). An empty buffer is a no-op.
+// trigger identifies which completion path (state.go) is flushing, for
+// TurnSink.OnTurnComplete's structured log line.
 func (s *Session) flushTurnTranscripts(trigger TurnTrigger) {
 	if len(s.turnTranscripts) == 0 {
 		return
 	}
 	// Capture the per-utterance list (a copy, before the join below clears it)
-	// for the conversation transcript summary (SOP-168).
+	// for the conversation transcript summary.
 	s.transcriptTurns = append(s.transcriptTurns, append([]string(nil), s.turnTranscripts...))
 	text := strings.Join(s.turnTranscripts, " ")
 	s.turnTranscripts = nil
@@ -1370,7 +1369,7 @@ func (s *Session) sendResponseMarkAndArmEcho(frames [][]byte) {
 // with the trigger identifying which one.
 // turnEndPending is cleared here too: whichever path completes the turn,
 // deferred or immediate, this is that completion. The turn-level cap
-// (SOP-161) is cancelled unconditionally here too, regardless of trigger --
+// is cancelled unconditionally here too, regardless of trigger --
 // mirroring how Close() cancels every timer unconditionally rather than
 // per-path -- so no current or future completion path can leave it armed.
 func (s *Session) completeTurn(trigger TurnTrigger) {
@@ -1404,7 +1403,7 @@ func (s *Session) openTurnToRouteVerdict(trigger TurnTrigger) {
 
 // recordTurnCompletion records the decision for the turn-completion triggers
 // whose decision comes from session state alone -- the four timer-driven caps
-// and the stopword turn-end (SOP-168) -- all of which take their audio
+// and the stopword turn-end -- all of which take their audio
 // position from the last VAD window, not a triggering event. The utterance,
 // turn, and response caps record their resolved (operator-tunable) bound; the
 // idle timeout's decision also follows its resolved bound (D8's silence-knob
@@ -1454,7 +1453,7 @@ func (s *Session) Close() {
 		log.Printf("telephony: session %s: decision recorder close: %v", s.CallSID, err)
 	}
 	// Render the conversation transcript summary from the drained turn
-	// accumulator (SOP-168), same lifecycle as the decision record. Idempotent:
+	// accumulator, same lifecycle as the decision record. Idempotent:
 	// emitTranscript clears the accumulator, so a second Close is a no-op.
 	s.emitTranscript()
 }

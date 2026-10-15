@@ -7,7 +7,7 @@ import "testing"
 // still hasn't called back" → "has to do it"), but that hallucination was the AATK-8
 // cold-start VAD bug (Silero fed a bare 256-sample window with no 64-sample context), not a
 // 700 effect. With AATK-8 fixed, a 700/900/1050 re-sweep over the fix-clean set is
-// content-identical, so 700 is restored (SOP-154's value, lower turn-taking latency). This
+// content-identical, so 700 is restored (its value before AATK-3, lower turn-taking latency). This
 // pins the tuned value so an accidental change is caught. The companion behavioral check is
 // TestSileroE2ETimelineGolden, which asserts the pipeline's end-of-utterance window against
 // the committed golden.

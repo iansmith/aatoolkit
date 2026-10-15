@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +14,7 @@ import (
 // blocks until the stop channel closes — it must NOT return on its own the
 // way a piped REPL does on EOF.
 func TestRunAuto_UpCallsFleetUpAndBlocksUntilStop(t *testing.T) {
-	eng := &fakeEngine{}
+	eng := &fakeEngine{upNotify: make(chan string, 1)}
 	var out strings.Builder
 	stop := make(chan struct{})
 
@@ -24,33 +23,29 @@ func TestRunAuto_UpCallsFleetUpAndBlocksUntilStop(t *testing.T) {
 		done <- RunAuto("up", &out, eng, stop)
 	}()
 
-	// Wait for RunAuto to call Up and reach the blocking <-stop.
-	// fakeEngine.Up is synchronous, so once upCalls is populated the
-	// goroutine is past Up and blocked on the channel.
-	deadline := time.After(2 * time.Second)
-	for len(eng.upCalls) == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("RunAuto did not call Up within timeout")
-		default:
-			runtime.Gosched()
+	// Wait for RunAuto to call Up. The fake signals the call on upNotify
+	// rather than the test polling upCalls, which RunAuto's goroutine writes.
+	select {
+	case name := <-eng.upNotify:
+		if name != "" {
+			t.Fatalf("expected Up(\"\") for fleet-wide up, got Up(%q)", name)
 		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunAuto did not call Up within timeout")
 	}
 
-	if eng.upCalls[0] != "" {
-		t.Fatalf("expected Up(\"\") called once for fleet-wide up, got %v", eng.upCalls)
-	}
-
-	// Must NOT have torn down while still running.
-	if eng.teardownCalls != 0 {
-		t.Fatalf("expected no teardown while blocked, got %d", eng.teardownCalls)
-	}
-
-	// Must not have returned yet.
+	// Must not return on its own. Up has already signalled, so a RunAuto that
+	// does not block on stop returns well within this window.
 	select {
 	case err := <-done:
 		t.Fatalf("RunAuto returned prematurely (err=%v); it must block until stop", err)
-	default:
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Must NOT have torn down while still running. RunAuto writes
+	// teardownCalls only after stop closes, which has not happened yet.
+	if eng.teardownCalls != 0 {
+		t.Fatalf("expected no teardown while blocked, got %d", eng.teardownCalls)
 	}
 
 	close(stop)

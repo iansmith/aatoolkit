@@ -38,14 +38,23 @@ type fakeEngine struct {
 	viewResult         []string
 	viewErr            error
 	failNotImplemented bool
+
+	// upNotify, when non-nil, is sent each Up call's name after the call is
+	// recorded. A test that runs the code under test on its own goroutine
+	// waits on this instead of polling upCalls, which that goroutine writes.
+	// Give it enough buffer for the calls expected, or Up blocks.
+	upNotify chan string
 }
 
 func (f *fakeEngine) Status() []ServerStatus { return f.statuses }
 
 func (f *fakeEngine) Up(name string) error {
 	f.upCalls = append(f.upCalls, name)
+	if f.upNotify != nil {
+		f.upNotify <- name
+	}
 	if f.failNotImplemented {
-		return fmt.Errorf("not implemented: lifecycle engine lands in SOP-11")
+		return fmt.Errorf("not implemented: not supported by this lifecycle engine yet")
 	}
 	return nil
 }
@@ -53,7 +62,7 @@ func (f *fakeEngine) Up(name string) error {
 func (f *fakeEngine) Down(name string) error {
 	f.downCalls = append(f.downCalls, name)
 	if f.failNotImplemented {
-		return fmt.Errorf("not implemented: lifecycle engine lands in SOP-11")
+		return fmt.Errorf("not implemented: not supported by this lifecycle engine yet")
 	}
 	return nil
 }
@@ -61,7 +70,7 @@ func (f *fakeEngine) Down(name string) error {
 func (f *fakeEngine) Bounce(name string) error {
 	f.bounceCalls = append(f.bounceCalls, name)
 	if f.failNotImplemented {
-		return fmt.Errorf("not implemented: lifecycle engine lands in SOP-11")
+		return fmt.Errorf("not implemented: not supported by this lifecycle engine yet")
 	}
 	return nil
 }
@@ -72,17 +81,17 @@ func (f *fakeEngine) ReloadConfigIfChanged(out io.Writer) {
 
 func (f *fakeEngine) Dead(name string) error {
 	f.deadCalls = append(f.deadCalls, name)
-	return fmt.Errorf("not implemented: lifecycle engine lands in SOP-11")
+	return fmt.Errorf("not implemented: not supported by this lifecycle engine yet")
 }
 
 func (f *fakeEngine) Build(name string) error {
 	f.buildCalls = append(f.buildCalls, name)
-	return fmt.Errorf("not implemented: lifecycle engine lands in SOP-11")
+	return fmt.Errorf("not implemented: not supported by this lifecycle engine yet")
 }
 
 func (f *fakeEngine) Logs(name string) ([]string, error) {
 	f.logsCalls = append(f.logsCalls, name)
-	return nil, fmt.Errorf("not implemented: lifecycle engine lands in SOP-11")
+	return nil, fmt.Errorf("not implemented: not supported by this lifecycle engine yet")
 }
 
 func (f *fakeEngine) Kill(pid int) error {

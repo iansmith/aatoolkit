@@ -2,8 +2,8 @@ package telephony
 
 import "testing"
 
-// TestFormatTranscript pins the conversation transcript summary's exact shape
-// (SOP-168): each user turn's utterances bracketed on one line, with a blank
+// TestFormatTranscript pins the conversation transcript summary's exact shape:
+// each user turn's utterances bracketed on one line, with a blank
 // agent response line between consecutive user turns. This is the format the
 // human reads at end of call/replay to gauge STT + segmentation quality.
 func TestFormatTranscript(t *testing.T) {
@@ -49,7 +49,7 @@ func TestFormatTranscript_Empty(t *testing.T) {
 
 // TestFlushTurnTranscripts_AccumulatesForTranscript pins the capture hook: a
 // completed turn's per-utterance list is copied into transcriptTurns (before the
-// join) so Close can render it, and an empty flush appends nothing (SOP-168).
+// join) so Close can render it, and an empty flush appends nothing.
 func TestFlushTurnTranscripts_AccumulatesForTranscript(t *testing.T) {
 	s := &Session{turnTranscripts: []string{"hello there", "how are you"}}
 	s.flushTurnTranscripts(TriggerSilenceTurnEnd)

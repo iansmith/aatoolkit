@@ -28,10 +28,10 @@ func EventLogEnabled() bool {
 }
 
 // DecisionRecorder receives one structured DecisionEvent per parameterized
-// choice the voice-input path makes (M1: end-of-utterance only). It exists so
-// the parameters we set for dealing with voice input can be evaluated after
-// the fact: each event ties a parameter and its value to a position in the
-// input audio and the effect the choice had.
+// choice the voice-input path makes. It exists so the parameters we set for
+// dealing with voice input can be evaluated after the fact: each event ties a
+// parameter and its value to a position in the input audio and the effect the
+// choice had.
 //
 // Implementations must return promptly from Record: it is called synchronously
 // from the session's single sequencer loop and must not block it (same
@@ -41,8 +41,8 @@ type DecisionRecorder interface {
 	Close() error
 }
 
-// Decision event types and the labels M1 emits. Kept as named constants so the
-// producer (state.go) and any consumer read the same strings.
+// Decision event types and the labels the session emits. Kept as named
+// constants so the producer (state.go) and any consumer read the same strings.
 const (
 	DecisionTypeVAD         = "vad"
 	DecisionTypeCap         = "cap"
@@ -79,8 +79,7 @@ const modelRouteShadowEffect = "shadow only; turn answered unchanged"
 
 // DecisionEvent is one recorded decision. The shape is deliberately flat and
 // JSON-friendly (one object per JSONL line); fields not relevant to a given
-// event type are omitted. M1 populates only the VAD end-of-utterance shape;
-// later milestones add further event types (STT, caps) and any fields they need.
+// event type are omitted.
 //
 // AudioMS is a position in the INPUT audio (derived from the monotonic
 // VAD-window clock), never wall-clock, so the record is stable under replay.
@@ -96,7 +95,7 @@ type DecisionEvent struct {
 	RequestID    int     `json:"request_id,omitempty"`
 	Effect       string  `json:"effect,omitempty"`
 
-	// STT round-trip fields (SOP-167). Text is the delivered transcript;
+	// STT round-trip fields. Text is the delivered transcript;
 	// LatencyMS is result_time - dispatch_time from the injected clock;
 	// AudioBytes is the dispatched mu-law buffer length; STTDurSec is whisper's
 	// own reported audio duration. All omitempty so non-STT events stay compact.
@@ -134,8 +133,8 @@ type decisionHeader struct {
 	Totals    decisionTotals `json:"totals"`
 }
 
-// decisionTotals is the per-recording summary written into the header at Close
-// (SOP-168). Turns counts every recorded turn completion -- silence-turn-end,
+// decisionTotals is the per-recording summary written into the header at Close.
+// Turns counts every recorded turn completion -- silence-turn-end,
 // stopword, turn-cap, utterance-cap (all now emit a decision) -- but not the
 // idle timeout, which ends the call after its turn already closed. A mid-turn
 // Twilio hangup (TriggerCallEnd) records no decision and so is not counted.
@@ -273,7 +272,7 @@ func WithFileDecisionRecorderFromEnv(dir, streamSID, callSID, label string, cfg 
 }
 
 // formatDecisionLine renders one event as a single human-readable line for the
-// live terminal feed. The STT round-trip events (SOP-167) carry no gating
+// live terminal feed. The STT round-trip events carry no gating
 // param/prob, so they render their own shape; VAD and cap events share the
 // param=value line.
 func formatDecisionLine(ev DecisionEvent) string {

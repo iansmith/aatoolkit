@@ -1,11 +1,11 @@
 # Vendored asset provenance (the engine copy)
 
 This directory holds `go:embed`-ded binary assets: the farewell clip and two
-sound-effect clips (SOP-156). All are documented below.
+sound-effect clips. All are documented below.
 
 ---
 
-# audio-forced-stop.ulaw / llm-thinking.ulaw — sound effects (SOP-156)
+# audio-forced-stop.ulaw / llm-thinking.ulaw — sound effects
 
 | | audio-forced-stop | llm-thinking |
 |---|---|---|
@@ -13,7 +13,7 @@ sound-effect clips (SOP-156). All are documented below.
 | Source (kept) | `audio-forced-stop.mp3` | `llm-thinking.mp3` |
 | Format | headerless μ-law, 8 kHz, mono (`len/8000` == seconds) | same |
 | μ-law size | 12672 bytes = 1.58s | 40320 bytes = 5.04s |
-| Role | played when a single utterance exceeds `MaxUtteranceMS` and the caller is cut off, then the call terminates via the mark-echo flow | a loopable "thinking" bed for a future feature; **embedded but wired to no playback path in SOP-156** |
+| Role | played when a single utterance exceeds `MaxUtteranceMS` and the caller is cut off, then the call terminates via the mark-echo flow | a loopable "thinking" bed for a future feature; **first embedded with no playback path** |
 | Original filename | `daviddumaisaudio-sci-fi-weapon-laser-shot-04-316416.mp3` | `soundzee-futuristic-ui-beeps-356129.mp3` |
 | License | **Pixabay Content License** (deferred: verify attribution requirements before production; swap if terms are unclear — Ian's call, 2026-07-17) | same |
 
@@ -40,12 +40,11 @@ ffmpeg -i <name>.mp3 -ar 8000 -ac 1 -f mulaw <name>.ulaw
 | Shipped clip | 16644 bytes = 2.08s, 0.42s internal pause |
 
 Regenerate (requires voice-out up — `aa-server-status> voice-out up`):
-
-```sh
-scripts/make_farewell.sh --play        # audition  -> build/farewell.ulaw
-scripts/make_farewell.sh --install     # copy into this directory
-go build -o build/server ./cmd/server  # re-embed
-```
+synthesize the text above through `POST /v1/tts` with the voice and speed
+above, trim the leading and trailing silence, apply the 8 ms fade at each edge,
+encode as 8 kHz mono μ-law, audition the result, and copy it into this
+directory. The next build of anything that imports this package re-embeds it.
+The script that automates these steps is not part of this repo.
 
 ## Why the text has an ellipsis
 
@@ -69,7 +68,7 @@ and an audible click; the 8 ms fades force both edges to zero.
 
 ## Not reproducible byte-for-byte
 
-Supertonic's synthesis is not seeded, so re-running `make_farewell.sh` yields a
-slightly different rendering (duration varies by ~5%) — there is no sha256 to
-pin here. Audition after regenerating.
+Supertonic's synthesis is not seeded, so regenerating yields a slightly
+different rendering (duration varies by ~5%) — there is no sha256 to pin here.
+Audition after regenerating.
 

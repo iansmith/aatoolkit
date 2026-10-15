@@ -400,7 +400,7 @@ func sendConnected(t *testing.T, conn *websocket.Conn) {
 	writeText(t, conn, msg)
 }
 
-// --- SOP-141: Optional connected frame ---
+// --- Optional connected frame ---
 
 // Behavior: connected then start — the server accepts a connected frame followed by
 // a start frame, consumes the connected silently, and passes the start frame to

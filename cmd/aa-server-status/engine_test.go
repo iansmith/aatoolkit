@@ -498,11 +498,11 @@ func TestRealEngine_Up_MultiServer_OneFails_OthersStillAttemptedAndAggregateName
 		t.Fatalf("expected good-svc to still be launched despite bad-svc's failure, got %q", goodState)
 	}
 	if !strings.Contains(msg, ".log") {
-		t.Fatalf("expected the aggregate's succeeding member to also carry its log path (SOP-108), got: %v", err)
+		t.Fatalf("expected the aggregate's succeeding member to also carry its log path, got: %v", err)
 	}
 }
 
-// --- SOP-108: log path printed to console on a successful start -----------
+// --- log path printed to console on a successful start -----------
 
 // A fully successful single-server up must print that server's log path to
 // the console at that moment — today Up() bypasses formatAggregate entirely
@@ -634,11 +634,10 @@ func TestFormatTailHint(t *testing.T) {
 // A multi-server up with a partial failure, driven through the real REPL
 // dispatch path (not just Up()'s return value), must print each server's
 // outcome line exactly once. Up() writes its outcome lines straight to
-// os.Stdout as a side effect (§6.5, SOP-108), and dispatch separately
+// os.Stdout as a side effect (§6.5), and dispatch separately
 // prints whatever error Up() returns — if Up() always prints AND returns an
 // error whose text repeats the same lines, every line would appear twice
-// once dispatch's own print lands on the same stream (PR #69 review
-// finding).
+// once dispatch's own print lands on the same stream.
 func TestRun_Up_MultiServer_PartialFailure_DispatchPrintsEachLineOnce(t *testing.T) {
 	goodPort := freeTestPort(t)
 	badPort := freeTestPort(t)

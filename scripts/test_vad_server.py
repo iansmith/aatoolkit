@@ -1,10 +1,10 @@
-"""Handler test for scripts/vad_server.py (SOP-148).
+"""Handler test for scripts/vad_server.py.
 
 Drives the real FastAPI app in-process — the starlette TestClient runs the
 lifespan, which builds the ONNX Runtime session against the real vendored model
 — and asserts that ``POST /`` reproduces the wire fixture's response byte-for-
 byte for every frame in both golden sets. Real ORT, real model; the fixture
-(SOP-146, telephony/testdata/silero_wire_fixture.json) is the oracle.
+(telephony/testdata/silero_wire_fixture.json) is the oracle.
 
 Run: .venv/bin/python -m pytest scripts/test_vad_server.py
 """

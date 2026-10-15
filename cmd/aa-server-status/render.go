@@ -1,4 +1,4 @@
-// Column formatting for the status table (SOP-19 / design/aa-server-status.md
+// Column formatting for the status table (design/aa-server-status.md
 // §8). Colors use raw stdlib ANSI escapes only — no color dependency.
 package main
 
@@ -149,14 +149,14 @@ func colorize(code, text string) string {
 	return code + text + ansiReset
 }
 
-// redStates are the STATE keywords the ticket calls out as anomalies —
-// always red, regardless of AnomalyDetail.
+// redStates are the STATE keywords design/aa-server-status.md §8 calls out
+// as anomalies — always red, regardless of AnomalyDetail.
 var redStates = map[ServerState]bool{
 	StateStray:           true,
 	StatePartial:         true,
 	StateExtraListener:   true,
 	StateForeignConflict: true,
-	StateBlocked:         true, // inferred from anomaly pattern, not in ticket's explicit color list
+	StateBlocked:         true, // inferred from anomaly pattern, not in §8's explicit color list
 }
 
 // anomalyDetailStates are the STATE values for which a non-empty
@@ -208,7 +208,8 @@ func colorForState(state ServerState) string {
 }
 
 // formatStateCell renders the STATE column's full display text (including
-// any anomaly parenthetical) wrapped in the color the ticket specifies.
+// any anomaly parenthetical) wrapped in the color design/aa-server-status.md
+// §8 specifies.
 //
 // Precedence, outermost first:
 //  1. Stale — always "STALE" yellow, regardless of every other field: a

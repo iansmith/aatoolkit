@@ -285,12 +285,12 @@ func TestDrainFrames_PayloadSurvivesTwilioEncodingRoundTrip(t *testing.T) {
 	}
 }
 
-// --- SOP-126: chunk/timestamp on outgoing media frames ---
+// --- chunk/timestamp on outgoing media frames ---
 
 // TestCLI_ChunkTimestamp captures 3 outgoing frames through drainFrames +
 // mediaFrameEncoder and asserts the OUTGOING wire JSON carries monotonic
-// chunk (1, 2, 3) and timestamp ("0", "20", "40") fields — the ticket's
-// worked example: chunk 1 starts playing at t=0ms, chunk 2 at t=20ms, etc.
+// chunk (1, 2, 3) and timestamp ("0", "20", "40") fields: chunk 1 starts
+// playing at t=0ms, chunk 2 at t=20ms, and so on.
 func TestCLI_ChunkTimestamp(t *testing.T) {
 	data := bytes.Repeat([]byte{0x7f}, 3*muLawFrame20ms)
 	seqNum := 1

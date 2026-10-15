@@ -6,7 +6,7 @@
 |---|---|
 | File | `meetings_today.ulaw` |
 | Content | "Can you show me my meetings today?" — leading silence, the utterance, trailing silence |
-| Source | Provided by Ian directly for SOP-96 (not derived from any vendored/third-party asset) |
+| Source | Provided by Ian directly (not derived from any vendored/third-party asset) |
 | Format | 8 kHz, mono, G.711 μ-law, 1 byte/sample, no header (raw payload — matches what Twilio's Media Streams deliver) |
 | Size | 80,000 bytes = 10.0 s |
 | sha256 | `556fe18f83e69ddd021a19d353a45f1352e4cec9a3ed78aa2e2aa7973c7cdc03` |
@@ -29,7 +29,7 @@ ffmpeg -i <source-recording> -ar 8000 -ac 1 -f mulaw meetings_today.ulaw
 
 ## Why this fixture
 
-`telephony/testdata/silero_goldens.json` (SOP-80/95) is a 24-frame synthetic/short
+`telephony/testdata/silero_goldens.json` is a 24-frame synthetic/short
 fixture built to compare the VAD model's output against onnxruntime bit-for-bit on
 individual frames. It doesn't exercise a real end-to-end call: real leading
 silence, a real utterance, real trailing silence, and the full
@@ -43,7 +43,8 @@ emitted `VADEvent` timeline (speech onset → silence → end-of-utterance) agai
 committed golden, so a mis-wired detector, a windowing bug, or a state-machine
 regression in that chain gets caught.
 
-Do not reuse this fixture for anything outside this ticket's stated scope.
+Use this recording only as a regression fixture for the VAD pipeline. Do not
+tune VAD thresholds against it.
 
 ## Companion fixtures
 
@@ -72,10 +73,10 @@ Do not reuse this fixture for anything outside this ticket's stated scope.
   |---|---|---|
   | original | `EndSilenceMS = 700` | end-of-utterance at window 237 |
   | 2026-07-16 | `EndSilenceMS = 1050` (700ms fired inside a sentence, splitting one spoken thought into several turns) | end-of-utterance 237 → **248**; events 0–6 unchanged |
-  | 2026-07-17 (SOP-154) | `EndSilenceMS = 1050 → 700` (revert: SOP-150's fusion buffer makes a sub-utterance cut free, so the 1050ms workaround is no longer needed — see `design/voice-input-stt.md`) | end-of-utterance 248 → **237**; events 0–6 unchanged |
+  | 2026-07-17 | `EndSilenceMS = 1050 → 700` (revert: the turn-fusion buffer makes a sub-utterance cut free, so the 1050ms workaround is no longer needed) | end-of-utterance 248 → **237**; events 0–6 unchanged |
   | 2026-07-21 (AATK-3) | `EndSilenceMS = 700 → 900` (the "sub-utterance cut is free" premise was wrong: fragments are transcribed independently, so a mid-clause cut makes Whisper hallucinate on the truncated fragment — dataset D5, "the plumber still hasn't called back" → "…has to do it" at 700; whole at 900) | end-of-utterance 237 → **244**; events 0–6 unchanged |
   | 2026-07-21 (AATK-8) | Silero **context window** fix — prepend the previous chunk's 64 samples to each window (input 256 → 320), per the model's contract. A *detector* change, not a threshold shift. | **whole timeline moves**: onset **123 → 106**, the mid-speech silence blips (130/135/151) vanish, end-of-utterance **244 → 242**; event count **7 → 4** |
-  | 2026-07-21 (AATK-9) | `EndSilenceMS = 900 → 700` (revert of AATK-3: its phrase-break hallucination was the AATK-8 cold-start VAD bug, not a 700 effect — with AATK-8 fixed, a 700/900/1050 re-sweep over the fix-clean set is content-identical, so 900 bought nothing; back to SOP-154's 700 for lower latency) | end-of-utterance **242 → 235**; the three earlier events (106/190/214) unchanged |
+  | 2026-07-21 (AATK-9) | `EndSilenceMS = 900 → 700` (revert of AATK-3: its phrase-break hallucination was the AATK-8 cold-start VAD bug, not a 700 effect — with AATK-8 fixed, a 700/900/1050 re-sweep over the fix-clean set is content-identical, so 900 bought nothing; back to the pre-AATK-3 700 for lower latency) | end-of-utterance **242 → 235**; the three earlier events (106/190/214) unchanged |
 
   The `EndSilenceMS` shifts are `ceil(EndSilenceMS/32) − ceil(700/32)` windows, where 32ms
   is the window duration (`WindowSize 256 / SampleRateHz 8000`): `ceil(1050/32) −

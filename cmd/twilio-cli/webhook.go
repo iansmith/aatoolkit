@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 const (
@@ -19,8 +17,6 @@ const (
 	// FROM is omitted. Same reserved 555 block as defaultTo: a throwaway
 	// source for a local validation call, never a number that can be reached.
 	defaultFrom       = "+15105557890"
-	defaultAccountSid = "ACtwiliocli0000000000000000000000"
-	defaultAPIVersion = "2010-04-01"
 	defaultCallStatus = "ringing"
 	defaultDirection  = "inbound"
 	// defaultCallerName is the CallerName alias placeholder. On a real call
@@ -36,12 +32,12 @@ const (
 func webhookForm(callSid, from, to string) url.Values {
 	return url.Values{
 		"CallSid":    {callSid},
-		"AccountSid": {defaultAccountSid},
+		"AccountSid": {smsfake.DefaultAccountSID},
 		"From":       {from},
 		"To":         {to},
 		"CallStatus": {defaultCallStatus},
 		"Direction":  {defaultDirection},
-		"ApiVersion": {defaultAPIVersion},
+		"ApiVersion": {smsfake.DefaultAPIVersion},
 		"Caller":     {from},
 		"Called":     {to},
 		"CallerName": {defaultCallerName},
@@ -51,32 +47,13 @@ func webhookForm(callSid, from, to string) url.Values {
 // fetchStreamURL performs the signed Twilio webhook ceremony: it POSTs the
 // standard voice-webhook field set (signed over webhookURL, the exact URL
 // posted to) and returns the Media Streams URL extracted from the TwiML
-// response.
+// response. The POST is twilio.PostSignedForm labelled "webhook", whose error
+// texts twilio-cli prints as they are.
 func fetchStreamURL(ctx context.Context, webhookURL, authToken, callSid, from, to string) (string, error) {
-	form := webhookForm(callSid, from, to)
-	sig := twilio.ComputeSignature(authToken, webhookURL, form)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, strings.NewReader(form.Encode()))
+	_, body, err := twilio.PostSignedForm(ctx, "webhook", webhookURL, authToken, webhookForm(callSid, from, to))
 	if err != nil {
-		return "", fmt.Errorf("build webhook request: %w", err)
+		return "", err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Twilio-Signature", sig)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("post webhook: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read webhook response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("webhook %s returned status %d: %s", webhookURL, resp.StatusCode, body)
-	}
-
 	return parseStreamURL(body)
 }
 

@@ -6,7 +6,7 @@ import (
 )
 
 // Turn is one unit of user input. Text is the typed line or the transcript;
-// Speaker is who said it (empty until speaker-ID lands — SOP-2 keeps it "").
+// Speaker is who said it (empty until speaker-ID lands).
 type Turn struct {
 	Text    string
 	Speaker string

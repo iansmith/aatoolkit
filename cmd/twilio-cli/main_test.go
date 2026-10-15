@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 // fixtureServerName is the entry name declared by validServerConfig. Named
@@ -89,7 +93,7 @@ func TestE164Validation(t *testing.T) {
 	}
 }
 
-// TestWebhookTarget_ExplicitFlagOverridesConfig covers observable behavior 2:
+// TestWebhookTarget_ExplicitFlagOverridesConfig covers flag precedence:
 // an explicit -webhook flag wins outright, even when config resolution would
 // otherwise succeed with a different value.
 func TestWebhookTarget_ExplicitFlagOverridesConfig(t *testing.T) {
@@ -119,8 +123,8 @@ func TestWebhookTarget_ExplicitFlagOverridesEvenBrokenConfig(t *testing.T) {
 	}
 }
 
-// TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent covers observable
-// behavior 1: with no -webhook flag, the target is derived from the merged
+// TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent covers config
+// resolution: with no -webhook flag, the target is derived from the merged
 // config's named server host + webhook port.
 func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
@@ -134,8 +138,8 @@ func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 	}
 }
 
-// TestWebhookTarget_MissingConfigProducesClearError covers observable
-// behavior 3: a missing config file with no -webhook flag must fail with a
+// TestWebhookTarget_MissingConfigProducesClearError covers the missing-config
+// error: a missing config file with no -webhook flag must fail with a
 // clear, actionable error naming the missing file, not a silent fallback.
 func TestWebhookTarget_MissingConfigProducesClearError(t *testing.T) {
 	basePath := filepath.Join(t.TempDir(), "fleet-config.toml")
@@ -926,6 +930,46 @@ func TestTwilioCLISMSStillRequiresExplicitFrom(t *testing.T) {
 	if strings.Contains(string(out), defaultFrom) {
 		t.Errorf("sms mode defaulted the FROM number; it must not:\n%s", out)
 	}
+}
+
+// TestTwilioCLISMSDefaultCapturePortIsSmsfakes pins that sms's -capture-port
+// defaults to smsfake.DefaultCapturePort and that the usage text's step 1
+// names that same port. A project that launches its server for the SMS round
+// trip names the port from smsfake rather than keeping a copy of the number,
+// which only holds while twilio-cli's default is that constant's value. Both
+// are read off the real binary because runSMSMode builds its flag set inline
+// and exits, so neither can be reached from a unit test.
+func TestTwilioCLISMSDefaultCapturePortIsSmsfakes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
+	bin, repoRoot := buildTwilioCLI(t, "twilio-cli-aatk154")
+
+	run := func(args ...string) string {
+		cmd := exec.Command(bin, args...)
+		cmd.Dir = repoRoot
+		out, _ := cmd.CombinedOutput() // -h exits 0 and the bare usage 1; only the text is asserted
+		return string(out)
+	}
+
+	t.Run("-capture-port defaults to it", func(t *testing.T) {
+		out := run("sms", "-h")
+		m := regexp.MustCompile(`(?m)^  -capture-port int\n.*\(default (\d+)\)$`).FindStringSubmatch(out)
+		if m == nil {
+			t.Fatalf("sms -h lists no -capture-port default:\n%s", out)
+		}
+		if want := strconv.Itoa(smsfake.DefaultCapturePort); m[1] != want {
+			t.Errorf("-capture-port defaults to %s, want smsfake.DefaultCapturePort %s", m[1], want)
+		}
+	})
+
+	t.Run("the usage text names it", func(t *testing.T) {
+		out := run("sms")
+		want := "1. launch the server with " + smsfake.BaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", smsfake.DefaultCapturePort))
+		if !strings.Contains(out, want) {
+			t.Errorf("sms usage does not contain %q:\n%s", want, out)
+		}
+	})
 }
 
 // TestTwilioCLIServerFlagResolvesEndToEnd drives the real binary for both

@@ -18,6 +18,7 @@ import (
 
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 // recordingSink is an in-memory io.WriteCloser standing in for ffplay's stdin.
@@ -91,9 +92,9 @@ func mkFrame(v byte) []byte {
 	return f
 }
 
-// --- core: the property that distinguishes the fix from the SOP-50 bug ---
+// --- core: the property that distinguishes the fix from the one-playback-per-frame bug ---
 
-// The whole point of SOP-65: consecutive frames must land in the single sink
+// The whole point of the fix: consecutive frames must land in the single sink
 // back-to-back, in order, forming one continuous μ-law stream — not one
 // playback per frame.
 func TestPlayer_FramesFormOneContinuousStreamInOrder(t *testing.T) {
@@ -404,7 +405,7 @@ func TestEarcon_FiresOnMicWarmSignalNotBefore(t *testing.T) {
 	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+	if err := dial(context.Background(), smsfake.NewSID("CA"), addr); err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 
@@ -450,7 +451,7 @@ func TestEarcon_ToneWrittenOnlyToPlaybackSink(t *testing.T) {
 	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+	if err := dial(context.Background(), smsfake.NewSID("CA"), addr); err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 
@@ -845,7 +846,7 @@ func TestEarcon_SuppressedWhileTheServerIsSpeaking(t *testing.T) {
 	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	if err := dial(context.Background(), newSID("CA"), addr); err != nil {
+	if err := dial(context.Background(), smsfake.NewSID("CA"), addr); err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 

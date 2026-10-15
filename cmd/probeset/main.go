@@ -79,7 +79,7 @@ func replayCmd(args []string) {
 // parseReplayFlags parses replay's VAD sweep flags into a full VADConfig
 // (defaults for any knob not overridden) and returns the recording path
 // (fs.Arg(0), "" if none). Each flag threads into the replay session's config
-// so a recording can be re-run at different thresholds (SOP-168). Split out from
+// so a recording can be re-run at different thresholds. Split out from
 // replayCmd so the flag->config threading is unit-testable without os.Exit.
 func parseReplayFlags(args []string) (telephony.VADConfig, string, error) {
 	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
@@ -116,7 +116,7 @@ func replayFileCfg(ctx context.Context, path string, cfg telephony.VADConfig) ([
 	opts := []telephony.SessionOption{
 		telephony.WithVADConfig(cfg),
 		telephony.WithFileDecisionRecorderFromEnv(filepath.Dir(path), callSID, callSID, "", cfg, os.Stderr),
-		// Conversation transcript summary (SOP-168): printed to stderr and written
+		// Conversation transcript summary: printed to stderr and written
 		// to <id>.transcript.txt beside the recording at end of replay. Agent role
 		// label is consumer-injected via AATOOLKIT_AGENT_LABEL.
 		telephony.WithTranscriptOutput(filepath.Dir(path), callSID, os.Stderr),
@@ -129,7 +129,7 @@ func replayFileCfg(ctx context.Context, path string, cfg telephony.VADConfig) ([
 // recordingID derives a recording's identity from its .ulaw path: the
 // filename with any trailing ".in.ulaw" / ".ulaw" suffix stripped, matching
 // the tap sidecar's <streamSID>.in.ulaw / <streamSID>.json naming
-// (internal/telephony/twilio/tap.go) so a row's RecordingID lines up with
+// (telephony/twilio/tap.go) so a row's RecordingID lines up with
 // the sidecar it was labelled from.
 func recordingID(path string) string {
 	base := filepath.Base(path)
@@ -141,7 +141,7 @@ func recordingID(path string) string {
 func buildCmd(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	// -1 = unset: seed EndSilenceMS from each recording's captured vad_config
-	// rather than overriding it (SOP-168 behavior 3).
+	// rather than overriding it.
 	endSilenceMS := fs.Int("end-silence-ms", -1, "VAD end-of-utterance silence threshold (ms); default: each recording's captured value")
 	fs.Parse(args)
 
@@ -169,18 +169,18 @@ func buildCmd(args []string) {
 // recordingSidecar is the subset of twilio/tap.go's tapSidecar fields build
 // needs. A local, minimal struct rather than importing the twilio package's
 // unexported type: JSON decoding only needs field names to match, not a
-// shared Go type, and internal/telephony/twilio isn't safe to import from
-// here regardless (it imports internal/telephony, which cmd/probeset also
-// imports directly for Replay -- an import through twilio would be the
-// long way around). VADConfig is the recording's captured VAD config, the
-// baseline a sweep varies one knob from (SOP-168 behavior 3).
+// shared Go type, and cmd/probeset has no other use for telephony/twilio
+// (twilio imports telephony, which cmd/probeset already imports directly for
+// Replay -- an import through twilio would be the long way around).
+// VADConfig is the recording's captured VAD config, the baseline a sweep
+// varies one knob from.
 type recordingSidecar struct {
 	Label     string              `json:"label"`
 	VADConfig telephony.VADConfig `json:"vad_config"`
 }
 
 // configForRecording seeds the replay config from the recording's captured
-// vad_config (SOP-168 behavior 3), so a sweep varies one knob from the captured
+// vad_config, so a sweep varies one knob from the captured
 // baseline rather than package defaults. endSilenceOverride >= 0 overrides
 // EndSilenceMS; < 0 (unset) keeps the captured value.
 func configForRecording(sc recordingSidecar, endSilenceOverride int) telephony.VADConfig {
@@ -330,19 +330,18 @@ func readDatasetRows(path string) ([]telephony.DatasetRow, error) {
 	return rows, nil
 }
 
-// promptVerifier is score's CLI-level Verifier. This ticket owns the
-// harness -- Score's aggregation and four-outcome reporting, fully
-// implemented and independently tested (TestScore_ReportsOutcomes) against
-// a fixed fake Verifier -- not the verifier's actual prompt-calling
-// semantics, which the ticket's own Out of scope section assigns
-// elsewhere ("Do NOT wire the verifier into the server" -- SOP-151). This stub
-// exists so `probeset score`'s CLI is otherwise complete (flags, dataset
-// loading, prompt-file loading, N-pass looping) and fails loudly with a
-// clear, actionable message instead of fabricating verdicts, until SOP-151
-// supplies the real one.
+// promptVerifier is score's CLI-level Verifier. The harness covers Score's
+// aggregation and four-outcome reporting -- fully implemented and
+// independently tested (TestScore_ReportsOutcomes) against a fixed fake
+// Verifier -- but not the verifier's actual prompt-calling semantics, which
+// are outside it; the verifier is deliberately not wired into the server.
+// This stub exists so `probeset score`'s CLI is otherwise complete (flags,
+// dataset loading, prompt-file loading, N-pass looping) and fails loudly
+// with a clear, actionable message instead of fabricating verdicts, until a
+// real verifier is supplied.
 func promptVerifier(prompt string) telephony.Verifier {
-	_ = prompt // real verifier (SOP-151) will use this; the stub doesn't
+	_ = prompt // a real verifier will use this; the stub doesn't
 	return func(_ context.Context, promptFile string, _ telephony.DatasetRow) (telephony.VerifierOutcome, error) {
-		return "", fmt.Errorf("no verifier wired for %s: SOP-151 owns the real prompt-calling verifier; this harness ticket (SOP-153) stops at Score's aggregation", promptFile)
+		return "", fmt.Errorf("no verifier wired for %s: the real prompt-calling verifier is not part of this harness, which stops at Score's aggregation", promptFile)
 	}
 }

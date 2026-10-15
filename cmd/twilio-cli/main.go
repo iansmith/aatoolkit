@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/iansmith/aatoolkit/config"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 // e164Pattern matches an E.164 number: a leading '+', a non-zero first digit,
@@ -106,11 +107,8 @@ const (
 // consumer's config; an error naming both ways to supply one is more use than
 // a name the engine invented.
 func resolveServerName(flagValue, envValue string) (string, error) {
-	if flagValue != "" {
-		return flagValue, nil
-	}
-	if envValue != "" {
-		return envValue, nil
+	if name := smsfake.Resolve(flagValue, envValue, ""); name != "" {
+		return name, nil
 	}
 	return "", fmt.Errorf("no server name: pass -server <name>, set %s, or skip config resolution entirely with -webhook <url>", serverEnvVar)
 }
@@ -146,11 +144,8 @@ func resolveFrom(positional string) (from, warning string) {
 // path resolves from any directory; an error naming both ways to supply one is
 // more use than a filename the engine invented.
 func resolveConfigPath(flagValue, envValue string) (string, error) {
-	if flagValue != "" {
-		return flagValue, nil
-	}
-	if envValue != "" {
-		return envValue, nil
+	if path := smsfake.Resolve(flagValue, envValue, ""); path != "" {
+		return path, nil
 	}
 	return "", fmt.Errorf("no config path: pass -config <file>, set %s, or skip config resolution entirely with -webhook <url>", configEnvVar)
 }
@@ -209,26 +204,19 @@ func smsWebhookTarget(explicit, configFlag, configEnv, serverFlag, serverEnv str
 	return resolveWebhook(explicit, configFlag, configEnv, serverFlag, serverEnv, "/sms/inbound")
 }
 
-// defaultCapturePort is the port the SMS capture server binds unless
-// -capture-port overrides it. Fixed rather than ephemeral so the operator can
-// launch the server with TWILIO_API_BASE_URL pointed at it *before* the CLI
-// runs; free against every port the fleet config declares, and adjacent to the
-// server's own 9730/9740 pair.
-const defaultCapturePort = 9750
-
 // smsCaptureGuidance returns the operator-facing line printed before the round
 // trip. It states the environment assignment verbatim, because that is the only
 // thing the operator can act on: the server reads TWILIO_API_BASE_URL once at
 // startup, so naming an internal Go field told them to do something impossible.
 func smsCaptureGuidance(port int) string {
 	return fmt.Sprintf("capture server listening on port %d — launch the server with %s",
-		port, captureBaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", port)))
+		port, smsfake.BaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", port)))
 }
 
 // startCapture binds the reply-capture server on port and returns it together
 // with the guidance line naming that same port.
 //
-// The pairing is the point. When runSMSMode called newSMSCaptureServer and
+// The pairing is the point. When runSMSMode called smsfake.NewCaptureServer and
 // smsCaptureGuidance separately, nothing stopped them being given different
 // ports — and nothing could catch it, because runSMSMode ends in
 // log.Fatalf/os.Exit and cannot be driven from a test at all. The two would then
@@ -236,8 +224,8 @@ func smsCaptureGuidance(port int) string {
 // instruction naming one port while the CLI listens on another, and gets a
 // timeout with no hint why. One port in, both artifacts out, and a test can
 // assert they agree.
-func startCapture(port int) (*smsCaptureServer, string, error) {
-	capture, err := newSMSCaptureServer(port)
+func startCapture(port int) (*smsfake.CaptureServer, string, error) {
+	capture, err := smsfake.NewCaptureServer(port)
 	if err != nil {
 		return nil, "", err
 	}
@@ -258,7 +246,7 @@ func runSMSMode(args []string) {
 	configPath := fs.String("config", "", "path to the fleet config to resolve the webhook target from; overrides $"+configEnvVar)
 	serverFlag := fs.String("server", "", "name of the config server entry to resolve the webhook target from; overrides $"+serverEnvVar)
 	toNumber := fs.String("to", defaultTo, "the Twilio number the SMS was sent to, E.164")
-	capturePort := fs.Int("capture-port", defaultCapturePort, "port the local reply-capture server binds; must match the TWILIO_API_BASE_URL the server was launched with")
+	capturePort := fs.Int("capture-port", smsfake.DefaultCapturePort, "port the local reply-capture server binds; must match the TWILIO_API_BASE_URL the server was launched with")
 	fs.Parse(args)
 
 	from := fs.Arg(0)
@@ -273,7 +261,7 @@ func runSMSMode(args []string) {
 			"  2. run this command; it prints the reply the server sends back\n\n"+
 			"The server reads that variable once at startup, so step 1 cannot be skipped\n"+
 			"or reordered. Requires TWILIO_AUTH_TOKEN in the environment.\n\n",
-			captureBaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", defaultCapturePort)))
+			smsfake.BaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", smsfake.DefaultCapturePort)))
 		fs.PrintDefaults()
 		os.Exit(1)
 	}
@@ -370,7 +358,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	callSid := newSID("CA")
+	callSid := smsfake.NewSID("CA")
 
 	streamURL, err := fetchStreamURL(ctx, target, authToken, callSid, from, *toNumber)
 	if err != nil {

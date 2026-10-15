@@ -28,13 +28,13 @@ const controlPlaneDepth = 16
 // mirrors sttDispatchDepth's rationale (telephony/session.go).
 const responseInputDepth = 4
 
-// TwilioDataPlaneInput is the SOP-116 ServiceInput pattern specialized to
+// TwilioDataPlaneInput is the ServiceInput pattern specialized to
 // Frame for the Twilio data plane (audio media frames). Its concrete
 // implementation (dropOldestPlane) evicts the oldest buffered frame rather
 // than blocking when full.
 type TwilioDataPlaneInput = telephony.ServiceInput[Frame]
 
-// TwilioControlPlaneInput is the SOP-116 ServiceInput pattern specialized to
+// TwilioControlPlaneInput is the ServiceInput pattern specialized to
 // Frame for the Twilio control plane (start/stop/mark/clear events). Its
 // concrete implementation (controlPlaneInput) treats a full buffer as fatal
 // rather than dropping or blocking indefinitely.
@@ -243,7 +243,7 @@ func (c *controlPlaneInput) Teardown() <-chan struct{} { return c.teardown }
 // decodes Twilio Media Streams frames and routes them by event type —
 // EventMedia to the data plane, everything else to the control plane —
 // while detecting gaps in the media chunk sequence. session.go integration
-// (wiring these planes into a live session) is deferred to SOP-115/F.
+// (wiring these planes into a live session) was deferred to a later change.
 type Demux struct {
 	Data    TwilioDataPlaneInput
 	Control TwilioControlPlaneInput
@@ -260,7 +260,7 @@ func NewDemuxWithPlanes(data TwilioDataPlaneInput, control TwilioControlPlaneInp
 }
 
 // NewDemux builds a Demux with production buffer depths: the data plane
-// sized per SOP-116's ComputeDepth(DataPlaneBufferMS, MuLawFrameMS), and a
+// sized per ComputeDepth(DataPlaneBufferMS, MuLawFrameMS), and a
 // depth-16 control plane.
 func NewDemux() *Demux {
 	dataDepth := telephony.ComputeDepth(telephony.DataPlaneBufferMS, telephony.MuLawFrameMS)

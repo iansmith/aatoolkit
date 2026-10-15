@@ -48,7 +48,7 @@ func fixedTextSTTServer(t *testing.T, text string) *telephony.STTClient {
 	return fakeSTTServer(t, func(string) string { return text })
 }
 
-// TestReplay_Deterministic asserts Observable behavior #1: same audio, same
+// TestReplay_Deterministic asserts Replay's determinism: same audio, same
 // config, byte-identical JSON output, every run. Uses a fake VAD factory
 // (telephony.WithVADFactory, the same test seam every other test in this
 // package uses) rather than the real Silero model, because determinism here
@@ -133,7 +133,7 @@ func (f *fakeReplayDetector) Detect(_ context.Context, window []float32) (float3
 
 func (f *fakeReplayDetector) Reset() {}
 
-// TestBuild_StructuralLabels pins the ticket's own worked example: a
+// TestBuild_StructuralLabels pins the structural-labelling example: a
 // complete-turn recording replaying to 3 utterances yields rows
 // [u1]=incomplete, [u1,u2]=incomplete, [u1,u2,u3]=complete -- by
 // construction, no hand-labelling.
@@ -159,7 +159,7 @@ func TestBuild_StructuralLabels(t *testing.T) {
 	}
 }
 
-// TestBuild_TruncatedRecording pins the ticket's other worked example: a
+// TestBuild_TruncatedRecording pins the truncated-recording case: a
 // truncated recording never reached a confirmed end, so every row --
 // including the terminal one -- is incomplete.
 func TestBuild_TruncatedRecording(t *testing.T) {
@@ -176,9 +176,29 @@ func TestBuild_TruncatedRecording(t *testing.T) {
 	}
 }
 
+// TestBuild_RowsCarryHarnessVersion pins the harness_version every dataset
+// row is written with. The value lands in the JSON output, so changing it
+// changes what build emits; it is not a refactor.
+func TestBuild_RowsCarryHarnessVersion(t *testing.T) {
+	const want = `"harness_version":"replay-harness-v1"`
+	rows := telephony.RowsFromUtterances("rec-hv", telephony.LabelCompleteTurn, []string{"hello", "there"}, 700)
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2: %+v", len(rows), rows)
+	}
+	for i, row := range rows {
+		b, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("row %d: marshal: %v", i, err)
+		}
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("row %d: JSON %s does not contain %s", i, b, want)
+		}
+	}
+}
+
 // TestBuild_ConfigChangesRows drives the SAME audio through Replay at two
 // different --end-silence-ms values and asserts they produce different
-// utterance (and therefore row) counts -- the DoD claim that the dataset is
+// utterance (and therefore row) counts -- the claim that the dataset is
 // audio-anchored, not frozen text: build re-replays at whatever config it's
 // given rather than reusing a cached transcript.
 //
@@ -242,7 +262,7 @@ func textsOf(results []telephony.ReplayResult) []string {
 	return out
 }
 
-// TestScore_ReportsOutcomes pins Observable behavior #5: score reports the
+// TestScore_ReportsOutcomes pins that score reports the
 // four named verifier outcomes, not raw accuracy.
 func TestScore_ReportsOutcomes(t *testing.T) {
 	rows := []telephony.DatasetRow{
@@ -291,6 +311,6 @@ func TestScore_ReportsOutcomes(t *testing.T) {
 		t.Fatalf("marshal report: %v", err)
 	}
 	if bytes.Contains(bytes.ToLower(b), []byte("accuracy")) {
-		t.Errorf("ScoreReport JSON contains \"accuracy\": %s (DoD: score reports the four outcomes, not accuracy)", b)
+		t.Errorf("ScoreReport JSON contains \"accuracy\": %s (score reports the four outcomes, not accuracy)", b)
 	}
 }

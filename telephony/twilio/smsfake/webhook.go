@@ -1,0 +1,54 @@
+// Package smsfake is the fake-Twilio SMS round trip: it builds and signs the
+// inbound-SMS webhook a real Twilio account would post to a server, and it
+// stands in for the Twilio Messages REST API so the server's outbound reply
+// can be captured and asserted on without a real account.
+//
+// It is exported rather than internal because the capture server stands in for
+// a real provider account, which a consuming project's own integration tests
+// need as much as this module's tools do — the same reason
+// twilio.ComputeSignature is exported.
+package smsfake
+
+import (
+	"context"
+	"net/url"
+
+	"github.com/iansmith/aatoolkit/telephony/twilio"
+)
+
+const (
+	// DefaultAccountSID is the placeholder account SID a fake round trip
+	// presents as its AccountSid when no real account is involved.
+	DefaultAccountSID = "ACtwiliocli0000000000000000000000"
+	// DefaultAPIVersion is the Twilio API version a fake round trip presents
+	// as its ApiVersion.
+	DefaultAPIVersion = "2010-04-01"
+)
+
+// InboundForm builds the standard Twilio inbound-SMS webhook field set for
+// accountSID, apiVersion, messageSID, from, to, and body, including the
+// SmsMessageSid/SmsSid aliases real Twilio inbound-SMS webhooks send alongside
+// MessageSid (mirroring the Caller/Called aliases of the voice webhook).
+func InboundForm(accountSID, apiVersion, messageSID, from, to, body string) url.Values {
+	return url.Values{
+		"MessageSid":    {messageSID},
+		"SmsMessageSid": {messageSID},
+		"SmsSid":        {messageSID},
+		"AccountSid":    {accountSID},
+		"From":          {from},
+		"To":            {to},
+		"Body":          {body},
+		"ApiVersion":    {apiVersion},
+	}
+}
+
+// PostWebhook performs the signed Twilio SMS-webhook ceremony: it POSTs form,
+// signed over webhookURL (the exact URL posted to), and returns an error if the
+// request fails or the server rejects it.
+//
+// It is twilio.PostSignedForm with every error text labelled "SMS webhook"
+// ("post SMS webhook: ...", "SMS webhook <webhookURL> returned status ...");
+// see twilio.PostSignedForm for when the status code and body come back.
+func PostWebhook(ctx context.Context, webhookURL, authToken string, form url.Values) (status int, body []byte, err error) {
+	return twilio.PostSignedForm(ctx, "SMS webhook", webhookURL, authToken, form)
+}

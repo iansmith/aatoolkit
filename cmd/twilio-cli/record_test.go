@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 // AATK-99 Phase 0. These tests are transcribed from the ticket's Test
@@ -241,7 +243,7 @@ func TestDial_RecordsSentAudioOnlyWhenAsked(t *testing.T) {
 
 		srv := mediaConsumingServer(t)
 		addr := "ws" + strings.TrimPrefix(srv.URL, "http")
-		if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, opts...); err != nil {
+		if err := dial(dialCtx(t, 5*time.Second), smsfake.NewSID("CA"), addr, opts...); err != nil {
 			t.Fatalf("dial: %v", err)
 		}
 	}
@@ -361,7 +363,7 @@ func recordSentThroughFileSource(t *testing.T, frames int, opts ...dialOption) (
 
 	out := filepath.Join(dir, "sent.ulaw")
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
-	if err := dial(dialCtx(t, 5*time.Second), newSID("CA"), addr, append(opts, withSentRecording(out))...); err != nil {
+	if err := dial(dialCtx(t, 5*time.Second), smsfake.NewSID("CA"), addr, append(opts, withSentRecording(out))...); err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 

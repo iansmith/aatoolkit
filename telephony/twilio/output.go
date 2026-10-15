@@ -10,14 +10,14 @@ import (
 )
 
 // TwilioDataPlaneOutput is the send side of the channel a Session writes
-// outbound media frames to (SOP-125). Twilio-package-local alias, following
+// outbound media frames to. Twilio-package-local alias, following
 // the same cross-package-alias-with-different-T pattern as
 // TwilioDataPlaneInput above (avoids an import cycle: this package already
 // imports telephony, so telephony cannot import it back).
 type TwilioDataPlaneOutput = telephony.ServiceOutput[[]byte]
 
 // TwilioControlPlaneOutput is the send side of the channel a Session writes
-// outbound control-plane messages to (mark/clear) (SOP-125).
+// outbound control-plane messages to (mark/clear).
 type TwilioControlPlaneOutput = telephony.ServiceOutput[telephony.ControlOutMessage]
 
 // wsWriter is the subset of *websocket.Conn that dataPlaneOutput/

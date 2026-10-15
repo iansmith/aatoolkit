@@ -487,7 +487,7 @@ func formatOutcomeLine(o verbOutcome) string {
 
 // printOutcomes prints every outcome's §6.5 line to w — including
 // successes, so a server's log path is visible the moment it starts, not
-// only when a start fails (SOP-108). Callers must only invoke this when the
+// only when a start fails. Callers must only invoke this when the
 // same lines won't also reach the console via a returned aggregate error
 // (see Up) — otherwise every line prints twice.
 func printOutcomes(w io.Writer, outcomes []verbOutcome) {
@@ -601,7 +601,7 @@ func (e *RealEngine) Up(name string) error {
 	// the moment a server starts) exactly once: on the success path here,
 	// or — on any failure — inside the aggregate error dispatch prints,
 	// never both. Printing unconditionally here would duplicate every line
-	// with dispatch's own error print (SOP-108).
+	// with dispatch's own error print.
 	if len(outcomes) == 1 {
 		if outcomes[0].Err != nil {
 			// The hint prints here too. A single server failing to start is
@@ -1499,10 +1499,10 @@ func (e *RealEngine) Command(name string) (string, []string, error) {
 }
 
 // Logs returns the not-implemented error — full log retrieval (reading back
-// build/logs/<name>-<ts>.log content) is out of this ticket's scope; the
-// `logs <name>` verb resolving a path is covered by internal/lifecycle's
-// NewestLog, wired by a future ticket if/when the REPL needs it beyond what
-// build/logs already gives operators via the filesystem directly.
+// build/logs/<name>-<ts>.log content) is not implemented; the `logs <name>`
+// verb resolving a path is covered by internal/lifecycle's NewestLog, to be
+// wired if/when the REPL needs it beyond what build/logs already gives
+// operators via the filesystem directly.
 func (e *RealEngine) Logs(name string) ([]string, error) {
 	return nil, notImplementedErr("logs")
 }

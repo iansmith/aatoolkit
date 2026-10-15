@@ -17,7 +17,7 @@ import (
 // runs in the VAD sidecar (scripts/vad_server.py) reached over HTTP, so the
 // driver stays cgo-free — exactly as STT runs in the whisper sidecar
 // (STTClient). Externalizing the model out of the call-handling process is the
-// point (SOP-145/147); the in-process ONNX detector was retired.
+// point; the in-process ONNX detector was retired.
 //
 // The sidecar is stateless — it takes the current recurrent state in each
 // request and returns the updated state — so this detector owns the state and
@@ -34,7 +34,7 @@ const defaultVADTimeout = 2 * time.Second
 // vadInferenceDeadline bounds a single window's inference — retries included —
 // and is strictly less than DataPlaneBufferMS (80ms), so a stalled sidecar
 // fails the window before the data-plane buffer it feeds would overflow rather
-// than blocking the VAD goroutine (SOP-147 / charter R8). It is derived from
+// than blocking the VAD goroutine (charter R8). It is derived from
 // the buffer, not a bare literal, so a buffer retune can't silently push the
 // per-inference budget past it — TestSileroPerInferenceDeadline guards the
 // inequality.
@@ -138,7 +138,7 @@ func (d *httpSileroDetector) Detect(ctx context.Context, window []float32) (floa
 		return 0, fmt.Errorf("silero-http: window length %d != %d", len(window), sileroWindowSize)
 	}
 	// Bound this window's inference — retries included — to vadInferenceDeadline,
-	// derived from the caller's ctx so a cancelled session still ends it (SOP-147).
+	// derived from the caller's ctx so a cancelled session still ends it.
 	ictx, cancel := context.WithTimeout(ctx, vadInferenceDeadline)
 	defer cancel()
 

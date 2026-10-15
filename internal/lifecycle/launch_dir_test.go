@@ -24,7 +24,7 @@ func assertCmdDirResolvesTo(t *testing.T, proc *Process, want string) {
 	}
 }
 
-// TestLaunch_DirSetsCmdDir pins behavior 1: a non-empty dir becomes the
+// TestLaunch_DirSetsCmdDir pins that a non-empty dir becomes the
 // child's actual working directory (exec.Cmd.Dir).
 func TestLaunch_DirSetsCmdDir(t *testing.T) {
 	logDir := t.TempDir()
@@ -39,7 +39,7 @@ func TestLaunch_DirSetsCmdDir(t *testing.T) {
 	assertCmdDirResolvesTo(t, proc, workDir)
 }
 
-// TestLaunch_DirUnsetLeavesCmdDirEmpty pins behavior 2: an empty dir leaves
+// TestLaunch_DirUnsetLeavesCmdDirEmpty pins that an empty dir leaves
 // cmd.Dir unset, so the child inherits the supervisor's own cwd exactly as
 // it does today — no regression for every existing server.
 func TestLaunch_DirUnsetLeavesCmdDirEmpty(t *testing.T) {
@@ -59,8 +59,9 @@ func TestLaunch_DirUnsetLeavesCmdDirEmpty(t *testing.T) {
 // TestLaunch_DirExpandsTilde closes a reuse gap found by /simplify: dir was
 // being handed to cmd.Dir verbatim, without the same "~/" expansion
 // source.go already applies to this same field for build-time -C sourcing
-// (expandTilde) — and the ticket's own round-trip test uses "~/some/project"
-// as a valid Dir value, so a bare "~/..." must actually resolve.
+// (expandTilde) — and config's own round-trip test
+// (TestServer_DirField_RoundTrips) uses "~/some/project" as a valid Dir
+// value, so a bare "~/..." must actually resolve.
 func TestLaunch_DirExpandsTilde(t *testing.T) {
 	logDir := t.TempDir()
 

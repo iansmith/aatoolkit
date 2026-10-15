@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"github.com/iansmith/aatoolkit/telephony/twilio/smsfake"
 )
 
 func TestWebhookCeremony_AcceptedByRealServer(t *testing.T) {
@@ -72,6 +75,22 @@ func TestWebhookForm_Aliases(t *testing.T) {
 	}
 }
 
+// TestWebhookForm_AccountSidAndApiVersionAreTheDefaults pins the two voice-form
+// fields read from smsfake's exported defaults. The two constants sit side by
+// side under one package prefix, and the receiving server accepts the signed
+// POST whatever they hold, so a swap or a wrong value would otherwise reach the
+// wire unnoticed. smsfake's own tests pin the constants' literal values.
+func TestWebhookForm_AccountSidAndApiVersionAreTheDefaults(t *testing.T) {
+	form := webhookForm("CAdefaults0001", "+15551234567", "+15559876543")
+
+	if got := form.Get("AccountSid"); got != smsfake.DefaultAccountSID {
+		t.Errorf("AccountSid = %q, want smsfake.DefaultAccountSID %q", got, smsfake.DefaultAccountSID)
+	}
+	if got := form.Get("ApiVersion"); got != smsfake.DefaultAPIVersion {
+		t.Errorf("ApiVersion = %q, want smsfake.DefaultAPIVersion %q", got, smsfake.DefaultAPIVersion)
+	}
+}
+
 func TestWebhookCeremony_ExtractsStreamURL(t *testing.T) {
 	t.Run("good TwiML extracts stream URL", func(t *testing.T) {
 		twiml := []byte(`<Response><Connect><Stream url="ws://example.com/streams"/></Connect></Response>`)
@@ -125,7 +144,7 @@ func TestCallSid_SingleSourcedAcrossWebhookAndStart(t *testing.T) {
 		t.Fatalf("webhook POST CallSid = %q, want %q", gotWebhookCallSid, callSid)
 	}
 
-	startMsg, err := twilio.EncodeStart("SStest0001", callSid, defaultAccountSid, 1)
+	startMsg, err := twilio.EncodeStart("SStest0001", callSid, smsfake.DefaultAccountSID, 1)
 	if err != nil {
 		t.Fatalf("EncodeStart: %v", err)
 	}
@@ -139,5 +158,93 @@ func TestCallSid_SingleSourcedAcrossWebhookAndStart(t *testing.T) {
 
 	if gotWebhookCallSid != f.CallSID {
 		t.Fatalf("CallSid mismatch: webhook=%q start=%q", gotWebhookCallSid, f.CallSID)
+	}
+}
+
+// TestWebhookCeremony_ReturnsTheAnsweredStreamURL pins the success path
+// exactly: the stream URL fetchStreamURL returns is the one the server's TwiML
+// answered with, not merely one shaped like it.
+func TestWebhookCeremony_ReturnsTheAnsweredStreamURL(t *testing.T) {
+	const want = "wss://media.example.test/streams"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<Response><Connect><Stream url="` + want + `"/></Connect></Response>`))
+	}))
+	defer ts.Close()
+
+	got, err := fetchStreamURL(context.Background(), ts.URL+"/webhook", "test-auth-token", "CAtest0002", "+15551234567", "+15559876543")
+	if err != nil {
+		t.Fatalf("fetchStreamURL: %v", err)
+	}
+	if got != want {
+		t.Errorf("stream URL = %q, want %q", got, want)
+	}
+}
+
+// TestWebhookCeremony_ErrorTextsNameTheWebhook pins the voice webhook's error
+// text at each stage that can fail before the TwiML is parsed. twilio-cli
+// prints that text as its fatal error, and
+// TestTwilioCLIRecordSentMustNotClobberTheAudioItReplays reads "post webhook"
+// out of the output to tell whether a run reached the network, so the wording
+// is part of the tool's output, not a detail of how it was produced.
+func TestWebhookCeremony_ErrorTextsNameTheWebhook(t *testing.T) {
+	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("signature mismatch"))
+	}))
+	defer rejecting.Close()
+
+	truncating := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		// A Content-Length the body never reaches, then a dropped connection.
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
+		_ = buf.Flush()
+	}))
+	defer truncating.Close()
+
+	// The URL will not parse, so the request is never built. The parse error
+	// comes from url.Parse rather than being written out, so the test pins the
+	// wording around it and not net/url's.
+	const unbuildable = "http://[::1/webhook"
+	_, parseErr := url.Parse(unbuildable)
+	if parseErr == nil {
+		t.Fatalf("url.Parse(%q) succeeded; the build case below would not fail", unbuildable)
+	}
+	// Nothing is expected to listen on port 1, and ephemeral allocation never
+	// hands it out, so the dial is refused. That is an assumption about the
+	// machine, not a guarantee: macOS lets an unprivileged process bind the
+	// port on the wildcard address, and root can bind it anywhere. Each case's
+	// ctx deadline keeps a listener there that takes the POST and never
+	// answers from holding the case until go test's own timeout.
+	const unanswered = "http://127.0.0.1:1/webhook"
+	rejectingURL := rejecting.URL + "/webhook"
+
+	for _, tc := range []struct {
+		name, webhookURL string
+		want             string // the whole error text, unless prefixOnly
+		prefixOnly       bool   // the rest is the dial error, whose wording is the OS's
+	}{
+		{"build", unbuildable, "build webhook request: " + parseErr.Error(), false},
+		{"post", unanswered, `post webhook: Post "` + unanswered + `": `, true},
+		{"non-200", rejectingURL, "webhook " + rejectingURL + " returned status 403: signature mismatch", false},
+		{"read", truncating.URL + "/webhook", "read webhook response: " + io.ErrUnexpectedEOF.Error(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := fetchStreamURL(ctx, tc.webhookURL, "test-auth-token", "CAtest0003", "+15551234567", "+15559876543")
+			if err == nil {
+				t.Fatal("fetchStreamURL succeeded, want an error")
+			}
+			if got := err.Error(); tc.prefixOnly && !strings.HasPrefix(got, tc.want) {
+				t.Errorf("error = %q, want it to start %q", got, tc.want)
+			} else if !tc.prefixOnly && got != tc.want {
+				t.Errorf("error = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
