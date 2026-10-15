@@ -147,7 +147,7 @@ type callParties struct {
 	from, to string
 }
 
-// maxPendingFrom bounds the CallSid->From map recorded by ServeHTTP for
+// maxPendingFrom bounds the CallSid -> From/To map recorded by ServeHTTP for
 // ServeStreams to thread onto the start Frame. Mirrors the maxAbandoned
 // evict-oldest discipline in telephony/stt.go: a call whose stream never
 // opens (or is rejected at the webhook) would otherwise leave a permanent
