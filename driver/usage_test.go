@@ -272,3 +272,73 @@ func TestSendStream_OddMetadataStillSucceeds(t *testing.T) {
 		requireNoAttrs(t, span, "gen_ai.response.id", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "error.type")
 	})
 }
+
+// hostedChunk is a content chunk as an OpenAI-compatible upstream sends one:
+// an id and a model on every chunk, and "usage": null on every chunk but the
+// last. bareChunk is the same chunk without those three fields, which is what
+// decoding it costs when they are not read at all.
+const (
+	hostedChunk = `data: {"id":"chatcmpl-0a1b2c3d4e5f","object":"chat.completion.chunk","created":1760000000,"model":"vendor/some-model-v1",` +
+		`"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}],"usage":null}`
+	bareChunk = `data: {"object":"chat.completion.chunk","created":1760000000,` +
+		`"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}`
+)
+
+// TestDecodeSSELine_MetadataCostsOneAllocationEach: reading a chunk's id and
+// model costs one allocation each, the string itself, and a null usage costs
+// none, so a traced or untraced stream pays no more per chunk than that for
+// the span's metadata.
+func TestDecodeSSELine_MetadataCostsOneAllocationEach(t *testing.T) {
+	allocs := func(line string) float64 {
+		return testing.AllocsPerRun(200, func() {
+			if _, ok, err := decodeSSELine(line); !ok || err != nil {
+				t.Fatalf("decodeSSELine(%q) = ok %v, err %v", line, ok, err)
+			}
+		})
+	}
+	bare, hosted := allocs(bareChunk), allocs(hostedChunk)
+	if hosted > bare+2 {
+		t.Errorf("a chunk with an id, a model and a null usage took %v allocs, the same chunk without them %v; "+
+			"want at most 2 more, one per string", hosted, bare)
+	}
+}
+
+// TestDecodeSSELine_MetadataStringsDecodeAsJSON: a chunk's id and model come
+// back exactly as encoding/json decodes the same string literal, escapes and
+// invalid UTF-8 included.
+func TestDecodeSSELine_MetadataStringsDecodeAsJSON(t *testing.T) {
+	literals := []string{
+		`""`,
+		`"plain-model-v1"`,
+		`"vendor\/model"`,
+		`"tab\there"`,
+		`"café 😀"`,
+		"\"caf\xc3\xa9 raw\"",
+		"\"bad \xff byte\"",
+		"\"cut \xe2\x82 rune\"",
+	}
+	for _, lit := range literals {
+		var want string
+		if err := json.Unmarshal([]byte(lit), &want); err != nil {
+			t.Fatalf("encoding/json rejects %q: %v", lit, err)
+		}
+		d, ok, err := decodeSSELine(`data: {"id":` + lit + `,"model":` + lit + `,"choices":[{"delta":{"content":"hi"}}]}`)
+		if err != nil || !ok {
+			t.Fatalf("decodeSSELine with %q = ok %v, err %v", lit, ok, err)
+		}
+		if d.id != want || d.model != want {
+			t.Errorf("literal %q: id %q, model %q; want %q for both", lit, d.id, d.model, want)
+		}
+	}
+}
+
+// BenchmarkDecodeSSELine_HostedChunk measures decoding one hostedChunk, the
+// per-chunk cost a real stream pays whether or not a span records it.
+func BenchmarkDecodeSSELine_HostedChunk(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, ok, err := decodeSSELine(hostedChunk); !ok || err != nil {
+			b.Fatalf("decodeSSELine = ok %v, err %v", ok, err)
+		}
+	}
+}
