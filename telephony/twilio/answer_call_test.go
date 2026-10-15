@@ -198,6 +198,30 @@ func TestServeHTTP_AuthorizeFalseNeverAsksAnswerCall(t *testing.T) {
 	}
 }
 
+// Setting Authorize does not switch the hook off: when Authorize lets the
+// caller through, AnswerCall is still asked, once, with From and To, and its
+// refusal is what the caller hears.
+func TestServeHTTP_AuthorizeTrueStillAsksAnswerCall(t *testing.T) {
+	rec := &answerCallRecorder{say: "wrong number", refuse: true}
+	s := &twilio.Server{
+		AuthToken:       "authtoken",
+		StreamScheme:    "wss",
+		Authorize:       func(string) bool { return true },
+		VoiceRejectText: "no",
+		AnswerCall:      rec.hook,
+	}
+	form := url.Values{"From": {"+15105551234"}, "To": {"+15105550000"}, "CallSid": {"CA1"}}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, signedWebhookRequest(t, "authtoken", "https", "example.com", form))
+
+	want := `<Response><Say>wrong number</Say><Hangup/></Response>`
+	if got := w.Body.String(); got != want || len(rec.asked) != 1 ||
+		rec.asked[0] != [2]string{"+15105551234", "+15105550000"} {
+		t.Fatalf("body %q, hook asked %v; want %q and one hook call with [+15105551234 +15105550000]",
+			got, rec.asked, want)
+	}
+}
+
 // A From that is not E.164 is refused with 403 before the hook is consulted,
 // so a refusing hook never turns it into Say+Hangup.
 func TestServeHTTP_BadFromNeverAsksAnswerCall(t *testing.T) {
