@@ -4,6 +4,21 @@
 // entrypoint, keeping transport details out of the policy.
 package host
 
+import "context"
+
+// ContextSender is the context-taking form of Host's Send and SendStream. ctx
+// parents the span each model request produces and bounds the call: its
+// deadline and cancellation apply, and the driver's own ceiling still applies
+// on top. ctx is a context.Context; it is unrelated to Host.Context(queryText),
+// which returns the messages array. It is separate from Host so that adding it
+// breaks no existing Host implementation. An interpreted policy reaches it by
+// type-asserting its host.Host, which works only if the consumer injects this
+// symbol.
+type ContextSender interface {
+	SendContext(ctx context.Context, contextWindow []byte, tier string) ([]byte, []byte, error)
+	SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error)
+}
+
 // Host is the capability set the chat policy calls into. Today that's just LLM
 // transport by tier — add methods here as the policy needs more from the driver.
 type Host interface {
