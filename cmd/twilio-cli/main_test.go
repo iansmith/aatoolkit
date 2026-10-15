@@ -77,7 +77,7 @@ func TestE164Validation(t *testing.T) {
 		desc    string
 	}{
 		{"+15555550100", false, "valid +1 US number (11 digits)"},
-		{"5103844134", true, "invalid: missing + prefix"},
+		{"5105551234", true, "invalid: missing + prefix"},
 		{"+0123", true, "invalid: leading 0 after +"},
 		{"+1", true, "invalid: too short (only 2 chars)"},
 		{"+123456789012345", false, "valid: 15 digits total"},

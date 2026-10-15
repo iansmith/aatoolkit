@@ -4,12 +4,14 @@
 // see it, and (b) answers with valid TwiML so the call doesn't error out.
 //
 // Wire it up:
-//   1. Run this on the box behind 146.75.248.146.
-//   2. Console -> Phone Numbers -> Active numbers -> (218) 376-7443
+//   1. Run this on a box reachable from the internet. Below, 203.0.113.10
+//      stands for that box's public IP and (555) 987-6543 for your Twilio
+//      number; substitute your own.
+//   2. Console -> Phone Numbers -> Active numbers -> (555) 987-6543
 //      -> Voice Configuration -> "A call comes in" = Webhook
-//      -> URL: http://146.75.248.146:9750/voice   Method: HTTP POST -> Save
+//      -> URL: http://203.0.113.10:9750/voice   Method: HTTP POST -> Save
 //   3. If on a trial account, verify the phone you'll dial from first.
-//   4. Call (218) 376-7443. Watch stdout; you should also hear the <Say>.
+//   4. Call (555) 987-6543. Watch stdout; you should also hear the <Say>.
 //
 // Plain http:// is fine for this webhook test. (The media stream you build
 // later needs wss:// on a TLS endpoint — that's a separate step.)
@@ -42,7 +44,7 @@ func main() {
 	})
 
 	// Bind all interfaces so the request arriving on the public IP is accepted
-	// (works whether the box holds 146.75.248.146 directly or via your NAT/port
+	// (works whether the box holds 203.0.113.10 directly or via your NAT/port
 	// forwarding).
 	const addr = "0.0.0.0:9750"
 	log.Printf("listening on %s — waiting for Twilio...", addr)
