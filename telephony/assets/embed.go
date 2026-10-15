@@ -14,8 +14,8 @@ import _ "embed"
 // handleSTTResult logs a transcript and returns, and nothing in this package
 // talks to voice-out at all.
 //
-// Regenerate with scripts/make_farewell.sh (see PROVENANCE.md). Nothing
-// depends on its length: MarkEchoTimeout derives the post-playout wait from
+// PROVENANCE.md records how to regenerate it. Nothing depends on its
+// length: MarkEchoTimeout derives the post-playout wait from
 // len(FarewellULaw), so a longer or shorter clip retimes itself.
 //
 //go:embed farewell.ulaw

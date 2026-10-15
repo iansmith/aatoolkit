@@ -26,9 +26,9 @@ import (
 // governing constraint is that it must be invisible -- off by default, and
 // incapable of harming a call when on.
 //
-// Recordings are keyed by streamSid, not CallSID
-// (docs/twilio-media-streams-spec.md:228 -- streamSid uniquely identifies a
-// Media Streams connection; a reconnect is a new connection on the same call).
+// Recordings are keyed by streamSid, not CallSID: streamSid uniquely
+// identifies a Media Streams connection, and a reconnect is a new connection
+// on the same call.
 
 // testStreamStartedAt is the stream start time every test in this package
 // states, whether it builds a Tap directly or drives one through the harness.

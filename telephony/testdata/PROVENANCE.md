@@ -43,7 +43,8 @@ emitted `VADEvent` timeline (speech onset → silence → end-of-utterance) agai
 committed golden, so a mis-wired detector, a windowing bug, or a state-machine
 regression in that chain gets caught.
 
-Do not reuse this fixture for anything outside this ticket's stated scope.
+Use this recording only as a regression fixture for the VAD pipeline. Do not
+tune VAD thresholds against it.
 
 ## Companion fixtures
 
@@ -72,7 +73,7 @@ Do not reuse this fixture for anything outside this ticket's stated scope.
   |---|---|---|
   | original | `EndSilenceMS = 700` | end-of-utterance at window 237 |
   | 2026-07-16 | `EndSilenceMS = 1050` (700ms fired inside a sentence, splitting one spoken thought into several turns) | end-of-utterance 237 → **248**; events 0–6 unchanged |
-  | 2026-07-17 | `EndSilenceMS = 1050 → 700` (revert: the turn-fusion buffer makes a sub-utterance cut free, so the 1050ms workaround is no longer needed — see `design/voice-input-stt.md`) | end-of-utterance 248 → **237**; events 0–6 unchanged |
+  | 2026-07-17 | `EndSilenceMS = 1050 → 700` (revert: the turn-fusion buffer makes a sub-utterance cut free, so the 1050ms workaround is no longer needed) | end-of-utterance 248 → **237**; events 0–6 unchanged |
   | 2026-07-21 (AATK-3) | `EndSilenceMS = 700 → 900` (the "sub-utterance cut is free" premise was wrong: fragments are transcribed independently, so a mid-clause cut makes Whisper hallucinate on the truncated fragment — dataset D5, "the plumber still hasn't called back" → "…has to do it" at 700; whole at 900) | end-of-utterance 237 → **244**; events 0–6 unchanged |
   | 2026-07-21 (AATK-8) | Silero **context window** fix — prepend the previous chunk's 64 samples to each window (input 256 → 320), per the model's contract. A *detector* change, not a threshold shift. | **whole timeline moves**: onset **123 → 106**, the mid-speech silence blips (130/135/151) vanish, end-of-utterance **244 → 242**; event count **7 → 4** |
   | 2026-07-21 (AATK-9) | `EndSilenceMS = 900 → 700` (revert of AATK-3: its phrase-break hallucination was the AATK-8 cold-start VAD bug, not a 700 effect — with AATK-8 fixed, a 700/900/1050 re-sweep over the fix-clean set is content-identical, so 900 bought nothing; back to the pre-AATK-3 700 for lower latency) | end-of-utterance **242 → 235**; the three earlier events (106/190/214) unchanged |
