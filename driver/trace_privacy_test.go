@@ -507,12 +507,20 @@ func parsePackageFiles(t *testing.T, fset *token.FileSet) map[string]*ast.File {
 // capture variable goes through getenv, so the read count
 // TestModelSpan_NoProviderReadsNoCaptureVariable takes covers them all. Its
 // name is written once, in trace.go; no other non-test file names it,
-// captureMessageContentEnv, captureMessageContent or getenv; and trace.go
-// calls nothing in os that reads the environment.
+// captureMessageContentEnv, captureMessageContent or getenv. In trace.go,
+// captureMessageContentEnv is used only as getenv's argument, getenv is
+// never assigned, and nothing in os or syscall that reads the environment
+// is named, called or taken as a value, but once: os.Getenv as getenv's
+// value. So a second alias of os.Getenv, or a call of syscall.Getenv, trips
+// it. Each of those two allowed uses must be there, so neither rule is
+// vacuous.
 func TestTraceSource_CaptureVariableReadOnlyThroughGetenv(t *testing.T) {
 	fset := token.NewFileSet()
 	files := parsePackageFiles(t, fset)
-	envReads := map[string]bool{"Getenv": true, "LookupEnv": true, "Environ": true}
+	envReads := map[string]map[string]bool{
+		"os":      {"Getenv": true, "LookupEnv": true, "Environ": true, "ExpandEnv": true, "Expand": true},
+		"syscall": {"Getenv": true, "Environ": true},
+	}
 	names := map[string]bool{"captureMessageContentEnv": true, "captureMessageContent": true, "getenv": true}
 	literals := 0
 	for path, f := range files {
@@ -529,18 +537,76 @@ func TestTraceSource_CaptureVariableReadOnlyThroughGetenv(t *testing.T) {
 				if path != "trace.go" && names[x.Name] {
 					t.Errorf("%s: references %s", fset.Position(x.Pos()), x.Name)
 				}
-			case *ast.CallExpr:
-				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && path == "trace.go" {
-					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "os" && envReads[sel.Sel.Name] {
-						t.Errorf("%s: calls os.%s; read the capture variable through getenv", fset.Position(x.Pos()), sel.Sel.Name)
-					}
-				}
 			}
 			return true
 		})
 	}
 	if literals != 1 {
 		t.Errorf("the capture variable's name is written %d times in the package's non-test files; want once, in trace.go", literals)
+	}
+
+	// The two uses trace.go is allowed: os.Getenv as the value of the one
+	// var getenv, and captureMessageContentEnv (beside its declaration) as
+	// the sole argument of a call of getenv.
+	f := files["trace.go"]
+	getenvValue := ast.Node(nil)
+	envNameOK := map[ast.Node]bool{}
+	getenvCalls := 0
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.ValueSpec:
+			for i, name := range x.Names {
+				if name.Name == "captureMessageContentEnv" {
+					envNameOK[name] = true
+				}
+				if name.Name == "getenv" && len(x.Values) == len(x.Names) {
+					if getenvValue != nil {
+						t.Errorf("%s: getenv declared twice", fset.Position(name.Pos()))
+					}
+					getenvValue = x.Values[i]
+				}
+			}
+		case *ast.CallExpr:
+			if fn, ok := x.Fun.(*ast.Ident); ok && fn.Name == "getenv" && len(x.Args) == 1 {
+				if arg, ok := x.Args[0].(*ast.Ident); ok && arg.Name == "captureMessageContentEnv" {
+					envNameOK[arg] = true
+					getenvCalls++
+				}
+			}
+		}
+		return true
+	})
+	getenvValueSeen := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			id, ok := x.X.(*ast.Ident)
+			if !ok || !envReads[id.Name][x.Sel.Name] {
+				return true
+			}
+			if n == getenvValue && id.Name == "os" && x.Sel.Name == "Getenv" {
+				getenvValueSeen = true
+				return true
+			}
+			t.Errorf("%s: names %s.%s; read the capture variable through getenv", fset.Position(x.Pos()), id.Name, x.Sel.Name)
+		case *ast.Ident:
+			if x.Name == "captureMessageContentEnv" && !envNameOK[x] {
+				t.Errorf("%s: uses captureMessageContentEnv other than as getenv's argument", fset.Position(x.Pos()))
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name == "getenv" {
+					t.Errorf("%s: assigns getenv", fset.Position(x.Pos()))
+				}
+			}
+		}
+		return true
+	})
+	if !getenvValueSeen {
+		t.Error("control: trace.go declares no var getenv = os.Getenv, so the environment rule cannot tell its one allowed read from any other")
+	}
+	if getenvCalls == 0 {
+		t.Error("control: trace.go never calls getenv(captureMessageContentEnv), so the argument rule checked nothing")
 	}
 }
 
