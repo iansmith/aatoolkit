@@ -121,6 +121,24 @@ func TestServeSMS_UnknownSenderRejected(t *testing.T) {
 	}
 }
 
+// The SMS rejection is built by the same TwiML escaper as the voice refusal:
+// a character XML 1.0 cannot carry is dropped, so the document stays
+// well-formed.
+func TestServeSMS_RejectTextDropsXMLIllegalChars(t *testing.T) {
+	s := &twilio.Server{
+		AuthToken:     "t",
+		Authorize:     func(string) bool { return false },
+		SMSRejectText: "no\x0bpe",
+	}
+	form := url.Values{"From": {"+15105551234"}, "Body": {"hi"}}
+	w := httptest.NewRecorder()
+	s.ServeSMS(w, signedTwilioRequest(t, "t", "https", "webhook.example.com", "/sms/inbound", form))
+
+	if got, want := w.Body.String(), `<Response><Message>nope</Message></Response>`; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
 // Authorize == nil must reproduce today's behavior exactly (back-compat).
 func TestServeSMS_NilAuthorizeAllows(t *testing.T) {
 	called := 0

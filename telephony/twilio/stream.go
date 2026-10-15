@@ -36,6 +36,7 @@ type Frame struct {
 	MarkName       string // non-empty only for EventMark
 	CallSID        string // non-empty only for EventStart
 	From           string // caller From threaded in by ServeStreams from the voice webhook; "" if unknown, only set for EventStart
+	To             string // dialed number threaded in by ServeStreams from the voice webhook; "" if unknown or not E.164, only set for EventStart
 }
 
 // inbound is the union of all Twilio Media Streams message shapes. Only the

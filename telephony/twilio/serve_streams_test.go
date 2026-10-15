@@ -56,27 +56,38 @@ func sendStart(t *testing.T, conn *websocket.Conn, streamSID, callSID string) {
 	writeText(t, conn, msg)
 }
 
+// captureStartFrame sets s.HandleStream to record the Frame it is handed,
+// serves s.ServeStreams and dials it. It returns the connection, for the
+// caller to send frames on, and a func that waits up to 2s for the recorded
+// Frame, failing the test if HandleStream was never called.
+func captureStartFrame(t *testing.T, s *twilio.Server) (*websocket.Conn, func() twilio.Frame) {
+	t.Helper()
+	received := make(chan twilio.Frame, 1)
+	s.HandleStream = func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
+		received <- f
+		return nil
+	}
+	conn := dialStreams(t, streamsServer(t, s))
+	return conn, func() twilio.Frame {
+		t.Helper()
+		select {
+		case f := <-received:
+			return f
+		case <-time.After(2 * time.Second):
+			t.Fatal("HandleStream not called within 2s")
+			return twilio.Frame{}
+		}
+	}
+}
+
 // --- edge / boundary ---
 
 // Edge: WebSocket upgrade must succeed — the server performs the HTTP→WebSocket
 // handshake and does not immediately close the connection.
 func TestServeStreams_AcceptsWebSocketUpgrade(t *testing.T) {
-	done := make(chan struct{})
-	s := &twilio.Server{
-		HandleStream: func(ctx context.Context, conn *websocket.Conn, start twilio.Frame) error {
-			close(done)
-			return nil
-		},
-	}
-	srv := streamsServer(t, s)
-	conn := dialStreams(t, srv)
+	conn, startFrame := captureStartFrame(t, &twilio.Server{})
 	sendStart(t, conn, "SS01", "CA01")
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Error("handler not called within 2s after start frame")
-	}
+	startFrame()
 }
 
 // Boundary: start frame is the first message on every Twilio connection; its
@@ -86,30 +97,18 @@ func TestServeStreams_HandlerReceivesStartFrame(t *testing.T) {
 		wantStreamSID = "SSabc123def456"
 		wantCallSID   = "CAghi789jkl012"
 	)
-	received := make(chan twilio.Frame, 1)
-	s := &twilio.Server{
-		HandleStream: func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
-			received <- f
-			return nil
-		},
-	}
-	srv := streamsServer(t, s)
-	conn := dialStreams(t, srv)
+	conn, startFrame := captureStartFrame(t, &twilio.Server{})
 	sendStart(t, conn, wantStreamSID, wantCallSID)
 
-	select {
-	case f := <-received:
-		if f.Event != twilio.EventStart {
-			t.Errorf("Event = %q, want %q", f.Event, twilio.EventStart)
-		}
-		if f.StreamSID != wantStreamSID {
-			t.Errorf("StreamSID = %q, want %q", f.StreamSID, wantStreamSID)
-		}
-		if f.CallSID != wantCallSID {
-			t.Errorf("CallSID = %q, want %q", f.CallSID, wantCallSID)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("handler not called within 2s")
+	f := startFrame()
+	if f.Event != twilio.EventStart {
+		t.Errorf("Event = %q, want %q", f.Event, twilio.EventStart)
+	}
+	if f.StreamSID != wantStreamSID {
+		t.Errorf("StreamSID = %q, want %q", f.StreamSID, wantStreamSID)
+	}
+	if f.CallSID != wantCallSID {
+		t.Errorf("CallSID = %q, want %q", f.CallSID, wantCallSID)
 	}
 }
 
@@ -288,27 +287,14 @@ func TestServeStreams_ClientDisconnect_HandlerExits(t *testing.T) {
 // server must still call HandleStream (the SID may be populated by Twilio later
 // in production, but the server should not gate on it).
 func TestServeStreams_EmptyStreamSID_HandlerStillCalled(t *testing.T) {
-	called := make(chan twilio.Frame, 1)
-	s := &twilio.Server{
-		HandleStream: func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
-			called <- f
-			return nil
-		},
-	}
-	srv := streamsServer(t, s)
-	conn := dialStreams(t, srv)
+	conn, startFrame := captureStartFrame(t, &twilio.Server{})
 
 	// Manually encode a start frame with empty StreamSID.
 	msg := []byte(`{"event":"start","streamSid":"","start":{"callSid":"CA_empty"}}`)
 	writeText(t, conn, msg)
 
-	select {
-	case f := <-called:
-		if f.Event != twilio.EventStart {
-			t.Errorf("Event = %q, want %q", f.Event, twilio.EventStart)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("handler not called for empty-StreamSID start frame within 2s")
+	if f := startFrame(); f.Event != twilio.EventStart {
+		t.Errorf("Event = %q, want %q", f.Event, twilio.EventStart)
 	}
 }
 
@@ -410,34 +396,22 @@ func TestServeStreams_ConnectedThenStart(t *testing.T) {
 		wantStreamSID = "SSconnected01"
 		wantCallSID   = "CAconnected01"
 	)
-	received := make(chan twilio.Frame, 1)
-	s := &twilio.Server{
-		HandleStream: func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
-			received <- f
-			return nil
-		},
-	}
-	srv := streamsServer(t, s)
-	conn := dialStreams(t, srv)
+	conn, startFrame := captureStartFrame(t, &twilio.Server{})
 
 	// Send connected then start.
 	sendConnected(t, conn)
 	sendStart(t, conn, wantStreamSID, wantCallSID)
 
 	// Handler must receive the start frame unchanged.
-	select {
-	case f := <-received:
-		if f.Event != twilio.EventStart {
-			t.Errorf("Event = %q, want %q", f.Event, twilio.EventStart)
-		}
-		if f.StreamSID != wantStreamSID {
-			t.Errorf("StreamSID = %q, want %q", f.StreamSID, wantStreamSID)
-		}
-		if f.CallSID != wantCallSID {
-			t.Errorf("CallSID = %q, want %q", f.CallSID, wantCallSID)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("handler not called within 2s after connected+start frames")
+	f := startFrame()
+	if f.Event != twilio.EventStart {
+		t.Errorf("Event = %q, want %q", f.Event, twilio.EventStart)
+	}
+	if f.StreamSID != wantStreamSID {
+		t.Errorf("StreamSID = %q, want %q", f.StreamSID, wantStreamSID)
+	}
+	if f.CallSID != wantCallSID {
+		t.Errorf("CallSID = %q, want %q", f.CallSID, wantCallSID)
 	}
 }
 
@@ -448,95 +422,77 @@ func TestServeStreams_StartFirst_StillWorks(t *testing.T) {
 		wantStreamSID = "SSnofirst01"
 		wantCallSID   = "CAnofirst01"
 	)
-	received := make(chan twilio.Frame, 1)
-	s := &twilio.Server{
-		HandleStream: func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
-			received <- f
-			return nil
-		},
-	}
-	srv := streamsServer(t, s)
-	conn := dialStreams(t, srv)
+	conn, startFrame := captureStartFrame(t, &twilio.Server{})
 
 	// Send start directly (no connected).
 	sendStart(t, conn, wantStreamSID, wantCallSID)
 
 	// Handler must receive the start frame unchanged.
-	select {
-	case f := <-received:
-		if f.Event != twilio.EventStart {
-			t.Errorf("Event = %q, want %q", f.Event, twilio.EventStart)
-		}
-		if f.StreamSID != wantStreamSID {
-			t.Errorf("StreamSID = %q, want %q", f.StreamSID, wantStreamSID)
-		}
-		if f.CallSID != wantCallSID {
-			t.Errorf("CallSID = %q, want %q", f.CallSID, wantCallSID)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("handler not called within 2s after start frame")
+	f := startFrame()
+	if f.Event != twilio.EventStart {
+		t.Errorf("Event = %q, want %q", f.Event, twilio.EventStart)
+	}
+	if f.StreamSID != wantStreamSID {
+		t.Errorf("StreamSID = %q, want %q", f.StreamSID, wantStreamSID)
+	}
+	if f.CallSID != wantCallSID {
+		t.Errorf("CallSID = %q, want %q", f.CallSID, wantCallSID)
 	}
 }
 
-// --- AATK-19: caller From threaded from the voice webhook to the stream ---
+// --- AATK-19, AATK-143: caller From and dialed To threaded from the voice
+// webhook to the stream ---
 
-// Frame.From is populated for an authorized voice call whose webhook fired
-// first: ServeHTTP records From keyed by CallSid, and ServeStreams looks it up
-// by the start frame's CallSID before calling HandleStream.
-func TestServeStreams_FromThreadedFromWebhook(t *testing.T) {
-	const from = "+15105550123"
+// Frame.From and Frame.To are populated for a voice call whose webhook fired
+// first: ServeHTTP records both keyed by CallSid, and ServeStreams looks them
+// up by the start frame's CallSID before calling HandleStream.
+func TestServeStreams_FromAndToThreadedFromWebhook(t *testing.T) {
+	const from, to = "+15105550123", "+15105550999"
 	s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss"}
-
-	form := url.Values{"From": {from}, "CallSid": {"CA1"}}
-	req := signedWebhookRequest(t, "authtoken", "https", "example.com", form)
+	form := url.Values{"From": {from}, "To": {to}, "CallSid": {"CA1"}}
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, req)
+	s.ServeHTTP(w, signedWebhookRequest(t, "authtoken", "https", "example.com", form))
 	if w.Code != http.StatusOK {
 		t.Fatalf("webhook status = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
 
-	received := make(chan twilio.Frame, 1)
-	s.HandleStream = func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
-		received <- f
-		return nil
-	}
-	srv := streamsServer(t, s)
-	conn := dialStreams(t, srv)
+	conn, startFrame := captureStartFrame(t, s)
 	sendStart(t, conn, "SS1", "CA1")
 
-	select {
-	case f := <-received:
-		if f.From != from {
-			t.Fatalf("Frame.From = %q, want %q", f.From, from)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler not called within 2s")
+	if f := startFrame(); f.From != from || f.To != to {
+		t.Fatalf("Frame From/To = %q/%q, want %q/%q", f.From, f.To, from, to)
 	}
 }
 
-// Adversary gap: Frame.From must be the empty string when no webhook ever
-// recorded the stream's CallSID (unknown/missing case named explicitly in the
-// ticket's Definition of done) — pins the zero-value default, not a panic or
-// a stale value from an unrelated CallSid.
-func TestServeStreams_FromEmptyWhenNoWebhookRecorded(t *testing.T) {
-	s := &twilio.Server{} // no ServeHTTP call ever made for this CallSid
-
-	received := make(chan twilio.Frame, 1)
-	s.HandleStream = func(ctx context.Context, conn *websocket.Conn, f twilio.Frame) error {
-		received <- f
-		return nil
+// Frame.To is "" when the webhook's To was not E.164: the value recorded for
+// the start frame is the validated one, not the raw form field. From is checked
+// too, so a pass cannot come from the CallSid simply not being found.
+func TestServeStreams_ToEmptyWhenWebhookToInvalid(t *testing.T) {
+	const from = "+15105550123"
+	s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss"}
+	form := url.Values{"From": {from}, "To": {"client:alice"}, "CallSid": {"CA1"}}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, signedWebhookRequest(t, "authtoken", "https", "example.com", form))
+	if w.Code != http.StatusOK {
+		t.Fatalf("webhook status = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
-	srv := streamsServer(t, s)
-	conn := dialStreams(t, srv)
+
+	conn, startFrame := captureStartFrame(t, s)
+	sendStart(t, conn, "SS1", "CA1")
+
+	if f := startFrame(); f.From != from || f.To != "" {
+		t.Fatalf("Frame From/To = %q/%q, want %q/\"\"", f.From, f.To, from)
+	}
+}
+
+// Frame.From and Frame.To are both "" when no webhook ever recorded the
+// stream's CallSID (the unknown/missing case).
+func TestServeStreams_FromAndToEmptyWhenNoWebhookRecorded(t *testing.T) {
+	conn, startFrame := captureStartFrame(t, &twilio.Server{}) // no ServeHTTP call for this CallSid
 	sendStart(t, conn, "SSunknown01", "CAunknown01")
 
-	select {
-	case f := <-received:
-		if f.From != "" {
-			t.Fatalf("Frame.From = %q, want \"\" (no webhook recorded this CallSid)", f.From)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler not called within 2s")
+	if f := startFrame(); f.From != "" || f.To != "" {
+		t.Fatalf("Frame From/To = %q/%q, want both \"\" (no webhook recorded this CallSid)", f.From, f.To)
 	}
 }
 
