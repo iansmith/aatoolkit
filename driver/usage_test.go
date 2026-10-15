@@ -175,3 +175,100 @@ func TestSendStream_UsageOnlyStreamIsStillEmpty(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeSSELine_OddMetadataNeverFailsTheChunk: a chunk's id, model and
+// usage feed only the span, so a value of an unexpected type in one of them
+// is dropped, never half read, and the chunk decodes as it did before those
+// fields were read at all. Its content comes through, and the well-typed
+// fields beside the odd one are kept.
+func TestDecodeSSELine_OddMetadataNeverFailsTheChunk(t *testing.T) {
+	cases := []struct {
+		name              string
+		line              string
+		wantModel, wantID string
+		wantUsage         *sseUsage
+	}{
+		{
+			name:      "numeric id",
+			line:      `data: {"id":7,"model":"m","choices":[{"delta":{"content":"hi"}}]}`,
+			wantModel: "m",
+		},
+		{
+			name:   "array model",
+			line:   `data: {"id":"r1","model":["m"],"choices":[{"delta":{"content":"hi"}}]}`,
+			wantID: "r1",
+		},
+		{
+			name:      "fractional token count",
+			line:      `data: {"id":"r1","model":"m","choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":1.5,"completion_tokens":8}}`,
+			wantModel: "m", wantID: "r1",
+		},
+		{
+			name: "usage that is not an object",
+			line: `data: {"choices":[{"delta":{"content":"hi"}}],"usage":"n/a"}`,
+		},
+		{
+			name:      "odd id and model beside a good usage",
+			line:      `data: {"id":{"v":1},"model":true,"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`,
+			wantUsage: &sseUsage{PromptTokens: 3, CompletionTokens: 2},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, ok, err := decodeSSELine(tc.line)
+			if err != nil || !ok {
+				t.Fatalf("decodeSSELine = ok %v, err %v; want the chunk decoded", ok, err)
+			}
+			if d.Content != "hi" {
+				t.Errorf("content = %q, want hi", d.Content)
+			}
+			if d.model != tc.wantModel || d.id != tc.wantID {
+				t.Errorf("model, id = %q, %q; want %q, %q", d.model, d.id, tc.wantModel, tc.wantID)
+			}
+			if (d.usage == nil) != (tc.wantUsage == nil) || (d.usage != nil && *d.usage != *tc.wantUsage) {
+				t.Errorf("usage = %+v, want %+v", d.usage, tc.wantUsage)
+			}
+		})
+	}
+}
+
+// TestSendStream_OddMetadataStillSucceeds: a stream whose chunks carry an id,
+// model or usage of an unexpected type answers as it did before tracing
+// existed, with no provider and with one, and the span leaves the odd values
+// out rather than failing the call.
+func TestSendStream_OddMetadataStillSucceeds(t *testing.T) {
+	steps := []sseStep{
+		{line: `data: {"id":7,"model":"served-model","choices":[{"delta":{"content":"The quick brown fox jumps over the lazy dog."},"finish_reason":null}],"usage":null}`},
+		{line: `data: {"id":7,"model":"served-model","choices":[{"delta":{},"finish_reason":"stop"}],"usage":"n/a"}`},
+		{line: `data: {"id":7,"model":["served-model"],"choices":[],"usage":{"prompt_tokens":1.5,"completion_tokens":8}}`},
+		{line: `data: [DONE]`},
+	}
+	const want = "The quick brown fox jumps over the lazy dog."
+
+	t.Run("no provider", func(t *testing.T) {
+		srv, _ := newScriptedSSEServer(steps...)
+		defer srv.Close()
+		h := &Host{client: srv.Client(), tiers: map[string]Tier{"fast": {URL: chatURL(srv), Model: "test", MaxTokens: 512}}}
+		content, _, err := h.SendStream(traceWindow, "fast", func(string) {})
+		if err != nil || string(content) != want {
+			t.Fatalf("SendStream = %q, %v; want %q, no error", content, err, want)
+		}
+	})
+
+	t.Run("traced", func(t *testing.T) {
+		withoutCaptureEnv(t)
+		srv, _ := newScriptedSSEServer(steps...)
+		defer srv.Close()
+		h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+		content, _, err := h.SendStream(traceWindow, "fast", func(string) {})
+		if err != nil || string(content) != want {
+			t.Fatalf("SendStream = %q, %v; want %q, no error", content, err, want)
+		}
+		span := onlyModelSpan(t, rec)
+		requireAttrs(t, span, map[string]any{
+			"gen_ai.response.model":          "served-model",
+			"gen_ai.response.finish_reasons": []string{"stop"},
+		})
+		requireNoAttrs(t, span, "gen_ai.response.id", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "error.type")
+	})
+}
