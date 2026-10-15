@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/iansmith/aatoolkit/host"
 	"github.com/iansmith/aatoolkit/telephony"
@@ -321,31 +322,58 @@ func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*ht
 // stream. ID, Model and Usage feed only the span, so they are decoded best
 // effort: a value of an unexpected type is dropped and never fails the chunk.
 type sseChunk struct {
-	ID      bestEffort[string] `json:"id"`
-	Model   bestEffort[string] `json:"model"`
+	ID      chunkString `json:"id"`
+	Model   chunkString `json:"model"`
 	Choices []struct {
 		Delta        sseDelta `json:"delta"`
 		FinishReason string   `json:"finish_reason"`
 	} `json:"choices"`
-	Usage bestEffort[sseUsage] `json:"usage"`
+	Usage chunkUsage `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 }
 
-// bestEffort is a chunk field decoded only if it has the expected type. A
-// null, or a value that does not decode as T, leaves ok false; either way
+// chunkString is a chunk's id or model, decoded best effort: a JSON string is
+// taken, and any other value, null included, leaves it empty; either way
 // decoding the chunk carries on, as it did before the field was read at all.
-// A value is taken whole or not at all, never half read.
-type bestEffort[T any] struct {
-	v  T
+// Upstreams send both on every chunk, so a string with no escapes and valid
+// UTF-8, which needs no unquoting, is taken from the bytes directly: it costs
+// the string's one allocation and no second decode.
+type chunkString string
+
+func (s *chunkString) UnmarshalJSON(b []byte) error {
+	if len(b) < 2 || b[0] != '"' {
+		return nil
+	}
+	if raw := b[1 : len(b)-1]; bytes.IndexByte(raw, '\\') < 0 && utf8.Valid(raw) {
+		*s = chunkString(raw)
+		return nil
+	}
+	var v string
+	if json.Unmarshal(b, &v) == nil {
+		*s = chunkString(v)
+	}
+	return nil
+}
+
+// chunkUsage is a chunk's usage, decoded best effort: an object that decodes
+// as sseUsage is taken whole, never half read, and any other value, null
+// included, leaves ok false without failing the chunk. Only a value that
+// opens an object is decoded, so the null a hosted upstream sends on every
+// chunk but the last costs nothing.
+type chunkUsage struct {
+	v  sseUsage
 	ok bool
 }
 
-func (f *bestEffort[T]) UnmarshalJSON(b []byte) error {
-	var v T
-	if string(b) != "null" && json.Unmarshal(b, &v) == nil {
-		f.v, f.ok = v, true
+func (u *chunkUsage) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || b[0] != '{' {
+		return nil
+	}
+	var v sseUsage
+	if json.Unmarshal(b, &v) == nil {
+		u.v, u.ok = v, true
 	}
 	return nil
 }
@@ -413,7 +441,7 @@ func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 		delta = chunk.Choices[0].Delta
 		delta.finishReason = chunk.Choices[0].FinishReason
 	}
-	delta.model, delta.id = chunk.Model.v, chunk.ID.v
+	delta.model, delta.id = string(chunk.Model), string(chunk.ID)
 	if chunk.Usage.ok {
 		u := chunk.Usage.v
 		delta.usage = &u
