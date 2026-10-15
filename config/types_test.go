@@ -39,8 +39,8 @@ func TestHealth_UnmarshalTOML_TableForm(t *testing.T) {
 }
 
 func TestHealth_UnmarshalTOML_StringForm(t *testing.T) {
-	h := decodeHealth(t, `health = "GET /spend?prefix=SOP"`)
-	want := Health{Path: "/spend?prefix=SOP"}
+	h := decodeHealth(t, `health = "GET /status?verbose=1"`)
+	want := Health{Path: "/status?verbose=1"}
 	if !reflect.DeepEqual(h, want) {
 		t.Errorf("got %+v, want %+v (host/port left unset, default to the server's own)", h, want)
 	}

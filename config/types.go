@@ -125,7 +125,7 @@ func (h Health) IsExec() bool { return len(h.Exec) > 0 }
 // UnmarshalTOML implements toml.Unmarshaler, accepting either the existing
 // table form (`health = { host = "...", port = ..., path = "..." }`, or
 // `health = { exec = ["pg_isready", "-p", "5432"] }`) or a shorthand string
-// form (`health = "GET /spend?prefix=SOP"`), where host and port default to the
+// form (`health = "GET /status?verbose=1"`), where host and port default to the
 // server's own (internal/health.ResolveSpec).
 //
 // Only GET is accepted in the string form — the HTTP probe has no method
