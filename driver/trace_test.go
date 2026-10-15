@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -729,39 +730,75 @@ func TestModelSpan_NotRecordingSkipsCapture(t *testing.T) {
 	}
 }
 
-// TestModelSpan_NoProviderReadsNoCaptureVariable: with no provider, a call's
-// span never reads and parses the capture variable; that happens only for a
-// span that is recording. The probe is strconv.ParseBool's error path, which
-// allocates: where the variable is parsed, an unparsable value costs more
-// allocations than "0", and where it is not, the two cost the same. The
-// control shows the probe sees the parse on a recording span.
+// TestModelSpan_NoProviderReadsNoCaptureVariable: with no provider, a call
+// never reads the capture variable, and never parses it; a traced call reads
+// it once, when its span ends. The reads are counted over whole calls through
+// getenv, the one lookup of the variable. The parse is probed through
+// strconv.ParseBool's error path, which allocates: where the variable is
+// parsed, an unparsable value costs more allocations than "0", and where it
+// is not, the two cost the same. Each probe has a control showing it sees
+// the read or the parse on a recording span.
 func TestModelSpan_NoProviderReadsNoCaptureVariable(t *testing.T) {
-	st := &streamState{acc: newSegmentAccumulator(minSegmentChars), hasContent: true, finishReason: "stop"}
-	st.contentBuf.WriteString("An answer.")
-	callAllocs := func(t *testing.T, h *Host, capture string) float64 {
-		t.Helper()
-		withCaptureEnv(t, capture)
-		return testing.AllocsPerRun(50, func() {
-			_, call := startModelSpan(context.Background(), h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
-			call.requestSent()
-			call.end(st, 512, traceWindow, "")
-		})
-	}
+	t.Run("read", func(t *testing.T) {
+		withCaptureEnv(t, "1")
+		var reads atomic.Int32
+		lookup := getenv
+		getenv = func(k string) string {
+			reads.Add(1)
+			return lookup(k)
+		}
+		t.Cleanup(func() { getenv = lookup })
+		srv, _ := newScriptedSSEServer(okSteps()...)
+		defer srv.Close()
 
-	// A provider with no span processor: its spans record, and ending one
-	// does the same work every time.
-	recording := sdktrace.NewTracerProvider()
-	t.Cleanup(func() { _ = recording.Shutdown(context.Background()) })
-	traced := &Host{tracerProvider: recording}
-	if zero, bad := callAllocs(t, traced, "0"), callAllocs(t, traced, "not-a-bool"); bad <= zero {
-		t.Fatalf("control: on a recording span an unparsable capture variable took %v allocs and \"0\" %v; "+
-			"want more, or this test cannot see the variable being parsed", bad, zero)
-	}
-	untraced := &Host{}
-	if zero, bad := callAllocs(t, untraced, "0"), callAllocs(t, untraced, "not-a-bool"); bad != zero {
-		t.Errorf("with no provider an unparsable capture variable took %v allocs and \"0\" %v; "+
-			"want the same: the variable was read and parsed", bad, zero)
-	}
+		traced, _ := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+		if _, _, err := traced.SendStream(traceWindow, "fast", func(string) {}); err != nil {
+			t.Fatalf("traced SendStream: %v", err)
+		}
+		if n := reads.Swap(0); n != 1 {
+			t.Fatalf("control: a traced call read the capture variable %d times; want once, "+
+				"or this test cannot see a read", n)
+		}
+		untraced := New(Config{
+			Tiers:  map[string]Tier{"fast": {URL: chatURL(srv), Model: "test", MaxTokens: 512}},
+			Prompt: func() string { return "" },
+		})
+		if _, _, err := untraced.SendStream(traceWindow, "fast", func(string) {}); err != nil {
+			t.Fatalf("SendStream with no provider: %v", err)
+		}
+		if n := reads.Load(); n != 0 {
+			t.Errorf("a call with no provider read the capture variable %d times; want none", n)
+		}
+	})
+
+	t.Run("parse", func(t *testing.T) {
+		st := &streamState{acc: newSegmentAccumulator(minSegmentChars), hasContent: true, finishReason: "stop"}
+		st.contentBuf.WriteString("An answer.")
+		callAllocs := func(t *testing.T, h *Host, capture string) float64 {
+			t.Helper()
+			withCaptureEnv(t, capture)
+			return testing.AllocsPerRun(50, func() {
+				_, call := startModelSpan(context.Background(), h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+				call.requestSent()
+				call.end(st, 512, traceWindow, "")
+			})
+		}
+
+		// A provider with no span processor: its spans record, and ending one
+		// does the same work every time.
+		recording := sdktrace.NewTracerProvider()
+		t.Cleanup(func() { _ = recording.Shutdown(context.Background()) })
+		traced := &Host{tracerProvider: recording}
+		if zero, bad := callAllocs(t, traced, "0"), callAllocs(t, traced, "not-a-bool"); bad <= zero {
+			t.Fatalf("control: on a recording span an unparsable capture variable took %v allocs and \"0\" %v; "+
+				"want more, or this test cannot see the variable being parsed", bad, zero)
+		}
+		untraced := &Host{}
+		if zero, bad := callAllocs(t, untraced, "0"), callAllocs(t, untraced, "not-a-bool"); bad != zero {
+			t.Errorf("with no provider an unparsable capture variable took %v allocs and \"0\" %v; "+
+				"want the same: the variable was read and parsed", bad, zero)
+		}
+	})
 }
 
 // TestModelSpan_NoProviderReadsNoClock: with no provider, a call's span reads

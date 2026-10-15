@@ -238,6 +238,10 @@ func (c *modelCall) end(st *streamState, maxTokens int, contextWindow []byte, er
 	c.span.SetAttributes(attrs...)
 }
 
+// getenv looks up the capture variable. It is os.Getenv, held in a variable
+// so a test can count the lookups.
+var getenv = os.Getenv
+
 // captureMessageContent reports whether the capture variable is set to a
 // value strconv.ParseBool reads as true. Unset, empty, false or unparsable
 // is off.
