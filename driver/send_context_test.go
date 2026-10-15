@@ -5,8 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -227,19 +225,6 @@ func TestSendStreamContext_CallerCancelEndsCall(t *testing.T) {
 	}
 }
 
-// bufferedSSEServer answers every request with lines as one complete body,
-// written at once with its Content-Length, so the client can hold the whole
-// stream before it processes the first line.
-func bufferedSSEServer(lines ...string) *httptest.Server {
-	body := strings.Join(lines, "\n") + "\n"
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		_, _ = io.WriteString(w, body)
-	}))
-}
-
 // TestSendStreamContext_DoneContextStopsBufferedStream: once the caller's
 // context is done, no onSegment call starts and the call fails with the
 // context's error, even when the rest of the stream is already buffered and
@@ -303,7 +288,7 @@ func TestSendStreamContext_DoneContextStopsBufferedStream(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			withoutCaptureEnv(t)
-			srv := bufferedSSEServer(tc.lines...)
+			srv := sseServer(tc.lines...)
 			defer srv.Close()
 			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
 			ctx, onFirst, cancel := tc.ctx()
@@ -357,14 +342,14 @@ func TestSendStreamContext_DoneContextFailsWithItsCause(t *testing.T) {
 	errSlow := errors.New("caller gave up waiting")
 	const s1, s2 = "The quick brown fox jumps over the lazy dog.", " A second sentence follows the first one here."
 	buffered := func() (string, func()) {
-		srv := bufferedSSEServer(textLine(s1), textLine(s2), finishLine("stop"), doneLine)
+		srv := sseServer(textLine(s1), textLine(s2), finishLine("stop"), doneLine)
 		return chatURL(srv), srv.Close
 	}
 	// lastLine ends the body with the line that cuts the first segment, so
 	// the cancel lands after the last line and the end-of-stream check is
 	// what sees it.
 	lastLine := func() (string, func()) {
-		srv := bufferedSSEServer(textLine(s1))
+		srv := sseServer(textLine(s1))
 		return chatURL(srv), srv.Close
 	}
 	stalled := func() (string, func()) {
