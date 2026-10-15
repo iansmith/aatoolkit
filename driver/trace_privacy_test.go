@@ -157,20 +157,26 @@ func TestServerAddrPort_StripsUserinfoPathQuery(t *testing.T) {
 // writes spans, is not handed a type that holds a secret or the
 // conversation. No parameter, result or receiver of a function in it, no
 // field of a struct in it, and no type it declares (an alias included) is or
-// holds a Tier (its APIKey), a Host (its tiers, history and prompt), an
-// *http.Request, an http.Header or an error (whose text can echo an upstream
-// body). "Holds" is followed through every type the package's non-test files
+// holds a Tier (its APIKey), a Host (its tiers, history and prompt) or an
+// error (whose text can echo an upstream body); nor an interface or any,
+// which can hold any of those; nor a type from outside the package other
+// than the few spanTypesAllowed lists, so *http.Request, http.Header,
+// *http.Response (its Request) and url.URL (its password) are all refused.
+// None of them takes a type parameter, which could be any of those.
+// "Holds" is followed through every type the package's non-test files
 // declare, so a field added to a driver.go struct that trace.go takes, such
 // as streamState, counts. trace.go also never names APIKey or the tiers map,
-// never calls RecordError, AddEvent or an Error() method, and gives every
-// SetStatus the literal "" as its description; it must contain at least one
-// SetStatus, so that rule is not vacuous.
+// never reads a context value (a context.Context is allowed only to parent
+// the span), never calls RecordError, AddEvent or an Error() method, and
+// gives every SetStatus the literal "" as its description; it must contain
+// at least one SetStatus, so that rule is not vacuous.
 //
 // This is a tripwire for those routes, not a proof: a string or []byte can
 // still carry anything, and the contextWindow and the stream's content reach
-// trace.go by design, to be recorded only when capture is on.
-// TestModelSpan_NeverRecordsSecretsOrNumbers is the guard on what a span
-// actually holds.
+// trace.go by design, to be recorded only when capture is on. A package
+// variable trace.go reads, or the result of a function it calls, is not
+// followed. TestModelSpan_NeverRecordsSecretsOrNumbers is the guard on what
+// a span actually holds.
 func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 	fset := token.NewFileSet()
 	pos := func(n ast.Node) string { return fset.Position(n.Pos()).String() }
@@ -193,7 +199,7 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 
 	// holds returns the forbidden type that e is or holds, with the path to
 	// it, or "" when it reaches none.
-	forbidden := map[string]bool{"Tier": true, "Host": true, "error": true}
+	forbidden := map[string]bool{"Tier": true, "Host": true, "error": true, "any": true}
 	var holds func(e ast.Expr, seen map[string]bool) string
 	fieldsHold := func(fields *ast.FieldList, seen map[string]bool) string {
 		if fields == nil {
@@ -219,8 +225,12 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 				}
 			}
 		case *ast.SelectorExpr:
-			if id, ok := x.X.(*ast.Ident); ok && id.Name == "http" && (x.Sel.Name == "Request" || x.Sel.Name == "Header") {
-				return "http." + x.Sel.Name
+			name := x.Sel.Name
+			if id, ok := x.X.(*ast.Ident); ok {
+				name = id.Name + "." + name
+			}
+			if !spanTypesAllowed[name] {
+				return name + ", a type from outside the package that spanTypesAllowed does not list"
 			}
 		case *ast.StarExpr:
 			return holds(x.X, seen)
@@ -254,7 +264,7 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 		case *ast.StructType:
 			return fieldsHold(x.Fields, seen)
 		case *ast.InterfaceType:
-			return fieldsHold(x.Methods, seen)
+			return "an interface, which can hold any value that implements it"
 		case *ast.FuncType:
 			if bad := fieldsHold(x.Params, seen); bad != "" {
 				return bad
@@ -279,6 +289,17 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 	if bad := holds(&ast.Ident{Name: "Config"}, map[string]bool{}); bad == "" {
 		t.Error("control: Config holds its tiers, but the walk finds no Tier in it")
 	}
+	// Control: the walk refuses a type that holds a request or a password
+	// though no rule names it, and a type that can hold anything.
+	for _, src := range []string{"*http.Response", "url.URL", "[]any", "interface{ String() string }", "func(...interface{})"} {
+		e, err := parser.ParseExpr(src)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", src, err)
+		}
+		if bad := holds(e, map[string]bool{}); bad == "" {
+			t.Errorf("control: the walk lets %s through", src)
+		}
+	}
 
 	setStatus := 0
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -287,12 +308,18 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 			checkFields("receiver", x.Recv)
 			checkFields("parameter", x.Type.Params)
 			checkFields("result", x.Type.Results)
+			if x.Type.TypeParams != nil {
+				t.Errorf("%s: %s takes a type parameter, which can be any type", pos(x), x.Name.Name)
+			}
 		case *ast.FuncLit:
 			checkFields("parameter", x.Type.Params)
 			checkFields("result", x.Type.Results)
 		case *ast.StructType:
 			checkFields("struct field", x.Fields)
 		case *ast.TypeSpec:
+			if x.TypeParams != nil {
+				t.Errorf("%s: type %s takes a type parameter, which can be any type", pos(x), x.Name.Name)
+			}
 			if _, isStruct := x.Type.(*ast.StructType); !isStruct {
 				if bad := holds(x.Type, map[string]bool{}); bad != "" {
 					t.Errorf("%s: type %s is %s", pos(x), x.Name.Name, bad)
@@ -310,6 +337,8 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 			switch {
 			case sel.Sel.Name == "RecordError" || sel.Sel.Name == "AddEvent":
 				t.Errorf("%s: calls %s", pos(x), sel.Sel.Name)
+			case sel.Sel.Name == "Value" && len(x.Args) == 1:
+				t.Errorf("%s: reads a context value, which can be anything", pos(x))
 			case sel.Sel.Name == "Error" && len(x.Args) == 0:
 				t.Errorf("%s: calls an Error() method", pos(x))
 			case sel.Sel.Name == "SetStatus":
@@ -328,6 +357,23 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 	if setStatus == 0 {
 		t.Error("trace.go calls SetStatus nowhere; the status rule above checked nothing")
 	}
+}
+
+// spanTypesAllowed lists the types from outside the package that trace.go
+// may be handed, as a parameter, result, receiver or struct field, directly
+// or inside a package type it takes. None of them holds a request, a header,
+// a URL or an error: the span and its tracer, the context that parents the
+// span (trace.go never reads its values), and plain data. Anything else from
+// outside the package is refused until it is added here.
+var spanTypesAllowed = map[string]bool{
+	"context.Context":      true,
+	"json.RawMessage":      true,
+	"strings.Builder":      true,
+	"time.Duration":        true,
+	"time.Time":            true,
+	"trace.Span":           true,
+	"trace.Tracer":         true,
+	"trace.TracerProvider": true,
 }
 
 // TestTraceSource_OnlyTraceGoTouchesSpans (DoD f): trace.go is the only
