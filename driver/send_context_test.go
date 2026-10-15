@@ -5,12 +5,15 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/iansmith/aatoolkit/host"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // The context-taking send forms are reachable from both the Host and the view
@@ -202,6 +205,115 @@ func TestSendStreamContext_CallerCancelEndsCall(t *testing.T) {
 	if elapsed >= stall/2 {
 		t.Errorf("call took %v after cancel; want it to end well before the %v stall", elapsed, stall)
 	}
+}
+
+// bufferedSSEServer answers every request with lines as one complete body,
+// written at once with its Content-Length, so the client can hold the whole
+// stream before it processes the first line.
+func bufferedSSEServer(lines ...string) *httptest.Server {
+	body := strings.Join(lines, "\n") + "\n"
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = io.WriteString(w, body)
+	}))
+}
+
+// TestSendStreamContext_DoneContextStopsBufferedStream: once the caller's
+// context is done, no onSegment call starts and the call fails with the
+// context's error, even when the rest of the stream is already buffered and
+// no network read is left to fail. That holds for lines still to be
+// processed, for segments still to be cut from the line in hand, and for the
+// end-of-stream flush, and the span records the failure.
+func TestSendStreamContext_DoneContextStopsBufferedStream(t *testing.T) {
+	const s1, s2, s3 = "The quick brown fox jumps over the lazy dog.",
+		" A second sentence follows the first one here.",
+		" And a third sentence closes the whole reply."
+	cases := []struct {
+		name  string
+		lines []string
+		// ctx returns the call's context, a func the first onSegment call
+		// runs, and the context's cancel.
+		ctx      func() (context.Context, func(), context.CancelFunc)
+		wantIs   error
+		wantType string
+	}{
+		{
+			name:     "cancelled with lines still buffered",
+			lines:    []string{textLine(s1), textLine(s2), textLine(s3), finishLine("stop"), doneLine},
+			ctx:      cancelOnFirstSegment,
+			wantIs:   context.Canceled,
+			wantType: "canceled",
+		},
+		{
+			name:     "cancelled with segments left in the line",
+			lines:    []string{textLine(s1 + s2 + s3), finishLine("stop"), doneLine},
+			ctx:      cancelOnFirstSegment,
+			wantIs:   context.Canceled,
+			wantType: "canceled",
+		},
+		{
+			name:     "cancelled before the end-of-stream flush",
+			lines:    []string{textLine(s1 + " and trailing words with no stop")},
+			ctx:      cancelOnFirstSegment,
+			wantIs:   context.Canceled,
+			wantType: "canceled",
+		},
+		{
+			name:  "deadline passed during onSegment",
+			lines: []string{textLine(s1), textLine(s2), textLine(s3), finishLine("stop"), doneLine},
+			ctx: func() (context.Context, func(), context.CancelFunc) {
+				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				return ctx, func() { <-ctx.Done() }, cancel
+			},
+			wantIs:   context.DeadlineExceeded,
+			wantType: "timeout",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withoutCaptureEnv(t)
+			srv := bufferedSSEServer(tc.lines...)
+			defer srv.Close()
+			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+			ctx, onFirst, cancel := tc.ctx()
+			defer cancel()
+
+			segments, late := 0, 0
+			content, _, err := h.SendStreamContext(ctx, traceWindow, "fast", func(string) {
+				if ctx.Err() != nil {
+					late++
+				}
+				segments++
+				if segments == 1 {
+					onFirst()
+				}
+			})
+			if late != 0 {
+				t.Errorf("%d onSegment calls started after the context was done; want none", late)
+			}
+			if err == nil {
+				t.Fatalf("no error after the context was done; content %q", content)
+			}
+			if !errors.Is(err, tc.wantIs) || !strings.HasPrefix(err.Error(), "reading SSE stream: ") {
+				t.Errorf("error = %q; want it to start %q and wrap %v", err, "reading SSE stream: ", tc.wantIs)
+			}
+			span := onlyModelSpan(t, rec)
+			requireAttrs(t, span, map[string]any{"error.type": tc.wantType})
+			if st := span.Status(); st.Code != codes.Error || st.Description != "" {
+				t.Errorf("status = %v %q, want Error with an empty description", st.Code, st.Description)
+			}
+		})
+	}
+}
+
+// cancelOnFirstSegment is a case context for
+// TestSendStreamContext_DoneContextStopsBufferedStream that the first
+// onSegment call cancels.
+func cancelOnFirstSegment() (context.Context, func(), context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	return ctx, cancel, cancel
 }
 
 // TestWithContext_SendAndSendStreamRunUnderBoundContext: the view WithContext
