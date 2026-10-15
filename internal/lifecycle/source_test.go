@@ -200,9 +200,9 @@ func TestRewriteBuildOutput_DashOAsLastToken_Errors(t *testing.T) {
 }
 
 func TestRewriteBuildOutput_EqualsForm_NotTreatedAsDashO(t *testing.T) {
-	// "-o=path" is a single token, not the "-o <path>" pair the ticket
-	// specifies — must NOT be silently accepted; must hard-error like any
-	// other missing -o case, not partially rewrite it.
+	// "-o=path" is a single token, not the "-o <path>" token pair
+	// RewriteBuildOutput requires — must NOT be silently accepted; must
+	// hard-error like any other missing -o case, not partially rewrite it.
 	_, err := RewriteBuildOutput("go build -o=build/server ./cmd/server", "/tmp/xyz/server")
 	if err == nil {
 		t.Fatalf("expected error for -o=path (not a token pair), got nil")

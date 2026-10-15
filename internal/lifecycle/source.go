@@ -91,7 +91,7 @@ func insertGoDirFlag(fields []string, dir string) ([]string, error) {
 // Only a literal, space-separated "-o" token followed by a path token
 // counts as the pair — "-o=path" (single token) and long-flag forms like
 // "--output" are NOT rewritten; both fall through to the same "missing -o"
-// hard error, per the ticket's explicit token-pair rule.
+// hard error: only the explicit token pair counts.
 func RewriteBuildOutput(buildCmd, newPath string) (string, error) {
 	fields, err := rewriteBuildOutputFields(buildCmd, newPath)
 	if err != nil {
