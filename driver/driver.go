@@ -66,7 +66,7 @@ type Tier struct {
 	// Measured on one hosted OpenAI-compatible provider: it accepts the key,
 	// and it also sends a final usage chunk without it. A local mlx-serve has
 	// not been measured, so keep IncludeUsage off on local tiers until it is.
-	// The stream parser reads usage from whichever chunk carries it, whatever
+	// Usage is recorded on the span whenever the stream carries it, whatever
 	// this flag says.
 	IncludeUsage bool
 }
@@ -161,34 +161,49 @@ const minSegmentChars = 30 // minimum buffer length before a punctuation boundar
 
 // Send implements host.Host. contextWindow is the already serialized `messages`
 // array; tier is "fast" | "deep". Returns content, reasoning (empty if the
-// model/flags don't emit it), error. It's SendStream without the per-segment
-// callback — the full assembled text is all the caller wants.
+// model/flags don't emit it), error. It is SendContext under
+// context.Background(), so sendTimeout alone bounds it.
 func (h *Host) Send(contextWindow []byte, tier string) ([]byte, []byte, error) {
-	return h.SendStream(contextWindow, tier, func(string) {})
+	return h.SendContext(context.Background(), contextWindow, tier)
 }
 
-// SendContext is the context-taking Send (host.ContextSender).
-// Stub (AATK-159): ctx is not used yet.
+// SendContext implements host.ContextSender: Send under ctx. It's
+// SendStreamContext without the per-segment callback — the full assembled
+// text is all the caller wants.
 func (h *Host) SendContext(ctx context.Context, contextWindow []byte, tier string) ([]byte, []byte, error) {
-	return h.Send(contextWindow, tier)
+	return h.SendStreamContext(ctx, contextWindow, tier, func(string) {})
 }
 
-// SendStreamContext is the context-taking SendStream (host.ContextSender).
-// Stub (AATK-159): ctx is not used yet.
-func (h *Host) SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
-	return h.SendStream(contextWindow, tier, onSegment)
-}
-
-// WithContext returns a host.Host view of h bound to ctx.
-// Stub (AATK-159): the view does not use ctx yet.
+// WithContext returns a host.Host whose Send and SendStream run under ctx: their
+// spans are children of ctx's span, and ctx's deadline and cancellation bound
+// them. Every other method is the receiver's own, and SendContext/
+// SendStreamContext keep their explicit ctx. Make one per inbound request and do
+// not keep it beyond that request. For work that outlives an HTTP handler, pass
+// context.WithoutCancel(ctx). A nil ctx panics, as http.Request.WithContext does.
 func (h *Host) WithContext(ctx context.Context) host.Host {
+	if ctx == nil {
+		panic("driver: WithContext called with a nil context")
+	}
 	return &boundHost{Host: h, ctx: ctx}
 }
 
-// boundHost is the view WithContext returns. Stub (AATK-159).
+// boundHost is the view WithContext returns: the receiver, with ctx bound to
+// its two context-free sends. It must override both. Were Send left promoted,
+// it would run (*Host).Send, which sends under context.Background() and loses
+// ctx. A boundHost is never modified after WithContext builds it.
 type boundHost struct {
 	*Host
 	ctx context.Context
+}
+
+// Send implements host.Host: SendContext under the bound context.
+func (b *boundHost) Send(contextWindow []byte, tier string) ([]byte, []byte, error) {
+	return b.Host.SendContext(b.ctx, contextWindow, tier)
+}
+
+// SendStream implements host.Host: SendStreamContext under the bound context.
+func (b *boundHost) SendStream(contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
+	return b.Host.SendStreamContext(b.ctx, contextWindow, tier, onSegment)
 }
 
 // SystemPrompt implements host.Host: the current system prompt, reloaded from
@@ -216,6 +231,11 @@ func buildStreamPayload(ep Tier, contextWindow []byte) map[string]any {
 		// hosted model invents a function to call and streams no content
 		// (AATK-113). tool_choice "none" was measured not to stop it.
 		payload["tools"] = []any{}
+	}
+	if ep.IncludeUsage {
+		// Asks the upstream for a final usage chunk (AATK-159). Off, the key
+		// is absent and the body is what it was before the flag existed.
+		payload["stream_options"] = map[string]any{"include_usage": true}
 	}
 	return payload
 }
@@ -270,12 +290,18 @@ type sseDelta struct {
 	// an empty stream can say why it ended ("tool_calls", "length"). Not a
 	// JSON field of the delta itself.
 	finishReason string
-	// Stub (AATK-159): not populated yet.
+	// model, id and usage are the chunk's own top-level fields, carried beside
+	// the delta the same way finishReason is, so the stream state can say
+	// which model answered and what the request cost. A choice-less chunk
+	// carries them beside an empty delta. Not JSON fields of the delta itself.
 	model, id string
 	usage     *sseUsage
 }
 
-// sseUsage is a chunk's token usage. Stub (AATK-159).
+// sseUsage is the token usage an OpenAI-compatible stream reports. A hosted
+// upstream sends it on a final choice-less chunk and "usage": null on every
+// chunk before it, hence the pointer in sseChunk. Provider extras (totals,
+// cached-token details) are ignored.
 type sseUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
@@ -292,8 +318,11 @@ func (d sseDelta) reasoningText() string {
 
 // decodeSSELine parses one line of the SSE stream into the delta it carries.
 // ok is false for lines with nothing to apply — blank lines, lines without the
-// "data: " prefix, the "[DONE]" terminator, and chunks carrying no choices. An
-// upstream error payload comes back as an error, as does a malformed chunk.
+// "data: " prefix, and the "[DONE]" terminator. Every other data chunk decodes
+// with ok true, including one carrying no choices, which is how an upstream
+// delivers the final usage: its delta is empty, and the chunk's model, id and
+// usage ride beside it as on any other chunk. An upstream error payload comes
+// back as an error, as does a malformed chunk.
 func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 	if line == "" || !strings.HasPrefix(line, "data: ") {
 		return sseDelta{}, false, nil
@@ -309,11 +338,11 @@ func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 	if chunk.Error != nil {
 		return sseDelta{}, false, fmt.Errorf("llm error: %s", chunk.Error.Message)
 	}
-	if len(chunk.Choices) == 0 {
-		return sseDelta{}, false, nil
+	if len(chunk.Choices) > 0 {
+		delta = chunk.Choices[0].Delta
+		delta.finishReason = chunk.Choices[0].FinishReason
 	}
-	delta = chunk.Choices[0].Delta
-	delta.finishReason = chunk.Choices[0].FinishReason
+	delta.model, delta.id, delta.usage = chunk.Model, chunk.ID, chunk.Usage
 	return delta, true, nil
 }
 
@@ -369,22 +398,25 @@ func (s *segmentAccumulator) take() (string, bool) {
 
 // streamState carries the accumulation state threaded through a run of
 // processSSELine calls: the assembled content and reasoning, the segment
-// accumulator, and whether any content chunk has been seen yet.
+// accumulator, whether any content chunk has been seen yet, and what the
+// chunks said about the response itself.
 type streamState struct {
 	contentBuf, reasoningBuf strings.Builder
 	acc                      *segmentAccumulator
 	hasContent               bool
 	finishReason             string // the last non-empty finish_reason seen
-	// Stub (AATK-159): not populated yet.
-	chunks    int
-	model, id string
-	usage     *sseUsage
+
+	chunks    int       // decoded data chunks, choice-less ones included
+	model, id string    // the first non-empty value of each
+	usage     *sseUsage // the last non-nil usage seen
 }
 
 // processSSELine decodes one SSE line, folds it into st, and calls onSegment
 // for any TTS segment boundary the new content crosses. It returns an error
 // for a malformed chunk or an upstream error payload; lines needing no work
-// (blank, non-data, [DONE], choice-less) are a no-op.
+// (blank, non-data, [DONE]) are a no-op. A choice-less chunk counts as a
+// chunk and contributes its model, id and usage, but its empty delta leaves
+// the content, reasoning, hasContent and finishReason as they were.
 func processSSELine(line string, st *streamState, onSegment func(string)) error {
 	d, ok, err := decodeSSELine(line)
 	if err != nil {
@@ -392,6 +424,16 @@ func processSSELine(line string, st *streamState, onSegment func(string)) error 
 	}
 	if !ok {
 		return nil
+	}
+	st.chunks++
+	if st.model == "" {
+		st.model = d.model
+	}
+	if st.id == "" {
+		st.id = d.id
+	}
+	if d.usage != nil {
+		st.usage = d.usage
 	}
 	st.contentBuf.WriteString(d.Content)
 	st.reasoningBuf.WriteString(d.reasoningText())
@@ -414,8 +456,18 @@ func processSSELine(line string, st *streamState, onSegment func(string)) error 
 // returned slices are the fully assembled (content, reasoning). Segments are
 // flushed when the buffer crosses ~30 chars and a delimiter (. ? ! , \n) is
 // seen; the delimiter is kept at the end of the segment so the TTS has the
-// punctuation it needs for natural cadence.
+// punctuation it needs for natural cadence. It is SendStreamContext under
+// context.Background(), so sendTimeout alone bounds it.
 func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
+	return h.SendStreamContext(context.Background(), contextWindow, tier, onSegment)
+}
+
+// SendStreamContext implements host.ContextSender: SendStream under ctx. The
+// request runs under ctx bounded by sendTimeout, so ctx's values reach it,
+// its cancellation ends the call wherever it is, and its deadline applies
+// when it is the earlier one. It is the one implementation of a model
+// request: Send, SendStream and SendContext all end here.
+func (h *Host) SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
 	ep, ok := h.tiers[tier]
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown tier %q (have: fast, deep)", tier)
@@ -424,7 +476,7 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
 	resp, err := h.postStreamRequest(ctx, ep, body)
 	if err != nil {
