@@ -70,7 +70,7 @@ func TestPythonCommand_ResolvesEntryWithPythonInterpreterToken(t *testing.T) {
 		Host:  "127.0.0.1",
 		Port:  7789,
 		Venv:  ".venv",
-		Entry: "python scripts/whisper_server.py",
+		Entry: "python scripts/serve.py",
 	}
 
 	command, args := PythonCommand(s)
@@ -78,7 +78,7 @@ func TestPythonCommand_ResolvesEntryWithPythonInterpreterToken(t *testing.T) {
 	if command != filepath.Join(".venv", "bin", "python") {
 		t.Fatalf("expected command %q, got %q", filepath.Join(".venv", "bin", "python"), command)
 	}
-	want := []string{"scripts/whisper_server.py", "--host", "127.0.0.1", "--port", "7789"}
+	want := []string{"scripts/serve.py", "--host", "127.0.0.1", "--port", "7789"}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("expected args %v, got %v", want, args)
 	}
@@ -113,7 +113,7 @@ func TestPythonCommand_EntryWithMultipleExtraTokens_PreservesOrder(t *testing.T)
 		Host:  "127.0.0.1",
 		Port:  7789,
 		Venv:  ".venv",
-		Entry: "python -m scripts.whisper_server --reload",
+		Entry: "python -m scripts.serve --reload",
 	}
 
 	command, args := PythonCommand(s)
@@ -121,7 +121,7 @@ func TestPythonCommand_EntryWithMultipleExtraTokens_PreservesOrder(t *testing.T)
 	if command != filepath.Join(".venv", "bin", "python") {
 		t.Fatalf("expected command %q, got %q", filepath.Join(".venv", "bin", "python"), command)
 	}
-	want := []string{"-m", "scripts.whisper_server", "--reload", "--host", "127.0.0.1", "--port", "7789"}
+	want := []string{"-m", "scripts.serve", "--reload", "--host", "127.0.0.1", "--port", "7789"}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("expected args %v, got %v", want, args)
 	}
@@ -338,7 +338,7 @@ func TestLaunchPython_MultiplePackages_ChecksEachIndividually(t *testing.T) {
 		Host:     "127.0.0.1",
 		Port:     7789,
 		Venv:     venv,
-		Entry:    "python scripts/whisper_server.py",
+		Entry:    "python scripts/serve.py",
 		Packages: []string{"fastapi", "uvicorn", "mlx_whisper", "multipart"},
 	}
 
