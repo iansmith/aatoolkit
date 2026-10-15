@@ -691,10 +691,10 @@ func TestSendStream_NoProviderIsNoOp(t *testing.T) {
 }
 
 // TestModelSpan_NotRecordingSkipsCapture: on a span that is not recording,
-// ending it does no work that grows with the request -- capture on or not,
-// a 1000-message window costs no more allocations than a 1-message one. The
-// control first shows that on a recording span with capture on it does, so
-// the measurement can see capture's cost.
+// ending it does no work that grows with the request -- with capture on and
+// with it off, a 1000-message window costs no more allocations than a
+// 1-message one. The control first shows that on a recording span with
+// capture on it does, so the measurement can see capture's cost.
 func TestModelSpan_NotRecordingSkipsCapture(t *testing.T) {
 	withCaptureEnv(t, "1")
 	msgs := make([]message, 1000)
@@ -721,6 +721,67 @@ func TestModelSpan_NotRecordingSkipsCapture(t *testing.T) {
 	}
 	none := noop.NewTracerProvider()
 	if s, b := endAllocs(none, small), endAllocs(none, big); b > s {
-		t.Errorf("on a non-recording span a 1000-message window took %v allocs and a 1-message one %v; want no more", b, s)
+		t.Errorf("capture on: on a non-recording span a 1000-message window took %v allocs and a 1-message one %v; want no more", b, s)
+	}
+	withoutCaptureEnv(t)
+	if s, b := endAllocs(none, small), endAllocs(none, big); b > s {
+		t.Errorf("capture off: on a non-recording span a 1000-message window took %v allocs and a 1-message one %v; want no more", b, s)
+	}
+}
+
+// TestModelSpan_NoProviderReadsNoCaptureVariable: with no provider, a call's
+// span never reads and parses the capture variable; that happens only for a
+// span that is recording. The probe is strconv.ParseBool's error path, which
+// allocates: where the variable is parsed, an unparsable value costs more
+// allocations than "0", and where it is not, the two cost the same. The
+// control shows the probe sees the parse on a recording span.
+func TestModelSpan_NoProviderReadsNoCaptureVariable(t *testing.T) {
+	st := &streamState{acc: newSegmentAccumulator(minSegmentChars), hasContent: true, finishReason: "stop"}
+	st.contentBuf.WriteString("An answer.")
+	callAllocs := func(t *testing.T, h *Host, capture string) float64 {
+		t.Helper()
+		withCaptureEnv(t, capture)
+		return testing.AllocsPerRun(50, func() {
+			_, call := h.startModelSpan(context.Background(), "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+			call.requestSent()
+			call.end(st, 512, traceWindow, "")
+		})
+	}
+
+	// A provider with no span processor: its spans record, and ending one
+	// does the same work every time.
+	recording := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = recording.Shutdown(context.Background()) })
+	traced := &Host{tracerProvider: recording}
+	if zero, bad := callAllocs(t, traced, "0"), callAllocs(t, traced, "not-a-bool"); bad <= zero {
+		t.Fatalf("control: on a recording span an unparsable capture variable took %v allocs and \"0\" %v; "+
+			"want more, or this test cannot see the variable being parsed", bad, zero)
+	}
+	untraced := &Host{}
+	if zero, bad := callAllocs(t, untraced, "0"), callAllocs(t, untraced, "not-a-bool"); bad != zero {
+		t.Errorf("with no provider an unparsable capture variable took %v allocs and \"0\" %v; "+
+			"want the same: the variable was read and parsed", bad, zero)
+	}
+}
+
+// TestModelSpan_NoProviderReadsNoClock: with no provider, a call's span reads
+// no clock: marking the request sent records no time, and the per-line time
+// is the zero time. The control shows both read the clock on a recording
+// span.
+func TestModelSpan_NoProviderReadsNoClock(t *testing.T) {
+	marks := func(h *Host) (issued, at time.Time) {
+		_, call := h.startModelSpan(context.Background(), "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+		defer call.end(&streamState{acc: newSegmentAccumulator(minSegmentChars)}, 512, traceWindow, "")
+		call.requestSent()
+		return call.issued, call.now()
+	}
+
+	recording := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = recording.Shutdown(context.Background()) })
+	if issued, at := marks(&Host{tracerProvider: recording}); issued.IsZero() || at.IsZero() {
+		t.Fatalf("control: on a recording span issued = %v and now() = %v; want both read from the clock", issued, at)
+	}
+	if issued, at := marks(&Host{}); !issued.IsZero() || !at.IsZero() {
+		t.Errorf("with no provider issued = %v and now() = %v; want the zero time for both", issued, at)
 	}
 }
