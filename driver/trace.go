@@ -2,10 +2,11 @@ package driver
 
 // ---------------------------------------------------------------------------
 // driver: OpenTelemetry spans for model requests (AATK-159). This is the only
-// file that starts, annotates or ends a span. What reaches it is chosen so a
-// secret cannot: no Tier (its APIKey), no request or header, no error (its
-// text can echo an upstream body). TestTraceSource_NoSecretsReachSpanCode
-// holds it to that.
+// file that starts, annotates or ends a span; TestTraceSource_OnlyTraceGoTouchesSpans
+// keeps the package's other files off spans. What reaches this file is chosen
+// so a secret cannot: no Tier (its APIKey), no request or header, no error
+// (its text can echo an upstream body), as a parameter or as a struct field.
+// TestTraceSource_NoSecretsReachSpanCode holds it to that.
 // ---------------------------------------------------------------------------
 
 import (

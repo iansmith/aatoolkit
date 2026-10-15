@@ -11,7 +11,9 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -148,11 +150,13 @@ func TestServerAddrPort_StripsUserinfoPathQuery(t *testing.T) {
 
 // TestTraceSource_NoSecretsReachSpanCode (DoD f): trace.go, the file that
 // writes spans, is never handed what holds a secret or a caller's text. No
-// function in it takes a Tier, an *http.Request, an http.Header or an error;
-// it never names APIKey or the tiers map; it never calls RecordError,
-// AddEvent or an Error() method; and every SetStatus description is the
-// literal "". It must contain at least one SetStatus, so the rule is not
-// vacuous.
+// function in it takes a Tier, an *http.Request, an http.Header or an error,
+// and no struct in it holds one, so none can arrive as a field either; it
+// never names APIKey or the tiers map; it never calls RecordError, AddEvent
+// or an Error() method; and every SetStatus description is the literal "".
+// It must contain at least one SetStatus, so the rule is not vacuous.
+// TestTraceSource_OnlyTraceGoTouchesSpans keeps every other file off spans,
+// so these rules cover every span write.
 func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "trace.go", nil, 0)
@@ -197,6 +201,12 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 			checkParams(x.Type.Params)
 		case *ast.FuncLit:
 			checkParams(x.Type.Params)
+		case *ast.StructType:
+			for _, field := range x.Fields.List {
+				if bad := forbiddenType(field.Type); bad != "" {
+					t.Errorf("%s: a struct field of type %s", pos(field), bad)
+				}
+			}
 		case *ast.Ident:
 			if x.Name == "APIKey" || x.Name == "tiers" {
 				t.Errorf("%s: references %s", pos(x), x.Name)
@@ -226,6 +236,93 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 	})
 	if setStatus == 0 {
 		t.Error("trace.go calls SetStatus nowhere; the status rule above checked nothing")
+	}
+}
+
+// TestTraceSource_OnlyTraceGoTouchesSpans (DoD f): trace.go is the only
+// non-test file in the package that starts, annotates or ends a span, so the
+// rules TestTraceSource_NoSecretsReachSpanCode holds it to cover every span
+// write. Every other non-test file imports no otel package but
+// go.opentelemetry.io/otel/trace, uses that only to name TracerProvider,
+// never selects a field named span, and never calls RecordError, AddEvent,
+// SetStatus, SetAttributes or SetName. Each rule must find something in
+// trace.go itself, so none of them is vacuous.
+func TestTraceSource_OnlyTraceGoTouchesSpans(t *testing.T) {
+	const traceImport = "go.opentelemetry.io/otel/trace"
+	spanCalls := map[string]bool{"RecordError": true, "AddEvent": true, "SetStatus": true, "SetAttributes": true, "SetName": true}
+
+	// spanWrites returns what in path breaks each rule, keyed by the rule.
+	spanWrites := func(t *testing.T, path string) map[string][]string {
+		t.Helper()
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		hits := map[string][]string{}
+		hit := func(rule string, n ast.Node, what string) {
+			hits[rule] = append(hits[rule], fmt.Sprintf("%s: %s", fset.Position(n.Pos()), what))
+		}
+		traceName := ""
+		for _, imp := range f.Imports {
+			p, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				t.Fatalf("%s: import path %s: %v", path, imp.Path.Value, err)
+			}
+			switch {
+			case p == traceImport:
+				traceName = "trace"
+				if imp.Name != nil {
+					traceName = imp.Name.Name
+				}
+			case strings.HasPrefix(p, "go.opentelemetry.io/"):
+				hit("otel import", imp, "imports "+p)
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				if x.Sel.Name == "span" {
+					hit("span field", x, "selects .span")
+				}
+				if id, ok := x.X.(*ast.Ident); ok && traceName != "" && id.Name == traceName && x.Sel.Name != "TracerProvider" {
+					hit("trace use", x, "uses "+traceName+"."+x.Sel.Name)
+				}
+			case *ast.CallExpr:
+				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && spanCalls[sel.Sel.Name] {
+					hit("span call", x, "calls "+sel.Sel.Name)
+				}
+			}
+			return true
+		})
+		return hits
+	}
+
+	paths, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("listing the package's files: %v", err)
+	}
+	checked := 0
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") || path == "trace.go" {
+			continue
+		}
+		checked++
+		for _, found := range spanWrites(t, path) {
+			for _, h := range found {
+				t.Error(h)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no non-test file besides trace.go to check")
+	}
+
+	control := spanWrites(t, "trace.go")
+	for _, rule := range []string{"otel import", "trace use", "span field", "span call"} {
+		if len(control[rule]) == 0 {
+			t.Errorf("control: the %q rule finds nothing in trace.go, so it cannot see a span write anywhere", rule)
+		}
 	}
 }
 
