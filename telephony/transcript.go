@@ -16,7 +16,7 @@ import (
 const defaultAgentLabel = "agent"
 
 // formatTranscript renders a call's per-turn utterance lists as a human-readable
-// conversation view (SOP-168): each user turn's utterances bracketed on one
+// conversation view: each user turn's utterances bracketed on one
 // line, with a blank agent response line between consecutive user turns (the
 // agent has no spoken response yet -- the blank brackets are the placeholder).
 // Its purpose is to gauge the quality of what a human would hear/read -- STT
@@ -51,8 +51,8 @@ func formatTranscript(turns [][]string, agentLabel string) string {
 	return b.String()
 }
 
-// WithTranscriptOutput enables the end-of-call conversation transcript summary
-// (SOP-168). At Close the session renders each turn's utterances bracketed and:
+// WithTranscriptOutput enables the end-of-call conversation transcript summary.
+// At Close the session renders each turn's utterances bracketed and:
 // prints the summary to live (nil = no print), and writes <sid>.transcript.txt
 // into dir (dir == "" = no file). Live and replay wiring pass the same dir/sid
 // as the audio tap / decision record so the transcript sits beside them.
@@ -65,14 +65,14 @@ func WithTranscriptOutput(dir, sid string, live io.Writer) SessionOption {
 }
 
 // WithTranscriptAgentLabel sets the response role label the transcript summary
-// prints (SOP-168). Empty or unset falls back to the generic "agent"; a consumer
+// prints. Empty or unset falls back to the generic "agent"; a consumer
 // injects its own product name here so the engine never embeds it.
 func WithTranscriptAgentLabel(label string) SessionOption {
 	return func(s *Session) { s.transcriptAgentLabel = label }
 }
 
 // emitTranscript renders the accumulated per-turn transcript and writes it to
-// the configured live writer and/or <sid>.transcript.txt file (SOP-168). Called
+// the configured live writer and/or <sid>.transcript.txt file. Called
 // from Close after the sequencer has drained. Clears the accumulator so a second
 // Close is a no-op.
 func (s *Session) emitTranscript() {

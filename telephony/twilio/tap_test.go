@@ -17,11 +17,11 @@ import (
 	"github.com/iansmith/aatoolkit/telephony"
 )
 
-// SOP-152 Phase 0 (rev 3). These tests describe the audio tap's expected
+// Phase 0 (rev 3). These tests describe the audio tap's expected
 // behavior and fail against the stubs in tap.go.
 //
-// The tap exists to capture real telephony audio for the probe dataset
-// (SOP-153): mu-law over the phone network is what turns "I can't pick up the
+// The tap exists to capture real telephony audio for the probe dataset:
+// mu-law over the phone network is what turns "I can't pick up the
 // kids" into "I can help you", and no mic recording reproduces that. Its
 // governing constraint is that it must be invisible -- off by default, and
 // incapable of harming a call when on.
@@ -232,11 +232,11 @@ func TestTap_SidecarCountsEveryFrame(t *testing.T) {
 }
 
 // TestTap_SidecarRecordsVADConfig: the sidecar's job is to tell a later replay
-// which thresholds produced this stream's live log, so SOP-153 can check it is
-// comparing like with like.
+// which thresholds produced this stream's live log, so the replay harness can
+// check it is comparing like with like.
 //
 // The comparison is derived, never hardcoded. No literal threshold appears
-// here: EndSilenceMS belongs to SOP-154, which takes it 1050 -> 700. f5cad49 is
+// here: EndSilenceMS is a tuning knob, and a retune took it 1050 -> 700. f5cad49 is
 // the worked example of the cost -- six tests across three packages broke on a
 // tuning change because they had hardcoded 22 = 700ms/32ms, failing in packages
 // that had nothing to do with the cause.
@@ -255,7 +255,7 @@ func TestTap_SidecarRecordsVADConfig(t *testing.T) {
 	if got.StreamSID != streamSID {
 		t.Errorf("sidecar stream_sid = %q, want %q", got.StreamSID, streamSID)
 	}
-	// Both IDs: the file is keyed by stream, but SOP-153 needs to group a
+	// Both IDs: the file is keyed by stream, but the replay harness needs to group a
 	// reconnected call's recordings back together.
 	if got.CallSID != callSID {
 		t.Errorf("sidecar call_sid = %q, want %q", got.CallSID, callSID)
@@ -378,8 +378,8 @@ func TestTap_OutboundWriteFailureLogsOnce(t *testing.T) {
 // Write creates the .ulaw before it writes to it, so a full disk yields a
 // zero-byte recording with no sidecar beside it -- exactly the artifact
 // EmptyPayloadIsNotMedia rejects ("indistinguishable from a recording whose
-// capture broke"), and exactly what Close's own doc says cannot happen. SOP-153
-// would find a recording it cannot tell from a silent call, with no sidecar to
+// capture broke"), and exactly what Close's own doc says cannot happen. The replay
+// harness would find a recording it cannot tell from a silent call, with no sidecar to
 // say otherwise. The invariant worth having is the one this pins: every .ulaw
 // on disk is real audio with a sidecar next to it.
 //
@@ -471,7 +471,7 @@ func TestTap_WriteAfterCloseIsSafe(t *testing.T) {
 // TestTap_EmptyPayloadIsNotMedia decides what contract 3's "first media frame"
 // hinges on: Write being called, or bytes actually arriving. It must be the
 // latter -- an empty .ulaw is indistinguishable from a recording whose capture
-// broke, and SOP-153 would replay it as a zero-utterance sample.
+// broke, and the replay harness would replay it as a zero-utterance sample.
 //
 // Contrast-structured: "no file appeared" is true of any tap that does nothing.
 func TestTap_EmptyPayloadIsNotMedia(t *testing.T) {
@@ -582,13 +582,13 @@ func TestTap_ConcurrentWritesRaceFree(t *testing.T) {
 	}
 }
 
-// --- outbound capture (SOP-158) ------------------------------------------
+// --- outbound capture ------------------------------------------
 //
 // Retroactive Phase 0 verification record: the 5 tests below
 // (TestTap_OutboundQueueDrainAligns, TestTap_SilenceOnEmptyQueue,
 // TestTap_BargeInOverlap, TestTap_QueueTruncationOnClose,
 // TestTap_DisabledAllocatesNothing_Outbound) were confirmed to establish a
-// genuine RED state against pre-SOP-158 code: with the WriteOut/DrainOut
+// genuine RED state against pre-outbound-capture code: with the WriteOut/DrainOut
 // outbound-queue implementation in tap.go reverted, the package failed to
 // compile with three undefined-symbol errors (tap.WriteIn, tap.WriteOut,
 // tap.DrainOut), and once stubbed to compile, all 5 tests failed on their
@@ -732,7 +732,7 @@ func TestTap_QueueTruncationOnClose(t *testing.T) {
 	}
 }
 
-// TestTap_SilenceMatchesRealFrameSize covers SOP-158's DoD directly: "the engine-
+// TestTap_SilenceMatchesRealFrameSize covers outbound capture's DoD directly: "the engine-
 // silent spans are silence (0xFF) of the correct duration" and "in-channel
 // and out-channel are byte-for-byte the same length." The 5 pre-existing
 // outbound tests above all use synthetic 1-byte payloads on both channels, so
@@ -794,7 +794,7 @@ func TestTap_DisabledAllocatesNothing_Outbound(t *testing.T) {
 	tap.DrainOut()
 }
 
-// --- stream isolation + bounded queue (SOP-158 attempt 6) --------------------
+// --- stream isolation + bounded queue (attempt 6) --------------------
 //
 // Phase 0 (attempt 6) red tests. tap.go currently shares a single openFailed
 // bool between the in- and out-streams, and outQueue has no size cap. Both
@@ -870,7 +870,7 @@ func TestTap_OutboundQueueIsBounded(t *testing.T) {
 	tap.Close()
 }
 
-// --- ring buffer correctness + complexity (SOP-158 attempt 8) ---------------
+// --- ring buffer correctness + complexity (attempt 8) ---------------
 //
 // Phase 0 (attempt 8) red tests. tap.go's outQueue is currently a slice
 // reslice-drop-oldest (t.outQueue = t.outQueue[1:]; append(...)) which is

@@ -96,7 +96,7 @@ type DecisionEvent struct {
 	RequestID    int     `json:"request_id,omitempty"`
 	Effect       string  `json:"effect,omitempty"`
 
-	// STT round-trip fields (SOP-167). Text is the delivered transcript;
+	// STT round-trip fields. Text is the delivered transcript;
 	// LatencyMS is result_time - dispatch_time from the injected clock;
 	// AudioBytes is the dispatched mu-law buffer length; STTDurSec is whisper's
 	// own reported audio duration. All omitempty so non-STT events stay compact.
@@ -134,8 +134,8 @@ type decisionHeader struct {
 	Totals    decisionTotals `json:"totals"`
 }
 
-// decisionTotals is the per-recording summary written into the header at Close
-// (SOP-168). Turns counts every recorded turn completion -- silence-turn-end,
+// decisionTotals is the per-recording summary written into the header at Close.
+// Turns counts every recorded turn completion -- silence-turn-end,
 // stopword, turn-cap, utterance-cap (all now emit a decision) -- but not the
 // idle timeout, which ends the call after its turn already closed. A mid-turn
 // Twilio hangup (TriggerCallEnd) records no decision and so is not counted.
@@ -273,7 +273,7 @@ func WithFileDecisionRecorderFromEnv(dir, streamSID, callSID, label string, cfg 
 }
 
 // formatDecisionLine renders one event as a single human-readable line for the
-// live terminal feed. The STT round-trip events (SOP-167) carry no gating
+// live terminal feed. The STT round-trip events carry no gating
 // param/prob, so they render their own shape; VAD and cap events share the
 // param=value line.
 func formatDecisionLine(ev DecisionEvent) string {

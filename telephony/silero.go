@@ -3,8 +3,8 @@ package telephony
 // Silero VAD v6.2.1 wire constants, shared by the HTTP detector
 // (silero_http.go) and the VAD windowing in vad.go. Inference itself runs
 // out-of-process in the VAD sidecar (scripts/vad_server.py) reached over HTTP;
-// the engine holds no in-process ONNX runtime (SOP-147 retired the in-process
-// ONNX detector — see silero_http.go).
+// the engine holds no in-process ONNX runtime (the in-process ONNX detector
+// was retired — see silero_http.go).
 
 // sileroWindowSize is the Silero VAD model's per-call chunk: 256 float32 PCM
 // samples (32ms @ 8kHz).

@@ -9,13 +9,13 @@ import (
 )
 
 // TurnSink receives turn-taking boundaries dispatched from a session's VAD
-// events. OnSpeechStart fires when the caller starts talking (SOP-95 wires
-// this as a no-op stub — barge-in behavior beyond that is out of scope);
+// events. OnSpeechStart fires when the caller starts talking (wired as a
+// no-op stub — barge-in behavior beyond that is out of scope);
 // OnEndOfUtterance fires when the caller's utterance is judged complete.
 // TurnTrigger names which of completeTurn's eight call sites (state.go, seven
 // distinct trigger values — silence-turn-end covers two of the eight: the
 // immediate and the deferred-while-a-pass-was-in-flight paths) ended a turn
-// (SOP-162 DoD: "trigger type" in every TurnSink.OnTurnComplete
+// (the "trigger type" in every TurnSink.OnTurnComplete
 // log line).
 type TurnTrigger string
 
@@ -29,9 +29,9 @@ const (
 	TriggerResponseCap    TurnTrigger = "response-cap"
 )
 
-// OnTurnComplete delivers the fused text of a completed turn (SOP-150):
+// OnTurnComplete delivers the fused text of a completed turn:
 // multiple utterances joined with a single space, each part trimmed, plus
-// the trigger that ended the turn (SOP-162). Implementations must return
+// the trigger that ended the turn. Implementations must return
 // promptly: they are called synchronously from the session's single
 // transition-table dispatch loop (state.go's handleSpeechOnset/
 // dispatchFullPass) and must not block it.
@@ -61,8 +61,8 @@ func (l logTurnSink) OnTurnComplete(text string, trigger TurnTrigger) {
 // The concrete Silero-backed detector runs out-of-process over HTTP
 // (silero_http.go); the VAD goroutine and its state machine are written against
 // this interface so they stay testable with a fake detector. ctx bounds a
-// single inference — the HTTP detector derives a per-inference deadline from it
-// (SOP-147); a fake may ignore it.
+// single inference — the HTTP detector derives a per-inference deadline from it;
+// a fake may ignore it.
 type vadDetector interface {
 	Detect(ctx context.Context, window []float32) (float32, error)
 	Reset()
@@ -74,7 +74,7 @@ type vadDetector interface {
 // custom factory without this package exposing detector construction.
 type VADDetector = vadDetector
 
-// VADConfig is an exported alias for vadConfig, so the audio tap (SOP-152, in
+// VADConfig is an exported alias for vadConfig, so the audio tap (in
 // package twilio) can record the config this process runs. Same need and same
 // shape as the VADDetector alias above: name the type outward without handing
 // out construction. An alias rather than a parallel struct keeps one definition
@@ -84,10 +84,10 @@ type VADConfig = vadConfig
 // DefaultVADConfig returns the VAD config every live call runs. It is
 // process-wide for production traffic: no live call passes WithVADConfig, so
 // vadCfg is filled from defaultVADConfig() via withDefaults() for every real
-// session. The tap records it so a later replay (SOP-153) knows which
+// session. The tap records it so a later replay knows which
 // thresholds produced a recording's live log -- defaultVADConfig() is a
 // moving target (f5cad49 took EndSilenceMS 700 -> 1050) and the value cannot
-// be recovered after the fact. SOP-153's replay harness is the one caller
+// be recovered after the fact. The replay harness is the one caller
 // that does override per-session, via WithVADConfig (session.go), so it can
 // drive `--end-silence-ms` without touching this package-wide default.
 func DefaultVADConfig() VADConfig {
@@ -101,7 +101,7 @@ type vadConfig struct {
 	SilenceThresh    float32 // prob < this counts as silence (hysteresis; <= SpeechThresh)
 	EndSilenceMS     int     // trailing silence duration that ends an utterance
 	SampleRateHz     int     // audio sample rate (Twilio μ-law = 8000)
-	TurnEndSilenceMS int     // trailing silence duration that ends a turn (~5s, SOP-154)
+	TurnEndSilenceMS int     // trailing silence duration that ends a turn (~5s)
 }
 
 func defaultVADConfig() vadConfig {
@@ -111,7 +111,7 @@ func defaultVADConfig() vadConfig {
 	// -- Silero was fed a bare 256-sample window with no 64-sample context, so it ran
 	// cold every frame and mis-placed the boundary. AATK-8 fixed the detector (feed
 	// 320 = 64 context + 256 chunk); a 700/900/1050 re-sweep over the fix-clean set is
-	// then content-identical, so 900 bought nothing. Reverted to 700 (SOP-154's value)
+	// then content-identical, so 900 bought nothing. Reverted to 700 (its value before AATK-3)
 	// for lower turn-taking latency. Caveat: one voice, partial set -- AATK-5 re-sweeps
 	// across the fuller re-collection before the tuning question closes.
 	return vadConfig{WindowSize: 256, SpeechThresh: 0.5, SilenceThresh: 0.35, EndSilenceMS: 700, SampleRateHz: 8000, TurnEndSilenceMS: 5000}
@@ -197,7 +197,7 @@ func TurnEndSilenceWindows() int {
 }
 
 // validateOrdering enforces the utterance-end << turn-end << idle ordering
-// invariant (SOP-154 Observable behavior #4): EndSilenceMS < TurnEndSilenceMS
+// invariant: EndSilenceMS < TurnEndSilenceMS
 // < maxSilenceMS. A config that inverts any leg is a bug the config itself
 // should reject, not a silently-broken timer race at runtime. Session.Start
 // calls this against the resolved config and MaxSilenceMS; it is a method
@@ -272,7 +272,7 @@ func (w *windower) push(samples []float32) [][]float32 {
 type vadMachine struct {
 	cfg          vadConfig
 	speaking     bool
-	silenceCount int  // consecutive sub-SilenceThresh windows since speech last stopped -- never reset at end-of-utterance, so it also drives VADTurnEnd (SOP-154: one counter, not two independent clocks)
+	silenceCount int  // consecutive sub-SilenceThresh windows since speech last stopped -- never reset at end-of-utterance, so it also drives VADTurnEnd (one counter, not two independent clocks)
 	voicedCount  int  // voiced windows accumulated since speech-start
 	turnEndFired bool // VADTurnEnd fired for this silence run; suppressed until next speech onset
 	windowIndex  int  // monotonic window counter since speech-start (0 at onset)
@@ -305,7 +305,7 @@ func (m *vadMachine) step(prob float32) (VADEvent, bool) {
 		}
 
 		// Not speaking: trailing silence keeps accumulating on the same
-		// counter that drove EndSilenceMS (SOP-154 Observable behavior #3) --
+		// counter that drove EndSilenceMS --
 		// a dead-zone probability changes nothing here either (hysteresis),
 		// matching the speaking branch below.
 		if m.turnEndFired || prob >= m.cfg.SilenceThresh {
@@ -366,11 +366,11 @@ func (m *vadMachine) event(kind VADKind, prob float32) VADEvent {
 	}
 }
 
-// VADInput is the frames-in plane of a vadService (SOP-116 pattern): callers
+// VADInput is the frames-in plane of a vadService (ServiceInput/ServiceOutput pattern): callers
 // Send raw μ-law frames for the wrapped vadMachine to consume.
 type VADInput = ServiceOutput[[]byte]
 
-// VADOutput is the events-out plane of a vadService (SOP-116 pattern):
+// VADOutput is the events-out plane of a vadService (ServiceInput/ServiceOutput pattern):
 // callers Recv the VADEvents the wrapped vadMachine emits.
 type VADOutput = ServiceInput[VADEvent]
 
@@ -400,7 +400,7 @@ type vadService struct {
 // every window fed so far is a precise "nothing from this input is still
 // in flight toward the sequencer" signal.
 //
-// This is SOP-153's replay harness's synchronization seam: Replay needs to
+// This is the replay harness's synchronization seam: Replay needs to
 // know every VADEndOfUtterance a replayed recording will ever produce has
 // actually reached the sequencer before it can safely conclude no more STT
 // dispatches are coming and end the call, and a fixed sleep can't stand in
@@ -455,7 +455,7 @@ const vadCloseWaitBound = 5 * time.Second
 // Close stops the service's goroutines and, best-effort, waits for both to
 // actually exit (not merely be asked to via cancel) before returning -- so a
 // caller that constructs a new vadService right after Close returns won't
-// usually race the outgoing one's goroutines (e.g. SOP-153's replay
+// usually race the outgoing one's goroutines (e.g. the replay
 // harness, which starts and tears down a fresh Session, and therefore a
 // fresh vadService, per recording in a tight loop within one process; a
 // live call, one per Session for a process's whole lifetime, never
@@ -467,7 +467,7 @@ const vadCloseWaitBound = 5 * time.Second
 // design) would otherwise turn every Close into a permanent hang. Detect
 // implementations that return promptly -- every real one, including
 // production Silero -- exit well within the bound and Close waits for them
-// as documented; a genuinely-blocked one just falls back to the pre-SOP-153
+// as documented; a genuinely-blocked one just falls back to the original
 // behavior of not being waited for.
 func (s *vadService) Close() {
 	s.cancel()
@@ -487,7 +487,7 @@ func (s *vadService) Close() {
 // cancelled or in is closed.
 //
 // onNoEvent, if given, is called once per window that did NOT produce an
-// event -- see newVADService's onWindow doc for why (SOP-153's replay
+// event -- see newVADService's onWindow doc for why (the replay harness's
 // synchronization seam).
 func runVAD(ctx context.Context, in <-chan []byte, out chan<- VADEvent, det vadDetector, cfg vadConfig, onNoEvent ...func()) {
 	cfg = cfg.withDefaults()
@@ -505,7 +505,7 @@ func runVAD(ctx context.Context, in <-chan []byte, out chan<- VADEvent, det vadD
 			for _, win := range w.push(decodeMuLaw(frame)) {
 				prob, err := det.Detect(ctx, win)
 				if err != nil {
-					// Fail loud, don't silently drop (SOP-147): a detector error
+					// Fail loud, don't silently drop: a detector error
 					// means VAD can no longer classify audio, so end the VAD
 					// goroutine with an attributable log rather than continuing to
 					// feed the state machine no-event windows forever.

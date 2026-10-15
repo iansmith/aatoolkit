@@ -68,11 +68,11 @@ type STTResult struct {
 }
 
 // STTInput is the receive side of the channel sttService reads STTRequests
-// from (the SOP-116 ServiceInput[T] pattern).
+// from (the ServiceInput[T] pattern).
 type STTInput = ServiceInput[STTRequest]
 
 // STTOutput is the send side of the channel sttService writes STTResults to
-// (the SOP-116 ServiceOutput[T] pattern).
+// (the ServiceOutput[T] pattern).
 type STTOutput = ServiceOutput[STTResult]
 
 // sttAbandon identifies a request to be abandoned before transcription.

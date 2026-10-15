@@ -9,9 +9,9 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/assets"
 )
 
-// SOP-161 Phase 0. These tests pin the turn-level cap: a whole turn (which
+// These tests pin the turn-level cap: a whole turn (which
 // may span several utterances separated by pauses) is bounded by MaxTurnMS,
-// distinct from SOP-156's per-utterance cap (which resets on every
+// distinct from the per-utterance cap (which resets on every
 // end-of-utterance). All timing is driven by the injected fakeClock — no
 // sleeps, no waiting for a real deadline.
 

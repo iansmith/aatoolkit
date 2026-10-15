@@ -9,7 +9,7 @@ import (
 )
 
 // TestParseReplayFlags_ThreadIntoConfig proves each replay sweep flag reaches
-// the VADConfig and the recording path is returned (SOP-168 behavior 2).
+// the VADConfig and the recording path is returned.
 func TestParseReplayFlags_ThreadIntoConfig(t *testing.T) {
 	cfg, file, err := parseReplayFlags([]string{
 		"--end-silence-ms", "900",
@@ -54,7 +54,7 @@ func TestParseReplayFlags_Defaults(t *testing.T) {
 
 // TestConfigForRecording_SeedsFromSidecar proves build seeds each replay from
 // the recording's captured vad_config, overriding EndSilenceMS only when the
-// flag is set (SOP-168 behavior 3).
+// flag is set.
 func TestConfigForRecording_SeedsFromSidecar(t *testing.T) {
 	sc := recordingSidecar{
 		Label: "greeting",

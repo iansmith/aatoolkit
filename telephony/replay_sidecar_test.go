@@ -16,12 +16,12 @@ import (
 	"github.com/iansmith/aatoolkit/telephony"
 )
 
-// TestReplay_SidecarE2E is the end-to-end VAD fidelity gate (SOP-174), the
+// TestReplay_SidecarE2E is the end-to-end VAD fidelity gate, the
 // sidecar-era successor to the in-process TestReplay_MatchesProduction that
-// SOP-147 removed. It replays a committed real recording through the WHOLE
+// retiring the in-process detector removed. It replays a committed real recording through the WHOLE
 // pipeline — decodeMuLaw → windower → the real VAD sidecar over HTTP → the turn
 // state machine — and asserts Replay dispatches exactly one FullPass per golden
-// end-of-utterance. Unlike the byte-level fixture tests (SOP-146/147/148), this
+// end-of-utterance. Unlike the byte-level fixture tests, this
 // exercises the assembled system: the Go HTTP client, real ONNX Runtime, real
 // timing, and real turn-taking, over real audio.
 //

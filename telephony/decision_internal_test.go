@@ -196,7 +196,7 @@ func TestDecisionRecorder_DroppedUtteranceRecorded(t *testing.T) {
 
 // TestDecisionRecorder_StopwordTurnEnd — a turn completed by the stopword
 // records a turn-end decision (effect names the stopword cause), filling the
-// log gap that would otherwise leave stopword turns unrecorded (SOP-168).
+// log gap that would otherwise leave stopword turns unrecorded.
 func TestDecisionRecorder_StopwordTurnEnd(t *testing.T) {
 	rec := &mockDecRecorder{}
 	sttIn := NewBufferedChan[STTRequest](10)
@@ -214,13 +214,13 @@ func TestDecisionRecorder_StopwordTurnEnd(t *testing.T) {
 		t.Fatalf("turn-end decisions: got %d, want 1 (%+v)", len(te), rec.events)
 	}
 	// Assert the meaningful contract (a turn-end naming the stopword cause), not
-	// the event's Type -- the type taxonomy is SOP-171's to restructure.
+	// the event's Type -- the type taxonomy is due to be restructured.
 	if !strings.Contains(te[0].Effect, "stopword") {
 		t.Errorf("Effect: got %q, want a mention of the stopword cause", te[0].Effect)
 	}
 }
 
-// TestComputeTotals pins the per-recording header totals (SOP-168): utterances
+// TestComputeTotals pins the per-recording header totals: utterances
 // from end-of-utterance events, turns from every recorded turn completion
 // (silence-turn-end, stopword, turn-cap, utterance-cap) but NOT idle-timeout,
 // and STT calls from stt_dispatch events.
