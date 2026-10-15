@@ -13,9 +13,10 @@ import (
 )
 
 // TestRESTClient_SendSMS_RequestShape locks the request shape SendSMS must produce:
-// path, form fields, and the API-key-pair Basic-auth header (D11 "prefer the API-key
-// pair"). The expected auth blob is computed in-test from the constants, never
-// hardcoded, so the test documents the encoding rather than duplicating a literal.
+// path, form fields, and the Basic-auth header built from the API key pair rather
+// than the account's auth token. The expected auth blob is computed in-test from
+// the constants, never hardcoded, so the test documents the encoding rather than
+// duplicating a literal.
 func TestRESTClient_SendSMS_RequestShape(t *testing.T) {
 	var gotMethod, gotPath, gotAuth string
 	var gotFrom, gotTo, gotBody string
@@ -66,8 +67,8 @@ func TestRESTClient_SendSMS_RequestShape(t *testing.T) {
 	}
 }
 
-// TestRESTClient_SendSMS_ContentType asserts the request is form-encoded per the
-// ticket's observable behavior 2 ("Content-Type: application/x-www-form-urlencoded").
+// TestRESTClient_SendSMS_ContentType asserts the request is form-encoded
+// ("Content-Type: application/x-www-form-urlencoded").
 // Added by Phase-0 adversary review: the RequestShape test parses the form via
 // r.ParseForm but never pins the Content-Type header itself, so a client that sent
 // e.g. JSON with matching field names could pass it unnoticed.
@@ -93,7 +94,8 @@ func TestRESTClient_SendSMS_ContentType(t *testing.T) {
 
 // TestRESTClient_SendSMS_ErrorOnNon2xx asserts non-2xx responses surface a non-nil
 // error carrying the status code, and that the error text never leaks the credential
-// secret or the basic-auth blob (ticket: "Credentials are never logged").
+// secret or the basic-auth blob, so a caller that logs the error never logs a
+// credential.
 func TestRESTClient_SendSMS_ErrorOnNon2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
