@@ -201,8 +201,9 @@ type TapOption func(*Tap)
 // into the sidecar's "channels", so a caller naming a direction twice would
 // otherwise publish a duplex recording that no longer reads as one. An empty
 // result is treated as duplex. There is no error return on this path -- NewTap
-// cannot fail today, and a silently-off tap is exactly the failure mode this
-// ticket exists to remove.
+// cannot fail today, and a silently-off tap is exactly the failure mode the
+// channel set exists to remove: before it, a tap given only outbound frames
+// deleted its own recording on Close.
 func WithChannels(channels ...Channel) TapOption {
 	return func(t *Tap) {
 		var set []Channel
@@ -647,8 +648,8 @@ func (t *Tap) declaredChannels() []string {
 //
 // Frames and Bytes are the INBOUND counts, and always have been; on an
 // outbound-only recording they are honestly zero. Adding outbound counters
-// here would change the duplex sidecar, which this ticket holds byte-identical
-// on purpose, so they stay out.
+// here would change the duplex sidecar, which is deliberately byte-identical
+// to what it was before one-directional taps existed, so they stay out.
 func (t *Tap) writeSidecar() {
 	raw, err := json.Marshal(tapSidecar{
 		StreamSID:        t.streamSID,

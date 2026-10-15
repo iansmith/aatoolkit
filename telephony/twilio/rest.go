@@ -25,7 +25,7 @@ const maxResponseBody = 64 << 10
 
 // RESTClient sends outbound SMS via the Twilio Messages REST API. Credentials are
 // supplied by the caller — the client never reads TWILIO_* environment variables
-// itself (charter R8; the consumer is responsible for sourcing its own credentials).
+// itself; the consumer is responsible for sourcing its own credentials.
 type RESTClient struct {
 	AccountSID string
 	KeySID     string
@@ -63,8 +63,8 @@ type OutboundSMS struct {
 	// reach the caller at all.
 	//
 	// The URL is used verbatim, so a caller that wants its own correlation id
-	// can carry one in the query string. It is never read from the environment
-	// (charter R8): endpoints, like credentials, come from the caller.
+	// can carry one in the query string. It is never read from the environment:
+	// endpoints, like credentials, come from the caller.
 	//
 	// Keep it free of secrets. A provider rejecting the URL echoes it back in
 	// the response body, which SendSMS puts verbatim into the returned error —
@@ -75,7 +75,7 @@ type OutboundSMS struct {
 
 // SendSMS POSTs a Messages.json request and returns the provider's message id
 // for the message it sent. Auth is HTTP Basic with the API key pair
-// (KeySID:KeySecret), per D11's "prefer the API-key pair". A non-2xx response
+// (KeySID:KeySecret), not the account's auth token. A non-2xx response
 // yields a non-nil error carrying the status code and response body;
 // credentials never appear in that error text.
 //
