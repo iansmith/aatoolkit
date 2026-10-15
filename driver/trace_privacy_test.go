@@ -787,6 +787,43 @@ func TestSendStreamContext_NoSpanWithoutRequest(t *testing.T) {
 	}
 }
 
+// TestSendStreamContext_SpanFollowsWindowEncoding: the window goes out as
+// the request's messages, so whether a call gets a span follows from
+// whether the window encodes. Bytes that are not JSON, or an empty non-nil
+// slice, do not: the call sends nothing and gets no span. A nil window
+// encodes as null, so it is sent, as it always was, and gets its span.
+func TestSendStreamContext_SpanFollowsWindowEncoding(t *testing.T) {
+	cases := []struct {
+		name      string
+		window    []byte
+		wantSpans int
+	}{
+		{name: "not JSON", window: []byte("not json"), wantSpans: 0},
+		{name: "empty, not nil", window: []byte{}, wantSpans: 0},
+		{name: "nil", window: nil, wantSpans: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, reqs := newScriptedSSEServer(okSteps()...)
+			defer srv.Close()
+			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+			_, _, err := h.SendStreamContext(context.Background(), tc.window, "fast", func(string) {})
+			if n := len(modelSpans(rec)); n != tc.wantSpans || reqs.Count() != tc.wantSpans {
+				t.Fatalf("%d model spans and %d requests (error %v); want %d of each", n, reqs.Count(), err, tc.wantSpans)
+			}
+			if tc.wantSpans == 0 {
+				if err == nil {
+					t.Error("no error for a window that does not encode")
+				}
+				return
+			}
+			if got := string(reqs.LastBody()["messages"]); got != "null" {
+				t.Errorf("messages sent = %s, want null", got)
+			}
+		})
+	}
+}
+
 // TestSendStreamContext_SpanWhenNothingIsSent: a call whose tier is found and
 // whose window encodes gets its span even when no request goes out -- its
 // context already done, or its tier URL one no request can be built for --

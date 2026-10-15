@@ -576,9 +576,11 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 //
 // Once its tier is found and its window encodes, a call gets one CLIENT
 // span, a child of ctx's span, from Config.TracerProvider or the global
-// provider; an unknown tier or a window that is not JSON gets none. A call
-// that then sends nothing, because ctx is already done or the tier URL
-// cannot be requested, still gets its span, which records why it failed.
+// provider. An unknown tier, or a window that does not encode (bytes that
+// are not JSON, or an empty non-nil slice), gets none and sends nothing; a
+// nil window encodes as null and is sent, as it always was. A call that
+// then sends nothing, because ctx is already done or the tier URL cannot be
+// requested, still gets its span, which records why it failed.
 // The span covers the whole call, onSegment's time included, and ends after
 // the last segment. It is ended by a defer, so a panicking onSegment still
 // ends it, as an error of type _OTHER; the panic is not recovered.
