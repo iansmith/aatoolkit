@@ -316,18 +316,36 @@ func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*ht
 }
 
 // sseChunk is one decoded `data: {...}` line from the chat-completions SSE
-// stream.
+// stream. ID, Model and Usage feed only the span, so they are decoded best
+// effort: a value of an unexpected type is dropped and never fails the chunk.
 type sseChunk struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
+	ID      bestEffort[string] `json:"id"`
+	Model   bestEffort[string] `json:"model"`
 	Choices []struct {
 		Delta        sseDelta `json:"delta"`
 		FinishReason string   `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *sseUsage `json:"usage"`
+	Usage bestEffort[sseUsage] `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// bestEffort is a chunk field decoded only if it has the expected type. A
+// null, or a value that does not decode as T, leaves ok false; either way
+// decoding the chunk carries on, as it did before the field was read at all.
+// A value is taken whole or not at all, never half read.
+type bestEffort[T any] struct {
+	v  T
+	ok bool
+}
+
+func (f *bestEffort[T]) UnmarshalJSON(b []byte) error {
+	var v T
+	if string(b) != "null" && json.Unmarshal(b, &v) == nil {
+		f.v, f.ok = v, true
+	}
+	return nil
 }
 
 // sseDelta is the incremental text one chunk carries.
@@ -349,8 +367,8 @@ type sseDelta struct {
 
 // sseUsage is the token usage an OpenAI-compatible stream reports. A hosted
 // upstream sends it on a final choice-less chunk and "usage": null on every
-// chunk before it, hence the pointer in sseChunk. Provider extras (totals,
-// cached-token details) are ignored.
+// chunk before it, hence the pointer in sseDelta and streamState. Provider
+// extras (totals, cached-token details) are ignored.
 type sseUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
@@ -370,8 +388,10 @@ func (d sseDelta) reasoningText() string {
 // "data: " prefix, and the "[DONE]" terminator. Every other data chunk decodes
 // with ok true, including one carrying no choices, which is how an upstream
 // delivers the final usage: its delta is empty, and the chunk's model, id and
-// usage ride beside it as on any other chunk. An upstream error payload comes
-// back as an *upstreamErrorPayload, and a malformed chunk as an error.
+// usage ride beside it as on any other chunk. Those three are decoded best
+// effort, so one of an unexpected type comes back empty instead of failing
+// the chunk. An upstream error payload comes back as an
+// *upstreamErrorPayload, and a malformed chunk as an error.
 func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 	if line == "" || !strings.HasPrefix(line, "data: ") {
 		return sseDelta{}, false, nil
@@ -391,7 +411,11 @@ func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 		delta = chunk.Choices[0].Delta
 		delta.finishReason = chunk.Choices[0].FinishReason
 	}
-	delta.model, delta.id, delta.usage = chunk.Model, chunk.ID, chunk.Usage
+	delta.model, delta.id = chunk.Model.v, chunk.ID.v
+	if chunk.Usage.ok {
+		u := chunk.Usage.v
+		delta.usage = &u
+	}
 	return delta, true, nil
 }
 
