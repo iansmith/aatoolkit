@@ -149,62 +149,164 @@ func TestServerAddrPort_StripsUserinfoPathQuery(t *testing.T) {
 }
 
 // TestTraceSource_NoSecretsReachSpanCode (DoD f): trace.go, the file that
-// writes spans, is never handed what holds a secret or a caller's text. No
-// function in it takes a Tier, an *http.Request, an http.Header or an error,
-// and no struct in it holds one, so none can arrive as a field either; it
-// never names APIKey or the tiers map; it never calls RecordError, AddEvent
-// or an Error() method; and every SetStatus description is the literal "".
-// It must contain at least one SetStatus, so the rule is not vacuous.
-// TestTraceSource_OnlyTraceGoTouchesSpans keeps every other file off spans,
-// so these rules cover every span write.
+// writes spans, is not handed a type that holds a secret or the
+// conversation. No parameter, result or receiver of a function in it, no
+// field of a struct in it, and no type it declares (an alias included) is or
+// holds a Tier (its APIKey), a Host (its tiers, history and prompt), an
+// *http.Request, an http.Header or an error (whose text can echo an upstream
+// body). "Holds" is followed through every type the package's non-test files
+// declare, so a field added to a driver.go struct that trace.go takes, such
+// as streamState, counts. trace.go also never names APIKey or the tiers map,
+// never calls RecordError, AddEvent or an Error() method, and gives every
+// SetStatus the literal "" as its description; it must contain at least one
+// SetStatus, so that rule is not vacuous.
+//
+// This is a tripwire for those routes, not a proof: a string or []byte can
+// still carry anything, and the contextWindow and the stream's content reach
+// trace.go by design, to be recorded only when capture is on.
+// TestModelSpan_NeverRecordsSecretsOrNumbers is the guard on what a span
+// actually holds.
 func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "trace.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parsing trace.go: %v", err)
-	}
 	pos := func(n ast.Node) string { return fset.Position(n.Pos()).String() }
 
-	forbiddenType := func(e ast.Expr) string {
-		var found string
-		ast.Inspect(e, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.Ident:
-				if x.Name == "Tier" || x.Name == "error" {
-					found = x.Name
-				}
-			case *ast.SelectorExpr:
-				if id, ok := x.X.(*ast.Ident); ok && id.Name == "http" && (x.Sel.Name == "Request" || x.Sel.Name == "Header") {
-					found = "http." + x.Sel.Name
+	// Every package-level type the package's non-test files declare, so a
+	// type trace.go names can be followed to what it holds.
+	decls := map[string]ast.Expr{}
+	var f *ast.File
+	paths, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("listing the package's files: %v", err)
+	}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		if path == "trace.go" {
+			f = file
+		}
+		for _, d := range file.Decls {
+			if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.TYPE {
+				for _, spec := range gd.Specs {
+					ts := spec.(*ast.TypeSpec)
+					decls[ts.Name.Name] = ts.Type
 				}
 			}
-			return found == ""
-		})
-		return found
+		}
 	}
-	checkParams := func(fields *ast.FieldList) {
+	if f == nil {
+		t.Fatal("trace.go not found")
+	}
+
+	// holds returns the forbidden type that e is or holds, with the path to
+	// it, or "" when it reaches none.
+	forbidden := map[string]bool{"Tier": true, "Host": true, "error": true}
+	var holds func(e ast.Expr, seen map[string]bool) string
+	fieldsHold := func(fields *ast.FieldList, seen map[string]bool) string {
+		if fields == nil {
+			return ""
+		}
+		for _, field := range fields.List {
+			if bad := holds(field.Type, seen); bad != "" {
+				return bad
+			}
+		}
+		return ""
+	}
+	holds = func(e ast.Expr, seen map[string]bool) string {
+		switch x := e.(type) {
+		case *ast.Ident:
+			if forbidden[x.Name] {
+				return x.Name
+			}
+			if def, ok := decls[x.Name]; ok && !seen[x.Name] {
+				seen[x.Name] = true
+				if bad := holds(def, seen); bad != "" {
+					return x.Name + ", which holds " + bad
+				}
+			}
+		case *ast.SelectorExpr:
+			if id, ok := x.X.(*ast.Ident); ok && id.Name == "http" && (x.Sel.Name == "Request" || x.Sel.Name == "Header") {
+				return "http." + x.Sel.Name
+			}
+		case *ast.StarExpr:
+			return holds(x.X, seen)
+		case *ast.ParenExpr:
+			return holds(x.X, seen)
+		case *ast.Ellipsis:
+			return holds(x.Elt, seen)
+		case *ast.ArrayType:
+			return holds(x.Elt, seen)
+		case *ast.ChanType:
+			return holds(x.Value, seen)
+		case *ast.MapType:
+			if bad := holds(x.Key, seen); bad != "" {
+				return bad
+			}
+			return holds(x.Value, seen)
+		case *ast.IndexExpr:
+			if bad := holds(x.X, seen); bad != "" {
+				return bad
+			}
+			return holds(x.Index, seen)
+		case *ast.IndexListExpr:
+			if bad := holds(x.X, seen); bad != "" {
+				return bad
+			}
+			for _, ix := range x.Indices {
+				if bad := holds(ix, seen); bad != "" {
+					return bad
+				}
+			}
+		case *ast.StructType:
+			return fieldsHold(x.Fields, seen)
+		case *ast.InterfaceType:
+			return fieldsHold(x.Methods, seen)
+		case *ast.FuncType:
+			if bad := fieldsHold(x.Params, seen); bad != "" {
+				return bad
+			}
+			return fieldsHold(x.Results, seen)
+		}
+		return ""
+	}
+	checkFields := func(what string, fields *ast.FieldList) {
 		if fields == nil {
 			return
 		}
 		for _, field := range fields.List {
-			if bad := forbiddenType(field.Type); bad != "" {
-				t.Errorf("%s: a parameter of type %s", pos(field), bad)
+			if bad := holds(field.Type, map[string]bool{}); bad != "" {
+				t.Errorf("%s: a %s of type %s", pos(field), what, bad)
 			}
 		}
+	}
+
+	// Control: the walk follows a type declared in another file through a
+	// map to a Tier, so a field like Config's would not slip past it.
+	if bad := holds(&ast.Ident{Name: "Config"}, map[string]bool{}); bad == "" {
+		t.Error("control: Config holds its tiers, but the walk finds no Tier in it")
 	}
 
 	setStatus := 0
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.FuncDecl:
-			checkParams(x.Recv)
-			checkParams(x.Type.Params)
+			checkFields("receiver", x.Recv)
+			checkFields("parameter", x.Type.Params)
+			checkFields("result", x.Type.Results)
 		case *ast.FuncLit:
-			checkParams(x.Type.Params)
+			checkFields("parameter", x.Type.Params)
+			checkFields("result", x.Type.Results)
 		case *ast.StructType:
-			for _, field := range x.Fields.List {
-				if bad := forbiddenType(field.Type); bad != "" {
-					t.Errorf("%s: a struct field of type %s", pos(field), bad)
+			checkFields("struct field", x.Fields)
+		case *ast.TypeSpec:
+			if _, isStruct := x.Type.(*ast.StructType); !isStruct {
+				if bad := holds(x.Type, map[string]bool{}); bad != "" {
+					t.Errorf("%s: type %s is %s", pos(x), x.Name.Name, bad)
 				}
 			}
 		case *ast.Ident:
