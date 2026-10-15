@@ -412,9 +412,10 @@ func TestVADConfig_ValidateOrdering(t *testing.T) {
 // the tap stamps it into every recording's sidecar so a later replay knows which
 // thresholds produced that call's log. It must therefore report
 // defaultVADConfig() itself and never its own copy of the values: a copy goes
-// stale the next time a threshold is tuned -- which is not hypothetical, f5cad49
-// moved EndSilenceMS 700 -> 1050 and the turn-end work moves it again -- and a
-// stale copy would mislabel every recording written after the drift, silently.
+// stale the next time a threshold is tuned -- which is not hypothetical: one
+// retune moved EndSilenceMS 700 -> 1050, and later ones (AATK-3 and AATK-9
+// among them) moved it again -- and a stale copy would mislabel every
+// recording written after the drift, silently.
 func TestDefaultVADConfig_MatchesInternal(t *testing.T) {
 	if got, want := DefaultVADConfig(), defaultVADConfig(); got != want {
 		t.Errorf("DefaultVADConfig() = %+v\n            want %+v\n(accessor has drifted from the config it reports)", got, want)

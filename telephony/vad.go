@@ -86,8 +86,8 @@ type VADConfig = vadConfig
 // vadCfg is filled from defaultVADConfig() via withDefaults() for every real
 // session. The tap records it so a later replay knows which
 // thresholds produced a recording's live log -- defaultVADConfig() is a
-// moving target (f5cad49 took EndSilenceMS 700 -> 1050) and the value cannot
-// be recovered after the fact. The replay harness is the one caller
+// moving target (one retune took EndSilenceMS 700 -> 1050) and the value
+// cannot be recovered after the fact. The replay harness is the one caller
 // that does override per-session, via WithVADConfig (session.go), so it can
 // drive `--end-silence-ms` without touching this package-wide default.
 func DefaultVADConfig() VADConfig {

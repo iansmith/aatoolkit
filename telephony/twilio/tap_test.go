@@ -236,10 +236,10 @@ func TestTap_SidecarCountsEveryFrame(t *testing.T) {
 // check it is comparing like with like.
 //
 // The comparison is derived, never hardcoded. No literal threshold appears
-// here: EndSilenceMS is a tuning knob, and a retune took it 1050 -> 700. f5cad49 is
-// the worked example of the cost -- six tests across three packages broke on a
-// tuning change because they had hardcoded 22 = 700ms/32ms, failing in packages
-// that had nothing to do with the cause.
+// here: EndSilenceMS is a tuning knob, and a retune took it 1050 -> 700. The
+// earlier 700 -> 1050 retune is the worked example of the cost -- six tests
+// across three packages broke on that tuning change because they had hardcoded
+// 22 = 700ms/32ms, failing in packages that had nothing to do with the cause.
 func TestTap_SidecarRecordsVADConfig(t *testing.T) {
 	dir := t.TempDir()
 	const streamSID, callSID = "SSsidecar", "CAsidecar"

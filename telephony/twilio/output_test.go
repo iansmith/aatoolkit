@@ -55,10 +55,10 @@ func TestDataPlaneOutputSendEncodesMedia(t *testing.T) {
 	}
 }
 
-// TestDataPlaneOutputSendWritesToTap covers the gap flagged by PR #115's
-// review: the 5 outbound-queue tests in tap_test.go all call tap.WriteOut
-// directly, bypassing Send entirely, so a Send that never enqueues onto the
-// tap is invisible to that suite. This drives the real Send() method (the
+// TestDataPlaneOutputSendWritesToTap covers a gap in tap_test.go: its
+// outbound-queue tests drive the tap directly (tap.WriteOut, tap.DrainOut)
+// and never call Send, so a Send that never enqueues onto the tap is
+// invisible to that suite. This drives the real Send() method (the
 // path a live call actually takes) with a real *Tap wired in, and asserts
 // the tap's outbound recording -- not a direct WriteOut call -- reflects
 // what was sent.
