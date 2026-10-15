@@ -22,10 +22,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// secretURL is the chat-completions URL at hostport with userinfo and a
-// query, both carrying secrets a span must never hold.
+// secretURL is the chat-completions URL at hostport with userinfo, a path
+// and a query, each carrying a secret a span must never hold. The test
+// upstreams ignore the path.
 func secretURL(hostport string) string {
-	return "http://u:pw-secret@" + hostport + "/v1/chat/completions?k=q-secret"
+	return "http://u:pw-secret@" + hostport + "/p-secret/v1/chat/completions?k=q-secret"
 }
 
 // closedHostPort returns the address of a server that is no longer listening,
@@ -40,14 +41,16 @@ func closedHostPort() string {
 // TestModelSpan_NeverRecordsSecretsOrNumbers (DoD f): whatever the outcome --
 // success, an upstream status echoing the key and the caller's number, an SSE
 // error payload echoing both, a transport failure, a timeout -- no span the
-// call ends, the model span or any other, holds the API key, URL userinfo or
-// query secrets, an auth header's name or scheme, or an E.164 number. With
-// capture on, the same holds for the secrets and headers, using number-free
-// fixtures.
+// call ends, the model span or any other, holds the API key, a secret from
+// the URL's userinfo, path or query, an auth header's name or scheme, or an
+// E.164 number. The number is in the window, and on success the model's
+// reasoning and reply echo it, so with capture off a span that recorded
+// input or output would hold it. With capture on, the same holds for the
+// secrets and headers, using number-free fixtures.
 func TestModelSpan_NeverRecordsSecretsOrNumbers(t *testing.T) {
 	const apiKey = "sk-scan-secret"
 	const number = "+15551234567"
-	needles := []string{apiKey, "pw-secret", "q-secret", "Bearer", "authorization"}
+	needles := []string{apiKey, "pw-secret", "p-secret", "q-secret", "Bearer", "authorization"}
 	// Test-only and unanchored, so it finds a number anywhere in a value.
 	e164 := regexp.MustCompile(`\+[1-9]\d{6,14}`)
 
@@ -66,8 +69,10 @@ func TestModelSpan_NeverRecordsSecretsOrNumbers(t *testing.T) {
 	scenarios := []scenario{
 		{name: "success", start: func(t *testing.T, echo string) (string, context.Context, func()) {
 			return serve(func(w http.ResponseWriter, r *http.Request) {
+				reasoning, _ := json.Marshal("They left " + echo + " to call back on.")
 				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprintln(w, textLine("Noted, I will call you back."))
+				fmt.Fprintln(w, `data: {"choices":[{"delta":{"reasoning_content":`+string(reasoning)+`},"finish_reason":null}]}`)
+				fmt.Fprintln(w, textLine("Noted, I will call you back at "+echo+"."))
 				fmt.Fprintln(w, finishLine("stop"))
 				fmt.Fprintln(w, doneLine)
 			})(t, echo)
