@@ -252,15 +252,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.recordCall(callSid, from, to)
 
 	if s.Authorize != nil && !s.Authorize(from) {
-		w.Header().Set("Content-Type", "text/xml")
-		fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, html.EscapeString(s.VoiceRejectText))
+		writeVoiceRefusal(w, s.VoiceRejectText)
 		return
 	}
 
 	if s.AnswerCall != nil {
 		if say, refuse := s.AnswerCall(r.Context(), from, to); refuse {
-			w.Header().Set("Content-Type", "text/xml")
-			fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, html.EscapeString(say))
+			writeVoiceRefusal(w, say)
 			return
 		}
 	}
@@ -297,6 +295,15 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeEmptyTwiML(w)
+}
+
+// writeVoiceRefusal answers a voice webhook by speaking text (HTML-escaped)
+// and hanging up, opening no stream. One definition for both refusals in
+// ServeHTTP — Authorize's VoiceRejectText and AnswerCall's say — so the two
+// cannot drift into different documents.
+func writeVoiceRefusal(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/xml")
+	fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, html.EscapeString(text))
 }
 
 // writeEmptyTwiML acknowledges a webhook without asking Twilio to do anything.
