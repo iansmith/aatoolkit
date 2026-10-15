@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -127,13 +128,15 @@ type Server struct {
 	// refusal instead of opening a stream. It is handed the caller (from) and
 	// the dialed number (to; "" when the webhook's To is missing or not
 	// E.164), so a consumer serving several numbers can answer differently on
-	// each. Returning refuse=true answers <Say>say</Say><Hangup/> (say is
-	// HTML-escaped) and opens no stream. It runs only for a call that passed
-	// signature validation, the E.164 From check and Authorize; an Authorize
-	// refusal wins and AnswerCall is never consulted. Nil keeps the stream
-	// answer unchanged. Voice only: ServeSMS never calls it, because
-	// InboundSMS already carries To. The engine holds no wording and no
-	// identity here; both belong to the consumer, as with Authorize.
+	// each. Returning refuse=true answers <Say>say</Say><Hangup/> and opens
+	// no stream; say is XML-escaped, and anything XML 1.0 cannot carry
+	// (invalid UTF-8, U+0000-U+001F other than tab, LF and CR, U+FFFE and
+	// U+FFFF) is dropped. It runs only for a call that passed signature
+	// validation, the E.164 From check and Authorize; an Authorize refusal
+	// wins and AnswerCall is never consulted. Nil keeps the stream answer
+	// unchanged. Voice only: ServeSMS never calls it, because InboundSMS
+	// already carries To. The engine holds no wording and no identity here;
+	// both belong to the consumer, as with Authorize.
 	AnswerCall func(ctx context.Context, from, to string) (say string, refuse bool)
 
 	fromMu    sync.Mutex
@@ -280,7 +283,7 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 	from := r.PostForm.Get("From")
 	if s.Authorize != nil && !s.Authorize(from) {
 		w.Header().Set("Content-Type", "text/xml")
-		fmt.Fprintf(w, `<Response><Message>%s</Message></Response>`, html.EscapeString(s.SMSRejectText))
+		fmt.Fprintf(w, `<Response><Message>%s</Message></Response>`, escapeTwiML(s.SMSRejectText))
 		return
 	}
 
@@ -297,13 +300,29 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 	writeEmptyTwiML(w)
 }
 
-// writeVoiceRefusal answers a voice webhook by speaking text (HTML-escaped)
-// and hanging up, opening no stream. One definition for both refusals in
-// ServeHTTP — Authorize's VoiceRejectText and AnswerCall's say — so the two
-// cannot drift into different documents.
+// writeVoiceRefusal answers a voice webhook by speaking text (escaped by
+// escapeTwiML) and hanging up, opening no stream. One definition for both
+// refusals in ServeHTTP — Authorize's VoiceRejectText and AnswerCall's say —
+// so the two cannot drift into different documents.
 func writeVoiceRefusal(w http.ResponseWriter, text string) {
 	w.Header().Set("Content-Type", "text/xml")
-	fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, html.EscapeString(text))
+	fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, escapeTwiML(text))
+}
+
+// escapeTwiML makes text safe as the content of a TwiML element.
+// html.EscapeString covers the XML metacharacters but passes through what
+// XML 1.0 cannot carry at all: invalid UTF-8, the C0 controls other than tab,
+// LF and CR, and U+FFFE/U+FFFF. One such character makes the whole document
+// unparseable, so they are dropped first. Valid text, tab and newline
+// included, escapes to the same bytes as html.EscapeString alone.
+func escapeTwiML(text string) string {
+	text = strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' || (r >= 0x20 && r != 0xFFFE && r != 0xFFFF) {
+			return r
+		}
+		return -1
+	}, strings.ToValidUTF8(text, ""))
+	return html.EscapeString(text)
 }
 
 // writeEmptyTwiML acknowledges a webhook without asking Twilio to do anything.

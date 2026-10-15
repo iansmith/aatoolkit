@@ -2,6 +2,7 @@ package twilio_test
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,40 @@ func TestServeHTTP_AnswerCallRefuseSaysAndHangsUp(t *testing.T) {
 	}
 	if ct := w.Header().Get("Content-Type"); ct != "text/xml" {
 		t.Fatalf("Content-Type = %q, want text/xml", ct)
+	}
+}
+
+// The refusal stays well-formed XML whatever say holds. Characters XML 1.0
+// cannot carry (invalid UTF-8, C0 controls other than tab, LF and CR, and
+// U+FFFE/U+FFFF) are dropped; valid text, tab and newline included, is
+// escaped to the same bytes as before.
+func TestServeHTTP_AnswerCallRefusalIsWellFormedXML(t *testing.T) {
+	for _, tc := range []struct{ say, wantSay string }{
+		{"vt\x0bhere", "vthere"},
+		{"nul\x00here", "nulhere"},
+		{"esc\x1bhere", "eschere"},
+		{"bad\xffutf8", "badutf8"},
+		{"non￾char", "nonchar"},
+		{"non￿char", "nonchar"},
+		{"tab\there\nnext", "tab\there\nnext"},
+		{"Call A & B", "Call A &amp; B"},
+	} {
+		rec := &answerCallRecorder{say: tc.say, refuse: true}
+		s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss", AnswerCall: rec.hook}
+		form := url.Values{"From": {"+15105551234"}, "To": {"+15105550000"}, "CallSid": {"CA1"}}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, signedWebhookRequest(t, "authtoken", "https", "example.com", form))
+
+		want := "<Response><Say>" + tc.wantSay + "</Say><Hangup/></Response>"
+		if got := w.Body.String(); got != want {
+			t.Errorf("say %q: body %q, want %q", tc.say, got, want)
+		}
+		var doc struct {
+			Say string `xml:"Say"`
+		}
+		if err := xml.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+			t.Errorf("say %q: body %q is not well-formed XML: %v", tc.say, w.Body.String(), err)
+		}
 	}
 }
 
