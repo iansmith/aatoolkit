@@ -104,7 +104,9 @@ driver.StartTwilioServer(addr, srv, driver.WithHandlerWrapper(
   model span becomes a root.
 - **Context.** `host.ContextSender` adds `SendContext` and `SendStreamContext`, which take a
   `context.Context`: its span parents the model span, and its deadline and cancellation bound
-  the call (the driver's own 300 s ceiling still applies). `Send` and `SendStream` run under
+  the call (the driver's own 300 s ceiling still applies). A call ctx cuts short fails with an
+  error wrapping `context.Cause(ctx)`, so a ctx cancelled with a cause matches that cause under
+  `errors.Is`, wherever the call was when it stopped. `Send` and `SendStream` run under
   `context.Background()`, so their spans are roots. `h.WithContext(ctx)` returns a `host.Host`
   whose `Send` and `SendStream` run under `ctx`; make one per inbound request and do not keep it.
 - **Request-scoped ctx.** The ctx a Twilio handler receives (`HandleSMS`, `HandleSMSStatus`,

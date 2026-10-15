@@ -325,6 +325,96 @@ func cancelOnFirstSegment() (context.Context, func(), context.CancelFunc) {
 	return ctx, cancel, cancel
 }
 
+// TestSendStreamContext_DoneContextFailsWithItsCause: a context cancelled or
+// timed out with a cause fails the call with that cause, whichever site sees
+// it first: the check before an already-buffered line, a network read
+// blocked on a stalled upstream, or the request still waiting for its
+// response headers. So errors.Is against the cause tells the caller's own
+// stop apart from an upstream failure in every case. The span still records
+// canceled or timeout.
+func TestSendStreamContext_DoneContextFailsWithItsCause(t *testing.T) {
+	errStop := errors.New("caller stopped the turn")
+	errSlow := errors.New("caller gave up waiting")
+	const s1, s2 = "The quick brown fox jumps over the lazy dog.", " A second sentence follows the first one here."
+	buffered := func() (string, func()) {
+		srv := bufferedSSEServer(textLine(s1), textLine(s2), finishLine("stop"), doneLine)
+		return chatURL(srv), srv.Close
+	}
+	// lastLine ends the body with the line that cuts the first segment, so
+	// the cancel lands after the last line and the end-of-stream check is
+	// what sees it.
+	lastLine := func() (string, func()) {
+		srv := bufferedSSEServer(textLine(s1))
+		return chatURL(srv), srv.Close
+	}
+	stalled := func() (string, func()) {
+		srv, _ := newScriptedSSEServer(sseStep{line: textLine(s1)}, sseStep{delay: 5 * time.Second, line: textLine(s2)})
+		return chatURL(srv), srv.Close
+	}
+	noHeaders := func() (string, func()) {
+		srv, _ := newScriptedSSEServer(sseStep{delay: 5 * time.Second, line: textLine(s1)})
+		return chatURL(srv), srv.Close
+	}
+	cancelCause := func() (context.Context, func(), func()) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		return ctx, func() { cancel(errStop) }, func() { cancel(nil) }
+	}
+	timeoutCause := func() (context.Context, func(), func()) {
+		ctx, cancel := context.WithTimeoutCause(context.Background(), 50*time.Millisecond, errSlow)
+		return ctx, func() { <-ctx.Done() }, cancel
+	}
+	cases := []struct {
+		name     string
+		upstream func() (url string, closeFn func())
+		// ctx returns the call's context, what ends it, and its cleanup.
+		ctx func() (ctx context.Context, end func(), cleanup func())
+		// inSegment ends the context from the first onSegment call;
+		// otherwise it is ended 50ms in, from another goroutine.
+		inSegment bool
+		wantCause error
+		wantType  string
+		wantText  string
+	}{
+		{"cancel cause, lines already buffered", buffered, cancelCause, true, errStop, "canceled", "reading SSE stream: "},
+		{"cancel cause, after the last line", lastLine, cancelCause, true, errStop, "canceled", "reading SSE stream: "},
+		{"cancel cause, upstream stalled", stalled, cancelCause, true, errStop, "canceled", "reading SSE stream: "},
+		{"cancel cause, before the response headers", noHeaders, cancelCause, false, errStop, "canceled", "calling "},
+		{"timeout cause, lines already buffered", buffered, timeoutCause, true, errSlow, "timeout", "reading SSE stream: "},
+		{"timeout cause, upstream stalled", stalled, timeoutCause, false, errSlow, "timeout", "reading SSE stream: "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withoutCaptureEnv(t)
+			url, closeFn := tc.upstream()
+			defer closeFn()
+			h, rec := tracedHost(t, url, Tier{Model: "test", MaxTokens: 512})
+			ctx, end, cleanup := tc.ctx()
+			defer cleanup()
+			if !tc.inSegment {
+				timer := time.AfterFunc(50*time.Millisecond, end)
+				defer timer.Stop()
+			}
+			segments := 0
+			_, _, err := h.SendStreamContext(ctx, traceWindow, "fast", func(string) {
+				segments++
+				if tc.inSegment && segments == 1 {
+					end()
+				}
+			})
+			if err == nil {
+				t.Fatal("no error after the context was done")
+			}
+			if !errors.Is(err, tc.wantCause) {
+				t.Errorf("error %q does not wrap the context's cause %q", err, tc.wantCause)
+			}
+			if !strings.HasPrefix(err.Error(), tc.wantText) {
+				t.Errorf("error = %q; want it to start %q", err, tc.wantText)
+			}
+			requireAttrs(t, onlyModelSpan(t, rec), map[string]any{"error.type": tc.wantType})
+		})
+	}
+}
+
 // TestWithContext_SendAndSendStreamRunUnderBoundContext: the view WithContext
 // returns runs Send and SendStream under the bound context -- its values and
 // its deadline reach the request -- and shares every other method, so its
