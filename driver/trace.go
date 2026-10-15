@@ -58,6 +58,13 @@ const (
 // panics.
 var errTypeOther = semconv.ErrorTypeOther.Value.AsString()
 
+// tracerOptions and clientKind never change, so they are built once rather
+// than allocated again on every request, traced or not.
+var (
+	tracerOptions = []trace.TracerOption{trace.WithSchemaURL(semconv.SchemaURL)}
+	clientKind    = trace.WithSpanKind(trace.SpanKindClient)
+)
+
 // tracer returns the tracer for one model request: from the configured
 // provider, or the global one as it is at this call. It is resolved per call
 // and never cached, so a provider installed after New is used.
@@ -66,7 +73,7 @@ func (h *Host) tracer() trace.Tracer {
 	if tp == nil {
 		tp = otel.GetTracerProvider()
 	}
-	return tp.Tracer(tracerName, trace.WithSchemaURL(semconv.SchemaURL))
+	return tp.Tracer(tracerName, tracerOptions...)
 }
 
 // serverAddrPort returns the host and port of rawURL for server.address and
@@ -120,7 +127,7 @@ func (h *Host) startModelSpan(ctx context.Context, tier, model, rawURL string) (
 	if port != 0 {
 		attrs = append(attrs, semconv.ServerPort(port))
 	}
-	ctx, span := h.tracer().Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
+	ctx, span := h.tracer().Start(ctx, name, clientKind, trace.WithAttributes(attrs...))
 	return ctx, &modelCall{span: span, recording: span.IsRecording()}
 }
 
