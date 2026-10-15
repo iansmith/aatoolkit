@@ -181,6 +181,27 @@ func TestServeHTTP_BadFromNeverAsksAnswerCall(t *testing.T) {
 	}
 }
 
+// AnswerCall is voice only: an inbound SMS never consults it, and even with a
+// hook that would refuse, the text still reaches HandleSMS and is acknowledged
+// with empty TwiML.
+func TestServeSMS_NeverAsksAnswerCall(t *testing.T) {
+	rec := &answerCallRecorder{say: "x", refuse: true}
+	handled := 0
+	s := &twilio.Server{
+		AuthToken:  "authtoken",
+		AnswerCall: rec.hook,
+		HandleSMS:  func(context.Context, twilio.InboundSMS) { handled++ },
+	}
+	form := url.Values{"MessageSid": {"SM1"}, "From": {"+15105551234"}, "To": {"+15105550000"}, "Body": {"hi"}}
+	w := httptest.NewRecorder()
+	s.ServeSMS(w, signedTwilioRequest(t, "authtoken", "https", "example.com", "/sms/inbound", form))
+
+	if len(rec.asked) != 0 || handled != 1 || w.Body.String() != "<Response></Response>" {
+		t.Fatalf("hook asked %v, HandleSMS called %d, body %q; want no hook call, 1, %q",
+			rec.asked, handled, w.Body.String(), "<Response></Response>")
+	}
+}
+
 // Frame.To carries the webhook's dialed number onto the start frame.
 func TestServeStreams_ToThreadedFromWebhook(t *testing.T) {
 	const from, to = "+15105550123", "+15105550999"
