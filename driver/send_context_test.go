@@ -224,8 +224,9 @@ func bufferedSSEServer(lines ...string) *httptest.Server {
 // context is done, no onSegment call starts and the call fails with the
 // context's error, even when the rest of the stream is already buffered and
 // no network read is left to fail. That holds for lines still to be
-// processed, for segments still to be cut from the line in hand, and for the
-// end-of-stream flush, and the span records the failure.
+// processed (a malformed one included, which would otherwise fail the call
+// its own way), for segments still to be cut from the line in hand, and for
+// the end-of-stream flush, and the span records the failure.
 func TestSendStreamContext_DoneContextStopsBufferedStream(t *testing.T) {
 	const s1, s2, s3 = "The quick brown fox jumps over the lazy dog.",
 		" A second sentence follows the first one here.",
@@ -249,6 +250,14 @@ func TestSendStreamContext_DoneContextStopsBufferedStream(t *testing.T) {
 		{
 			name:     "cancelled with segments left in the line",
 			lines:    []string{textLine(s1 + s2 + s3), finishLine("stop"), doneLine},
+			ctx:      cancelOnFirstSegment,
+			wantIs:   context.Canceled,
+			wantType: "canceled",
+		},
+		{
+			// The line after the cancel would fail the call its own way.
+			name:     "cancelled before a malformed line",
+			lines:    []string{textLine(s1), `data: {not json`},
 			ctx:      cancelOnFirstSegment,
 			wantIs:   context.Canceled,
 			wantType: "canceled",

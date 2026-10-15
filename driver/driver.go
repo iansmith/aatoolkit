@@ -538,10 +538,13 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 }
 
 // SendStreamContext implements host.ContextSender: SendStream under ctx. The
-// request runs under ctx bounded by sendTimeout, so ctx's values reach it,
-// its cancellation ends the call wherever it is, and its deadline applies
-// when it is the earlier one. It is the one implementation of a model
-// request: Send, SendStream and SendContext all end here.
+// request runs under ctx bounded by sendTimeout, so ctx's values reach it and
+// its deadline applies when it is the earlier one. Once ctx is done the call
+// fails with ctx's error at the next read, line or segment, even when the
+// rest of the stream is already buffered: no onSegment call starts after
+// that, though one already running is not interrupted. It is the one
+// implementation of a model request: Send, SendStream and SendContext all
+// end here.
 //
 // Once its tier is found and its window encodes, a call gets one CLIENT
 // span, a child of ctx's span, from Config.TracerProvider or the global
@@ -585,18 +588,35 @@ func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []
 	}
 	defer resp.Body.Close()
 
+	// A done ctx fails the next network read, but lines the transport has
+	// already buffered need none. So ctx is also checked before each line and
+	// before the end-of-stream flush, and a segment cut once it is done is
+	// dropped: no onSegment call starts after ctx is done.
+	emit := func(seg string) {
+		if ctx.Err() == nil {
+			onSegment(seg)
+		}
+	}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 256*1024)
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			err = streamReadError(err)
+			return nil, nil, streamErrorType(ctx, err, errTypeStreamRead), err
+		}
 		at := call.now()
 		hadChunk, hadContent := st.chunks > 0, st.hasContent
-		if err := processSSELine(scanner.Text(), st, onSegment); err != nil {
+		if err := processSSELine(scanner.Text(), st, emit); err != nil {
 			return nil, nil, streamErrorType(ctx, err, errTypeDecode), err
 		}
 		call.observe(st, hadChunk, hadContent, at)
 	}
-	if err := scanner.Err(); err != nil {
-		err = fmt.Errorf("reading SSE stream: %w", err)
+	err = scanner.Err()
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		err = streamReadError(err)
 		return nil, nil, streamErrorType(ctx, err, errTypeStreamRead), err
 	}
 	if !st.hasContent {
@@ -613,6 +633,12 @@ func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []
 		onSegment(seg)
 	}
 	return []byte(st.contentBuf.String()), []byte(st.reasoningBuf.String()), "", nil
+}
+
+// streamReadError is the error for a stream that could not be read to its
+// end: err is the read's failure, or ctx's error when ctx was done first.
+func streamReadError(err error) error {
+	return fmt.Errorf("reading SSE stream: %w", err)
 }
 
 // streamErrorType classifies a failed request for its span's error.type.
