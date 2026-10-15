@@ -118,15 +118,15 @@ func TestCarrierMediaSink_WriteFailureNeverDeliversCarrierAudio(t *testing.T) {
 }
 
 // TestCarrierAudioChan_NoGoroutineOutlivesACallLeftUndrained closes the gap the
-// stage-10b requirements adversary found in the DoD item "No engine goroutine
-// outlives a call whose consumer never reads. Differential measurement, as
-// AATK-79, and mutation-checked."
+// stage-10b requirements adversary found in AATK-84's DoD item "No engine
+// goroutine outlives a call whose consumer never reads. Differential
+// measurement, as AATK-79, and mutation-checked."
 //
 // The differential measurement in the frozen
 // TestCarrierAudioChan_NoEngineGoroutineOutlivesTheCall is real and its control
 // mutation is correctly caught — an unconditionally parked goroutine shows up as
 // 15 goroutines over 5 calls against 10 with no consumer. But it is blind to the
-// one leak shape this ticket was rewritten to prevent. Its comment claims "the
+// one leak shape AATK-84 was rewritten to prevent. Its comment claims "the
 // consumer is present and permanently behind after its proof read, which is the
 // worst case"; the test does not build that. It emits exactly one record, reads
 // it, and stops the call, so the channel is EMPTY when the call ends and no send
@@ -142,8 +142,8 @@ func TestCarrierMediaSink_WriteFailureNeverDeliversCarrierAudio(t *testing.T) {
 // subsequent sends have nowhere to go at the moment the call is stopped. Under
 // the correct implementation those sends take the non-blocking default branch
 // and are dropped, costing nothing. Under the per-record-goroutine leak each one
-// parks a goroutine that outlives the call — which is precisely the hazard the
-// ticket's "why not a wrapper" rationale exists to prevent, and the reason
+// parks a goroutine that outlives the call — which is precisely the hazard
+// AATK-84's "why not a wrapper" rationale exists to prevent, and the reason
 // observation is a channel rather than a synchronous MediaSink wrapper.
 //
 // The frozen test is not edited; this is a pure addition beside it.

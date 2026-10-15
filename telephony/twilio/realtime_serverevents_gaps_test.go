@@ -14,11 +14,11 @@ import (
 //
 // Round-2 adversary finding (blocker): TestServerEventChan_DropIsLogged
 // captured log output into a bare bytes.Buffer and read it after a sleep. But
-// drops are logged from the delivery goroutine, by construction — the ticket
+// drops are logged from the delivery goroutine, by construction — AATK-81
 // requires delivery to be non-blocking and requires the engine to run no
 // consumer code on a goroutine it owns — so the test's read races that write.
 // It was reproduced 5/5 under -race against a reference implementation, and no
-// compliant implementation can avoid it, while the DoD requires
+// compliant implementation can avoid it, while AATK-81's DoD requires
 // "GOWORK=off go test ./telephony/... -race" clean.
 //
 // A sleep is not a happens-before edge. This is.

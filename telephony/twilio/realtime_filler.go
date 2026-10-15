@@ -229,8 +229,8 @@ func (f *filler) arm(by armTrigger) {
 		// goroutine, no pending start, and every later arm returning at this
 		// same guard. That is precisely the case the re-arm exists for — the
 		// function call announced seconds into a wait the loop is already
-		// filling — so it would go silent for exactly the longest gap this
-		// ticket measured.
+		// filling — so it would go silent for exactly the longest gap AATK-108
+		// measured.
 		//
 		// Any timer still held here has already fired — start is what set
 		// playing — so leaving it alone costs nothing. start's own playing
