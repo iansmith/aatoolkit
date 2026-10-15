@@ -709,7 +709,7 @@ func TestModelSpan_NotRecordingSkipsCapture(t *testing.T) {
 	endAllocs := func(tp trace.TracerProvider, window []byte) float64 {
 		h := &Host{tracerProvider: tp}
 		return testing.AllocsPerRun(20, func() {
-			_, call := h.startModelSpan(context.Background(), "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+			_, call := startModelSpan(context.Background(), h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
 			call.end(st, 512, window, "")
 		})
 	}
@@ -742,7 +742,7 @@ func TestModelSpan_NoProviderReadsNoCaptureVariable(t *testing.T) {
 		t.Helper()
 		withCaptureEnv(t, capture)
 		return testing.AllocsPerRun(50, func() {
-			_, call := h.startModelSpan(context.Background(), "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+			_, call := startModelSpan(context.Background(), h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
 			call.requestSent()
 			call.end(st, 512, traceWindow, "")
 		})
@@ -770,7 +770,7 @@ func TestModelSpan_NoProviderReadsNoCaptureVariable(t *testing.T) {
 // span.
 func TestModelSpan_NoProviderReadsNoClock(t *testing.T) {
 	marks := func(h *Host) (issued, at time.Time) {
-		_, call := h.startModelSpan(context.Background(), "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+		_, call := startModelSpan(context.Background(), h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
 		defer call.end(&streamState{acc: newSegmentAccumulator(minSegmentChars)}, 512, traceWindow, "")
 		call.requestSent()
 		return call.issued, call.now()

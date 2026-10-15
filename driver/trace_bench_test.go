@@ -18,7 +18,7 @@ func BenchmarkModelSpan_NoProvider(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, call := h.startModelSpan(ctx, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+		_, call := startModelSpan(ctx, h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
 		call.requestSent()
 		call.observe(st, false, false, call.now())
 		call.end(st, 512, window, "")

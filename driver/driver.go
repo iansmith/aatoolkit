@@ -591,7 +591,7 @@ func (h *Host) SendStreamContext(ctx context.Context, contextWindow []byte, tier
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx, call := h.startModelSpan(ctx, tier, ep.Model, ep.URL)
+	ctx, call := startModelSpan(ctx, h.tracerProvider, tier, ep.Model, ep.URL)
 	st := &streamState{acc: newSegmentAccumulator(minSegmentChars)}
 	// What end records if streamChat never returns, because onSegment
 	// panicked.

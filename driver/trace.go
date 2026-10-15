@@ -2,11 +2,15 @@ package driver
 
 // ---------------------------------------------------------------------------
 // driver: OpenTelemetry spans for model requests (AATK-159). This is the only
-// file that starts, annotates or ends a span; TestTraceSource_OnlyTraceGoTouchesSpans
-// keeps the package's other files off spans. What reaches this file is chosen
-// so a secret cannot: no Tier (its APIKey), no request or header, no error
-// (its text can echo an upstream body), as a parameter or as a struct field.
-// TestTraceSource_NoSecretsReachSpanCode holds it to that.
+// non-test file that looks up a tracer or starts, annotates or ends a span;
+// TestTraceSource_OnlyTraceGoTouchesSpans keeps the package's other files
+// off spans. Its functions are free functions or methods on its own types,
+// handed no type that is or holds a Tier (its APIKey), a Host (its tiers,
+// history and prompt), a request, a header or an error (whose text can echo
+// an upstream body): not as a parameter, a result, a field of a struct it is
+// handed, or under an alias. TestTraceSource_NoSecretsReachSpanCode checks
+// those types. A string or []byte can still carry anything, so
+// TestModelSpan_NeverRecordsSecretsOrNumbers checks what the spans hold.
 // ---------------------------------------------------------------------------
 
 import (
@@ -66,11 +70,11 @@ var (
 	clientKind    = trace.WithSpanKind(trace.SpanKindClient)
 )
 
-// tracer returns the tracer for one model request: from the configured
-// provider, or the global one as it is at this call. It is resolved per call
-// and never cached, so a provider installed after New is used.
-func (h *Host) tracer() trace.Tracer {
-	tp := h.tracerProvider
+// tracer returns the tracer for one model request: from tp, the configured
+// provider, or when tp is nil from the global one as it is at this call. It
+// is resolved per call and never cached, so a provider installed after New
+// is used.
+func tracer(tp trace.TracerProvider) trace.Tracer {
 	if tp == nil {
 		tp = otel.GetTracerProvider()
 	}
@@ -103,10 +107,10 @@ func serverAddrPort(rawURL string) (addr string, port int) {
 	return addr, 0
 }
 
-// startModelSpan starts the CLIENT span for one chat-completions request,
-// a child of ctx's span, with the attributes known before it is sent. The
-// returned context carries the span.
-func (h *Host) startModelSpan(ctx context.Context, tier, model, rawURL string) (context.Context, *modelCall) {
+// startModelSpan starts the CLIENT span for one chat-completions request
+// with tracer(tp), a child of ctx's span, with the attributes known before it
+// is sent. The returned context carries the span.
+func startModelSpan(ctx context.Context, tp trace.TracerProvider, tier, model, rawURL string) (context.Context, *modelCall) {
 	name := "chat"
 	attrs := make([]attribute.KeyValue, 0, 7)
 	attrs = append(attrs,
@@ -128,7 +132,7 @@ func (h *Host) startModelSpan(ctx context.Context, tier, model, rawURL string) (
 	if port != 0 {
 		attrs = append(attrs, semconv.ServerPort(port))
 	}
-	ctx, span := h.tracer().Start(ctx, name, clientKind, trace.WithAttributes(attrs...))
+	ctx, span := tracer(tp).Start(ctx, name, clientKind, trace.WithAttributes(attrs...))
 	return ctx, &modelCall{span: span, recording: span.IsRecording()}
 }
 
