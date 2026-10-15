@@ -6,8 +6,6 @@ before they land there. This is the reusable **method**; the concrete predicate
 vocabulary and per-predicate rulings are application-specific and belong in the consuming
 application, not here.*
 
-Companion to `fact-database-research.md`.
-
 ---
 
 ## 1. The four representations
