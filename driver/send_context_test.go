@@ -27,12 +27,9 @@ var (
 // reaches the upstream request.
 type ctxKey struct{}
 
-// okSSEStream is a one-delta stream that SendStream accepts.
-const okSSEStream = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n"
-
-// ctxRecordingTransport answers every request itself with okSSEStream, so no
-// socket is opened, and records the request's context: its deadline, the
-// value under ctxKey, and the span it carries.
+// ctxRecordingTransport answers every request itself with a one-delta stream,
+// textLine("ok"), so no socket is opened, and records the request's context:
+// its deadline, the value under ctxKey, and the span it carries.
 type ctxRecordingTransport struct {
 	mu          sync.Mutex
 	calls       int
@@ -57,7 +54,7 @@ func (rt *ctxRecordingTransport) RoundTrip(r *http.Request) (*http.Response, err
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": {"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(okSSEStream)),
+		Body:       io.NopCloser(strings.NewReader(textLine("ok") + "\n")),
 		Request:    r,
 	}, nil
 }
