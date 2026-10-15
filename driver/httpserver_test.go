@@ -11,7 +11,7 @@ import (
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
-// The health handler is what aa-server-status polls (design design/aa-server-status.md
+// The health handler is what aa-server-status polls (design/aa-server-status.md
 // §7.1: health = { port = 9730, path = "/healthz" }) to decide the "source"
 // server is up. It must be reachable with a plain GET and return 2xx with no
 // dependency on the rest of the driver (Yaegi runtime, LLM tiers, etc.) being
