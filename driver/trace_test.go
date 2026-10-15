@@ -183,6 +183,53 @@ func TestSendStreamContext_OneClientSpanUnderCaller(t *testing.T) {
 	}
 }
 
+// TestModelSpan_StartOmitsWhatIsUnknown: a span leaves out a start value it
+// does not have rather than recording it empty. With no Tier.Model the span
+// is named "chat" and has no gen_ai.request.model; with no host in the tier
+// URL it has no server.address or server.port; and with a scheme that has
+// no default port and none given, it has no server.port.
+func TestModelSpan_StartOmitsWhatIsUnknown(t *testing.T) {
+	srv, _ := newScriptedSSEServer(okSteps()...)
+	defer srv.Close()
+	cases := []struct {
+		name, url, model string
+		wantName         string
+		want             map[string]any
+		wantAbsent       []string
+	}{
+		{
+			name: "no model", url: chatURL(srv), model: "",
+			wantName:   "chat",
+			want:       map[string]any{"server.address": "127.0.0.1", "server.port": serverPort(t, srv)},
+			wantAbsent: []string{"gen_ai.request.model"},
+		},
+		{
+			name: "no host", url: "http://bad host/v1/chat/completions", model: "test",
+			wantName:   "chat test",
+			want:       map[string]any{"gen_ai.request.model": "test"},
+			wantAbsent: []string{"server.address", "server.port"},
+		},
+		{
+			name: "no port", url: "ftp://files.example.invalid/v1/chat/completions", model: "test",
+			wantName:   "chat test",
+			want:       map[string]any{"server.address": "files.example.invalid"},
+			wantAbsent: []string{"server.port"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rec := tracedHost(t, tc.url, Tier{Model: tc.model, MaxTokens: 512})
+			_, _, _ = h.SendStream(traceWindow, "fast", func(string) {})
+			span := onlyModelSpan(t, rec)
+			if span.Name() != tc.wantName {
+				t.Errorf("name = %q, want %q", span.Name(), tc.wantName)
+			}
+			requireAttrs(t, span, tc.want)
+			requireNoAttrs(t, span, tc.wantAbsent...)
+		})
+	}
+}
+
 // TestSendStreamContext_TimeToFirstContentAfterRoleOnlyChunk: on a role-first
 // upstream the first chunk arrives at once and the first text later; the
 // span's time to first content is the later one, not the first chunk's.
