@@ -51,7 +51,7 @@ In this mode the engine is a thin, careful relay between the phone carrier and t
   audio comes back the same way. Barge-in is forwarded as a carrier `clear`.
 - **Per-call identity.** `WithInstructions[For]` sets the persona, `WithVoice` the voice,
   `WithTools` the tool schemas (passed through byte-for-byte), and `WithSessionID[For]` a
-  session id the backend forwards on each LLM request as `X-Client-Session-Id`, so a proxy can
+  session id the speech-to-speech server forwards on each LLM request as `X-Client-Session-Id`, so a proxy can
   tie requests to the call.
 - **Observe everything.** Channels for transcripts (`WithTranscriptChan`), every server event
   (`WithServerEventChan`), inbound caller audio, and every payload sent to the carrier.
