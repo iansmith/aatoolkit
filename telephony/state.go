@@ -11,7 +11,7 @@ import (
 )
 
 // MaxSilenceMS is how long the session waits, hearing no VAD speech events,
-// before starting call termination (SOP-125 Observable behavior #3).
+// before starting call termination.
 //
 // The clock runs from the caller's most recent speech onset, not their first
 // (see withSpeechReset), so this is dead air after they genuinely stop -- 20s
@@ -19,7 +19,7 @@ import (
 // and think mid-call.
 const MaxSilenceMS = 15000
 
-// MaxUtteranceMS caps a single continuous utterance (SOP-156). While the
+// MaxUtteranceMS caps a single continuous utterance. While the
 // caller speaks without reaching end-of-utterance, the utterance timer runs;
 // on expiry the engine plays the forced-stop clip and hangs up. 45s is long enough
 // for any genuine turn and short enough that a caller who holds the line open
@@ -27,7 +27,7 @@ const MaxSilenceMS = 15000
 // per-process by AATOOLKIT_MAX_UTTERANCE_MS, and per-session by WithMaxUtteranceMS.
 const MaxUtteranceMS = 45000
 
-// MaxTurnMS caps a whole turn (SOP-161) -- the caller's entire stretch of
+// MaxTurnMS caps a whole turn -- the caller's entire stretch of
 // speaking before the engine takes her turn, spanning any pauses in between.
 // Unlike MaxUtteranceMS (which resets on every end-of-utterance), this timer
 // runs from the turn's first speech onset until completeTurn, so a caller
@@ -39,8 +39,7 @@ const MaxTurnMS = 60000
 
 // MarkEchoGraceMS is the only tunable knob in the mark-echo timeout
 // derivation: the margin added atop the farewell clip's own playout
-// duration to give Twilio a chance to echo the mark back (SOP-125
-// Observable behavior #4).
+// duration to give Twilio a chance to echo the mark back.
 const MarkEchoGraceMS = 500
 
 // MarkEchoTimeout derives how long to wait for Twilio's mark-echo after
@@ -84,10 +83,10 @@ func StartSTTService(ctx context.Context, svc *sttService) {
 }
 
 // SessionState is a state in the session's total (state, source) transition
-// table (charter: single select loop, SOP-123). AwaitingFullResult,
+// table (charter: single select loop). AwaitingFullResult,
 // Terminating, and AwaitingMarkEcho exist in the enum ahead of the logic
 // that drives them -- their transition handlers are stubs that log "not yet
-// implemented" (SOP-115/G,H own that logic; out of scope here).
+// implemented" (that logic is out of scope here).
 type SessionState int
 
 const (
@@ -276,17 +275,17 @@ func buildTransitionTable() transitionTable {
 
 	// Terminating: never actually dwelt in -- handleIdleTimer performs the
 	// whole send-farewell/send-mark/arm-mark-echo-timer sequence atomically
-	// and returns AwaitingMarkEcho directly (SOP-125). Its row stays entirely
+	// and returns AwaitingMarkEcho directly. Its row stays entirely
 	// stubbed since no event is ever dispatched while "in" it.
 	for _, src := range AllSources {
 		t[StateTerminating][src] = handleNotImplemented
 	}
 
 	// AwaitingMarkEcho: waiting for Twilio to echo the farewell mark back, or
-	// for the mark-echo timeout to fire (SOP-125). The control-plane mark echo
+	// for the mark-echo timeout to fire. The control-plane mark echo
 	// and its timer drive the wait; the inbound data plane (media, and the VAD/
 	// STT it feeds) keeps arriving until the socket closes and is absorbed
-	// silently -- expected teardown traffic, not a gap (SOP-169). Anything else
+	// silently -- expected teardown traffic, not a gap. Anything else
 	// remains a stub.
 	for _, src := range AllSources {
 		t[StateAwaitingMarkEcho][src] = handleNotImplemented
@@ -298,12 +297,12 @@ func buildTransitionTable() transitionTable {
 	t[StateAwaitingMarkEcho][SourceSTTResult] = handleAbsorb
 
 	// Idle timer: fires after MaxSilenceMS of no VAD speech and starts call
-	// termination (SOP-125 Observable behavior #3). Wired into every state
+	// termination. Wired into every state
 	// where a call is actively in progress -- not Terminating,
 	// AwaitingMarkEcho (both mid-termination already), or Closed (terminal).
-	// Idle timer (silence → farewell, SOP-125), the max-utterance cap (speech
-	// too long → forced-stop, SOP-156), and the max-turn cap (a whole turn
-	// too long, across pauses → forced-stop, SOP-161) are the three
+	// Idle timer (silence → farewell), the max-utterance cap (speech
+	// too long → forced-stop), and the max-turn cap (a whole turn
+	// too long, across pauses → forced-stop) are the three
 	// termination timers, wired into the same set of in-progress states by
 	// definition -- not Terminating/AwaitingMarkEcho (already terminating) or
 	// Closed (terminal). One slice, so a sixth live state can never wire one
@@ -315,7 +314,7 @@ func buildTransitionTable() transitionTable {
 	}
 
 	// AwaitingFullResult: this utterance's full pass was dispatched -- acting
-	// on its transcript is SOP-115/G scope. Its result returns the session to
+	// on its transcript is out of scope here. Its result returns the session to
 	// Listening, so the caller's next utterance dispatches its own pass.
 	t[StateAwaitingFullResult][SourceTwilioData] = handleDataFrame
 	t[StateAwaitingFullResult][SourceTwilioControl] = handleControlEvent
@@ -356,7 +355,7 @@ func buildTransitionTable() transitionTable {
 }
 
 // handleDataFrame appends one inbound media payload to the session's turn
-// buffer (SOP-124 Observable behavior #1) and relays it toward the VAD
+// buffer and relays it toward the VAD
 // pipeline (via the session's non-blocking forward buffer -- see
 // Session.run). Only Idle transitions to Listening; every other state that
 // wires this handler (Listening, AwaitingFullResult) keeps accumulating
@@ -376,8 +375,8 @@ func handleDataFrame(s *Session, ev transitionEvent) SessionState {
 }
 
 // handleControlEvent handles a Twilio control-plane event. A "stop" event
-// transitions cleanly to Closed (farewell/mark-echo teardown is SOP-115/H
-// scope -- out of scope here, so stop goes straight to Closed). Anything
+// transitions cleanly to Closed (farewell/mark-echo teardown is
+// out of scope here, so stop goes straight to Closed). Anything
 // else is unexpected in the states this ticket implements and is logged
 // loudly without changing state.
 func handleControlEvent(s *Session, ev transitionEvent) SessionState {
@@ -393,17 +392,17 @@ func handleControlEvent(s *Session, ev transitionEvent) SessionState {
 
 // handleSpeechOnset is VADSpeech's handling, identical in every live state:
 // the caller has started an utterance. This is the "now speaking" edge of the
-// two-phase timer model (SOP-156). The idle/silence timer is cancelled -- it
+// two-phase timer model. The idle/silence timer is cancelled -- it
 // watches silence, and the caller is no longer silent, so it must not fire
 // mid-utterance (the bug that hung a real caller up at 15s) -- and the
 // max-utterance cap is armed to bound this utterance. VADSpeech fires once per
 // utterance, so the cap measures the whole utterance from its start. Sets
-// turnActive = true (SOP-154) -- a no-op write on every onset after the
+// turnActive = true -- a no-op write on every onset after the
 // turn's first, since nothing clears it again until completion. Never
 // changes state; the recognition pass in flight is orthogonal.
 //
 // !s.turnActive, checked here before the assignment below, is exactly "this
-// is the first onset of a new turn" -- so the turn-level cap (SOP-161) arms
+// is the first onset of a new turn" -- so the turn-level cap arms
 // here, guarded by that check, rather than on every onset the way the
 // per-utterance cap does.
 func handleSpeechOnset(s *Session, ev VADEvent) SessionState {
@@ -435,7 +434,7 @@ func handleSpeechOnset(s *Session, ev VADEvent) SessionState {
 // kept talking (observed live in build/logs/server-2026-07-16-11-19-21.log
 // -- one "speech start" logged across a 17-second call, with termination
 // armed from it). VADTurnEnd needs the same uniform treatment for the same
-// reason (SOP-154): a full pass can still be in flight (StateAwaitingFullResult)
+// reason: a full pass can still be in flight (StateAwaitingFullResult)
 // when TurnEndSilenceMS of trailing silence elapses, and a turn-end embedded
 // in only one state's switch would be silently dropped in every other one.
 //
@@ -462,7 +461,7 @@ func withSpeechReset(h transitionHandler) transitionHandler {
 				if s.State() == StateAwaitingFullResult {
 					// Defer completion until the in-flight pass returns; carry
 					// the event so the turn-end decision is recorded then, at
-					// the completion point (SOP-165).
+					// the completion point.
 					s.turnEndPending = true
 					s.turnEndEvent = vev
 					return s.State()
@@ -478,7 +477,7 @@ func withSpeechReset(h transitionHandler) transitionHandler {
 
 // handleListeningVADEvent dispatches turn-taking boundaries to the session's
 // TurnSink directly from the transition table (dispatchTurnSink is gone --
-// SOP-123 subsumes its work here). VADEndOfUtterance dispatches the one full
+// the transition table subsumes its work here). VADEndOfUtterance dispatches the one full
 // pass immediately. VADSilence carries no meaning here. VADSpeech and
 // VADTurnEnd never reach this handler -- withSpeechReset intercepts both for
 // every live state.
@@ -530,8 +529,8 @@ func dispatchFullPass(s *Session, ev VADEvent) SessionState {
 // pass here instead would be worse -- dispatchSTT advances sttReqID, so the
 // first utterance's result would arrive stale and be discarded, trading a
 // dropped short utterance for a dropped long one. Overlapping passes need
-// per-request correlation rather than a single awaited id (SOP-115/H, with
-// barge-in). VADSpeech and VADTurnEnd never reach here: withSpeechReset
+// per-request correlation rather than a single awaited id (left for later,
+// along with barge-in). VADSpeech and VADTurnEnd never reach here: withSpeechReset
 // intercepts both.
 func handleAwaitingFullResultVADEvent(s *Session, ev transitionEvent) SessionState {
 	vev, _ := ev.payload.(VADEvent)
@@ -543,9 +542,9 @@ func handleAwaitingFullResultVADEvent(s *Session, ev transitionEvent) SessionSta
 	// end-of-utterance bookkeeping must still run -- otherwise the cap armed for
 	// this second utterance stays armed and the idle timer stays cancelled after
 	// the caller has finished, and a subsequent silence force-stops the call
-	// instead of ending it with the farewell (SOP-156).
+	// instead of ending it with the farewell.
 	s.onUtteranceEnd()
-	// Still a real end-of-utterance decision, just a dropped one (SOP-164) --
+	// Still a real end-of-utterance decision, just a dropped one --
 	// the interesting mis-cut the dataset wants to see.
 	s.recordEndOfUtterance(vev, false)
 	return s.State()
@@ -553,8 +552,8 @@ func handleAwaitingFullResultVADEvent(s *Session, ev transitionEvent) SessionSta
 
 // handleSTTResult validates an inbound STTResult's correlation identity,
 // logs it, and — for FullPass results — either accumulates the transcript
-// into the turn buffer or flushes the buffer if the turn-end policy fires
-// (SOP-150). A late STTResult whose RequestID does not match the session's
+// into the turn buffer or flushes the buffer if the turn-end policy fires.
+// A late STTResult whose RequestID does not match the session's
 // current awaited request id is silently discarded (D5 logical discard —
 // Charter R8).
 func handleSTTResult(s *Session, ev transitionEvent) SessionState {
@@ -570,7 +569,7 @@ func handleSTTResult(s *Session, ev transitionEvent) SessionState {
 			s.CallSID, res.RequestID, s.sttReqID)
 		// Release the discarded request's dispatch instant so the map stays
 		// cleared-on-result even when a superseded pass's late result arrives
-		// (SOP-167) -- recordSTTResult, which normally deletes it, never runs
+		// -- recordSTTResult, which normally deletes it, never runs
 		// for a discarded result.
 		delete(s.sttDispatchTimes, res.RequestID)
 		return s.State()
@@ -611,7 +610,7 @@ func handleIdleTimer(s *Session, ev transitionEvent) SessionState {
 	return s.terminateWithClip(assets.FarewellULaw)
 }
 
-// handleUtteranceTimeout runs when the max-utterance cap fires (SOP-156): the
+// handleUtteranceTimeout runs when the max-utterance cap fires: the
 // caller has spoken continuously past MaxUtteranceMS, so cut them off. It plays
 // the forced-stop clip and terminates through the same mark-echo flow as the
 // farewell -- only the clip differs, so the mark-echo timeout is derived from
@@ -624,7 +623,7 @@ func handleUtteranceTimeout(s *Session, ev transitionEvent) SessionState {
 	return s.terminateWithClip(assets.AudioForcedStopULaw)
 }
 
-// handleTurnTimeout runs when the max-turn cap fires (SOP-161): the caller's
+// handleTurnTimeout runs when the max-turn cap fires: the caller's
 // whole turn -- possibly spanning several utterances and pauses -- has run
 // longer than MaxTurnMS, so cut them off. Same shape as
 // handleUtteranceTimeout: play the forced-stop clip and terminate through the
@@ -638,7 +637,7 @@ func handleTurnTimeout(s *Session, ev transitionEvent) SessionState {
 
 // onUtteranceEnd is the end-of-utterance bookkeeping shared by every path a
 // caller's utterance can close on: it notifies the TurnSink and reconciles the
-// two-phase termination timers (SOP-156) -- cancel the max-utterance cap and
+// two-phase termination timers -- cancel the max-utterance cap and
 // re-arm the idle/silence timer, so a caller who now stays quiet gets the
 // farewell after MaxSilenceMS rather than the forced-stop after MaxUtteranceMS.
 // It must run on EVERY end-of-utterance, dispatching path or not.
@@ -722,8 +721,8 @@ func handleResponsePlayoutBackstop(s *Session, ev transitionEvent) SessionState 
 	return StateListening
 }
 
-// handleMarkEchoControlEvent covers AwaitingMarkEcho's happy path (SOP-125
-// Observable behavior #4): Twilio's echo of the farewell mark closes the
+// handleMarkEchoControlEvent covers AwaitingMarkEcho's happy path:
+// Twilio's echo of the farewell mark closes the
 // underlying transport and moves to Closed. Anything else -- a stray "stop",
 // or a mark echo whose name doesn't match the one just sent -- is unexpected
 // here and is logged loudly without changing state.
@@ -737,8 +736,8 @@ func handleMarkEchoControlEvent(s *Session, ev transitionEvent) SessionState {
 	return StateClosed
 }
 
-// handleMarkEchoTimeout covers AwaitingMarkEcho's timeout path (SOP-125
-// Observable behavior #4): Twilio never echoed the mark within
+// handleMarkEchoTimeout covers AwaitingMarkEcho's timeout path:
+// Twilio never echoed the mark within
 // MarkEchoTimeout, so the peer did not honor the mark protocol -- log
 // loudly, close the transport anyway, and move to Closed.
 func handleMarkEchoTimeout(s *Session, ev transitionEvent) SessionState {
@@ -764,14 +763,14 @@ type notImplKey struct {
 }
 
 // handleNotImplemented is the stub handler for the termination states'
-// unreachable rows (SOP-115/G,H scope) -- out of scope here per the ticket,
+// unreachable rows -- out of scope here per the ticket,
 // but the table must still be total.
 //
 // Each (state, source) pair is reported once per session. A per-frame source
 // would otherwise repeat itself at the frame rate: AwaitingMarkEcho takes
 // inbound media for the farewell's whole playout, which at 50 frames/sec
 // drowns the control plane in ~100 identical lines. Logging once keeps the
-// gap visible to SOP-115/G,H without the noise.
+// gap visible without the noise.
 func handleNotImplemented(s *Session, ev transitionEvent) SessionState {
 	if s.notImplLogged == nil {
 		s.notImplLogged = make(map[notImplKey]bool)
@@ -794,7 +793,7 @@ func handleClosed(s *Session, ev transitionEvent) SessionState {
 // handleAbsorb silently discards an event and leaves the state unchanged. Used
 // for inputs that are expected but have nothing to act on -- inbound call audio
 // (and the VAD/STT it feeds) that keeps arriving while the session tears down,
-// during the mark-echo wait (SOP-169). Unlike handleClosed it does not force a
+// during the mark-echo wait. Unlike handleClosed it does not force a
 // state change, so the mark-echo wait is preserved.
 func handleAbsorb(s *Session, ev transitionEvent) SessionState {
 	return s.State()

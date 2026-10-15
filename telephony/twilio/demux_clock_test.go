@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// SOP-152 follow-up. The data plane reports how long a drop episode lasted,
+// The data plane reports how long a drop episode lasted,
 // and that duration is the whole point of the log line: "dropped=3" says almost
 // nothing on its own, while "dropped=3 duration=4s" is the difference between a
 // momentary blip and a call that spent four seconds shedding the caller's

@@ -19,7 +19,7 @@ import (
 // carrier has finished playing what was sent").
 //
 // The classic path has answered "has everything I sent actually played?" since
-// SOP-125: Session.sendMarkAndArmEcho writes a Twilio mark after a clip and
+// its mark-echo flow landed: Session.sendMarkAndArmEcho writes a Twilio mark after a clip and
 // handleMarkEchoControlEvent reads the echo as playout-complete. The realtime
 // path dropped the same signal in pumpCarrierToBridge's default: case, so a
 // consumer that wants to hang up after a spoken line had to estimate the

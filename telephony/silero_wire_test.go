@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-// SOP-147. These tests pin the HTTP VAD detector against silero_wire_fixture.json
-// (SOP-146) — the byte-exact request/response oracle from real ONNX Runtime
+// These tests pin the HTTP VAD detector against silero_wire_fixture.json
+// — the byte-exact request/response oracle from real ONNX Runtime
 // inference — plus the failure policy (retry within a sub-buffer deadline, loud
 // error on exhaustion). The detector runs the model out-of-process in the VAD
 // sidecar; these tests need no live sidecar, only the committed fixture.
@@ -148,7 +148,7 @@ func TestSileroRetry(t *testing.T) {
 
 // TestSileroDeadlineExceeded: a sidecar that never answers must make Detect
 // return a non-nil error once the per-inference deadline elapses — the silent
-// `continue` is gone (SOP-147).
+// `continue` is gone.
 func TestSileroDeadlineExceeded(t *testing.T) {
 	block := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

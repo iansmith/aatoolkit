@@ -1,4 +1,4 @@
-// Column formatting for the status table (SOP-19 / design/aa-server-status.md
+// Column formatting for the status table (design/aa-server-status.md
 // §8). Colors use raw stdlib ANSI escapes only — no color dependency.
 package main
 

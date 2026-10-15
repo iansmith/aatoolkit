@@ -228,7 +228,7 @@ func speechThenSilenceProbs(speechN, silenceN int) []float32 {
 	return probs
 }
 
-// --- call termination (SOP-125) ---------------------------------------------
+// --- call termination ---------------------------------------------
 
 // TestMarkEchoTimeoutDerivedFromClip guards that the mark-echo timeout is
 // genuinely derived from the farewell clip's length, not a hardcoded

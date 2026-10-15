@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// These tests describe the expected SOP-18 signal-handling behavior:
+// These tests describe the expected signal-handling behavior:
 //   - SIGINT is swallowed with a hint on the 1st/2nd delivery within a
 //     rolling 2s window, and triggers the same teardown as "bye" on the 3rd.
 //   - SIGTSTP is always swallowed and never advances or resets the SIGINT

@@ -1,5 +1,5 @@
 """Generate onnxruntime reference per-frame speech probabilities for
-`meetings_today.ulaw` (SOP-96): a real recording of "Can you show me my
+`meetings_today.ulaw`: a real recording of "Can you show me my
 meetings today?", 8 kHz mono G.711 mu-law, 10.0 s.
 
 Adapted from
@@ -30,7 +30,7 @@ import onnxruntime as ort
 
 HERE = pathlib.Path(__file__).parent
 # testdata/ -> telephony/ -> aatoolkit/ . The engine no longer vendors the model
-# (SOP-149 removed both third_party/gonnx and the telephony/assets embed), so this
+# (both third_party/gonnx and the telephony/assets embed were removed), so this
 # dev-only regenerator expects it supplied out-of-tree at models/silero_vad/silero_vad.onnx
 # (the sidecar's default path); the sha256 check below rejects any other file. The
 # committed fixtures make regeneration a rare, offline step.
@@ -132,8 +132,8 @@ def main() -> None:
     probs = [f["output"] for f in out]
     print(f"wrote {GOLDENS.name}: {len(out)} frames, prob range [{min(probs):.4f}, {max(probs):.4f}]")
 
-    # --- wire fixture (SOP-146) ---------------------------------------------
-    # The byte-exact request/response oracle for the HTTP detector's tests (SOP-147):
+    # --- wire fixture ---------------------------------------------
+    # The byte-exact request/response oracle for the HTTP detector's tests:
     # a separate file, generated from the same real ONNX Runtime inference, over both
     # the real-audio (meetings_today) and synthetic (silero_goldens) window sets.
     synthetic = json.loads(SYNTHETIC.read_text())

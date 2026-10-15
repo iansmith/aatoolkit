@@ -75,7 +75,7 @@ func runSignalLoop(sigCh <-chan os.Signal, out io.Writer, engine Engine, exit fu
 	}
 }
 
-// watchSignals installs the SIGINT/SIGTSTP handling described in SOP-18:
+// watchSignals installs the SIGINT/SIGTSTP handling:
 // SIGTSTP is trapped and ignored, and a burst of 3 SIGINTs within ~2s
 // tears down everything the supervisor owns (the same path as "bye") and
 // exits. Intended to run on its own goroutine from main, independent of

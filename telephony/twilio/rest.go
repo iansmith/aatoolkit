@@ -11,7 +11,7 @@ import (
 )
 
 // defaultBaseURL is Twilio's production REST API host, used when RESTClient.BaseURL
-// is empty. Tests (and SOP-188's CLI fake mode) override BaseURL to point at a local
+// is empty. Tests (and the CLI's fake mode) override BaseURL to point at a local
 // capture server instead.
 const defaultBaseURL = "https://api.twilio.com"
 
@@ -32,7 +32,7 @@ type RESTClient struct {
 	KeySecret  string
 
 	// BaseURL defaults to defaultBaseURL when empty. Overriding it is the test/fake
-	// seam (SOP-188 points it at a local capture server).
+	// seam (the CLI's fake mode points it at a local capture server).
 	BaseURL string
 
 	// HTTPClient defaults to http.DefaultClient when nil.

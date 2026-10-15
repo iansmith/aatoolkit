@@ -92,9 +92,9 @@ func mkFrame(v byte) []byte {
 	return f
 }
 
-// --- core: the property that distinguishes the fix from the SOP-50 bug ---
+// --- core: the property that distinguishes the fix from the one-playback-per-frame bug ---
 
-// The whole point of SOP-65: consecutive frames must land in the single sink
+// The whole point of the fix: consecutive frames must land in the single sink
 // back-to-back, in order, forming one continuous μ-law stream — not one
 // playback per frame.
 func TestPlayer_FramesFormOneContinuousStreamInOrder(t *testing.T) {

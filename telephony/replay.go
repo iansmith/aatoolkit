@@ -23,9 +23,9 @@ const pendingSettleTimeout = 30 * time.Second
 const replayTimerBoundMS = 10 * 60 * 1000
 
 // ReplayResult is one utterance's FullPass transcript from a replay run
-// (ticket SOP-153 Observable behavior #1: "emits the ordered FullPass
-// transcripts as JSON" -- one per utterance, the same granularity `build`
-// structures its cumulative-prefix rows over, not one per fused turn).
+// ("emits the ordered FullPass transcripts as JSON" -- one per utterance, the
+// same granularity `build` structures its cumulative-prefix rows over, not one
+// per fused turn).
 type ReplayResult struct {
 	Text string `json:"text"`
 }
@@ -69,7 +69,7 @@ const silencePaddingMargin = 4
 // texts is appended (not merely after the channel handoff), so a
 // pending.Wait() in Replay can never observe fewer results than were
 // actually recorded -- the real completion signal that replaces the fixed
-// sleep this type exists to fix (SOP-153 finding #4).
+// sleep this type exists to fix.
 type utteranceRecorder struct {
 	ch chan STTResult
 	wg *sync.WaitGroup
@@ -207,8 +207,8 @@ func Replay(ctx context.Context, callSID string, audioStream io.Reader, sttClien
 	controlIn := NewBufferedChan[ControlEvent](1)
 
 	// pending tracks the whole VADEndOfUtterance-to-STTResult round trip as
-	// ONE unit, end to end, in place of a guessed sleep (SOP-153 finding
-	// #4): eventObserver adds one the instant an event is
+	// ONE unit, end to end, in place of a guessed sleep: eventObserver
+	// adds one the instant an event is
 	// guaranteed-delivered onto the session's VAD output channel (run()'s
 	// select is now guaranteed to see it) -- whether or not it will
 	// actually result in an STT dispatch (state.go's
@@ -427,7 +427,7 @@ const (
 
 // HarnessVersion tags every row this build of the harness produces (DoD:
 // "rows carry provenance: recording id, VAD config, harness version").
-const HarnessVersion = "SOP-153-v1"
+const HarnessVersion = "replay-harness-v1"
 
 // DatasetRow is one cumulative-prefix row of a replayed recording's FullPass
 // transcripts, labelled structurally rather than by hand.
@@ -446,7 +446,7 @@ type DatasetRow struct {
 // a judgment call. The final, full-recording prefix is `complete`, unless
 // recLabel is `truncated`, in which case the recording never reached a
 // confirmed end and every row -- including the terminal one -- is
-// `incomplete` (ticket SOP-153 "Why": labels are structural, not
+// `incomplete` (labels are structural, not
 // hand-written; re-running at a different --end-silence-ms produces a
 // different, equally correct set because the utterances it structures over
 // change with the VAD config).
@@ -470,9 +470,8 @@ func RowsFromUtterances(recordingID string, recLabel RecordingLabel, utterances 
 }
 
 // VerifierOutcome is one of the four outcomes score reports for a row, in
-// place of raw accuracy (ticket SOP-153 Observable behavior #5: accuracy
-// averages over an asymmetry where one error truncates a caller and the
-// other costs a re-ask).
+// place of raw accuracy (accuracy averages over an asymmetry where one error
+// truncates a caller and the other costs a re-ask).
 type VerifierOutcome string
 
 const (
