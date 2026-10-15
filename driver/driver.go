@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iansmith/aatoolkit/host"
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
@@ -33,9 +34,14 @@ import (
 // llama-server instances, no proxy. The policy only ever names a tier.
 // ---------------------------------------------------------------------------
 
+// sendTimeout bounds one model request end to end: the connection, the
+// response headers and the whole stream. It composes with the caller's
+// context, so an earlier caller deadline wins.
+const sendTimeout = 300 * time.Second
+
 // Tier describes one tier's llama-server. reasoning=false asks the model to
 // skip its thinking trace; maxTokens caps a single turn so a runaway generation
-// can't burn the whole 300s timeout.
+// can't burn the whole sendTimeout.
 type Tier struct {
 	URL, Model string
 	Reasoning  bool
@@ -52,6 +58,17 @@ type Tier struct {
 	// tool_choice "none" was measured not to. Off by default: the local
 	// servers have not been exercised against an empty tools array.
 	NoTools bool
+	// IncludeUsage, when true, sends "stream_options": {"include_usage": true}
+	// on this tier's chat request (AATK-159), asking the upstream to report
+	// the request's token usage at the end of the stream. Off by default,
+	// because not every OpenAI-compatible upstream accepts the key; with it
+	// off the request body is byte-identical to before the field existed.
+	// Measured on one hosted OpenAI-compatible provider: it accepts the key,
+	// and it also sends a final usage chunk without it. A local mlx-serve has
+	// not been measured, so keep IncludeUsage off on local tiers until it is.
+	// The stream parser reads usage from whichever chunk carries it, whatever
+	// this flag says.
+	IncludeUsage bool
 }
 
 // Host is the driver's concrete host.Host: it turns a (messages, tier) pair
@@ -150,6 +167,30 @@ func (h *Host) Send(contextWindow []byte, tier string) ([]byte, []byte, error) {
 	return h.SendStream(contextWindow, tier, func(string) {})
 }
 
+// SendContext is the context-taking Send (host.ContextSender).
+// Stub (AATK-159): ctx is not used yet.
+func (h *Host) SendContext(ctx context.Context, contextWindow []byte, tier string) ([]byte, []byte, error) {
+	return h.Send(contextWindow, tier)
+}
+
+// SendStreamContext is the context-taking SendStream (host.ContextSender).
+// Stub (AATK-159): ctx is not used yet.
+func (h *Host) SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
+	return h.SendStream(contextWindow, tier, onSegment)
+}
+
+// WithContext returns a host.Host view of h bound to ctx.
+// Stub (AATK-159): the view does not use ctx yet.
+func (h *Host) WithContext(ctx context.Context) host.Host {
+	return &boundHost{Host: h, ctx: ctx}
+}
+
+// boundHost is the view WithContext returns. Stub (AATK-159).
+type boundHost struct {
+	*Host
+	ctx context.Context
+}
+
 // SystemPrompt implements host.Host: the current system prompt, reloaded from
 // its file only when the file changes.
 func (h *Host) SystemPrompt() string { return h.prompt() }
@@ -208,10 +249,13 @@ func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*ht
 // sseChunk is one decoded `data: {...}` line from the chat-completions SSE
 // stream.
 type sseChunk struct {
+	ID      string `json:"id"`
+	Model   string `json:"model"`
 	Choices []struct {
 		Delta        sseDelta `json:"delta"`
 		FinishReason string   `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *sseUsage `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -226,6 +270,15 @@ type sseDelta struct {
 	// an empty stream can say why it ended ("tool_calls", "length"). Not a
 	// JSON field of the delta itself.
 	finishReason string
+	// Stub (AATK-159): not populated yet.
+	model, id string
+	usage     *sseUsage
+}
+
+// sseUsage is a chunk's token usage. Stub (AATK-159).
+type sseUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
 }
 
 // reasoningText returns the delta's reasoning, tolerating both spellings
@@ -322,6 +375,10 @@ type streamState struct {
 	acc                      *segmentAccumulator
 	hasContent               bool
 	finishReason             string // the last non-empty finish_reason seen
+	// Stub (AATK-159): not populated yet.
+	chunks    int
+	model, id string
+	usage     *sseUsage
 }
 
 // processSSELine decodes one SSE line, folds it into st, and calls onSegment
@@ -367,7 +424,7 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 	resp, err := h.postStreamRequest(ctx, ep, body)
 	if err != nil {
