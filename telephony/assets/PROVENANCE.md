@@ -1,4 +1,4 @@
-# Vendored asset provenance (the engine copy)
+# Vendored asset provenance
 
 This directory holds `go:embed`-ded binary assets: the farewell clip and two
 sound-effect clips. All are documented below.

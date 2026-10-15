@@ -28,7 +28,7 @@ const MaxSilenceMS = 15000
 const MaxUtteranceMS = 45000
 
 // MaxTurnMS caps a whole turn -- the caller's entire stretch of
-// speaking before the engine takes her turn, spanning any pauses in between.
+// speaking before the agent takes its turn, spanning any pauses in between.
 // Unlike MaxUtteranceMS (which resets on every end-of-utterance), this timer
 // runs from the turn's first speech onset until completeTurn, so a caller
 // who breaks a long ramble into several sub-cap utterances is still bounded.

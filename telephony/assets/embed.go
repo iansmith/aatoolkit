@@ -8,11 +8,13 @@ import _ "embed"
 // encoded at 8 kHz (1 byte/sample, so len/8000 == seconds). It says
 // "Call me anytime... Bye!" in the voice-out TTS's F5 voice.
 //
-// voice-out is the engine that will speak the engine's replies once that
-// path is built, so sourcing the farewell from it means she will end a
-// call in the voice she spoke it in. Today it is the only thing she says:
-// handleSTTResult logs a transcript and returns, and nothing in this package
-// talks to voice-out at all.
+// voice-out is a supertonic TTS sidecar, the kind of /v1/tts endpoint the
+// driver package's Speak synthesizes through, so an agent whose replies are
+// voiced in voice-out's F5 voice ends the call in the voice it spoke in. The
+// telephony package itself never talks to voice-out. A reply reaches a call
+// as audio frames a consumer hands to ReplyRouter.Route; handleSTTResult does
+// not reply at all: it accumulates FullPass transcripts in the turn buffer and
+// flushes that buffer to the TurnSink when a result ends the turn.
 //
 // PROVENANCE.md records how to regenerate it. Nothing depends on its
 // length: MarkEchoTimeout derives the post-playout wait from
