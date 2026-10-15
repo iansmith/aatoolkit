@@ -48,6 +48,20 @@ func StartHealthServer(addr string) *http.Server {
 	return srv
 }
 
+// TwilioServerOption configures StartTwilioServer (AATK-159).
+type TwilioServerOption func(*twilioServerConfig)
+
+// twilioServerConfig is the resolved option set for StartTwilioServer.
+type twilioServerConfig struct {
+	wrap func(route string, h http.Handler) http.Handler
+}
+
+// WithHandlerWrapper wraps each Twilio route's handler before it is mounted.
+// Stub: not yet applied.
+func WithHandlerWrapper(wrap func(route string, h http.Handler) http.Handler) TwilioServerOption {
+	return func(*twilioServerConfig) {}
+}
+
 // newTwilioMux builds the Twilio-facing routes: /webhook (the Twilio call
 // webhook, s.ServeHTTP), /streams (the Media Streams WebSocket upgrade,
 // s.ServeStreams), /sms/inbound (the inbound-SMS webhook, s.ServeSMS), and
@@ -58,7 +72,7 @@ func StartHealthServer(addr string) *http.Server {
 // already the one the provider reaches. Left off, a consumer's only options are
 // to rebuild this route table on a mux of its own — a copy that stops matching
 // the day a route here changes — or to run a second listener on another port.
-func newTwilioMux(s *twilio.Server) *http.ServeMux {
+func newTwilioMux(s *twilio.Server, opts ...TwilioServerOption) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook", s.ServeHTTP)
 	mux.HandleFunc("/streams", s.ServeStreams)
@@ -71,7 +85,7 @@ func newTwilioMux(s *twilio.Server) *http.ServeMux {
 // serving the routes built by newTwilioMux — which is where they are listed, so
 // adding one is not a two-comment edit.
 // Bind failures are reported to stderr but do not crash the process.
-func StartTwilioServer(addr string, s *twilio.Server) *http.Server {
+func StartTwilioServer(addr string, s *twilio.Server, opts ...TwilioServerOption) *http.Server {
 	mux := newTwilioMux(s)
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
