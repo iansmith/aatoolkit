@@ -22,6 +22,9 @@ enable-aatoolkit
 __pycache__/
 *.pyc
 
+# macOS Finder metadata — bare pattern so it matches at any depth.
+.DS_Store
+
 
 CLAUDE.local.md
 .project-conf-local.toml
