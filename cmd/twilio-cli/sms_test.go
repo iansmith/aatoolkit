@@ -424,7 +424,7 @@ func TestRunSMS_TimesOutWithActionableError(t *testing.T) {
 func TestRunSMSMode_PrintsActionableBaseURLGuidance(t *testing.T) {
 	const want = "TWILIO_API_BASE_URL=http://127.0.0.1:9750"
 
-	got := smsCaptureGuidance(defaultCapturePort)
+	got := smsCaptureGuidance(smsfake.DefaultCapturePort)
 
 	if !strings.Contains(got, want) {
 		t.Errorf("guidance = %q, want it to contain %q", got, want)
@@ -440,7 +440,7 @@ func TestRunSMSMode_PrintsActionableBaseURLGuidance(t *testing.T) {
 // hardcoded 9750 would satisfy it while printing a URL the operator's
 // -capture-port run is not listening on.
 func TestSMSCaptureGuidance_ReflectsNonDefaultPort(t *testing.T) {
-	const port = 9751 // any port that is not defaultCapturePort
+	const port = 9751 // any port that is not smsfake.DefaultCapturePort
 
 	got := smsCaptureGuidance(port)
 
@@ -448,8 +448,8 @@ func TestSMSCaptureGuidance_ReflectsNonDefaultPort(t *testing.T) {
 	if !strings.Contains(got, want) {
 		t.Errorf("guidance for -capture-port %d = %q, want it to contain %q", port, got, want)
 	}
-	if strings.Contains(got, strconv.Itoa(defaultCapturePort)) {
-		t.Errorf("guidance for -capture-port %d = %q, still names the default port %d", port, got, defaultCapturePort)
+	if strings.Contains(got, strconv.Itoa(smsfake.DefaultCapturePort)) {
+		t.Errorf("guidance for -capture-port %d = %q, still names the default port %d", port, got, smsfake.DefaultCapturePort)
 	}
 }
 
@@ -679,8 +679,8 @@ func TestRunSMS_SecondCallWaitsForItsOwnReply(t *testing.T) {
 // straight into a timeout. A mutation splitting the two now has nowhere to hide:
 // startCapture takes one port, and runSMSMode has no second value to give it.
 func TestStartCapture_GuidanceNamesThePortActuallyBound(t *testing.T) {
-	// Deliberately not defaultCapturePort: a guidance line that hardcoded the
-	// default would pass against the default and fail here.
+	// Deliberately not smsfake.DefaultCapturePort: a guidance line that
+	// hardcoded the default would pass against the default and fail here.
 	port := freeTCPPort(t)
 
 	capture, guidance, err := startCapture(port)

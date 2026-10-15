@@ -38,12 +38,21 @@ type fakeEngine struct {
 	viewResult         []string
 	viewErr            error
 	failNotImplemented bool
+
+	// upNotify, when non-nil, is sent each Up call's name after the call is
+	// recorded. A test that runs the code under test on its own goroutine
+	// waits on this instead of polling upCalls, which that goroutine writes.
+	// Give it enough buffer for the calls expected, or Up blocks.
+	upNotify chan string
 }
 
 func (f *fakeEngine) Status() []ServerStatus { return f.statuses }
 
 func (f *fakeEngine) Up(name string) error {
 	f.upCalls = append(f.upCalls, name)
+	if f.upNotify != nil {
+		f.upNotify <- name
+	}
 	if f.failNotImplemented {
 		return fmt.Errorf("not implemented: not supported by this lifecycle engine yet")
 	}
