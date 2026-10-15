@@ -95,8 +95,9 @@ func TestDecodeSSELine_ChoicelessChunkCarriesUsage(t *testing.T) {
 
 // TestProcessSSELine_UsageChunkKeepsFinishReason: folding a stream into
 // streamState counts every decoded chunk, keeps the first non-empty model and
-// id and the last usage, and a final choice-less usage chunk leaves the
-// content and the finish reason the earlier chunks set.
+// id and the last non-nil usage, and a choice-less usage chunk after the
+// finish chunk leaves the content and the finish reason the earlier chunks
+// set. The trailing chunk with "usage": null must not clear the usage.
 func TestProcessSSELine_UsageChunkKeepsFinishReason(t *testing.T) {
 	st := &streamState{acc: newSegmentAccumulator(minSegmentChars)}
 	lines := []string{
@@ -104,6 +105,7 @@ func TestProcessSSELine_UsageChunkKeepsFinishReason(t *testing.T) {
 		`data: {"id":"r1","model":"m1","choices":[{"delta":{"content":"Hello"},"finish_reason":null}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
 		`data: {"id":"r2","model":"m2","choices":[{"delta":{},"finish_reason":"length"}],"usage":null}`,
 		`data: {"id":"r2","model":"m2","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":8,"total_tokens":18}}`,
+		`data: {"id":"r3","model":"m3","choices":[],"usage":null}`,
 		``,
 		`data: [DONE]`,
 	}
@@ -112,14 +114,14 @@ func TestProcessSSELine_UsageChunkKeepsFinishReason(t *testing.T) {
 			t.Fatalf("processSSELine(%q): %v", line, err)
 		}
 	}
-	if st.chunks != 4 {
-		t.Errorf("chunks = %d, want 4 (blank and [DONE] lines are not chunks)", st.chunks)
+	if st.chunks != 5 {
+		t.Errorf("chunks = %d, want 5 (blank and [DONE] lines are not chunks)", st.chunks)
 	}
 	if st.model != "m1" || st.id != "r1" {
 		t.Errorf("model, id = %q, %q; want the first non-empty: m1, r1", st.model, st.id)
 	}
 	if st.usage == nil || *st.usage != (sseUsage{PromptTokens: 10, CompletionTokens: 8}) {
-		t.Errorf("usage = %+v, want the last one seen: {PromptTokens:10 CompletionTokens:8}", st.usage)
+		t.Errorf("usage = %+v, want the last non-nil one: {PromptTokens:10 CompletionTokens:8}", st.usage)
 	}
 	if st.finishReason != "length" {
 		t.Errorf("finishReason = %q; the usage chunk must not overwrite length", st.finishReason)
