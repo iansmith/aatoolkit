@@ -149,7 +149,8 @@ func TestServeHTTP_AnswerCallInvalidToIsEmpty(t *testing.T) {
 	}
 }
 
-// A hook that declines leaves the stream TwiML unchanged.
+// A hook that lets the call through (refuse=false) leaves the stream TwiML
+// unchanged, and its say text is not used.
 func TestServeHTTP_AnswerCallFalseStreams(t *testing.T) {
 	rec := &answerCallRecorder{say: "ignored", refuse: false}
 	s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss", AnswerCall: rec.hook}
