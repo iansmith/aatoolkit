@@ -59,7 +59,7 @@ func HandleStreamWithOpts(ctx context.Context, conn *websocket.Conn, start Frame
 // telephony.WithVADFactory and telephony.WithTurnSink on top of the
 // data/control SessionOptions handleStream itself supplies, so a session's
 // VAD/turn-taking behavior is deterministic and observable in tests while
-// its inbound wiring always goes through a real Demux (SOP-120).
+// its inbound wiring always goes through a real Demux.
 //
 // startedAt is this stream's wall-clock start, read once by the exported
 // wrappers above and passed down rather than sampled here -- see NewTap for
@@ -87,8 +87,7 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	// pumpDataPlane (inbound) and dataPlaneOutput.Send (outbound) below --
 	// the one place holding the same payload the session is about to
 	// receive/send, so what gets recorded and what the session heard/said
-	// cannot diverge (SOP-152 Observable behavior 2 -- "byte-identical to
-	// the payloads delivered to the session").
+	// cannot diverge ("byte-identical to the payloads delivered to the session").
 	// Duplex, by taking WithChannels' default: this session sees both
 	// directions, and pumpDataPlane's WriteIn/DrainOut pair below is the
 	// inbound frame clock that keeps the two recordings aligned.
@@ -115,7 +114,7 @@ func handleStream(ctx context.Context, conn *websocket.Conn, start Frame, starte
 	// off or no tap dir is set. The session flushes the recorder on Close.
 	opts = append(opts, telephony.WithFileDecisionRecorderFromEnv(
 		tapDir, start.StreamSID, start.CallSID, tapLabelFromEnv(), telephony.DefaultVADConfig(), os.Stderr))
-	// Conversation transcript summary (SOP-168): printed to stderr at end of
+	// Conversation transcript summary: printed to stderr at end of
 	// call, and written to <streamSID>.transcript.txt when a tap dir is set. The
 	// agent role label is consumer-injected via AATOOLKIT_AGENT_LABEL.
 	opts = append(opts,

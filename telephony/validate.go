@@ -13,7 +13,7 @@ import (
 // failing hard (a non-nil error) if the detector can't be built or produces an
 // implausible result. A consumer calls this once before accepting calls,
 // passing the same factory it wires via WithVADFactory (e.g.
-// NewVADClient(url).Detector()) — since SOP-147 the detector is the out-of-
+// NewVADClient(url).Detector()) — the detector is now the out-of-
 // process sidecar, so the self-test also confirms the sidecar answers.
 func ValidateVAD(factory func() (VADDetector, error)) error {
 	return validateVAD(factory)

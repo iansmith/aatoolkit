@@ -341,8 +341,6 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	}
 }
 
-// --- SOP-126 ---
-
 // withFakeMic overrides the package-level streamMic seam for the duration of
 // the test, restoring the original afterward. Real mic capture (ffmpeg +
 // avfoundation) is environment-dependent (device permissions, hardware) —
@@ -631,7 +629,7 @@ func TestCLI_MarkEchoRepeats(t *testing.T) {
 
 // TestCLI_ServerClose covers observable behavior 2 (server-initiated
 // hangup): when the server closes the WebSocket, dial() must return without
-// error. This behavior already exists from SOP-125 (see
+// error. This behavior already exists (see
 // TestDial_ReturnsOnServerClose) — this test locks it in under the ticket's
 // required name since dial.go's read loop is modified further by this
 // ticket (mark echo, clear handling) and could regress it.

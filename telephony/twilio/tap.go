@@ -55,7 +55,7 @@ func tapLabelFromEnv() string {
 	return os.Getenv("AATOOLKIT_TAP_LABEL")
 }
 
-// agentLabelFromEnv is the transcript summary's response role label (SOP-168),
+// agentLabelFromEnv is the transcript summary's response role label,
 // injected by the consumer (empty = the engine's generic "agent" default). The
 // engine never embeds a product name; the deployment sets this env var.
 func agentLabelFromEnv() string {

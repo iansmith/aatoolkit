@@ -24,7 +24,7 @@ removed (see History) precisely so there would be a single VAD and a single STT.
   endpoint. That is *why* it is a faithful test tool — it is indistinguishable from
   Twilio at the frame boundary.
 - **Server side**, the telephony session runs VAD (Silero, externalized to a sidecar
-  by default — SOP-145) and STT (`telephony.STTClient.Transcribe` → the whisper
+  by default) and STT (`telephony.STTClient.Transcribe` → the whisper
   sidecar at `/v1/audio/transcriptions`). This is the single VAD and the single STT
   client in the engine.
 

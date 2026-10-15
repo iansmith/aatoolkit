@@ -176,6 +176,26 @@ func TestBuild_TruncatedRecording(t *testing.T) {
 	}
 }
 
+// TestBuild_RowsCarryHarnessVersion pins the harness_version every dataset
+// row is written with. The value lands in the JSON output, so changing it
+// changes what build emits; it is not a refactor.
+func TestBuild_RowsCarryHarnessVersion(t *testing.T) {
+	const want = `"harness_version":"replay-harness-v1"`
+	rows := telephony.RowsFromUtterances("rec-hv", telephony.LabelCompleteTurn, []string{"hello", "there"}, 700)
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2: %+v", len(rows), rows)
+	}
+	for i, row := range rows {
+		b, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("row %d: marshal: %v", i, err)
+		}
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("row %d: JSON %s does not contain %s", i, b, want)
+		}
+	}
+}
+
 // TestBuild_ConfigChangesRows drives the SAME audio through Replay at two
 // different --end-silence-ms values and asserts they produce different
 // utterance (and therefore row) counts -- the DoD claim that the dataset is

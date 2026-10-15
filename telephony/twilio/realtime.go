@@ -820,7 +820,7 @@ func WithVoiceUpdateChanFor(fn func(start Frame) <-chan string) RealtimeOption {
 // the engine had already written, and the carrier echoes it back once that
 // audio has finished playing. WithMarkEchoChan is where the echo arrives.
 //
-// The classic path has answered that question since SOP-125 and this path
+// The classic path has answered that question since its mark-echo flow landed, and this path
 // could not: the backend owns playback here, so nothing local consumed marks
 // and an inbound one was dropped. A consumer can still have a reason to care
 // about the carrier's playout position — ending a call after a spoken line,

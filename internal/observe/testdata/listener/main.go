@@ -3,7 +3,8 @@
 // process-tree tests), and blocks until killed. It is built by the observe
 // package tests via `go build` into a temp dir and exec'd as a real child
 // process — this is the "process the test spawns itself" fixture called for
-// by SOP-15 ("unit-testable against processes the test spawns itself").
+// by the requirement that observe be "unit-testable against processes the
+// test spawns itself".
 package main
 
 import (

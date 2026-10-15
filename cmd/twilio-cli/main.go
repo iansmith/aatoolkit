@@ -204,13 +204,6 @@ func smsWebhookTarget(explicit, configFlag, configEnv, serverFlag, serverEnv str
 	return resolveWebhook(explicit, configFlag, configEnv, serverFlag, serverEnv, "/sms/inbound")
 }
 
-// defaultCapturePort is the port the SMS capture server binds unless
-// -capture-port overrides it. Fixed rather than ephemeral so the operator can
-// launch the server with TWILIO_API_BASE_URL pointed at it *before* the CLI
-// runs; free against every port the fleet config declares, and adjacent to the
-// server's own 9730/9740 pair.
-const defaultCapturePort = 9750
-
 // smsCaptureGuidance returns the operator-facing line printed before the round
 // trip. It states the environment assignment verbatim, because that is the only
 // thing the operator can act on: the server reads TWILIO_API_BASE_URL once at
@@ -253,7 +246,7 @@ func runSMSMode(args []string) {
 	configPath := fs.String("config", "", "path to the fleet config to resolve the webhook target from; overrides $"+configEnvVar)
 	serverFlag := fs.String("server", "", "name of the config server entry to resolve the webhook target from; overrides $"+serverEnvVar)
 	toNumber := fs.String("to", defaultTo, "the Twilio number the SMS was sent to, E.164")
-	capturePort := fs.Int("capture-port", defaultCapturePort, "port the local reply-capture server binds; must match the TWILIO_API_BASE_URL the server was launched with")
+	capturePort := fs.Int("capture-port", smsfake.DefaultCapturePort, "port the local reply-capture server binds; must match the TWILIO_API_BASE_URL the server was launched with")
 	fs.Parse(args)
 
 	from := fs.Arg(0)
@@ -268,7 +261,7 @@ func runSMSMode(args []string) {
 			"  2. run this command; it prints the reply the server sends back\n\n"+
 			"The server reads that variable once at startup, so step 1 cannot be skipped\n"+
 			"or reordered. Requires TWILIO_AUTH_TOKEN in the environment.\n\n",
-			smsfake.BaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", defaultCapturePort)))
+			smsfake.BaseURLEnv(fmt.Sprintf("http://127.0.0.1:%d", smsfake.DefaultCapturePort)))
 		fs.PrintDefaults()
 		os.Exit(1)
 	}
