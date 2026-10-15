@@ -21,10 +21,10 @@ import (
 // behavior and fail against the stubs in tap.go.
 //
 // The tap exists to capture real telephony audio for the probe dataset:
-// mu-law over the phone network is what turns "I can't pick up the
-// kids" into "I can help you", and no mic recording reproduces that. Its
-// governing constraint is that it must be invisible -- off by default, and
-// incapable of harming a call when on.
+// mu-law over the phone network is what makes the transcriber hear a
+// similar-sounding but different phrase from the one spoken, and no mic
+// recording reproduces that. Its governing constraint is that it must be
+// invisible -- off by default, and incapable of harming a call when on.
 //
 // Recordings are keyed by streamSid, not CallSID: streamSid uniquely
 // identifies a Media Streams connection, and a reconnect is a new connection

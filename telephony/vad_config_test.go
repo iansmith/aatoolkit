@@ -3,8 +3,8 @@ package telephony
 import "testing"
 
 // AATK-9: the default end-of-utterance silence is 700ms, reverted from 900ms. AATK-3 had
-// raised it to 900 to stop a Whisper phrase-break hallucination (dataset D5, "the plumber
-// still hasn't called back" → "has to do it"), but that hallucination was the AATK-8
+// raised it to 900 to stop a Whisper phrase-break hallucination (a manual-test utterance cut
+// mid-clause, transcribed with an invented ending), but that hallucination was the AATK-8
 // cold-start VAD bug (Silero fed a bare 256-sample window with no 64-sample context), not a
 // 700 effect. With AATK-8 fixed, a 700/900/1050 re-sweep over the fix-clean set is
 // content-identical, so 700 is restored (its value before AATK-3, lower turn-taking latency). This
