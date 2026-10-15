@@ -1008,3 +1008,35 @@ func TestModelSpan_NoProviderReadsNoClock(t *testing.T) {
 		t.Errorf("with no provider issued = %v and now() = %v; want the zero time for both", issued, at)
 	}
 }
+
+// TestModelSpan_FinishedMarksReadNoClock: on a recording span, the per-line
+// time is read only while a first-arrival mark is pending. After the first
+// chunk it is still read, because the first content may come later; once
+// both marks are taken it is the zero time, so the rest of the stream reads
+// no clock per line.
+func TestModelSpan_FinishedMarksReadNoClock(t *testing.T) {
+	recording := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = recording.Shutdown(context.Background()) })
+	st := &streamState{acc: newSegmentAccumulator(minSegmentChars)}
+	_, call := startModelSpan(context.Background(), recording, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+	defer call.end(st, 512, traceWindow, "")
+	call.requestSent()
+
+	at := call.now()
+	if at.IsZero() {
+		t.Fatal("control: before any line, now() is the zero time; want a clock read")
+	}
+	st.chunks = 1
+	call.observe(st, false, false, at)
+	if at = call.now(); at.IsZero() {
+		t.Error("after the first chunk, with no content yet, now() is the zero time; want a clock read")
+	}
+	st.chunks, st.hasContent = 2, true
+	call.observe(st, true, false, at)
+	if !call.sawChunk || !call.sawContent {
+		t.Fatalf("marks taken: chunk %v, content %v; want both", call.sawChunk, call.sawContent)
+	}
+	if at := call.now(); !at.IsZero() {
+		t.Errorf("with both marks taken, now() = %v; want the zero time", at)
+	}
+}
