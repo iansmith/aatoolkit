@@ -493,6 +493,55 @@ func TestTraceSource_CaptureVariableReadOnlyThroughGetenv(t *testing.T) {
 	}
 }
 
+// TestTraceSource_ClockReadOnlyInModelCallMarks: the package's non-test
+// files read the clock -- time.Now, time.Since or time.Until, called or
+// taken as a value -- only in modelCall's requestSent and now, the two marks
+// TestModelSpan_NoProviderReadsNoClock shows skip the clock when the span is
+// not recording. So nothing else on the send path, a span's end included,
+// reads it for tracing. Each of the two must read it, so the rule is not
+// vacuous.
+func TestTraceSource_ClockReadOnlyInModelCallMarks(t *testing.T) {
+	fset := token.NewFileSet()
+	files := parsePackageFiles(t, fset)
+	clockReads := map[string]bool{"Now": true, "Since": true, "Until": true}
+	allowed := map[string]int{"requestSent": 0, "now": 0}
+	for path, f := range files {
+		for _, d := range f.Decls {
+			fn, isFunc := d.(*ast.FuncDecl)
+			mark := ""
+			if isFunc && path == "trace.go" && fn.Recv != nil && len(fn.Recv.List) == 1 {
+				if star, ok := fn.Recv.List[0].Type.(*ast.StarExpr); ok {
+					if id, ok := star.X.(*ast.Ident); ok && id.Name == "modelCall" {
+						if _, ok := allowed[fn.Name.Name]; ok {
+							mark = fn.Name.Name
+						}
+					}
+				}
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "time" || !clockReads[sel.Sel.Name] {
+					return true
+				}
+				if mark != "" {
+					allowed[mark]++
+				} else {
+					t.Errorf("%s: reads the clock with time.%s outside modelCall's requestSent and now", fset.Position(sel.Pos()), sel.Sel.Name)
+				}
+				return true
+			})
+		}
+	}
+	for name, n := range allowed {
+		if n == 0 {
+			t.Errorf("control: modelCall.%s reads no clock, so this rule cannot tell its read from any other", name)
+		}
+	}
+}
+
 // TestModelSpan_ErrorStatusAndType: every failure ends its span with status
 // Error, an empty description, and the error.type of its kind, and the error
 // returned to the caller is the text it always was.

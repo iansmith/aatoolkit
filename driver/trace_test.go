@@ -802,10 +802,13 @@ func TestModelSpan_NoProviderReadsNoCaptureVariable(t *testing.T) {
 	})
 }
 
-// TestModelSpan_NoProviderReadsNoClock: with no provider, a call's span reads
-// no clock: marking the request sent records no time, and the per-line time
-// is the zero time. The control shows both read the clock on a recording
-// span.
+// TestModelSpan_NoProviderReadsNoClock: with no provider, tracing adds no
+// clock read to a call. TestTraceSource_ClockReadOnlyInModelCallMarks keeps
+// every clock read in the package in modelCall's requestSent and now; this
+// test shows both skip the clock when the span is not recording: marking the
+// request sent records no time, and the per-line time is the zero time. The
+// control shows both read the clock on a recording span. (The request's own
+// timeout, context.WithTimeout, reads the clock as it did before tracing.)
 func TestModelSpan_NoProviderReadsNoClock(t *testing.T) {
 	marks := func(h *Host) (issued, at time.Time) {
 		_, call := startModelSpan(context.Background(), h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
