@@ -61,16 +61,18 @@ tune VAD thresholds against it.
   reproduces this timeline exactly was removed with it. `TestReplay_SidecarE2E`
   now reads the snapshot only to count its end-of-utterance events.
 
-  **This timeline is tied to `defaultVADConfig`'s thresholds, so a deliberate
-  tuning change moves it — and the diff is the check.** Every event's
-  `window_index` is a threshold crossing; changing a threshold shifts exactly
-  the events downstream of it, by exactly the arithmetic, and nothing else.
-  Before accepting a new snapshot, predict the shift and confirm the diff
-  matches. If more events move than the arithmetic accounts for — or the event
-  count changes — that is a regression wearing a tuning change's clothes, and
-  the golden is doing its job.
+  **Nothing checks this timeline event by event any more.** The snapshot matches
+  `defaultVADConfig`'s current thresholds (`EndSilenceMS = 700`, end-of-utterance
+  at window 235), but no script in this repo regenerates it, so a tuning change
+  leaves the file as it is. `TestReplay_SidecarE2E` would notice only a change in
+  the number of end-of-utterance events; a shifted `window_index` or a moved
+  onset passes. Updating the snapshot after a VAD change is a manual edit.
 
-  Its history, as a worked example:
+  While the exact-timeline test existed, a deliberate tuning change moved the
+  snapshot and the diff was the check. Every event's `window_index` is a
+  threshold crossing, so changing a threshold shifted exactly the events
+  downstream of it, by exactly the arithmetic, and nothing else. Its history
+  from that time, as a worked example:
 
   | when | change | effect on this golden |
   |---|---|---|
