@@ -12,7 +12,7 @@ import (
 // stale override (see render.go's formatStateCell) is applied. Values are
 // the literal display tokens the status table renders
 // (design/aa-server-status.md §8): StateStray and StateBlocked are uppercase to
-// match the ticket's inline-annotation examples, the rest lowercase.
+// match §8's inline-annotation examples, the rest lowercase.
 type ServerState string
 
 const (
@@ -38,9 +38,8 @@ type PortStatus struct {
 }
 
 // ServerStatus is one row of the status table (design/aa-server-status.md
-// §8). PID, Health, Ports, and the anomaly fields are placeholders until the
-// reconciliation engine (a downstream ticket) supplies real observed data —
-// StubEngine.Status() below leaves them zero-valued.
+// §8). PID, Health, Ports, and the anomaly fields are observed data that
+// RealEngine supplies; StubEngine.Status() below leaves them zero-valued.
 type ServerStatus struct {
 	Name    string
 	Type    config.ServerType
@@ -61,8 +60,8 @@ type ServerStatus struct {
 	// renders "up (disabled)" in yellow rather than red STRAY, which is
 	// reserved for foreign processes occupying a disabled server's slot.
 	OwnedDisabled bool
-	// Stale marks the underlying observation as stale (source-staleness
-	// probe — placeholder until that ticket lands). When true it overrides
+	// Stale marks the underlying observation as stale (the source-staleness
+	// probe, lifecycle.ProbeStaleness). When true it overrides
 	// every other STATE rendering with a plain yellow "STALE".
 	Stale bool
 	// AnomalyDetail is the parenthetical detail text rendered alongside the

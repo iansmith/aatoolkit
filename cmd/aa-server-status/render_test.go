@@ -39,7 +39,7 @@ func TestFormatPorts_EmptyRendersPlaceholder(t *testing.T) {
 func TestFormatPorts_UnexpectedExtraListenerRendersExactAnnotation(t *testing.T) {
 	got := formatPorts([]PortStatus{{Port: 8081, Unexpected: true}})
 	if got != "+8081 ✗unexpected" {
-		t.Fatalf("expected ticket's literal extra-listener annotation, got %q", got)
+		t.Fatalf("expected §8's literal extra-listener annotation, got %q", got)
 	}
 }
 
@@ -59,9 +59,8 @@ func TestFormatHealth_EmptyRendersPlaceholder(t *testing.T) {
 // error; these cover states that must NOT be colored red/green/yellow) ---
 
 func TestFormatStateCell_UnrecognizedStateIsUncoloredPassthrough(t *testing.T) {
-	// The stub engine reports "unknown" today (real reconciliation is a
-	// downstream ticket) — it must not be misclassified into any of the
-	// five defined colors.
+	// The stub engine reports "unknown" (it does no real reconciliation) —
+	// it must not be misclassified into any of the five defined colors.
 	got := formatStateCell(ServerStatus{State: "unknown"})
 	if strings.Contains(got, "\x1b[") {
 		t.Fatalf("expected an unrecognized state to render uncolored, got %q", got)
@@ -273,7 +272,7 @@ func TestFormatStateCell_DisabledRendersDim(t *testing.T) {
 func TestFormatStateCell_StrayWithForeignDetailRendersTicketExample(t *testing.T) {
 	got := formatStateCell(ServerStatus{State: StateStray, AnomalyDetail: "pid 9999, foreign"})
 	if !strings.Contains(got, "STRAY (pid 9999, foreign)") {
-		t.Fatalf("expected the ticket's exact STRAY annotation text, got %q", got)
+		t.Fatalf("expected §8's exact STRAY annotation text, got %q", got)
 	}
 	if !strings.Contains(got, ansiRed) {
 		t.Fatalf("expected STRAY rendered red, got %q", got)
@@ -283,7 +282,7 @@ func TestFormatStateCell_StrayWithForeignDetailRendersTicketExample(t *testing.T
 func TestFormatStateCell_BlockedWithDetailRendersTicketExample(t *testing.T) {
 	got := formatStateCell(ServerStatus{State: StateBlocked, AnomalyDetail: "pid 7777 — not ours"})
 	if !strings.Contains(got, "BLOCKED (pid 7777 — not ours)") {
-		t.Fatalf("expected the ticket's exact BLOCKED annotation text, got %q", got)
+		t.Fatalf("expected §8's exact BLOCKED annotation text, got %q", got)
 	}
 	if !strings.Contains(got, ansiRed) {
 		t.Fatalf("expected BLOCKED rendered red, got %q", got)

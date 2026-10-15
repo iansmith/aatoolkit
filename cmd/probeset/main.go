@@ -330,16 +330,15 @@ func readDatasetRows(path string) ([]telephony.DatasetRow, error) {
 	return rows, nil
 }
 
-// promptVerifier is score's CLI-level Verifier. This ticket owns the
-// harness -- Score's aggregation and four-outcome reporting, fully
-// implemented and independently tested (TestScore_ReportsOutcomes) against
-// a fixed fake Verifier -- not the verifier's actual prompt-calling
-// semantics, which the ticket's own Out of scope section assigns
-// elsewhere ("Do NOT wire the verifier into the server"). This stub
-// exists so `probeset score`'s CLI is otherwise complete (flags, dataset
-// loading, prompt-file loading, N-pass looping) and fails loudly with a
-// clear, actionable message instead of fabricating verdicts, until a real
-// verifier is supplied.
+// promptVerifier is score's CLI-level Verifier. The harness covers Score's
+// aggregation and four-outcome reporting -- fully implemented and
+// independently tested (TestScore_ReportsOutcomes) against a fixed fake
+// Verifier -- but not the verifier's actual prompt-calling semantics, which
+// are outside it; the verifier is deliberately not wired into the server.
+// This stub exists so `probeset score`'s CLI is otherwise complete (flags,
+// dataset loading, prompt-file loading, N-pass looping) and fails loudly
+// with a clear, actionable message instead of fabricating verdicts, until a
+// real verifier is supplied.
 func promptVerifier(prompt string) telephony.Verifier {
 	_ = prompt // a real verifier will use this; the stub doesn't
 	return func(_ context.Context, promptFile string, _ telephony.DatasetRow) (telephony.VerifierOutcome, error) {

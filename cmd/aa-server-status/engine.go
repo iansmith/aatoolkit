@@ -1499,10 +1499,10 @@ func (e *RealEngine) Command(name string) (string, []string, error) {
 }
 
 // Logs returns the not-implemented error — full log retrieval (reading back
-// build/logs/<name>-<ts>.log content) is out of this ticket's scope; the
-// `logs <name>` verb resolving a path is covered by internal/lifecycle's
-// NewestLog, wired by a future ticket if/when the REPL needs it beyond what
-// build/logs already gives operators via the filesystem directly.
+// build/logs/<name>-<ts>.log content) is not implemented; the `logs <name>`
+// verb resolving a path is covered by internal/lifecycle's NewestLog, to be
+// wired if/when the REPL needs it beyond what build/logs already gives
+// operators via the filesystem directly.
 func (e *RealEngine) Logs(name string) ([]string, error) {
 	return nil, notImplementedErr("logs")
 }

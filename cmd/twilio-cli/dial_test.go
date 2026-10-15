@@ -472,7 +472,7 @@ func dialCtx(t *testing.T, timeout time.Duration) context.Context {
 	return ctx
 }
 
-// TestCLI_MarkEcho covers observable behavior 1: dial() estimates the
+// TestCLI_MarkEcho covers mark echo: dial() estimates the
 // playout duration of preceding downlink audio from byte count (8 kHz
 // μ-law) and echoes the mark back to the server after that delay.
 func TestCLI_MarkEcho(t *testing.T) {
@@ -627,12 +627,11 @@ func TestCLI_MarkEchoRepeats(t *testing.T) {
 	}
 }
 
-// TestCLI_ServerClose covers observable behavior 2 (server-initiated
-// hangup): when the server closes the WebSocket, dial() must return without
-// error. This behavior already exists (see
-// TestDial_ReturnsOnServerClose) — this test locks it in under the ticket's
-// required name since dial.go's read loop is modified further by this
-// ticket (mark echo, clear handling) and could regress it.
+// TestCLI_ServerClose covers server-initiated hangup: when the server closes
+// the WebSocket, dial() must return without error.
+// TestDial_ReturnsOnServerClose covers the same behavior; this test exists
+// as well because dial.go's read loop also carries the mark-echo and clear
+// handling, either of which could regress it.
 func TestCLI_ServerClose(t *testing.T) {
 	withFakeMic(t, blockingMic)
 
@@ -668,8 +667,8 @@ func TestCLI_ServerClose(t *testing.T) {
 	}
 }
 
-// TestCLI_CallerHangup covers observable behavior 2 (caller-initiated
-// hangup via capture EOF, distinct from Ctrl-C/ctx-cancel, already covered
+// TestCLI_CallerHangup covers caller-initiated hangup (via capture EOF,
+// distinct from Ctrl-C/ctx-cancel, already covered
 // by TestDial_SendsStopFrameOnCancel): when the mic capture stream ends on
 // its own, dial() must send a stop frame before closing — not sit blocked
 // waiting for the next server message forever.
@@ -721,8 +720,8 @@ func TestCLI_CallerHangup(t *testing.T) {
 	}
 }
 
-// TestCLI_NoEchoMarks covers observable behavior 5: --no-echo-marks
-// suppresses mark echoing. Verified differentially: the same mark, sent to
+// TestCLI_NoEchoMarks covers --no-echo-marks, which suppresses mark
+// echoing. Verified differentially: the same mark, sent to
 // two separate dial() calls, is echoed when the flag is absent and is NOT
 // echoed when the flag is present — proving the flag actually changes
 // behavior, rather than merely observing that echoing never happens to be
