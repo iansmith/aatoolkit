@@ -642,12 +642,9 @@ func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []
 		if err := context.Cause(ctx); err != nil {
 			return failed(ctx, streamReadError(err), errTypeStreamRead)
 		}
-		at := call.now()
-		hadChunk, hadContent := st.chunks > 0, st.hasContent
-		if err := processSSELine(scanner.Text(), st, emit); err != nil {
+		if err := foldLine(call, st, scanner.Text(), emit); err != nil {
 			return failed(ctx, err, errTypeDecode)
 		}
-		call.observe(st, hadChunk, hadContent, at)
 	}
 	err = scanner.Err()
 	if cause := context.Cause(ctx); cause != nil {
@@ -670,6 +667,18 @@ func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []
 		onSegment(seg)
 	}
 	return []byte(st.contentBuf.String()), []byte(st.reasoningBuf.String()), "", nil
+}
+
+// foldLine folds one SSE line into st through processSSELine and takes, on
+// call, the first-arrival marks the line produced. The time is read before
+// the line is processed, so the onSegment calls it triggers are not counted,
+// and the marks are taken by a defer, so a panicking onSegment still leaves
+// them for the span.
+func foldLine(call *modelCall, st *streamState, line string, onSegment func(string)) error {
+	at := call.now()
+	hadChunk, hadContent := st.chunks > 0, st.hasContent
+	defer call.observe(st, hadChunk, hadContent, at)
+	return processSSELine(line, st, onSegment)
 }
 
 // streamReadError is the error for a stream that could not be read to its
