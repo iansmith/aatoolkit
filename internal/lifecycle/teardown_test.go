@@ -323,11 +323,10 @@ func TestTeardownAll_AttemptsEveryServer_AggregatesErrors(t *testing.T) {
 // --- Cross-feature interaction ---------------------------------------------------
 
 // TestTeardownAll_ReverseConfigOrder confirms the multi-server path tears
-// down in the reverse of the configured order — the ticket is explicit
-// that this reversal belongs only to the multi-server function, not to
-// Teardown itself. TeardownAll builds its Results slice in the order it
-// actually attempts each server, so the returned order is itself the
-// observable evidence.
+// down in the reverse of the configured order — a reversal that belongs
+// only to the multi-server function, not to Teardown itself. TeardownAll
+// builds its Results slice in the order it actually attempts each server,
+// so the returned order is itself the observable evidence.
 func TestTeardownAll_ReverseConfigOrder(t *testing.T) {
 	portA := freeTestPort(t)
 	procA := spawnTdlistener(t, portA, 0, false, false)

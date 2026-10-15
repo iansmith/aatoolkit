@@ -139,7 +139,7 @@ func TestNewSession_InitializesFields(t *testing.T) {
 	}
 }
 
-// --- core: the property that defines this ticket ---
+// --- core: data-plane frames reach the VAD ---
 
 // The sequencer must fan a frame arriving on the Twilio data-plane input
 // through to the VAD pipeline, unchanged (observed here via a spy detector).

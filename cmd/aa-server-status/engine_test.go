@@ -637,8 +637,7 @@ func TestFormatTailHint(t *testing.T) {
 // os.Stdout as a side effect (§6.5), and dispatch separately
 // prints whatever error Up() returns — if Up() always prints AND returns an
 // error whose text repeats the same lines, every line would appear twice
-// once dispatch's own print lands on the same stream (PR #69 review
-// finding).
+// once dispatch's own print lands on the same stream.
 func TestRun_Up_MultiServer_PartialFailure_DispatchPrintsEachLineOnce(t *testing.T) {
 	goodPort := freeTestPort(t)
 	badPort := freeTestPort(t)

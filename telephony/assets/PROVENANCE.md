@@ -40,12 +40,11 @@ ffmpeg -i <name>.mp3 -ar 8000 -ac 1 -f mulaw <name>.ulaw
 | Shipped clip | 16644 bytes = 2.08s, 0.42s internal pause |
 
 Regenerate (requires voice-out up — `aa-server-status> voice-out up`):
-
-```sh
-scripts/make_farewell.sh --play        # audition  -> build/farewell.ulaw
-scripts/make_farewell.sh --install     # copy into this directory
-go build -o build/server ./cmd/server  # re-embed
-```
+synthesize the text above through `POST /v1/tts` with the voice and speed
+above, trim the leading and trailing silence, apply the 8 ms fade at each edge,
+encode as 8 kHz mono μ-law, audition the result, and copy it into this
+directory. The next build of anything that imports this package re-embeds it.
+The script that automates these steps is not part of this repo.
 
 ## Why the text has an ellipsis
 
@@ -69,7 +68,7 @@ and an audible click; the 8 ms fades force both edges to zero.
 
 ## Not reproducible byte-for-byte
 
-Supertonic's synthesis is not seeded, so re-running `make_farewell.sh` yields a
-slightly different rendering (duration varies by ~5%) — there is no sha256 to
-pin here. Audition after regenerating.
+Supertonic's synthesis is not seeded, so regenerating yields a slightly
+different rendering (duration varies by ~5%) — there is no sha256 to pin here.
+Audition after regenerating.
 

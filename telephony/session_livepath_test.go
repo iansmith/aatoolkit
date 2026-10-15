@@ -37,7 +37,7 @@ func TestLivePath_StopwordEndsTurn(t *testing.T) {
 
 	// Feed the first utterance: enough frames to cross EndSilenceWindows and
 	// fire VADEndOfUtterance, the one point STT actually dispatches from
-	// (onset-dispatch was removed -- see the ticket comment for why).
+	// (STT is not dispatched at speech onset).
 	for i := 0; i < telephony.EndSilenceWindows()+2; i++ {
 		sendData(t, dataIn, windowFrame(0x80), 5*time.Second)
 		time.Sleep(2 * time.Millisecond)
@@ -143,7 +143,7 @@ func TestLivePath_SilenceTurnEndCompletesTurn(t *testing.T) {
 
 	// Feed the utterance: enough frames to cross EndSilenceWindows and fire
 	// VADEndOfUtterance, the one point STT actually dispatches from
-	// (onset-dispatch was removed -- see the ticket comment for why).
+	// (STT is not dispatched at speech onset).
 	for i := 0; i < telephony.EndSilenceWindows()+2; i++ {
 		sendData(t, dataIn, windowFrame(0x80), 5*time.Second)
 		time.Sleep(2 * time.Millisecond)
@@ -259,8 +259,8 @@ func TestLivePath_IdleStillTerminates(t *testing.T) {
 	}
 }
 
-// TestLivePath_IdleTerminatesFlushesBeforeClip is the ticket's Test
-// Expectations case TestLivePath_IdleStillTerminates couldn't cover: this
+// TestLivePath_IdleTerminatesFlushesBeforeClip covers the case
+// TestLivePath_IdleStillTerminates can't: this
 // session DOES wire STT, so a real utterance completes and its text sits in
 // turnTranscripts when the idle timer fires. terminateWithClip's sendClip
 // writes the farewell clip to dataOut synchronously, AFTER completeTurn()

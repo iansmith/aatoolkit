@@ -484,7 +484,7 @@ func TestSessionUsesTheWallClockByDefault(t *testing.T) {
 	}
 }
 
-// --- Normalization / stopword match (ticket table) ---
+// --- Normalization / stopword match ---
 
 func TestNormalizeTranscript(t *testing.T) {
 	tests := []struct {

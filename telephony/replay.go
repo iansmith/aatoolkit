@@ -22,10 +22,10 @@ const pendingSettleTimeout = 30 * time.Second
 // does.
 const replayTimerBoundMS = 10 * 60 * 1000
 
-// ReplayResult is one utterance's FullPass transcript from a replay run
-// ("emits the ordered FullPass transcripts as JSON" -- one per utterance, the
-// same granularity `build` structures its cumulative-prefix rows over, not one
-// per fused turn).
+// ReplayResult is one utterance's FullPass transcript from a replay run.
+// Replay returns them in order, one per utterance -- the same granularity
+// `build` structures its cumulative-prefix rows over, not one per fused turn
+// -- and `probeset replay` emits that list as JSON.
 type ReplayResult struct {
 	Text string `json:"text"`
 }
@@ -59,8 +59,8 @@ const silencePaddingMargin = 4
 // (StopwordPolicy swallows the "done" utterance entirely, and multiple
 // utterances joined by silence-turn-end collapse into one fused string),
 // a different, coarser granularity than the per-utterance FullPass
-// transcripts Observable behavior #1 and `build`'s cumulative-prefix rows
-// are both defined over.
+// transcripts that Replay's output (see ReplayResult) and `build`'s
+// cumulative-prefix rows are both defined over.
 //
 // Send being unbuffered means it blocks until Session's run loop actually
 // takes the value off the channel; since that loop dispatches a received
@@ -139,10 +139,10 @@ const replayLookahead = 4
 // lookahead, the padding loop could finish -- and Replay proceed to
 // pending.Wait() -- before the final EOU's settlement, and therefore before
 // its pending.Add(), has actually happened. That would silently
-// reintroduce the exact race this ticket's fixed-sleep removal exists to
-// eliminate, with no test likely to catch it except a rare flake. A
-// negative result here fails the build (assigning a negative constant to
-// uint), not the test suite.
+// reintroduce the exact race that replacing the old fixed sleep with the
+// pending WaitGroup exists to eliminate, with no test likely to catch it
+// except a rare flake. A negative result here fails the build (assigning a
+// negative constant to uint), not the test suite.
 const _ = uint(silencePaddingMargin - replayLookahead)
 
 // vadProgressGate is real backpressure between feedReplayAudio's sends and
@@ -188,7 +188,7 @@ func (g *vadProgressGate) release() {
 // production Session -- the same VAD+STT path a live call runs, not a copy
 // -- and returns the ordered FullPass turn transcripts.
 //
-// sttClient is the same STTClient production wires (internal/telephony/stt.go);
+// sttClient is the same STTClient production wires (stt.go);
 // callers pass a real one (NewSTTClient(sttBaseURL)) to drive a genuine
 // whisper sidecar, or one pointed at an httptest server for deterministic
 // tests -- either way it is the identical STTClient.Transcribe code path,
@@ -318,7 +318,7 @@ func Replay(ctx context.Context, callSID string, audioStream io.Reader, sttClien
 // buffer with a non-blocking, drop-on-full send, and blasting an entire
 // recording's frames in with no throttling races it, silently dropping
 // windows and corrupting the VAD's view of the audio (directly threatening
-// Observable behavior #1's determinism and the fidelity gate).
+// Replay's determinism and the VAD fidelity gate, TestReplay_SidecarE2E).
 func feedReplayAudio(ctx context.Context, dataIn TwilioDataPlaneInput, audioStream io.Reader, gate *vadProgressGate) error {
 	buf := make([]byte, replayFrameBytes)
 	for {
@@ -425,8 +425,9 @@ const (
 	RowComplete   RowLabel = "complete"
 )
 
-// HarnessVersion tags every row this build of the harness produces (DoD:
-// "rows carry provenance: recording id, VAD config, harness version").
+// HarnessVersion tags every row this build of the harness produces, so each
+// row carries its provenance: recording id, VAD config (EndSilenceMS), and
+// harness version.
 const HarnessVersion = "replay-harness-v1"
 
 // DatasetRow is one cumulative-prefix row of a replayed recording's FullPass
@@ -490,8 +491,8 @@ type Verifier func(ctx context.Context, promptFile string, row DatasetRow) (Veri
 
 // ScoreReport is score's output: which prompt ran, at which VAD config, over
 // how many rows, and how many rows landed in each of the four outcomes.
-// Deliberately carries no accuracy field (DoD: "score reports the four
-// outcomes, not accuracy").
+// Deliberately carries no accuracy field: score reports the four outcomes,
+// not accuracy (see VerifierOutcome for why).
 type ScoreReport struct {
 	PromptFile   string                  `json:"prompt_file"`
 	EndSilenceMS int                     `json:"end_silence_ms"`

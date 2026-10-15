@@ -117,10 +117,9 @@ func startUtteranceSession(t *testing.T, name string, det *fakeDetector, clock *
 	return s, data, dataOut, sink
 }
 
-// TestUtterance_CapForcesStopAfterMaxMs is the point of the ticket: a caller
+// TestUtterance_CapForcesStopAfterMaxMs is the cap's central case: a caller
 // who talks past the cap is cut off with the forced-stop clip, and the session
-// heads into termination. Fails on current code — no utterance timer is armed,
-// so fakeClock finds nothing to fire at the cap duration.
+// heads into termination.
 func TestUtterance_CapForcesStopAfterMaxMs(t *testing.T) {
 	clock := newFakeClock()
 	det := &fakeDetector{probs: voicedProbs(50)}

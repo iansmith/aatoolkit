@@ -28,10 +28,10 @@ func EventLogEnabled() bool {
 }
 
 // DecisionRecorder receives one structured DecisionEvent per parameterized
-// choice the voice-input path makes (M1: end-of-utterance only). It exists so
-// the parameters we set for dealing with voice input can be evaluated after
-// the fact: each event ties a parameter and its value to a position in the
-// input audio and the effect the choice had.
+// choice the voice-input path makes. It exists so the parameters we set for
+// dealing with voice input can be evaluated after the fact: each event ties a
+// parameter and its value to a position in the input audio and the effect the
+// choice had.
 //
 // Implementations must return promptly from Record: it is called synchronously
 // from the session's single sequencer loop and must not block it (same
@@ -41,8 +41,8 @@ type DecisionRecorder interface {
 	Close() error
 }
 
-// Decision event types and the labels M1 emits. Kept as named constants so the
-// producer (state.go) and any consumer read the same strings.
+// Decision event types and the labels the session emits. Kept as named
+// constants so the producer (state.go) and any consumer read the same strings.
 const (
 	DecisionTypeVAD         = "vad"
 	DecisionTypeCap         = "cap"
@@ -79,8 +79,7 @@ const modelRouteShadowEffect = "shadow only; turn answered unchanged"
 
 // DecisionEvent is one recorded decision. The shape is deliberately flat and
 // JSON-friendly (one object per JSONL line); fields not relevant to a given
-// event type are omitted. M1 populates only the VAD end-of-utterance shape;
-// later milestones add further event types (STT, caps) and any fields they need.
+// event type are omitted.
 //
 // AudioMS is a position in the INPUT audio (derived from the monotonic
 // VAD-window clock), never wall-clock, so the record is stable under replay.

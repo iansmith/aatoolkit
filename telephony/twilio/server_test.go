@@ -49,7 +49,7 @@ type twiMLStream struct {
 	} `xml:"Connect"`
 }
 
-// --- behavior 1: valid request returns Connect/Stream TwiML ---
+// --- valid request returns Connect/Stream TwiML ---
 
 func TestServeHTTP_ValidRequestReturnsStreamTwiML(t *testing.T) {
 	s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss"}
@@ -74,7 +74,7 @@ func TestServeHTTP_ValidRequestReturnsStreamTwiML(t *testing.T) {
 	}
 }
 
-// --- behaviors 2-3: scheme flag drives both advertised scheme and validation scheme ---
+// --- scheme flag drives both advertised scheme and validation scheme ---
 
 func TestServeHTTP_SchemeFromFlag(t *testing.T) {
 	tests := []struct {
@@ -148,7 +148,7 @@ func TestServeHTTP_ZeroSchemeIsSecure(t *testing.T) {
 	}
 }
 
-// --- behavior 4: missing/malformed From rejected with 403 ---
+// --- missing/malformed From rejected with 403 ---
 
 func TestServeHTTP_RejectsBadFrom(t *testing.T) {
 	tests := []struct {
@@ -190,9 +190,8 @@ func TestServeHTTP_RejectsBadFrom(t *testing.T) {
 
 // --- adversary gap: CallSid is logged but not a precondition for 200 ---
 
-// Ticket behavior 1 states CallSid arriving is logged but is NOT a
-// precondition for the 200 — a request with a valid From but no CallSid at
-// all must still succeed.
+// CallSid is logged when it arrives but is NOT a precondition for the 200 —
+// a request with a valid From but no CallSid at all must still succeed.
 func TestServeHTTP_MissingCallSidStillSucceeds(t *testing.T) {
 	s := &twilio.Server{AuthToken: "authtoken", StreamScheme: "wss"}
 	form := url.Values{"From": {"+15105551234"}} // no CallSid field at all
@@ -208,7 +207,7 @@ func TestServeHTTP_MissingCallSidStillSucceeds(t *testing.T) {
 
 // --- adversary gap: E.164 leading-digit boundary ---
 
-// The ticket names the exact pattern ^\+[1-9]\d{1,14}$ — a leading zero after
+// From must match e164Pattern, ^\+[1-9]\d{1,14}$ — a leading zero after
 // the plus is a distinct rejection case from "no plus at all" or "bare plus",
 // and pins the [1-9] (not [0-9]) first-digit requirement specifically.
 func TestServeHTTP_RejectsFromWithLeadingZero(t *testing.T) {

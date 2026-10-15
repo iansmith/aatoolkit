@@ -93,7 +93,7 @@ func TestE164Validation(t *testing.T) {
 	}
 }
 
-// TestWebhookTarget_ExplicitFlagOverridesConfig covers observable behavior 2:
+// TestWebhookTarget_ExplicitFlagOverridesConfig covers flag precedence:
 // an explicit -webhook flag wins outright, even when config resolution would
 // otherwise succeed with a different value.
 func TestWebhookTarget_ExplicitFlagOverridesConfig(t *testing.T) {
@@ -123,8 +123,8 @@ func TestWebhookTarget_ExplicitFlagOverridesEvenBrokenConfig(t *testing.T) {
 	}
 }
 
-// TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent covers observable
-// behavior 1: with no -webhook flag, the target is derived from the merged
+// TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent covers config
+// resolution: with no -webhook flag, the target is derived from the merged
 // config's named server host + webhook port.
 func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 	basePath := writeConfig(t, validServerConfig)
@@ -138,8 +138,8 @@ func TestWebhookTarget_ResolvesFromConfigWhenFlagAbsent(t *testing.T) {
 	}
 }
 
-// TestWebhookTarget_MissingConfigProducesClearError covers observable
-// behavior 3: a missing config file with no -webhook flag must fail with a
+// TestWebhookTarget_MissingConfigProducesClearError covers the missing-config
+// error: a missing config file with no -webhook flag must fail with a
 // clear, actionable error naming the missing file, not a silent fallback.
 func TestWebhookTarget_MissingConfigProducesClearError(t *testing.T) {
 	basePath := filepath.Join(t.TempDir(), "fleet-config.toml")

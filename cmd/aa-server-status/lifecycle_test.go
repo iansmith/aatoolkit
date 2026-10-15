@@ -128,9 +128,9 @@ func TestStubEngine_StatusIncludesConfiguredType(t *testing.T) {
 }
 
 func TestStubEngine_StatusPlaceholdersForUnwiredColumns(t *testing.T) {
-	// Real observation (PID, ports, health, anomalies) is a downstream
-	// reconciliation ticket — until it lands, the stub must supply
-	// harmless zero-valued placeholders rather than fabricating data.
+	// StubEngine does no real observation (PID, ports, health, anomalies) —
+	// RealEngine does — so the stub must supply harmless zero-valued
+	// placeholders rather than fabricating data.
 	cfg := config.Config{Servers: []config.Server{{Name: "server", Enabled: true}}}
 	eng := NewStubEngine(cfg)
 	s := eng.Status()[0]

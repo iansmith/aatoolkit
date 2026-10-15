@@ -42,8 +42,7 @@ type TurnSink interface {
 }
 
 // logTurnSink is the default TurnSink: it just logs each boundary. Useful as
-// a safe default before a real consumer (the Respond pipeline, out of scope
-// for this ticket) is wired in.
+// a safe default until a consumer wires in its own TurnSink.
 type logTurnSink struct {
 	callSID string
 }
@@ -86,8 +85,8 @@ type VADConfig = vadConfig
 // vadCfg is filled from defaultVADConfig() via withDefaults() for every real
 // session. The tap records it so a later replay knows which
 // thresholds produced a recording's live log -- defaultVADConfig() is a
-// moving target (f5cad49 took EndSilenceMS 700 -> 1050) and the value cannot
-// be recovered after the fact. The replay harness is the one caller
+// moving target (one retune took EndSilenceMS 700 -> 1050) and the value
+// cannot be recovered after the fact. The replay harness is the one caller
 // that does override per-session, via WithVADConfig (session.go), so it can
 // drive `--end-silence-ms` without touching this package-wide default.
 func DefaultVADConfig() VADConfig {
@@ -404,7 +403,7 @@ type vadService struct {
 // know every VADEndOfUtterance a replayed recording will ever produce has
 // actually reached the sequencer before it can safely conclude no more STT
 // dispatches are coming and end the call, and a fixed sleep can't stand in
-// for that signal (see internal/telephony/replay.go's vadProgressGate).
+// for that signal (see replay.go's vadProgressGate).
 func newVADService(sessionID string, det vadDetector, cfg vadConfig, inDepth, outDepth int, onWindow ...func(ev VADEvent, emitted bool)) *vadService {
 	ctx, cancel := context.WithCancel(context.Background())
 	in := NewBufferedChan[[]byte](inDepth)

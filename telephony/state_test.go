@@ -127,8 +127,8 @@ func TestSTTResultOutOfOrderIsReported(t *testing.T) {
 	t.Fatalf("expected log output to report the out-of-order STT result (\"unexpected\" or \"mismatch\"), got: %q", logBuf.String())
 }
 
-// TestUnexpectedControlEventLogsAndStaysInState covers the "unexpected
-// input" branch of the ticket's Observable behavior #2: a control-plane
+// TestUnexpectedControlEventLogsAndStaysInState covers handleControlEvent's
+// "unexpected input" branch: a control-plane
 // event that isn't "stop" has no wired handler in Idle/Listening, so it
 // must route to the warn/debug handler -- logging LOUDLY and remaining in
 // state, never panicking or silently dropping.

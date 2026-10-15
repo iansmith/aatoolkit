@@ -14,7 +14,7 @@ import (
 
 // ControlEvent is a Twilio control-plane signal (e.g. "stop") routed to a
 // Session's controlIn field, decoupled from twilio.Frame to avoid an import
-// cycle (internal/telephony/twilio already imports internal/telephony).
+// cycle (telephony/twilio already imports telephony).
 // Twilio-side adapters translate twilio.Frame into ControlEvent.
 type ControlEvent struct {
 	Kind     string
@@ -109,7 +109,7 @@ type ControlOutMessage struct {
 
 // TwilioDataPlaneOutput is the send side of the channel a Session writes
 // outbound media frames to (the ServiceOutput pattern). The concrete
-// implementation (internal/telephony/twilio/output.go) encodes each payload
+// implementation (telephony/twilio/output.go) encodes each payload
 // via EncodeMedia and writes it to the WebSocket; this package only sees the
 // generic interface to avoid an import cycle (twilio already imports
 // telephony).
@@ -117,7 +117,7 @@ type TwilioDataPlaneOutput = ServiceOutput[[]byte]
 
 // TwilioControlPlaneOutput is the send side of the channel a Session writes
 // outbound control-plane messages to (mark/clear). The concrete
-// implementation (internal/telephony/twilio/output.go) encodes each message
+// implementation (telephony/twilio/output.go) encodes each message
 // via EncodeMark/EncodeClear and writes it to the WebSocket.
 type TwilioControlPlaneOutput = ServiceOutput[ControlOutMessage]
 
@@ -334,7 +334,7 @@ func WithTurnSink(sink TurnSink) SessionOption {
 }
 
 // WithDecisionRecorder wires the DecisionRecorder that receives one
-// DecisionEvent per parameterized voice-input choice (M1: end-of-utterance).
+// DecisionEvent per parameterized voice-input choice.
 // Unset, a session uses a no-op recorder (NewSession default) and records
 // nothing. The session owns the recorder's lifecycle: Close flushes it.
 func WithDecisionRecorder(r DecisionRecorder) SessionOption {
@@ -599,7 +599,7 @@ func (s *Session) Start() error {
 	// Validated against the production MaxSilenceMS constant, not the
 	// session's idleTimeoutMS test-seam override (see WithMaxSilenceMS):
 	// this is a config sanity check on the real 700/5000/15000 ordering the
-	// ticket's design rests on, not a runtime assertion against every
+	// session's timer design rests on, not a runtime assertion against every
 	// possible test override -- several existing tests intentionally
 	// compress idleTimeoutMS to fast-forward termination flows unrelated to
 	// VAD timing, and there is no equivalent per-session override for

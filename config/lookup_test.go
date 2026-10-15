@@ -2,7 +2,7 @@ package config
 
 import "testing"
 
-// TestConfig_ServerByName_Found covers observable behavior 1: a caller can
+// TestConfig_ServerByName_Found covers lookup by name: a caller can
 // look up a named server entry without hand-rolling a loop over c.Servers.
 func TestConfig_ServerByName_Found(t *testing.T) {
 	cfg := Config{Servers: []Server{
@@ -41,7 +41,7 @@ func TestConfig_ServerByName_EmptyServers(t *testing.T) {
 	}
 }
 
-// TestServer_WebhookPort_TwoListens covers observable behavior 2: resolving
+// TestServer_WebhookPort_TwoListens covers resolving
 // a named port role (the webhook/streams port) without the caller hardcoding
 // an index into Listens.
 func TestServer_WebhookPort_TwoListens(t *testing.T) {

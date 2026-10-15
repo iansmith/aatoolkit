@@ -26,9 +26,9 @@ import (
 // governing constraint is that it must be invisible -- off by default, and
 // incapable of harming a call when on.
 //
-// Recordings are keyed by streamSid, not CallSID
-// (docs/twilio-media-streams-spec.md:228 -- streamSid uniquely identifies a
-// Media Streams connection; a reconnect is a new connection on the same call).
+// Recordings are keyed by streamSid, not CallSID: streamSid uniquely
+// identifies a Media Streams connection, and a reconnect is a new connection
+// on the same call.
 
 // testStreamStartedAt is the stream start time every test in this package
 // states, whether it builds a Tap directly or drives one through the harness.
@@ -44,7 +44,7 @@ import (
 var testStreamStartedAt = time.Date(2026, 7, 17, 9, 30, 15, 123456789, time.UTC)
 
 // errWriter always fails. It is the injected writer behind the "a broken tap
-// never breaks a call" guarantee (Observable behavior 4). It counts both
+// never breaks a call" guarantee. It counts both
 // writes and closes: a tap that leaks its fd degrades a long-running process,
 // which is the same harm by a slower route.
 type errWriter struct {
@@ -236,10 +236,10 @@ func TestTap_SidecarCountsEveryFrame(t *testing.T) {
 // check it is comparing like with like.
 //
 // The comparison is derived, never hardcoded. No literal threshold appears
-// here: EndSilenceMS is a tuning knob, and a retune took it 1050 -> 700. f5cad49 is
-// the worked example of the cost -- six tests across three packages broke on a
-// tuning change because they had hardcoded 22 = 700ms/32ms, failing in packages
-// that had nothing to do with the cause.
+// here: EndSilenceMS is a tuning knob, and a retune took it 1050 -> 700. The
+// earlier 700 -> 1050 retune is the worked example of the cost -- six tests
+// across three packages broke on that tuning change because they had hardcoded
+// 22 = 700ms/32ms, failing in packages that had nothing to do with the cause.
 func TestTap_SidecarRecordsVADConfig(t *testing.T) {
 	dir := t.TempDir()
 	const streamSID, callSID = "SSsidecar", "CAsidecar"
@@ -272,7 +272,7 @@ func TestTap_SidecarRecordsVADConfig(t *testing.T) {
 
 // --- failure tolerance -------------------------------------------------------
 
-// TestTap_WriteFailureDoesNotKillCall covers Observable behavior 4. A full or
+// TestTap_WriteFailureDoesNotKillCall covers the broken-tap guarantee. A full or
 // read-only disk must be a non-event: Write reports nothing upward (it has no
 // error return by construction), it does not panic, and -- the part that would
 // actually hurt -- a failed write must not wedge the tap into dropping the rest
@@ -594,7 +594,7 @@ func TestTap_ConcurrentWritesRaceFree(t *testing.T) {
 // tap.DrainOut), and once stubbed to compile, all 5 tests failed on their
 // assertions (no .out.ulaw produced, no silence padding, no overlap
 // alignment, no out_truncated sidecar flag). With the implementation
-// restored, all 5 pass and `go test -race ./internal/telephony/` is clean.
+// restored, all 5 pass under the race detector.
 // No assertion in these tests was altered to reach this state.
 
 // inulawPath and outulawPath name the two direction-specific .ulaw files.
@@ -671,8 +671,8 @@ func TestTap_SilenceOnEmptyQueue(t *testing.T) {
 // Strengthened (attempt 8): the original only checked aggregate byte
 // lengths ("both are 4 bytes"), which a DrainOut writing garbled, shifted,
 // or zeroed frames of the right total length would still pass -- exactly
-// the ticket's own Test Expectations line ("assert both channels have
-// energy at the same byte offset"), previously unchecked. Now asserts
+// the property this test exists for (both channels have energy at the
+// same byte offset), previously unchecked. Now asserts
 // pairwise content equality at each overlapping frame's byte offset in
 // both channels, not just that the lengths match.
 func TestTap_BargeInOverlap(t *testing.T) {
@@ -841,12 +841,12 @@ func TestTap_OutOpenFailureDoesNotHaltInboundWrites(t *testing.T) {
 	}
 }
 
-// TestTap_OutboundQueueIsBounded pins the ticket's File map requirement that
-// outQueue be "thread-safe, bounded": under a stalled drain (DrainOut not
-// keeping pace with WriteOut -- e.g. triggered by the isolation bug above,
-// or any other inbound-frame stall) the queue must never grow without
-// limit. Direct field access is deliberate: this is a white-box test in the
-// tap's own package, and the queue has no public accessor by design.
+// TestTap_OutboundQueueIsBounded pins that outQueue is bounded: under a
+// stalled drain (DrainOut not keeping pace with WriteOut -- e.g. triggered
+// by the isolation bug above, or any other inbound-frame stall) the queue
+// must never grow without limit. Direct field access is deliberate: this is
+// a white-box test in the tap's own package, and the queue has no public
+// accessor by design.
 func TestTap_OutboundQueueIsBounded(t *testing.T) {
 	dir := t.TempDir()
 	const streamSID = "SSqueuebound"
