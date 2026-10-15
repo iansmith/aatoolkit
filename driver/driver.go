@@ -27,6 +27,7 @@ import (
 	"github.com/iansmith/aatoolkit/host"
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,9 @@ type Host struct {
 	history     []message
 	userContext func(queryText string) string // optional user context block
 	histMu      sync.Mutex
+	// tracerProvider is Config.TracerProvider, fixed at New. Nil means the
+	// global provider, resolved at each call and never cached.
+	tracerProvider trace.TracerProvider
 }
 
 // Config is what an agent supplies to stand up a driver: its LLM tiers, TTS
@@ -102,6 +106,26 @@ type Config struct {
 	// bypasses. The engine supplies no default URL: like every other field
 	// here, it is the consumer's to inject.
 	RealtimeURL string
+
+	// TracerProvider supplies the tracer for the span each model request
+	// produces (AATK-159): one CLIENT span per chat-completions request that
+	// is actually sent, named "chat <Tier.Model>". Nil, the default, means
+	// otel.GetTracerProvider() is resolved at each call, so a consumer that
+	// installs its SDK globally, before or after New, gets spans. With nothing
+	// installed, the no-op provider records and sends nothing. The engine
+	// never installs a provider, exporter or propagator, and never adds trace
+	// headers to the upstream request.
+	//
+	// Message content stays off the span by default: it is personal data (the
+	// system prompt, the user-context block, the history and the user's own
+	// text). The environment variable AATOOLKIT_CAPTURE_MESSAGE_CONTENT turns
+	// it on when strconv.ParseBool reads its value as true ("1", "true"):
+	// each request's messages and the model's output are then recorded as
+	// gen_ai.input.messages and gen_ai.output.messages. Unset, empty, false or
+	// unparsable leaves it off. It is read per request, and only for a span
+	// that is recording. Values are not truncated; bound them with the SDK's
+	// span limits (OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT).
+	TracerProvider trace.TracerProvider
 }
 
 // StreamHandler returns the Media Streams handler for the configured
@@ -129,9 +153,10 @@ func New(cfg Config) *Host {
 				return http.ErrUseLastResponse
 			},
 		},
-		prompt:      cfg.Prompt,
-		tts:         cfg.TTS,
-		userContext: cfg.UserContext,
+		prompt:         cfg.Prompt,
+		tts:            cfg.TTS,
+		userContext:    cfg.UserContext,
+		tracerProvider: cfg.TracerProvider,
 	}
 	h.speech = newSpeechQueue(func(text []byte, voice string, speed float64) {
 		if err := h.synthesizeAndPlay(string(text), voice, speed); err != nil {
