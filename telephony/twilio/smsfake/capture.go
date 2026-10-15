@@ -134,6 +134,17 @@ type CaptureServer struct {
 	notify chan struct{}
 }
 
+// DefaultCapturePort is twilio-cli's default -capture-port: the port its
+// guidance tells the operator to point TWILIO_API_BASE_URL at (see BaseURLEnv)
+// when launching the server under test, before twilio-cli runs. A project that
+// launches its server for that round trip can name the port from here rather
+// than keep a copy of the number.
+//
+// It is a default, not a requirement. NewCaptureServer itself takes any port
+// from 1 to 65535; it rejects 0, which would bind an ephemeral port the server
+// could not be pointed at in advance.
+const DefaultCapturePort = 9750
+
 // NewCaptureServer starts a new capture server listening on the requested
 // port of 127.0.0.1, returning an error naming that port if the bind fails.
 //
