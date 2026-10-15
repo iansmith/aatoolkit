@@ -14,7 +14,7 @@ import (
 
 // ControlEvent is a Twilio control-plane signal (e.g. "stop") routed to a
 // Session's controlIn field, decoupled from twilio.Frame to avoid an import
-// cycle (internal/telephony/twilio already imports internal/telephony).
+// cycle (telephony/twilio already imports telephony).
 // Twilio-side adapters translate twilio.Frame into ControlEvent.
 type ControlEvent struct {
 	Kind     string
@@ -109,7 +109,7 @@ type ControlOutMessage struct {
 
 // TwilioDataPlaneOutput is the send side of the channel a Session writes
 // outbound media frames to (the ServiceOutput pattern). The concrete
-// implementation (internal/telephony/twilio/output.go) encodes each payload
+// implementation (telephony/twilio/output.go) encodes each payload
 // via EncodeMedia and writes it to the WebSocket; this package only sees the
 // generic interface to avoid an import cycle (twilio already imports
 // telephony).
@@ -117,7 +117,7 @@ type TwilioDataPlaneOutput = ServiceOutput[[]byte]
 
 // TwilioControlPlaneOutput is the send side of the channel a Session writes
 // outbound control-plane messages to (mark/clear). The concrete
-// implementation (internal/telephony/twilio/output.go) encodes each message
+// implementation (telephony/twilio/output.go) encodes each message
 // via EncodeMark/EncodeClear and writes it to the WebSocket.
 type TwilioControlPlaneOutput = ServiceOutput[ControlOutMessage]
 

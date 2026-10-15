@@ -188,7 +188,7 @@ func (g *vadProgressGate) release() {
 // production Session -- the same VAD+STT path a live call runs, not a copy
 // -- and returns the ordered FullPass turn transcripts.
 //
-// sttClient is the same STTClient production wires (internal/telephony/stt.go);
+// sttClient is the same STTClient production wires (stt.go);
 // callers pass a real one (NewSTTClient(sttBaseURL)) to drive a genuine
 // whisper sidecar, or one pointed at an httptest server for deterministic
 // tests -- either way it is the identical STTClient.Transcribe code path,

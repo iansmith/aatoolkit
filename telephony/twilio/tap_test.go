@@ -594,7 +594,7 @@ func TestTap_ConcurrentWritesRaceFree(t *testing.T) {
 // tap.DrainOut), and once stubbed to compile, all 5 tests failed on their
 // assertions (no .out.ulaw produced, no silence padding, no overlap
 // alignment, no out_truncated sidecar flag). With the implementation
-// restored, all 5 pass and `go test -race ./internal/telephony/` is clean.
+// restored, all 5 pass under the race detector.
 // No assertion in these tests was altered to reach this state.
 
 // inulawPath and outulawPath name the two direction-specific .ulaw files.

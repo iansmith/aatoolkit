@@ -404,7 +404,7 @@ type vadService struct {
 // know every VADEndOfUtterance a replayed recording will ever produce has
 // actually reached the sequencer before it can safely conclude no more STT
 // dispatches are coming and end the call, and a fixed sleep can't stand in
-// for that signal (see internal/telephony/replay.go's vadProgressGate).
+// for that signal (see replay.go's vadProgressGate).
 func newVADService(sessionID string, det vadDetector, cfg vadConfig, inDepth, outDepth int, onWindow ...func(ev VADEvent, emitted bool)) *vadService {
 	ctx, cancel := context.WithCancel(context.Background())
 	in := NewBufferedChan[[]byte](inDepth)

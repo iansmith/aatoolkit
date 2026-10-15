@@ -5,8 +5,8 @@ meetings today?", 8 kHz mono G.711 mu-law, 10.0 s.
 Adapted from
 third_party/gonnx/sample_models/silero_vad/generate_realaudio_goldens.py — same
 mu-law decode, windowing, and recurrent-state threading, retargeted at this
-ticket's own fixture and output file (this script writes into
-internal/telephony/testdata/, not the third_party fork's directory).
+directory's own fixture and output file (this script writes into
+telephony/testdata/, not the third_party fork's directory).
 
 Run from this directory:
 

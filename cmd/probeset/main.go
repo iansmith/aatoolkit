@@ -129,7 +129,7 @@ func replayFileCfg(ctx context.Context, path string, cfg telephony.VADConfig) ([
 // recordingID derives a recording's identity from its .ulaw path: the
 // filename with any trailing ".in.ulaw" / ".ulaw" suffix stripped, matching
 // the tap sidecar's <streamSID>.in.ulaw / <streamSID>.json naming
-// (internal/telephony/twilio/tap.go) so a row's RecordingID lines up with
+// (telephony/twilio/tap.go) so a row's RecordingID lines up with
 // the sidecar it was labelled from.
 func recordingID(path string) string {
 	base := filepath.Base(path)
@@ -169,11 +169,11 @@ func buildCmd(args []string) {
 // recordingSidecar is the subset of twilio/tap.go's tapSidecar fields build
 // needs. A local, minimal struct rather than importing the twilio package's
 // unexported type: JSON decoding only needs field names to match, not a
-// shared Go type, and internal/telephony/twilio isn't safe to import from
-// here regardless (it imports internal/telephony, which cmd/probeset also
-// imports directly for Replay -- an import through twilio would be the
-// long way around). VADConfig is the recording's captured VAD config, the
-// baseline a sweep varies one knob from.
+// shared Go type, and cmd/probeset has no other use for telephony/twilio
+// (twilio imports telephony, which cmd/probeset already imports directly for
+// Replay -- an import through twilio would be the long way around).
+// VADConfig is the recording's captured VAD config, the baseline a sweep
+// varies one knob from.
 type recordingSidecar struct {
 	Label     string              `json:"label"`
 	VADConfig telephony.VADConfig `json:"vad_config"`
