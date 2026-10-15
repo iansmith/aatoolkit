@@ -252,8 +252,8 @@ func TransitionHandlerDefined(state SessionState, source InputSource) bool {
 
 // buildTransitionTable constructs the total (state, source) transition
 // table. Every entry defaults to handleUnexpected (loud warn, remain in
-// state) and is then overridden for the (state, source) pairs this ticket
-// implements.
+// state) and is then overridden for the (state, source) pairs the session
+// drives.
 func buildTransitionTable() transitionTable {
 	var t transitionTable
 	for _, st := range AllStates {
@@ -377,8 +377,8 @@ func handleDataFrame(s *Session, ev transitionEvent) SessionState {
 // handleControlEvent handles a Twilio control-plane event. A "stop" event
 // transitions cleanly to Closed (farewell/mark-echo teardown is
 // out of scope here, so stop goes straight to Closed). Anything
-// else is unexpected in the states this ticket implements and is logged
-// loudly without changing state.
+// else is unexpected in the states that route control events here and is
+// logged loudly without changing state.
 func handleControlEvent(s *Session, ev transitionEvent) SessionState {
 	cev, _ := ev.payload.(ControlEvent)
 	if cev.Kind == controlKindStop {
@@ -746,10 +746,9 @@ func handleMarkEchoTimeout(s *Session, ev transitionEvent) SessionState {
 	return StateClosed
 }
 
-// handleUnexpected is the default handler for a (state, source) pair this
-// ticket does not otherwise drive: it logs loudly and remains in state, per
-// the ticket's requirement that unexpected inputs never panic or hang the
-// select loop.
+// handleUnexpected is the default handler for a (state, source) pair the
+// table does not otherwise drive: it logs loudly and remains in state,
+// because an unexpected input must never panic or hang the select loop.
 func handleUnexpected(s *Session, ev transitionEvent) SessionState {
 	log.Printf("telephony: session %s: WARN unexpected input source=%s in state=%s", s.CallSID, ev.source, s.State())
 	return s.State()
@@ -763,8 +762,8 @@ type notImplKey struct {
 }
 
 // handleNotImplemented is the stub handler for the termination states'
-// unreachable rows -- out of scope here per the ticket,
-// but the table must still be total.
+// unreachable rows: they carry no logic of their own, but the table must
+// still be total.
 //
 // Each (state, source) pair is reported once per session. A per-frame source
 // would otherwise repeat itself at the frame rate: AwaitingMarkEcho takes

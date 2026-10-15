@@ -137,7 +137,7 @@ func TestControlPlaneOutputSendEncodesClear(t *testing.T) {
 	}
 }
 
-// TestControlPlaneOutputNeverEncodesStop guards Observable behavior #1:
+// TestControlPlaneOutputNeverEncodesStop guards that
 // EncodeStop is not part of the server's outbound vocabulary. There is no
 // ControlOutKind that maps to it, so an unknown/zero-value Kind must be
 // rejected rather than silently falling through to some default encoding.

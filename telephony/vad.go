@@ -42,8 +42,7 @@ type TurnSink interface {
 }
 
 // logTurnSink is the default TurnSink: it just logs each boundary. Useful as
-// a safe default before a real consumer (the Respond pipeline, out of scope
-// for this ticket) is wired in.
+// a safe default until a consumer wires in its own TurnSink.
 type logTurnSink struct {
 	callSID string
 }

@@ -62,13 +62,10 @@ func startTurnCapSession(t *testing.T, name string, det *fakeDetector, clock *fa
 	return s, dataIn, dataOut, sttIn, sttOut, sink
 }
 
-// TestTurnCap_UnderCapSingleUtteranceCompletesNormally is the ticket's first
-// Test Expectation: a turn under MaxTurnMS (single utterance, silence
-// turn-end) completes normally — no forced-stop clip on dataOut, and the cap
-// timer (armed at the turn's first onset) is cancelled by completeTurn. Fails
-// on current code — WithMaxTurnMS/the turn cap don't exist yet, so nothing is
-// armed for turnTestDur and assertNoClip's post-fire check is vacuous, not
-// proof of cancellation.
+// TestTurnCap_UnderCapSingleUtteranceCompletesNormally pins that a turn under
+// MaxTurnMS (single utterance, silence turn-end) completes normally — no
+// forced-stop clip on dataOut, and the cap timer (armed at the turn's first
+// onset) is cancelled by completeTurn.
 func TestTurnCap_UnderCapSingleUtteranceCompletesNormally(t *testing.T) {
 	clock := newFakeClock()
 	probs := speechThenSilenceProbs(1, telephony.TurnEndSilenceWindows()+10)
@@ -122,12 +119,11 @@ func TestTurnCap_UnderCapSingleUtteranceCompletesNormally(t *testing.T) {
 	assertNoClip(t, dataOut)
 }
 
-// TestTurnCap_MultiUtteranceUnderCapCompletesNormally is the ticket's second
-// Test Expectation: a turn spanning 2+ utterances, each individually well
-// under the utterance cap and separated by pauses, still completes normally
-// on the stopword — proving the turn cap doesn't spuriously fire on a
-// multi-utterance turn that stays under budget. Fails on current code for the
-// same reason as the single-utterance case above.
+// TestTurnCap_MultiUtteranceUnderCapCompletesNormally pins that a turn
+// spanning 2+ utterances, each individually well under the utterance cap and
+// separated by pauses, still completes normally on the stopword — proving the
+// turn cap doesn't spuriously fire on a multi-utterance turn that stays under
+// budget.
 func TestTurnCap_MultiUtteranceUnderCapCompletesNormally(t *testing.T) {
 	clock := newFakeClock()
 	one := speechThenSilenceProbs(2, telephony.EndSilenceWindows())
@@ -158,12 +154,10 @@ func TestTurnCap_MultiUtteranceUnderCapCompletesNormally(t *testing.T) {
 	assertNoClip(t, dataOut)
 }
 
-// TestTurnCap_AccumulatesAcrossPausesAndForcesStop is the ticket's third Test
-// Expectation and the core of the ticket: a turn whose accumulated wall-clock
-// exceeds MaxTurnMS, spanning multiple utterances separated by pauses (none
-// of which individually ends the turn), forces a stop with the forced-stop
-// clip and ends the call. Fails on current code — no turn timer exists to
-// fire, so no clip ever reaches dataOut.
+// TestTurnCap_AccumulatesAcrossPausesAndForcesStop is the turn cap's core
+// case: a turn whose accumulated wall-clock exceeds MaxTurnMS, spanning
+// multiple utterances separated by pauses (none of which individually ends
+// the turn), forces a stop with the forced-stop clip and ends the call.
 func TestTurnCap_AccumulatesAcrossPausesAndForcesStop(t *testing.T) {
 	clock := newFakeClock()
 	one := speechThenSilenceProbs(2, telephony.EndSilenceWindows())
@@ -206,14 +200,12 @@ func TestTurnCap_AccumulatesAcrossPausesAndForcesStop(t *testing.T) {
 	t.Fatalf("after the turn cap fired, state = %s, want AwaitingMarkEcho or Closed", s.State())
 }
 
-// TestTurnCap_FiresWhileAwaitingFullResult is an adversary gap test: the
-// ticket's file map wires SourceTurnTimer into all of inProgressStates
-// (StateIdle, StateListening, StateAwaitingFullResult), not just Listening.
-// This drives the cap to fire while a full STT pass is still outstanding
-// (state == StateAwaitingFullResult, the one in-progress state none of the
-// other new tests exercise) and confirms the forced-stop still fires. Fails
-// on current code the same way the other accumulation test does — no timer
-// exists to fire.
+// TestTurnCap_FiresWhileAwaitingFullResult is an adversary gap test:
+// SourceTurnTimer is wired into all of inProgressStates (StateIdle,
+// StateListening, StateAwaitingFullResult), not just Listening. This drives
+// the cap to fire while a full STT pass is still outstanding (state ==
+// StateAwaitingFullResult, the one in-progress state where no other test in
+// this file fires the cap) and confirms the forced-stop still fires.
 func TestTurnCap_FiresWhileAwaitingFullResult(t *testing.T) {
 	clock := newFakeClock()
 	probs := speechThenSilenceProbs(3, telephony.EndSilenceWindows()+3)
@@ -251,13 +243,11 @@ func TestTurnCap_FiresWhileAwaitingFullResult(t *testing.T) {
 	cancel()
 }
 
-// TestTurnCap_ArmedOnceNotReArmedBySecondOnset is the ticket's fourth Test
-// Expectation: the cap arms once per turn, at the turn's first speech onset,
-// and does not re-arm on a second onset within the same turn. fakeClock.fire
-// reports how many timers it released for the exact duration it fired — a
-// re-arm would leave 2 armed for turnTestDur instead of 1. Fails on current
-// code (no timer armed at all, so fire's precondition — an armed timer for
-// turnTestDur — is never met and the test fatals in waitArmed).
+// TestTurnCap_ArmedOnceNotReArmedBySecondOnset pins that the cap arms once
+// per turn, at the turn's first speech onset, and does not re-arm on a second
+// onset within the same turn. fakeClock.fire reports how many timers it
+// released for the exact duration it fired — a re-arm would leave 2 armed for
+// turnTestDur instead of 1.
 func TestTurnCap_ArmedOnceNotReArmedBySecondOnset(t *testing.T) {
 	clock := newFakeClock()
 	// First utterance: speech, then exactly enough silence to cross
@@ -341,14 +331,11 @@ func waitSpeechStart2(t *testing.T, sink *spySink) {
 	t.Fatal("fewer than 2 speech onsets observed within the backstop")
 }
 
-// TestTurnCap_CancelledOnBothCompletionTriggers is the ticket's fifth Test
-// Expectation: completeTurn cancels the turn cap unconditionally, regardless
-// of which trigger fired. Checked on 2 distinct trigger paths — silence
-// turn-end and stopword — each leaving no armed timerTurn behind (advancing
-// the clock past MaxTurnMS after normal completion must not produce a
-// forced-stop). Fails on current code the same way the under-cap tests above
-// do: nothing is ever armed for turnTestDur, so clock.fire's precondition is
-// never met.
+// TestTurnCap_CancelledOnBothCompletionTriggers pins that completeTurn
+// cancels the turn cap unconditionally, regardless of which trigger fired.
+// Checked on 2 distinct trigger paths — silence turn-end and stopword — each
+// leaving no armed timerTurn behind (advancing the clock past MaxTurnMS after
+// normal completion must not produce a forced-stop).
 func TestTurnCap_CancelledOnBothCompletionTriggers(t *testing.T) {
 	t.Run("SilenceTurnEnd", func(t *testing.T) {
 		clock := newFakeClock()

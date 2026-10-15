@@ -24,10 +24,10 @@ const tapDirEnv = "AATOOLKIT_AUDIO_TAP"
 const defaultFrameBytes = telephony.SampleRateHz * telephony.MuLawFrameMS / 1000
 
 // maxOutQueueFrames bounds the outbound recording queue. sendClip enqueues
-// an entire clip's frames in one synchronous burst -- exactly the
-// burst-dumped, not-real-time-paced behavior this ticket exists to fix --
-// so the queue must hold at least one full clip before DrainOut (paced by
-// real inbound frame arrival) can catch up. This bound is deliberately NOT
+// an entire clip's frames in one synchronous burst -- burst-dumped, not
+// real-time paced, which the duplex tap's queue-and-drain undoes in the
+// recording -- so the queue must hold at least one full clip before
+// DrainOut (paced by real inbound frame arrival) can catch up. This bound is deliberately NOT
 // real-time flow control: it is a safety net against a genuine runaway (a
 // bug causing endless WriteOut calls unrelated to any real clip), sized
 // generously above every currently known clip (farewell, forced-stop, and a

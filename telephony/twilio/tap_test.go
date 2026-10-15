@@ -44,7 +44,7 @@ import (
 var testStreamStartedAt = time.Date(2026, 7, 17, 9, 30, 15, 123456789, time.UTC)
 
 // errWriter always fails. It is the injected writer behind the "a broken tap
-// never breaks a call" guarantee (Observable behavior 4). It counts both
+// never breaks a call" guarantee. It counts both
 // writes and closes: a tap that leaks its fd degrades a long-running process,
 // which is the same harm by a slower route.
 type errWriter struct {
@@ -272,7 +272,7 @@ func TestTap_SidecarRecordsVADConfig(t *testing.T) {
 
 // --- failure tolerance -------------------------------------------------------
 
-// TestTap_WriteFailureDoesNotKillCall covers Observable behavior 4. A full or
+// TestTap_WriteFailureDoesNotKillCall covers the broken-tap guarantee. A full or
 // read-only disk must be a non-event: Write reports nothing upward (it has no
 // error return by construction), it does not panic, and -- the part that would
 // actually hurt -- a failed write must not wedge the tap into dropping the rest
@@ -671,8 +671,8 @@ func TestTap_SilenceOnEmptyQueue(t *testing.T) {
 // Strengthened (attempt 8): the original only checked aggregate byte
 // lengths ("both are 4 bytes"), which a DrainOut writing garbled, shifted,
 // or zeroed frames of the right total length would still pass -- exactly
-// the ticket's own Test Expectations line ("assert both channels have
-// energy at the same byte offset"), previously unchecked. Now asserts
+// the property this test exists for (both channels have energy at the
+// same byte offset), previously unchecked. Now asserts
 // pairwise content equality at each overlapping frame's byte offset in
 // both channels, not just that the lengths match.
 func TestTap_BargeInOverlap(t *testing.T) {
@@ -841,12 +841,12 @@ func TestTap_OutOpenFailureDoesNotHaltInboundWrites(t *testing.T) {
 	}
 }
 
-// TestTap_OutboundQueueIsBounded pins the ticket's File map requirement that
-// outQueue be "thread-safe, bounded": under a stalled drain (DrainOut not
-// keeping pace with WriteOut -- e.g. triggered by the isolation bug above,
-// or any other inbound-frame stall) the queue must never grow without
-// limit. Direct field access is deliberate: this is a white-box test in the
-// tap's own package, and the queue has no public accessor by design.
+// TestTap_OutboundQueueIsBounded pins that outQueue is bounded: under a
+// stalled drain (DrainOut not keeping pace with WriteOut -- e.g. triggered
+// by the isolation bug above, or any other inbound-frame stall) the queue
+// must never grow without limit. Direct field access is deliberate: this is
+// a white-box test in the tap's own package, and the queue has no public
+// accessor by design.
 func TestTap_OutboundQueueIsBounded(t *testing.T) {
 	dir := t.TempDir()
 	const streamSID = "SSqueuebound"
