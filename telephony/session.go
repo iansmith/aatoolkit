@@ -35,7 +35,7 @@ const controlKindMark = "mark"
 // the name expected back on its echo.
 const farewellMarkName = "farewell"
 
-// Timer names for the TimerFacility (Charter R2: one mechanism)
+// Timer names for the TimerFacility, the session's one timer mechanism.
 const (
 	timerIdle      = "idle"
 	timerMarkEcho  = "markEcho"
@@ -270,8 +270,8 @@ type Session struct {
 	// sendBedChunk so the clip loops.
 	bedOffset int
 
-	// timerFacility manages all named timers (idle, utterance, markEcho).
-	// Single mechanism per Charter R2.
+	// timerFacility manages every named timer (the timer* names above): the
+	// session has no other timer mechanism.
 	timerFacility *TimerFacility
 
 	// clock is how this session's timers wait out their durations; nil means
@@ -291,8 +291,8 @@ type Session struct {
 
 	// forwardCh is the session's own, fully-owned channel for handing frames
 	// from run() to the VAD-forwarder goroutine. Because Session owns both
-	// ends, run() can select-send against it without ever blocking (charter
-	// R8) -- unlike vad.In, a blocking Send whose buffer may be full.
+	// ends, run() can select-send against it without ever blocking -- unlike
+	// vad.In, a blocking Send whose buffer may be full.
 	forwardCh chan []byte
 
 	// notImplLogged records which (state, source) pairs handleNotImplemented
@@ -300,8 +300,8 @@ type Session struct {
 	// gap once instead of once per frame. AwaitingMarkEcho receives inbound
 	// media for the whole 2s farewell playout -- at 50 frames/sec that is
 	// ~100 identical lines, which buries the control plane in the log.
-	// Written only from run()'s single select loop (charter: one loop owns
-	// every transition), so it needs no lock.
+	// Written only from run()'s single select loop (one loop owns every
+	// transition), so it needs no lock.
 	notImplLogged map[notImplKey]bool
 
 	stateMu    sync.Mutex
@@ -634,10 +634,11 @@ func (s *Session) Start() error {
 // input this session was wired with (Twilio data plane, Twilio control plane,
 // VAD events, STT results), driven until an input closes or the session's
 // context is cancelled. Every input's payload is dispatched through the total
-// (state, source) transition table (state.go), which returns the next state. the
-// engine never performs a blocking send from this loop (charter R8): the only
-// outbound handoff, to VAD, goes through forwardCh via a non-blocking
-// select-send in handleDataFrame.
+// (state, source) transition table (state.go), which returns the next state.
+// Its handoffs to the VAD and STT services never block it: each is a
+// non-blocking select-send onto a channel the session owns (forwardCh in
+// handleDataFrame, sttDispatchCh in dispatchSTT), drained by a goroutine of
+// its own.
 //
 // A nil, unwired input's Channel() is nil, and a nil channel in a select
 // case simply never fires — so an unwired source is inert rather than a
@@ -652,7 +653,7 @@ func (s *Session) run() {
 // list of arrivals and nothing else: "this channel closed, so stop" is the same
 // decision for every input, so it lives once in dispatchIfOpen rather than as a
 // branch inside each case. What remains here is one line per thing that can
-// happen, which is the property the charter's flat-dispatcher rule is after.
+// happen, which keeps the select a flat dispatcher.
 //
 // Every case returns rather than breaking, so a reader can tell which arrivals
 // can end the session (a closed input) from which cannot (a timer, a recorded
@@ -712,9 +713,9 @@ func (s *Session) dispatchVADEvent(ev VADEvent, ok bool) bool {
 
 // dispatchTimerCompletion drops a superseded completion, then maps a fired
 // TimerFacility timer's name to its InputSource and dispatches it. Split out of
-// run()'s select loop (which must stay a flat, low-complexity dispatcher per
-// Charter R8) as the number of named timers has grown across tickets (AATK-24,
-// AATK-25 and earlier ones). The staleness check moved in here with
+// run()'s select loop (which must stay a flat, low-complexity dispatcher) as
+// the number of named timers has grown across tickets (AATK-24, AATK-25 and
+// earlier ones). The staleness check moved in here with
 // it: it is part of "handle a fired timer", and leaving it inline cost run() a
 // branch that the split exists to keep out of it.
 func (s *Session) dispatchTimerCompletion(completion TimerCompletion) {
@@ -909,7 +910,7 @@ const farewellFrameBytes = SampleRateHz * MuLawFrameMS / 1000
 // plane) is a no-op. Used by both terminal clips: the farewell (idle timeout)
 // and the forced-stop (utterance cap). Called synchronously from a
 // timer handler: a terminal, once-per-call flow, not the steady-state media
-// path run() must never block in (charter R8), and dataOut's buffer is sized
+// path run() must never block in, and dataOut's buffer is sized
 // generously enough to absorb the whole clip without blocking on a draining
 // consumer.
 func (s *Session) sendClip(clip []byte) {
@@ -969,13 +970,12 @@ func (s *Session) closeTransport() {
 }
 
 // dispatchSTT hands an STTRequest to drainSTTDispatch via a non-blocking
-// select-send so a slow/unwired STT sidecar cannot stall the sequencer
-// (Charter R8: run()'s select never performs a blocking send) -- mirrors
-// handleDataFrame's non-blocking send to forwardCh. audio is copied so later
-// turnBuf appends on the run() goroutine cannot race the drain goroutine's
-// Send. Routing every request through the single drainSTTDispatch goroutine
-// (rather than a bare goroutine per call, as a per-call send would) preserves
-// FIFO dispatch order across the requests it hands off.
+// select-send so a slow/unwired STT sidecar cannot stall the sequencer --
+// mirrors handleDataFrame's non-blocking send to forwardCh. audio is copied so
+// later turnBuf appends on the run() goroutine cannot race the drain
+// goroutine's Send. Routing every request through the single drainSTTDispatch
+// goroutine (rather than a bare goroutine per call, as a per-call send would)
+// preserves FIFO dispatch order across the requests it hands off.
 func (s *Session) dispatchSTT(kind STTPassKind, audio []byte) {
 	if s.sttIn == nil {
 		return
@@ -1210,7 +1210,7 @@ func (s *Session) drainModelRouteVerdicts() {
 
 // drainSTTDispatch relays STTRequests from sttDispatchCh to sttIn in FIFO
 // order, isolated from run()'s select loop so a slow/backed-up STT sidecar
-// stalls only this goroutine (Charter R8) -- mirrors forwardToVAD's pattern.
+// stalls only this goroutine -- mirrors forwardToVAD's pattern.
 func (s *Session) drainSTTDispatch() {
 	for {
 		select {
@@ -1230,7 +1230,7 @@ func (s *Session) drainSTTDispatch() {
 // forwardToVAD drains forwardCh and relays each frame into the VAD service's
 // input via a blocking Send. It is a goroutine isolated from run()'s select
 // loop specifically so that a slow/backed-up VAD pipeline stalls only this
-// goroutine, never the sequencer (charter R8) -- run() keeps servicing every
+// goroutine, never the sequencer -- run() keeps servicing every
 // other select-case regardless of how long a given Send blocks here.
 func (s *Session) forwardToVAD() {
 	for {

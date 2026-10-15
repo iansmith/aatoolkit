@@ -351,9 +351,8 @@ func (m *vadMachine) step(prob float32) (VADEvent, bool) {
 	return VADEvent{}, false
 }
 
-// event snapshots the machine's current state into a lossless VADEvent
-// (charter R9). SessionID is left zero here — the vadService wrapper stamps
-// it on relay (charter R10).
+// event snapshots the machine's current state into a lossless VADEvent.
+// SessionID is left zero here — the vadService wrapper stamps it on relay.
 func (m *vadMachine) event(kind VADKind, prob float32) VADEvent {
 	return VADEvent{
 		Kind:              kind,
@@ -374,8 +373,7 @@ type VADInput = ServiceOutput[[]byte]
 type VADOutput = ServiceInput[VADEvent]
 
 // vadService wraps runVAD behind the VADInput/VADOutput service planes,
-// stamping SessionID (fixed at construction, charter R10) onto every event
-// it relays.
+// stamping SessionID (fixed at construction) onto every event it relays.
 type vadService struct {
 	In  VADInput
 	Out VADOutput

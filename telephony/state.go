@@ -83,7 +83,7 @@ func StartSTTService(ctx context.Context, svc *sttService) {
 }
 
 // SessionState is a state in the session's total (state, source) transition
-// table (charter: single select loop). AwaitingFullResult,
+// table, which run()'s single select loop drives. AwaitingFullResult,
 // Terminating, and AwaitingMarkEcho exist in the enum ahead of the logic
 // that drives them -- their transition handlers are stubs that log "not yet
 // implemented" (that logic is out of scope here).
@@ -224,7 +224,8 @@ type transitionEvent struct {
 // transitionHandler applies one (state, source) transition and returns the
 // next state. Handlers may run side effects (TurnSink callbacks, logging,
 // forwarding a frame) but must never block -- run()'s select loop calls them
-// synchronously (charter R8: no blocking sends anywhere in the loop).
+// synchronously, so a handler that blocked would stall every input the loop
+// serves.
 type transitionHandler func(s *Session, ev transitionEvent) SessionState
 
 // transitionTable is total: every (state, source) pair must resolve to a
@@ -554,8 +555,8 @@ func handleAwaitingFullResultVADEvent(s *Session, ev transitionEvent) SessionSta
 // logs it, and — for FullPass results — either accumulates the transcript
 // into the turn buffer or flushes the buffer if the turn-end policy fires.
 // A late STTResult whose RequestID does not match the session's
-// current awaited request id is silently discarded (D5 logical discard —
-// Charter R8).
+// current awaited request id is discarded on that id check alone: it is
+// logged and dropped, and handling it never blocks the loop.
 func handleSTTResult(s *Session, ev transitionEvent) SessionState {
 	res, _ := ev.payload.(STTResult)
 	if res.SessionID != s.CallSID {
