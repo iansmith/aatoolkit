@@ -22,6 +22,9 @@ enable-aatoolkit
 __pycache__/
 *.pyc
 
+# macOS Finder metadata — bare pattern so it matches at any depth.
+.DS_Store
+
 
 CLAUDE.local.md
 .project-conf-local.toml
@@ -42,8 +45,8 @@ CLAUDE.local.md
 # parent directory is excluded, so `.claude/` would make the negations below inert and the
 # generated skills would never be committed — defeating the version freeze they exist for.
 #
-# agents/ is exempted ahead of BILL-486, which may ship per-tier subagent definitions there.
-# Cost if that ticket closes wontfix: nothing, the directory simply stays absent. Cost of
+# agents/ is exempted ahead of planned tooling work that may ship per-tier subagent definitions
+# there. Cost if that work never lands: nothing, the directory simply stays absent. Cost of
 # adding it late: definitions land on disk, never get committed, and effort silently inherits
 # while the config reads as configured — the same silent shape that left one repo with zero
 # tracked skills.

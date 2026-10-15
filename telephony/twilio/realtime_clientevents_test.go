@@ -226,7 +226,7 @@ func TestClientEventChan_EngineNeverClosesTheConsumersChannel(t *testing.T) {
 // The positive proof (one event actually reaches the backend) comes first:
 // without it, "the idle timer still fires" would hold trivially against an
 // inert stub that never reads the channel at all, which proves nothing about
-// this ticket's wiring.
+// WithClientEventChan's wiring.
 //
 // slopstop:test non-interference — paired: asserts one consumer event actually reaches the backend before checking that steady consumer traffic against a silent backend still ends the call with "idle timeout"
 func TestClientEventChan_ConsumerEventDoesNotResetIdleTimer(t *testing.T) {

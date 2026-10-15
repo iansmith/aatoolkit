@@ -21,8 +21,8 @@ hf download microsoft/deberta-v3-small --revision a36c739020e01763fe789b4b85e2df
 Expected output:
 ```
 Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-path=/Users/iansmith/.cache/huggingface/hub/models--urchade--gliner_small-v2.1/snapshots/4e091416cf7c3481db542c2a3d26156916f3a47f
-path=/Users/iansmith/.cache/huggingface/hub/models--microsoft--deberta-v3-small/snapshots/a36c739020e01763fe789b4b85e2df55d6180012
+path=~/.cache/huggingface/hub/models--urchade--gliner_small-v2.1/snapshots/4e091416cf7c3481db542c2a3d26156916f3a47f
+path=~/.cache/huggingface/hub/models--microsoft--deberta-v3-small/snapshots/a36c739020e01763fe789b4b85e2df55d6180012
 ```
 
 ## Verify the model

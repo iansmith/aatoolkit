@@ -15,8 +15,8 @@ import (
 // AATK-2 behavior 1: on ctx-cancel the mic process must be stopped with a graceful
 // SIGINT (so ffmpeg flushes its capture buffer and closes stdout at EOF), NOT
 // exec.CommandContext's default SIGKILL, which drops buffered audio and truncates the
-// tail of the recording (the confirmed cause of dropped trailing words like D4's
-// "done"). Verified against a real child: cancelling the context must terminate it by
+// tail of the recording (the confirmed cause of a manual test recording losing its final
+// word). Verified against a real child: cancelling the context must terminate it by
 // SIGINT, not SIGKILL. WaitDelay must stay set so a wedged process is still bounded.
 func TestGracefulCancel_SendsSIGINTNotSIGKILL(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

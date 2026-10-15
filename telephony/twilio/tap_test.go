@@ -21,10 +21,10 @@ import (
 // behavior and fail against the stubs in tap.go.
 //
 // The tap exists to capture real telephony audio for the probe dataset:
-// mu-law over the phone network is what turns "I can't pick up the
-// kids" into "I can help you", and no mic recording reproduces that. Its
-// governing constraint is that it must be invisible -- off by default, and
-// incapable of harming a call when on.
+// mu-law over the phone network is what makes the transcriber hear a
+// similar-sounding but different phrase from the one spoken, and no mic
+// recording reproduces that. Its governing constraint is that it must be
+// invisible -- off by default, and incapable of harming a call when on.
 //
 // Recordings are keyed by streamSid, not CallSID: streamSid uniquely
 // identifies a Media Streams connection, and a reconnect is a new connection
@@ -732,17 +732,17 @@ func TestTap_QueueTruncationOnClose(t *testing.T) {
 	}
 }
 
-// TestTap_SilenceMatchesRealFrameSize covers outbound capture's DoD directly: "the engine-
-// silent spans are silence (0xFF) of the correct duration" and "in-channel
-// and out-channel are byte-for-byte the same length." The 5 pre-existing
-// outbound tests above all use synthetic 1-byte payloads on both channels, so
-// a DrainOut that falls back to a single 0xFF byte on an empty queue passes
-// them even though it desyncs the two files by ~159 bytes on every real,
-// 160-byte (20ms @ 8kHz mu-law) silent frame. This test uses realistic
-// frame-sized payloads on WriteIn, matching what the real Twilio media-stream
-// path (session.go's frame size, SampleRateHz*MuLawFrameMS/1000) delivers, so
-// a fixed-1-byte silence fallback fails it while the 5 synthetic tests stay
-// green.
+// TestTap_SilenceMatchesRealFrameSize covers two of outbound capture's
+// requirements directly: the engine-silent spans are silence (0xFF) of the
+// correct duration, and the in-channel and out-channel files are byte-for-byte
+// the same length. The 5 pre-existing outbound tests above all use synthetic
+// 1-byte payloads on both channels, so a DrainOut that falls back to a single
+// 0xFF byte on an empty queue passes them even though it desyncs the two files
+// by ~159 bytes on every real, 160-byte (20ms @ 8kHz mu-law) silent frame.
+// This test uses realistic frame-sized payloads on WriteIn, matching what the
+// real Twilio media-stream path (session.go's frame size,
+// SampleRateHz*MuLawFrameMS/1000) delivers, so a fixed-1-byte silence fallback
+// fails it while the 5 synthetic tests stay green.
 func TestTap_SilenceMatchesRealFrameSize(t *testing.T) {
 	dir := t.TempDir()
 	const streamSID = "SSrealframe"

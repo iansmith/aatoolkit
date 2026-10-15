@@ -237,7 +237,7 @@ On success it prints the reply it intercepted:
 
 ```
 capture server listening on port 9750 — launch the server with TWILIO_API_BASE_URL=http://127.0.0.1:9750
-captured reply — From=+12183767443 To=+15551234567
+captured reply — From=+15105559999 To=+15551234567
 
 ...the reply text, with real line breaks...
 ```

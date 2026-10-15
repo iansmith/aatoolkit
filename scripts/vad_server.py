@@ -15,8 +15,8 @@ defaults, kept for other launchers):
   AATOOLKIT_VAD_MODEL           path to silero_vad.onnx (default: models/silero_vad/silero_vad.onnx)
 
 Warmed on startup so /healthz cannot answer until the model is loaded and
-executes a first inference, following the voice_server.py / whisper_server.py
-pattern.
+executes a first inference: the lifespan warm-up every sidecar here follows
+(see sidecar.py).
 """
 
 import os
@@ -117,9 +117,9 @@ def create_app(*, warmup: bool = True) -> FastAPI:
     return app
 
 
-# Module-level app for uvicorn and for tests that only inspect routes, matching
-# whisper_server.app — keeps vad_server.app working as launched. (voice_server
-# has no module-level app: its create_app() would eagerly build the TTS model.)
+# Module-level app for uvicorn and for tests (test_vad_server.py drives
+# vad_server.app) — keeps vad_server.app working as launched. Building it at
+# import is cheap: the model is loaded in the lifespan, not by create_app().
 app = create_app()
 
 

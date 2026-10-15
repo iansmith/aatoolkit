@@ -53,9 +53,9 @@ func fixedTextSTTServer(t *testing.T, text string) *telephony.STTClient {
 // (telephony.WithVADFactory, the same test seam every other test in this
 // package uses) rather than the real Silero model, because determinism here
 // is a claim about Replay's own plumbing -- not about the real VAD, which
-// TestReplay_MatchesProduction below exercises and pins separately -- and a
-// fake, fast detector keeps this test from re-paying the real fixture's
-// ~10s runtime twice.
+// TestReplay_SidecarE2E (replay_sidecar_test.go, opt-in via
+// AATOOLKIT_VAD_PYTHON) exercises separately -- and a fake, fast detector
+// keeps this test from re-paying the real fixture's ~10s runtime twice.
 func TestReplay_Deterministic(t *testing.T) {
 	sttClient := fixedTextSTTServer(t, "hello there")
 
@@ -205,7 +205,7 @@ func TestBuild_RowsCarryHarnessVersion(t *testing.T) {
 // The fixture is two identical speech bursts separated by a 15-window
 // silence gap (a fake VAD factory drives this, not the real Silero model --
 // this test is about build/replay's config-sensitivity, not VAD fidelity,
-// which TestReplay_MatchesProduction owns separately). At
+// which the opt-in TestReplay_SidecarE2E checks separately). At
 // --end-silence-ms=200 (~7 windows to cross), the gap is long enough to end
 // the first utterance mid-gap, yielding 2 utterances. At
 // --end-silence-ms=1000 (~32 windows to cross), the same 15-window gap

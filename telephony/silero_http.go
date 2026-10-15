@@ -34,7 +34,7 @@ const defaultVADTimeout = 2 * time.Second
 // vadInferenceDeadline bounds a single window's inference — retries included —
 // and is strictly less than DataPlaneBufferMS (80ms), so a stalled sidecar
 // fails the window before the data-plane buffer it feeds would overflow rather
-// than blocking the VAD goroutine (charter R8). It is derived from
+// than blocking the VAD goroutine. It is derived from
 // the buffer, not a bare literal, so a buffer retune can't silently push the
 // per-inference budget past it — TestSileroPerInferenceDeadline guards the
 // inequality.

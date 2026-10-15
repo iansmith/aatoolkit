@@ -722,8 +722,8 @@ func EnvFloatOr(k string, def float64) float64 {
 }
 
 // ParseStreamScheme parses the -stream-scheme flag, defaulting to "wss" and
-// rejecting any value other than "ws" or "wss" (PRD D15 — the flag itself is
-// validated so an invalid scheme never reaches twilio.Server.StreamScheme).
+// rejecting any value other than "ws" or "wss". The flag itself is validated
+// so an invalid scheme never reaches twilio.Server.StreamScheme.
 // It uses a fresh FlagSet (rather than the package-global flag.CommandLine)
 // so it can be called repeatedly and in isolation from tests.
 func ParseStreamScheme(args []string) (string, error) {

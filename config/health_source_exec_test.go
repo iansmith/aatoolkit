@@ -146,7 +146,7 @@ func TestValidate_HealthSource_MissingHalf_Rejected(t *testing.T) {
 }
 
 // Declaring health.source alongside the HTTP form (a "conflicting existing
-// field", per the ticket's test expectations) is rejected: there is no
+// field", per AATK-41's test expectations) is rejected: there is no
 // program to build for a GET.
 func TestValidate_HealthSource_WithoutExec_Rejected(t *testing.T) {
 	s := validServer(func(s *Server) {

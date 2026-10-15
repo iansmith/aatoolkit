@@ -278,8 +278,9 @@ func TestHandleFrame_ClearFlushesQueuedPlayout(t *testing.T) {
 		t.Errorf("clear frame was not logged:\n%s", out)
 	}
 
-	// The consequence the ticket exists for: a mark arriving right behind the
-	// clear is echoed at once, because there is nothing left to wait for.
+	// The reason a clear must flush the playout model (AATK-100): a mark
+	// arriving right behind the clear is echoed at once, because there is
+	// nothing left to wait for.
 	markOut := captureLog(t, func() {
 		handleFrame(twilio.Frame{Event: twilio.EventMark, MarkName: "farewell"},
 			player, audio, nil, "MZtest", true)

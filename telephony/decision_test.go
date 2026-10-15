@@ -203,8 +203,8 @@ func TestDecisionRecorder_EndOfUtterance(t *testing.T) {
 // session's sequencer goroutine, inside completeTurn, before terminateWithClip)
 // with a deadlock backstop a passing test never reaches. Asserts on the literal
 // wire values ("cap", the kind strings) so the test pins the recorded JSON
-// contract directly and compiles against current code — where nothing records a
-// cap decision, so the backstop is the RED signal (M4).
+// contract directly. When no matching cap decision is recorded, the backstop's
+// t.Fatalf is what fails the test.
 func waitCapEvent(t *testing.T, rec *mockRecorder, kind string) telephony.DecisionEvent {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -347,11 +347,12 @@ func TestDecisionRecorder_IdleTimeout(t *testing.T) {
 	if e.Param != "MaxSilenceMS" {
 		t.Errorf("Param: got %q, want MaxSilenceMS", e.Param)
 	}
-	// AATK-24 (D8 silence-knob production-ization, Addendum V3): the idle
-	// cap decision now follows the resolved bound (the WithMaxSilenceMS
-	// override, here idleTestMS), not the bare MaxSilenceMS constant --
-	// distinct from Session.Start's validateOrdering check, which is
-	// unaffected and still validates against the bare constant.
+	// AATK-24 made the silence knob, WithMaxSilenceMS, a production setting:
+	// the idle cap decision now follows the resolved bound (the
+	// WithMaxSilenceMS override, here idleTestMS), not the bare MaxSilenceMS
+	// constant -- distinct from Session.Start's validateOrdering check, which
+	// AATK-24's Addendum V3 left unchanged and which still validates against
+	// the bare constant.
 	if e.ParamValue != idleTestMS {
 		t.Errorf("ParamValue: got %v, want %d (the resolved override, not the bare MaxSilenceMS constant)", e.ParamValue, idleTestMS)
 	}
@@ -385,7 +386,7 @@ func (f *fakeNow) advance(d time.Duration) {
 // waitEventType blocks until at least one DecisionEvent of the given type has
 // been recorded and returns the first, with a deadlock backstop a passing test
 // never reaches. Used to observe the stt_dispatch / stt_result records, each of
-// which appears once on the single-utterance path (M5).
+// which appears once on the single-utterance path.
 func waitEventType(t *testing.T, rec *mockRecorder, typ string) telephony.DecisionEvent {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -405,7 +406,7 @@ func waitEventType(t *testing.T, rec *mockRecorder, typ string) telephony.Decisi
 // dispatch, advances the injected clock by a known delta, then delivers the
 // matching STTResult, and asserts both the stt_dispatch and stt_result decisions
 // are recorded -- the latter correlated by request id and carrying the exact
-// latency, the transcript, and whisper's own audio duration (M5).
+// latency, the transcript, and whisper's own audio duration.
 func TestDecisionRecorder_STTDispatchAndResult(t *testing.T) {
 	const sessionID = "test-sttdec"
 	rec := &mockRecorder{}

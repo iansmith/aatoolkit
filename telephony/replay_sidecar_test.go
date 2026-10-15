@@ -52,8 +52,10 @@ func TestReplay_SidecarE2E(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 
-	// One FullPass per golden end-of-utterance — derived from the committed
-	// golden, not hardcoded, so this stays in lockstep across a VAD retune.
+	// One FullPass per golden end-of-utterance — the count is read from the
+	// committed golden, not hardcoded. Nothing regenerates that golden, so a
+	// VAD retune that changes the count needs a hand edit to it (see
+	// testdata/PROVENANCE.md).
 	euWindows := goldenEndOfUtteranceWindows(t)
 	if len(results) != len(euWindows) {
 		t.Fatalf("got %d FullPass results, want %d (golden end-of-utterance windows %v): %+v", len(results), len(euWindows), euWindows, results)

@@ -1,16 +1,17 @@
-"""Shared scaffolding for aatoolkit's voice-path FastAPI sidecars.
+"""Shared scaffolding for aatoolkit's FastAPI model sidecars.
 
-voice_server.py (TTS), whisper_server.py (STT), and vad_server.py (VAD) are all
-the same shape: a separate process the Go driver talks to over HTTP, each
-exposing a repo-owned ``GET /healthz`` and taking ``--host``/``--port``. This
-module holds the two pieces they share so the convention lives in one place.
+vad_server.py (Silero VAD) and facts_server.py (GLiNER fact extraction) are the
+same shape: a separate process the Go side talks to over HTTP, each exposing a
+repo-owned ``GET /healthz`` and taking ``--host``/``--port``. This module holds
+the two pieces they share so the convention lives in one place.
 
-Health contract (one definition for all three): ``/healthz`` returns a constant
-``200 {"status": "ok"}``. Readiness is gated *structurally*, not by this
-response — each sidecar runs its model warm-up inside the ASGI lifespan, which
-uvicorn completes before it accepts a single connection, so the supervisor's
-readiness poll sees connection-refused until the server is warm and 200 only
-once it is. A reachable /healthz is therefore already warm.
+Health contract (one definition for every sidecar that uses this module):
+``/healthz`` returns a constant ``200 {"status": "ok"}``. Readiness is gated
+*structurally*, not by this response — each sidecar runs its model warm-up
+inside the ASGI lifespan, which uvicorn completes before it accepts a single
+connection, so the supervisor's readiness poll sees connection-refused until the
+server is warm and 200 only once it is. A reachable /healthz is therefore
+already warm.
 """
 import argparse
 import os
@@ -38,7 +39,7 @@ def build_arg_parser(
     The supervisor auto-appends ``--host``/``--port`` from the fleet config; the
     ``AATOOLKIT_<PREFIX>_HOST`` / ``AATOOLKIT_<PREFIX>_PORT`` env vars are fallback
     defaults for other launchers. ``env_prefix`` names each sidecar's namespace
-    (STT, VAD, TTS); ``port`` is that sidecar's default port.
+    (``VAD``, ``FACTS``); ``port`` is that sidecar's default port.
     """
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(

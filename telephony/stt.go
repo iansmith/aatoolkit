@@ -56,7 +56,7 @@ type STTRequest struct {
 }
 
 // STTResult is the lossless whisper verbose_json record for one STTRequest,
-// tagged with the same correlation identity the request carried (Charter R9).
+// tagged with the same correlation identity the request carried.
 type STTResult struct {
 	SessionID string
 	RequestID int

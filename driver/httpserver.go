@@ -1,9 +1,9 @@
-// The the engine driver is becoming an HTTP server (design design/aa-server-status.md
-// §7.1, §10): aa-server-status needs a mandatory GET /healthz on :9730 to manage
-// it as a "source" server (§6.1 — health probe is the authoritative "serving"
-// signal). This file is intentionally minimal: just the listener + health
-// route. The full twilio-cli/HTTP command surface is separate, deferred work
-// (design §11) and does not belong here.
+// The engine driver serves HTTP (design/aa-server-status.md §7.1, §10):
+// aa-server-status needs a mandatory GET /healthz on :9730 to manage it as a
+// "source" server (§6.1 — health probe is the authoritative "serving" signal).
+// This file is intentionally minimal: the health listener and the
+// Twilio-facing listener, nothing more. A local HTTP tester for the driver
+// (app-cli) is separate, deferred work (design §11) and does not belong here.
 package driver
 
 import (

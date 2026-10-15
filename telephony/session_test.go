@@ -336,7 +336,7 @@ func TestSession_ParentContextCancelStopsSequencer(t *testing.T) {
 	}
 }
 
-// --- deadlock avoidance (charter R8) ---
+// --- deadlock avoidance: a slow VAD pipeline never blocks run() ---
 
 // slowDetector blocks every Detect call on a gate the test controls, so the
 // VAD pipeline's internal buffer fills up and its consumer stalls -- the
@@ -356,9 +356,8 @@ func (d *slowDetector) Reset() {}
 // TestNoDeadlockUnderSustainedFrames pumps 1000 frames at max rate
 // into the session's Twilio data-plane input while the VAD detector is
 // gated shut (simulating a slow/backed-up VAD pipeline). A correct run()
-// drains dataIn continuously via the non-blocking forwardCh handoff
-// (charter R8: the engine never performs a blocking send) and must accept all
-// 1000 frames well within the timeout regardless of VAD speed. A
+// drains dataIn continuously via the non-blocking forwardCh handoff and must
+// accept all 1000 frames well within the timeout regardless of VAD speed. A
 // blocking-send implementation hangs once VAD.In's buffer fills.
 func TestNoDeadlockUnderSustainedFrames(t *testing.T) {
 	const frameCount = 1000

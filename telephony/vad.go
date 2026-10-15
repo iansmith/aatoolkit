@@ -105,8 +105,8 @@ type vadConfig struct {
 
 func defaultVADConfig() vadConfig {
 	// EndSilenceMS 900 -> 700 (AATK-9): AATK-3 raised 700 -> 900 to kill a Whisper
-	// phrase-break hallucination (D5, "...the plumber still hasn't called back" split
-	// into "...has to do it." at 700), but that split was the AATK-8 cold-start VAD bug
+	// phrase-break hallucination (a manual-test utterance cut mid-clause, transcribed with
+	// an invented ending at 700), but that split was the AATK-8 cold-start VAD bug
 	// -- Silero was fed a bare 256-sample window with no 64-sample context, so it ran
 	// cold every frame and mis-placed the boundary. AATK-8 fixed the detector (feed
 	// 320 = 64 context + 256 chunk); a 700/900/1050 re-sweep over the fix-clean set is
@@ -351,9 +351,8 @@ func (m *vadMachine) step(prob float32) (VADEvent, bool) {
 	return VADEvent{}, false
 }
 
-// event snapshots the machine's current state into a lossless VADEvent
-// (charter R9). SessionID is left zero here — the vadService wrapper stamps
-// it on relay (charter R10).
+// event snapshots the machine's current state into a lossless VADEvent.
+// SessionID is left zero here — the vadService wrapper stamps it on relay.
 func (m *vadMachine) event(kind VADKind, prob float32) VADEvent {
 	return VADEvent{
 		Kind:              kind,
@@ -374,8 +373,7 @@ type VADInput = ServiceOutput[[]byte]
 type VADOutput = ServiceInput[VADEvent]
 
 // vadService wraps runVAD behind the VADInput/VADOutput service planes,
-// stamping SessionID (fixed at construction, charter R10) onto every event
-// it relays.
+// stamping SessionID (fixed at construction) onto every event it relays.
 type vadService struct {
 	In  VADInput
 	Out VADOutput

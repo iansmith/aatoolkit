@@ -46,17 +46,17 @@
   {
     "id": "school-elliptical",
     "category": "elliptical",
-    "text": "She starts next Monday at Roosevelt High",
+    "text": "She starts next Monday at Anytown High",
     "steered_labels": ["school_start_date", "school_name"],
     "control_labels": ["date", "organization"],
     "threshold": 0.5,
     "expect_steered": [
       {"label": "school_start_date", "text": "next Monday"},
-      {"label": "school_name", "text": "Roosevelt High"}
+      {"label": "school_name", "text": "Anytown High"}
     ],
     "expect_control": [
       {"label": "date", "text": "next Monday"},
-      {"label": "organization", "text": "Roosevelt High"}
+      {"label": "organization", "text": "Anytown High"}
     ]
   },
   {

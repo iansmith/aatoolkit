@@ -205,7 +205,9 @@ func TestLinearToMuLaw_IsExactMinimum(t *testing.T) {
 
 // TestLinearToMuLaw_NeverWorseThanFfmpeg is a guard test: it asserts that
 // LinearToMuLaw is never strictly worse than ffmpeg's G.711 encoder,
-// across all 65,536 int16 inputs. Bit-equality is forbidden (charter R3).
+// across all 65,536 int16 inputs. It deliberately does not demand
+// bit-equality with ffmpeg: a different code passes as long as its error is
+// no larger.
 func TestLinearToMuLaw_NeverWorseThanFfmpeg(t *testing.T) {
 	// Skip if ffmpeg is not available
 	_, err := exec.LookPath("ffmpeg")

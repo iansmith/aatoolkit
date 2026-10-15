@@ -350,7 +350,7 @@ func TestResponsePlayoutBackstopResumesListening(t *testing.T) {
 }
 
 // TestFailedResponseReturnsToListening pins Observable behavior #4's failed
-// half (D6): a failed event sends "clear", writes no frames/mark,
+// half: a failed event sends "clear", writes no frames/mark,
 // transitions to StateListening, and arms the idle timer.
 func TestFailedResponseReturnsToListening(t *testing.T) {
 	const idleMS = 9000
@@ -557,9 +557,11 @@ func TestReplyRouterFailDeliversFailedEvent(t *testing.T) {
 	}
 }
 
-// TestIdleDecisionRecordsResolvedOverride pins D8's silence-knob
-// production-ization (Addendum V3): with WithMaxSilenceMS(x) set, the
-// idle-timeout cap decision records x, not the bare MaxSilenceMS constant.
+// TestIdleDecisionRecordsResolvedOverride pins AATK-24's change that made the
+// silence knob, WithMaxSilenceMS, a production setting: with
+// WithMaxSilenceMS(x) set, the idle-timeout cap decision records x, not the
+// bare MaxSilenceMS constant. (AATK-24's Addendum V3 kept Session.Start's
+// config-sanity check, validateOrdering, on the bare constant.)
 func TestIdleDecisionRecordsResolvedOverride(t *testing.T) {
 	const idleOverrideMS = 4321
 	clock := newFakeClock()

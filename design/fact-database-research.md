@@ -28,7 +28,7 @@ utterance
    │           (multi-turn window; NOT per-utterance)
    ▼
 ② RESOLVE      Coreference + entity resolution BEFORE writing to the graph.
-   │           "my husband" / "them" / "Erin's mother" → canonical node, or a NIL placeholder.
+   │           "my husband" / "them" / "Alice's mother" → canonical node, or a NIL placeholder.
    ▼
 ③ TIME         Attach bi-temporal validity: valid-from / valid-until (world time) +
    │           ingested-at / invalidated-at (system time). "until Christmas" → valid_until.
@@ -76,7 +76,7 @@ Verified recipes that lift extraction quality:
 - **QA-mediated extraction (SocraticKG):** rather than extracting triples directly, generate and
   answer **5W1H questions** ("who has a birthday? when? whose?") about an utterance, then convert
   the QA pairs into triples. [[arxiv 2601.10003](https://arxiv.org/pdf/2601.10003)] This maps
-  naturally onto the assistant because she's *already* a conversational agent — the questions she'd ask to
+  naturally onto the assistant because it is *already* a conversational agent — the questions it would ask to
   fill gaps (§6) are the same questions that drive extraction.
 - **Extract-Critique-Refine (ECR):** a 3-step prompt (extract → self-critique → refine) emitting
   entities + relations + triples gave **+16% triple-F1** over a one-shot baseline; a Chain-of-Thought
@@ -96,7 +96,7 @@ has matured a lot since; treat this as a design bias (verify what you write), no
 
 ## 2. Coreference & entity resolution — the load-bearing stage
 
-the assistant's facts are only meaningful when linked to the right person. "My husband's birthday is
+The assistant's facts are only meaningful when linked to the right person. "My husband's birthday is
 Aug 8" is useless as a floating triple; it has to attach to a stable *husband* node. This stage is
 where a personal KG lives or dies.
 
@@ -117,7 +117,7 @@ where a personal KG lives or dies.
 
 ### Unknown entities are first-class: NIL / placeholder nodes
 
-This is the mechanism for "Erin", "Erin's mother", and an as-yet-unnamed husband. Entity linking is
+This is the mechanism for "Alice", "Alice's mother", and an as-yet-unnamed husband. Entity linking is
 formally *matching a mention to a KB entry **or returning NIL** when none exists* — and real input
 "virtually guarantees many entities will not appear in the KB."
 [[Dredze et al., COLING 2010](https://www.cs.jhu.edu/~mdredze/publications/entity_linking_coling.pdf)]
@@ -130,8 +130,8 @@ formally *matching a mention to a KB entry **or returning NIL** when none exists
   [[arxiv 2302.02500](https://arxiv.org/pdf/2302.02500)]
 
 **Implication for the assistant:** when a mention doesn't resolve, **create an explicit unlinked
-placeholder node** — `(:Person {name:'Erin', status:'unresolved'})`,
-`(:Person {rel:'mother_of:Erin', status:'unresolved'})` — that a later clarifying answer can fill
+placeholder node** — `(:Person {name:'Alice', status:'unresolved'})`,
+`(:Person {rel:'mother_of:Alice', status:'unresolved'})` — that a later clarifying answer can fill
 and canonicalize. These placeholders *are* your to-do list of questions to ask (§6).
 
 ---
@@ -212,7 +212,7 @@ Build cross-session memory on established blueprints rather than from scratch:
 | **Mem0** (practitioner) | Extract → consolidate → vector+graph store | Popular hybrid vector+graph pattern; good engineering reference |
 
 The episodic-vs-semantic distinction matters: **episodic** = the raw utterance/event ("on Jul 19 she
-mentioned choir"), **semantic** = the distilled fact ("she sings in a choir"). the assistant wants both —
+mentioned choir"), **semantic** = the distilled fact ("she sings in a choir"). The assistant wants both —
 episodic in pgvector (§5a), semantic in AGE.
 
 *(One A-MEM sub-claim about its exact structured note schema was **refuted** 1-2 in verification, so
@@ -246,7 +246,7 @@ budget — treat as directional)*:
 - **Frame gap-filling as knowledge-graph completion.** Select which question to ask by asking which
   answer would most complete the graph; a KG-completion-based question-selection method beat two
   baselines. [[KG-completion question selection, Ono et al.](https://www.researchgate.net/publication/350859214)]
-  For the assistant: the graph *knows* it has a `husband` node with no `name`, and an unresolved `Erin` —
+  For the assistant: the graph *knows* it has a `husband` node with no `name`, and an unresolved `Alice` —
   those are the highest-value questions.
 - **Follow-up question generation with KG + LLM:** a Recognition → Selection (score KG nodes by
   PageRank importance + semantic similarity) → Fusion pipeline generates deeper follow-ups than the
@@ -260,7 +260,7 @@ budget — treat as directional)*:
 **Pattern for the assistant:** maintain a priority queue of gaps (missing name on a known relation,
 unresolved placeholder, contradictory facts, soon-to-expire facts worth confirming). Rank by
 value-of-information × how naturally it fits the current conversation, and surface at most one or two
-per session so she doesn't feel like an interrogation. §6.1 makes this concrete.
+per session so the assistant doesn't feel like an interrogation. §6.1 makes this concrete.
 
 ### 6.1 Which question to ask, and *when* — a two-part policy
 
@@ -274,7 +274,7 @@ overwhelm the user" constraint you flagged.
 
 **The graph enumerates its own gaps.** Because unresolved mentions become explicit NIL placeholder
 nodes (§2) and your schema defines the expected attributes of each entity type, the *set of missing
-facts is directly readable off the graph*: a `husband` node with no `name`, an unresolved `Erin`, a
+facts is directly readable off the graph*: a `husband` node with no `name`, an unresolved `Alice`, a
 `carpool` statement with no phone number. This is the KB-completion framing — **frame question
 selection as "which answer would most complete the graph."** A KG-completion-based question-selection
 method beat two baselines on exactly this task
@@ -298,7 +298,7 @@ generate a natural-language question per `(entity, missing-property)` pair.
 
 **Rank by value-of-information (VOI), not recency.** A missing **name is unusually high-VOI**
 because it's a *hub*: canonicalizing "husband" unlocks every dangling fact that should attach to
-him, and resolving "Erin" lets the carpool arrangement and both children link up. So the ranking
+him, and resolving "Alice" lets the carpool arrangement and both children link up. So the ranking
 key is roughly *"how many other facts/edges does answering this unblock?"* — degree of the
 placeholder node plus number of pending facts waiting on it — times a confidence/importance weight.
 Identity-resolving questions (who is this person?) should almost always outrank attribute questions
@@ -335,14 +335,14 @@ while low-VOI attribute gaps can be banked for later.
 *"You mentioned your husband's birthday — what's his name, so I can keep track?"* ✓, not
 *"Want to tell me more about your family?"* ✗.
 
-#### C. the assistant's two channels — mapping the policy onto her capabilities
+#### C. The assistant's two channels — mapping the policy onto its capabilities
 
 You noted the assistant can both **ask follow-ups in-conversation** and **send unsolicited questions**.
 These have very different interruption costs and should run under different budgets:
 
 | | **Reactive follow-up** (in-conversation) | **Unsolicited push** (out-of-band) |
 |---|---|---|
-| Interruption cost | Low — she's already talking to the user | High — she's initiating contact |
+| Interruption cost | Low — it is already talking to the user | High — it is initiating contact |
 | Best for | Highest-VOI gap created *this turn* (esp. identity resolution), asked while context is fresh | Banked high-VOI gaps, asked at a good moment |
 | VOI timing | Ask **now** — VOI and naturalness both peak at mention | Batch, pick the single best, wait for a breakpoint |
 | Rate budget | ~1–2 per session, fewer early on | Near-zero at cold-start; grows with tenure/trust |
@@ -373,7 +373,7 @@ form. Concrete policy:
    single highest-VOI slot and let the rest stay queued — stacked questions read as interrogation.
 
 **Net policy in one line:** *the graph tells the assistant **what** to ask (VOI-ranked gaps), and
-interruption-cost economics tell her **whether and when** — reactively and immediately for the
+interruption-cost economics tell it **whether and when** — reactively and immediately for the
 top identity gap while context is fresh, and sparingly, batched, and trust-gated for everything
 pushed out of band.*
 
@@ -429,7 +429,7 @@ Recurring events get an event node with an RRULE:
 AGE *does* let you put properties directly on an edge (`(a)-[:BIRTHDAY {date:'Aug 8'}]->(b)`), which
 is lighter. Use edge-properties for simple, single-valued, rarely-revised facts; use **reified
 Statement nodes** when you need per-fact provenance, supersession history, or n-ary facts (the
-pickup arrangement involves the kid, the 5pm deadline, *and* Erin's mother — that's n-ary and won't
+pickup arrangement involves the kid, the 5pm deadline, *and* Alice's mother — that's n-ary and won't
 fit on one edge cleanly). The property-graph-vs-RDF/reification tradeoff was flagged as
 under-evidenced; the pragmatic rule above is standard practice.
 
@@ -468,15 +468,15 @@ under-evidenced; the pragmatic rule above is standard practice.
   doesn't vanish.
 
 **"Older kid prefers 'them'. Soccer Tue/Thu until 4:30, pickup by 5 or tell them beforehand. I
-coordinate with Erin's mother to pick up both kids."**
+coordinate with Alice's mother to pick up both kids."**
 - `prefers_pronoun:'they'` on the older child (high-priority preference fact — apply it everywhere).
 - `Event{soccer, rrule:BYDAY=TU,TH, end:'16:30', hard_pickup_by:'17:00',
   on_delay:'notify_child_beforehand'}` — the conditional/procedural bit becomes a property.
-- Placeholders: `Person{name:'Erin', status:unresolved}`,
-  `Person{rel:'mother_of:Erin', status:unresolved}` → **questions: who is Erin? her mother's name &
+- Placeholders: `Person{name:'Alice', status:unresolved}`,
+  `Person{rel:'mother_of:Alice', status:unresolved}` → **questions: who is Alice? her mother's name &
   phone? how do I notify the kid if late?**
 - A carpool arrangement is n-ary → a reified `Statement{predicate:'carpool'}` linking the user,
-  Erin's mother, and both kids.
+  Alice's mother, and both kids.
 
 ---
 

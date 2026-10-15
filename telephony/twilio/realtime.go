@@ -1828,7 +1828,7 @@ func (s *carrierMediaSink) gatedMessage(msg []byte) func() ([]byte, bool) {
 
 // Media delivers one chunk of the backend's audio to the carrier.
 //
-// It is also where filler audio stops, and the ORDER here is the ticket's
+// It is also where filler audio stops, and the ORDER here is AATK-108's
 // central promise: the loop is stopped, the carrier is cleared, and only then
 // is the reply's first frame written. A clear sent after that frame would
 // discard the reply itself; a clear not sent at all would leave the reply
@@ -1850,7 +1850,7 @@ func (s *carrierMediaSink) Media(ctx context.Context, payload string) error {
 
 // stopFillerAndClear ends the loop and, if it was actually playing, sends the
 // clear the carrier is then owed — one definition of the ordering Media's doc
-// calls the ticket's central promise.
+// calls AATK-108's central promise.
 //
 // The clear goes out only when the loop was actually PLAYING. A reply that
 // arrived inside Delay merely disarms, and a call with no filler configured
@@ -2035,7 +2035,7 @@ func (s *carrierMediaSink) markEchoBound(now time.Time) time.Duration {
 // Clear on Bridge.Run's read-loop goroutine, and since AATK-108 in fillerMedia
 // on the filler's play goroutine as well. Inventing a source channel to route
 // through deliver would reintroduce a per-call goroutine to drain it — the
-// leak this ticket's non-blocking, inline design exists to avoid.
+// leak AATK-84's non-blocking, inline design exists to avoid.
 //
 // Every caller reaches this from inside writeSem, as the afterWrite of its own
 // write. That is what serialises carrierAudioDropped now that the callers are
