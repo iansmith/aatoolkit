@@ -2,6 +2,7 @@ package twilio_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -68,6 +69,35 @@ func TestServeHTTP_AnswerCallSeesPostedTo(t *testing.T) {
 
 	if len(rec.asked) != 1 || rec.asked[0] != [2]string{"+15105551234", "+15105550000"} {
 		t.Fatalf("AnswerCall asked %v, want [[+15105551234 +15105550000]]", rec.asked)
+	}
+}
+
+// The hook is handed the webhook request's own context, so a consumer lookup
+// that honours ctx sees the request's values and stops when the request is
+// cancelled. The request context here carries a value and is already
+// cancelled; context.Background() in its place has neither.
+func TestServeHTTP_AnswerCallGetsRequestContext(t *testing.T) {
+	type ctxKey struct{}
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "request"))
+	cancel()
+
+	var gotValue any
+	var gotErr error
+	s := &twilio.Server{
+		AuthToken:    "authtoken",
+		StreamScheme: "wss",
+		AnswerCall: func(ctx context.Context, _, _ string) (string, bool) {
+			gotValue, gotErr = ctx.Value(ctxKey{}), ctx.Err()
+			return "", false
+		},
+	}
+	form := url.Values{"From": {"+15105551234"}, "To": {"+15105550000"}, "CallSid": {"CA1"}}
+	req := signedWebhookRequest(t, "authtoken", "https", "example.com", form).WithContext(ctx)
+	s.ServeHTTP(httptest.NewRecorder(), req)
+
+	if gotValue != "request" || !errors.Is(gotErr, context.Canceled) {
+		t.Fatalf("AnswerCall ctx value %v, err %v; want %q and context.Canceled (the request's context)",
+			gotValue, gotErr, "request")
 	}
 }
 
