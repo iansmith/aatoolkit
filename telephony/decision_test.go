@@ -347,11 +347,12 @@ func TestDecisionRecorder_IdleTimeout(t *testing.T) {
 	if e.Param != "MaxSilenceMS" {
 		t.Errorf("Param: got %q, want MaxSilenceMS", e.Param)
 	}
-	// AATK-24 (D8 silence-knob production-ization, Addendum V3): the idle
-	// cap decision now follows the resolved bound (the WithMaxSilenceMS
-	// override, here idleTestMS), not the bare MaxSilenceMS constant --
-	// distinct from Session.Start's validateOrdering check, which is
-	// unaffected and still validates against the bare constant.
+	// AATK-24 made the silence knob, WithMaxSilenceMS, a production setting:
+	// the idle cap decision now follows the resolved bound (the
+	// WithMaxSilenceMS override, here idleTestMS), not the bare MaxSilenceMS
+	// constant -- distinct from Session.Start's validateOrdering check, which
+	// AATK-24's Addendum V3 left unchanged and which still validates against
+	// the bare constant.
 	if e.ParamValue != idleTestMS {
 		t.Errorf("ParamValue: got %v, want %d (the resolved override, not the bare MaxSilenceMS constant)", e.ParamValue, idleTestMS)
 	}
