@@ -14,6 +14,7 @@ import (
 
 	"github.com/iansmith/aatoolkit/host"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // The context-taking send forms are reachable from both the Host and the view
@@ -32,14 +33,15 @@ type ctxKey struct{}
 const okSSEStream = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n"
 
 // ctxRecordingTransport answers every request itself with okSSEStream, so no
-// socket is opened, and records the request's context: its deadline and the
-// value under ctxKey.
+// socket is opened, and records the request's context: its deadline, the
+// value under ctxKey, and the span it carries.
 type ctxRecordingTransport struct {
 	mu          sync.Mutex
 	calls       int
 	deadline    time.Time
 	hasDeadline bool
 	value       any
+	span        trace.SpanContext
 }
 
 func (rt *ctxRecordingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -52,6 +54,7 @@ func (rt *ctxRecordingTransport) RoundTrip(r *http.Request) (*http.Response, err
 	rt.calls++
 	rt.deadline, rt.hasDeadline = dl, ok
 	rt.value = r.Context().Value(ctxKey{})
+	rt.span = trace.SpanContextFromContext(r.Context())
 	rt.mu.Unlock()
 	return &http.Response{
 		StatusCode: http.StatusOK,
@@ -66,6 +69,14 @@ func (rt *ctxRecordingTransport) last() (calls int, deadline time.Time, hasDeadl
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return rt.calls, rt.deadline, rt.hasDeadline, rt.value
+}
+
+// lastSpan returns the span context the most recent request's context
+// carried, invalid when it carried none.
+func (rt *ctxRecordingTransport) lastSpan() trace.SpanContext {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.span
 }
 
 // newCtxRecordingHost builds a Host through New and routes its client through
@@ -143,7 +154,9 @@ func TestSendStreamContext_DeadlineComposition(t *testing.T) {
 	})
 }
 
-// TestSendAndSendStream_RunOnTheContextPath: the context-free methods keep
+// TestSendAndSendStream_RunOnTheContextPath: the context-free methods run on
+// SendStreamContext's path: their request goes out under the context that
+// carries the call's model span, which only that path starts. They keep
 // today's bound -- a deadline sendTimeout out -- and carry no caller values.
 func TestSendAndSendStream_RunOnTheContextPath(t *testing.T) {
 	window := []byte(`[{"role":"user","content":"hi"}]`)
@@ -160,6 +173,8 @@ func TestSendAndSendStream_RunOnTheContextPath(t *testing.T) {
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
 			h, rt := newCtxRecordingHost()
+			rec, tp := newRecorder(t)
+			h.tracerProvider = tp // what New copies from Config.TracerProvider
 			before := time.Now()
 			if err := call(h); err != nil {
 				t.Fatalf("%s: %v", name, err)
@@ -167,6 +182,11 @@ func TestSendAndSendStream_RunOnTheContextPath(t *testing.T) {
 			requireSendTimeoutDeadline(t, rt, before, time.Now())
 			if _, _, _, v := rt.last(); v != nil {
 				t.Errorf("request carried caller value %v; want none", v)
+			}
+			span := onlyModelSpan(t, rec)
+			if got := rt.lastSpan(); !got.Equal(span.SpanContext()) {
+				t.Errorf("request went out under span %v (valid %v); want the call's model span %v",
+					got.SpanID(), got.IsValid(), span.SpanContext().SpanID())
 			}
 		})
 	}
