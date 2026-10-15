@@ -733,7 +733,8 @@ func TestModelSpan_NotRecordingSkipsCapture(t *testing.T) {
 // TestModelSpan_NoProviderReadsNoCaptureVariable: with no provider, a call
 // never reads the capture variable, and never parses it; a traced call reads
 // it once, when its span ends. The reads are counted over whole calls through
-// getenv, the one lookup of the variable. The parse is probed through
+// getenv, which TestTraceSource_CaptureVariableReadOnlyThroughGetenv keeps
+// the one lookup of the variable. The parse is probed through
 // strconv.ParseBool's error path, which allocates: where the variable is
 // parsed, an unparsable value costs more allocations than "0", and where it
 // is not, the two cost the same. Each probe has a control showing it sees

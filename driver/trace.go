@@ -246,7 +246,7 @@ var getenv = os.Getenv
 // value strconv.ParseBool reads as true. Unset, empty, false or unparsable
 // is off.
 func captureMessageContent() bool {
-	on, err := strconv.ParseBool(os.Getenv(captureMessageContentEnv))
+	on, err := strconv.ParseBool(getenv(captureMessageContentEnv))
 	return err == nil && on
 }
 

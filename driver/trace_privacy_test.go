@@ -172,23 +172,10 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 
 	// Every package-level type the package's non-test files declare, so a
 	// type trace.go names can be followed to what it holds.
+	files := parsePackageFiles(t, fset)
+	f := files["trace.go"]
 	decls := map[string]ast.Expr{}
-	var f *ast.File
-	paths, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatalf("listing the package's files: %v", err)
-	}
-	for _, path := range paths {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", path, err)
-		}
-		if path == "trace.go" {
-			f = file
-		}
+	for _, file := range files {
 		for _, d := range file.Decls {
 			if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.TYPE {
 				for _, spec := range gd.Specs {
@@ -197,9 +184,6 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 				}
 			}
 		}
-	}
-	if f == nil {
-		t.Fatal("trace.go not found")
 	}
 
 	// holds returns the forbidden type that e is or holds, with the path to
@@ -441,6 +425,71 @@ func TestTraceSource_OnlyTraceGoTouchesSpans(t *testing.T) {
 		if len(control[rule]) == 0 {
 			t.Errorf("control: the %q rule finds nothing in trace.go, so it cannot see a span write anywhere", rule)
 		}
+	}
+}
+
+// parsePackageFiles parses the package's non-test files, keyed by name.
+func parsePackageFiles(t *testing.T, fset *token.FileSet) map[string]*ast.File {
+	t.Helper()
+	paths, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("listing the package's files: %v", err)
+	}
+	files := map[string]*ast.File{}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		files[path] = f
+	}
+	if files["trace.go"] == nil {
+		t.Fatal("trace.go not found")
+	}
+	return files
+}
+
+// TestTraceSource_CaptureVariableReadOnlyThroughGetenv: every lookup of the
+// capture variable goes through getenv, so the read count
+// TestModelSpan_NoProviderReadsNoCaptureVariable takes covers them all. Its
+// name is written once, in trace.go; no other non-test file names it,
+// captureMessageContentEnv, captureMessageContent or getenv; and trace.go
+// calls nothing in os that reads the environment.
+func TestTraceSource_CaptureVariableReadOnlyThroughGetenv(t *testing.T) {
+	fset := token.NewFileSet()
+	files := parsePackageFiles(t, fset)
+	envReads := map[string]bool{"Getenv": true, "LookupEnv": true, "Environ": true}
+	names := map[string]bool{"captureMessageContentEnv": true, "captureMessageContent": true, "getenv": true}
+	literals := 0
+	for path, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.BasicLit:
+				if v, err := strconv.Unquote(x.Value); x.Kind == token.STRING && err == nil && v == documentedCaptureEnv {
+					literals++
+					if path != "trace.go" {
+						t.Errorf("%s: names the capture variable", fset.Position(x.Pos()))
+					}
+				}
+			case *ast.Ident:
+				if path != "trace.go" && names[x.Name] {
+					t.Errorf("%s: references %s", fset.Position(x.Pos()), x.Name)
+				}
+			case *ast.CallExpr:
+				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && path == "trace.go" {
+					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "os" && envReads[sel.Sel.Name] {
+						t.Errorf("%s: calls os.%s; read the capture variable through getenv", fset.Position(x.Pos()), sel.Sel.Name)
+					}
+				}
+			}
+			return true
+		})
+	}
+	if literals != 1 {
+		t.Errorf("the capture variable's name is written %d times in the package's non-test files; want once, in trace.go", literals)
 	}
 }
 
