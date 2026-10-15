@@ -136,9 +136,11 @@ driver.StartTwilioServer(addr, srv, driver.WithHandlerWrapper(
 
 The span is named `chat {Tier.Model}` (`chat` when the model is empty), with scope
 `github.com/iansmith/aatoolkit/driver` and schema `https://opentelemetry.io/schemas/1.41.0`.
-It covers the whole call, `onSegment` time included. An unknown tier or a window that is not
-JSON gets no span. A call that sends nothing because its context is already done, or because
-its tier URL cannot be requested, still gets one, which records why it failed.
+It covers the whole call, `onSegment` time included. An unknown tier, or a window that does not
+encode (bytes that are not JSON, or an empty non-nil slice), gets no span and sends nothing; a
+nil window encodes as `null` and is sent, as before. A call that sends nothing because its
+context is already done, or because its tier URL cannot be requested, still gets a span, which
+records why it failed.
 
 | Attribute | Value |
 |---|---|
@@ -158,8 +160,10 @@ its tier URL cannot be requested, still gets one, which records why it failed.
 | `gen_ai.input.messages`, `gen_ai.output.messages` | only with message content capture on |
 
 Never on a span: the API key or any request header; URL userinfo, path or query; error text or
-upstream error bodies; From or To. The span has no events, and no trace headers are added to
-the upstream request.
+upstream error bodies. The engine adds no From or To attribute anywhere, but with message
+content capture on, `gen_ai.input.messages` and `gen_ai.output.messages` hold whatever the
+messages carry: the system prompt, and any number or name the consumer put in the window. The
+span has no events, and no trace headers are added to the upstream request.
 
 ## Status
 
