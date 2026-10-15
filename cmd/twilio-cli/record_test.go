@@ -94,7 +94,7 @@ func TestRecordSent_WritesSentPayloads(t *testing.T) {
 		t.Errorf("recorded bytes differ from the payloads sent: got %d bytes, want %d", len(got), len(spoken))
 	}
 	// The wire carried framed JSON; the file must not. Equality above already
-	// implies it, but this names the mistake the ticket exists to prevent.
+	// implies it, but this names the mistake AATK-99 exists to prevent.
 	if len(wire) != 3 {
 		t.Fatalf("frames written to the wire: got %d, want 3", len(wire))
 	}

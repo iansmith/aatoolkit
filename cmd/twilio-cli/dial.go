@@ -674,11 +674,11 @@ func handleFrame(f twilio.Frame, player *lazyPlayer, audio *callAudio, conn *web
 
 	case twilio.EventMark:
 		// twilio-cli has no way to observe when its playback (piped to
-		// ffplay) actually finishes rendering a given frame, so it
-		// approximates playout duration from the byte count of the
-		// mu-law audio (8 kHz, 1 byte/sample) received since the last
-		// mark, and echoes the mark back after that estimated delay
-		// (charter R17: approximate, not exact, playout-complete signal).
+		// ffplay) actually finishes rendering a given frame, so its mark
+		// echo is an approximate playout-complete signal, not an exact one:
+		// it estimates how much audio is still queued from the byte count
+		// of mu-law (8 kHz, 1 byte/sample) handed to the player, and echoes
+		// the mark back after that estimated delay.
 		// Ask the filler, which already tracks the only quantity a mark echo
 		// depends on: how much handed-over audio has not played yet.
 		//

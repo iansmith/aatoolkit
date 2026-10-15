@@ -7,8 +7,8 @@ import (
 	"github.com/iansmith/aatoolkit/config"
 )
 
-// TestResolveSpec_SourceDeclared_ArgvUnaffected pins the ticket's test
-// expectation directly: a source-declared probe (AATK-41) resolves to the
+// TestResolveSpec_SourceDeclared_ArgvUnaffected pins AATK-41's test
+// expectation directly: a source-declared probe resolves to the
 // exact same argv shape probeExec already runs for a plain exec health
 // check — config.Health.Source is purely a build-time declaration consumed
 // by internal/lifecycle.EnsureHealthProbeBuilt before the first probe;

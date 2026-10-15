@@ -16,8 +16,8 @@ import (
 //
 // s.Entry's first whitespace-separated token is resolved against
 // <venv>/bin (e.g. "supertonic serve" -> <venv>/bin/supertonic, with
-// "serve" as the first arg; "python scripts/whisper_server.py" ->
-// <venv>/bin/python, with "scripts/whisper_server.py" as the first arg).
+// "serve" as the first arg; "python scripts/vad_server.py" ->
+// <venv>/bin/python, with "scripts/vad_server.py" as the first arg).
 // Any remaining tokens are appended verbatim, then --host/--port are
 // auto-appended — no other flags are added.
 func PythonCommand(s config.Server) (command string, args []string) {

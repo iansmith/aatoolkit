@@ -7,8 +7,8 @@ import (
 
 // wavData and buildWAV16kMono are minimal WAV helpers retained purely for tests.
 // They formerly backed the local mic-capture path (removed with its own VAD); the
-// only remaining user is TestPadWAVSilence, which builds a known WAV and inspects
-// the padded result's data chunk. Kept in a _test.go file so they are not shipped
+// only remaining user is TestPadWAVSilenceAlwaysAppendsTail, which builds a known
+// WAV and inspects the padded result's data chunk. Kept in a _test.go file so they are not shipped
 // as unused production code.
 
 // buildWAV16kMono wraps raw 16 kHz mono s16le PCM in a WAV container.

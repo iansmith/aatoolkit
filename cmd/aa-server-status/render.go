@@ -161,14 +161,14 @@ var redStates = map[ServerState]bool{
 
 // anomalyDetailStates are the STATE values for which a non-empty
 // AnomalyDetail is actually rendered in the parenthetical. STRAY/BLOCKED are
-// the ticket's original two; StatePartial, StateUp and StateExtraListener
-// were added for AATK-87 F2/F3, which are exactly the three states
-// statusForLocked's owned-server branch can pair an AnomalyDetail with:
-// nothing could be confirmed at all (classifyOwned renders StatePartial), a
-// declared port is confirmed while another tree member's read was ambiguous
-// (StateUp), or that same ambiguity coexists with a genuine stray port
-// (StateExtraListener). A state not in this list still ignores
-// AnomalyDetail even if one happens to be set.
+// the original two, the only states rendered with a detail before AATK-87;
+// StatePartial, StateUp and StateExtraListener were added for AATK-87 F2/F3,
+// which are exactly the three states statusForLocked's owned-server branch can
+// pair an AnomalyDetail with: nothing could be confirmed at all (classifyOwned
+// renders StatePartial), a declared port is confirmed while another tree
+// member's read was ambiguous (StateUp), or that same ambiguity coexists with
+// a genuine stray port (StateExtraListener). A state not in this list still
+// ignores AnomalyDetail even if one happens to be set.
 var anomalyDetailStates = map[ServerState]bool{
 	StateStray:         true,
 	StateBlocked:       true,

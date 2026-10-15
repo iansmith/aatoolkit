@@ -4,8 +4,9 @@ FastAPI + uvicorn sidecar for NER-based fact extraction using GLiNER.
 
 Implements the extraction wire contract from AATK-51. Binds to 127.0.0.1,
 with model path/repo-id passed as a command-line flag and resolved at startup.
-No app is built at module import (see sidecar.py comment: "voice_server has no
-module-level app: its create_app() would eagerly build the TTS model.").
+No app is built at module import: the model comes from --model, resolved at
+startup, so ``__main__`` builds the app after parsing arguments, and each test
+builds its own with ``create_app``.
 
 **Model identity:** --model defaults to os.environ.get("AATOOLKIT_FACTS_MODEL",
 "urchade/gliner_small-v2.1"). The sidecar classifies the value by one stateless

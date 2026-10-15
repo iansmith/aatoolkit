@@ -76,7 +76,7 @@ Verified recipes that lift extraction quality:
 - **QA-mediated extraction (SocraticKG):** rather than extracting triples directly, generate and
   answer **5W1H questions** ("who has a birthday? when? whose?") about an utterance, then convert
   the QA pairs into triples. [[arxiv 2601.10003](https://arxiv.org/pdf/2601.10003)] This maps
-  naturally onto the assistant because she's *already* a conversational agent — the questions she'd ask to
+  naturally onto the assistant because it is *already* a conversational agent — the questions it would ask to
   fill gaps (§6) are the same questions that drive extraction.
 - **Extract-Critique-Refine (ECR):** a 3-step prompt (extract → self-critique → refine) emitting
   entities + relations + triples gave **+16% triple-F1** over a one-shot baseline; a Chain-of-Thought
@@ -96,7 +96,7 @@ has matured a lot since; treat this as a design bias (verify what you write), no
 
 ## 2. Coreference & entity resolution — the load-bearing stage
 
-the assistant's facts are only meaningful when linked to the right person. "My husband's birthday is
+The assistant's facts are only meaningful when linked to the right person. "My husband's birthday is
 Aug 8" is useless as a floating triple; it has to attach to a stable *husband* node. This stage is
 where a personal KG lives or dies.
 
@@ -212,7 +212,7 @@ Build cross-session memory on established blueprints rather than from scratch:
 | **Mem0** (practitioner) | Extract → consolidate → vector+graph store | Popular hybrid vector+graph pattern; good engineering reference |
 
 The episodic-vs-semantic distinction matters: **episodic** = the raw utterance/event ("on Jul 19 she
-mentioned choir"), **semantic** = the distilled fact ("she sings in a choir"). the assistant wants both —
+mentioned choir"), **semantic** = the distilled fact ("she sings in a choir"). The assistant wants both —
 episodic in pgvector (§5a), semantic in AGE.
 
 *(One A-MEM sub-claim about its exact structured note schema was **refuted** 1-2 in verification, so
@@ -260,7 +260,7 @@ budget — treat as directional)*:
 **Pattern for the assistant:** maintain a priority queue of gaps (missing name on a known relation,
 unresolved placeholder, contradictory facts, soon-to-expire facts worth confirming). Rank by
 value-of-information × how naturally it fits the current conversation, and surface at most one or two
-per session so she doesn't feel like an interrogation. §6.1 makes this concrete.
+per session so the assistant doesn't feel like an interrogation. §6.1 makes this concrete.
 
 ### 6.1 Which question to ask, and *when* — a two-part policy
 
@@ -335,14 +335,14 @@ while low-VOI attribute gaps can be banked for later.
 *"You mentioned your husband's birthday — what's his name, so I can keep track?"* ✓, not
 *"Want to tell me more about your family?"* ✗.
 
-#### C. the assistant's two channels — mapping the policy onto her capabilities
+#### C. The assistant's two channels — mapping the policy onto its capabilities
 
 You noted the assistant can both **ask follow-ups in-conversation** and **send unsolicited questions**.
 These have very different interruption costs and should run under different budgets:
 
 | | **Reactive follow-up** (in-conversation) | **Unsolicited push** (out-of-band) |
 |---|---|---|
-| Interruption cost | Low — she's already talking to the user | High — she's initiating contact |
+| Interruption cost | Low — it is already talking to the user | High — it is initiating contact |
 | Best for | Highest-VOI gap created *this turn* (esp. identity resolution), asked while context is fresh | Banked high-VOI gaps, asked at a good moment |
 | VOI timing | Ask **now** — VOI and naturalness both peak at mention | Batch, pick the single best, wait for a breakpoint |
 | Rate budget | ~1–2 per session, fewer early on | Near-zero at cold-start; grows with tenure/trust |
@@ -373,7 +373,7 @@ form. Concrete policy:
    single highest-VOI slot and let the rest stay queued — stacked questions read as interrogation.
 
 **Net policy in one line:** *the graph tells the assistant **what** to ask (VOI-ranked gaps), and
-interruption-cost economics tell her **whether and when** — reactively and immediately for the
+interruption-cost economics tell it **whether and when** — reactively and immediately for the
 top identity gap while context is fresh, and sparingly, batched, and trust-gated for everything
 pushed out of band.*
 

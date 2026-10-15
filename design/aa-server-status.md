@@ -1,6 +1,6 @@
 # aa-server-status — design
 
-Status: **design / agreed direction.** Written 2026-07-06. Staging doc for ticket creation (the tickets are the long-lasting record).
+Status: **design / agreed direction.** Written 2026-07-06 as a staging doc for planning the supervisor's implementation; that implementation, not this doc, is the long-lasting record.
 
 `aa-server-status` is a Go program that starts, stops, and reports the health of every server in the system — MLX model servers, Python (venv) servers, a `caddy`-style reverse proxy, and the `app` core driver itself. It replaces the hand-rolled `scripts/*.sh` launchers and centralizes all lifecycle + environment management in one place.
 

@@ -63,8 +63,8 @@ func TestHealth_Declared(t *testing.T) {
 // --- validation: exactly one form ---
 
 // execServer is validServer's datastore counterpart: the same fixture, turned
-// into the thing this ticket exists for — a server that does not speak HTTP and
-// so declares its readiness as a command.
+// into the thing the exec health form (AATK-36) exists for — a server that does
+// not speak HTTP and so declares its readiness as a command.
 func execServer(overrides func(*Server)) Server {
 	return validServer(func(s *Server) {
 		s.Name = "datastore"
@@ -80,8 +80,8 @@ func execServer(overrides func(*Server)) Server {
 	})
 }
 
-// The symptom in the ticket: a server whose readiness cannot be expressed as an
-// HTTP GET must be declarable at all.
+// The symptom AATK-36 reported: a server whose readiness cannot be expressed as
+// an HTTP GET must be declarable at all.
 func TestValidate_HealthExecFormPasses(t *testing.T) {
 	if err := Validate(Config{Servers: []Server{execServer(nil)}}); err != nil {
 		t.Fatalf("expected exec-form health to validate, got %v", err)
