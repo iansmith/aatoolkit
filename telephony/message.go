@@ -39,7 +39,7 @@ const (
 
 // VADEvent is a voice-activity boundary emitted on a vadService's VADOutput.
 // It is a lossless record of the vadMachine's full state at the moment of
-// emission (charter R9) and carries SessionID on every result (charter R10).
+// emission and carries SessionID on every result.
 type VADEvent struct {
 	Kind         VADKind
 	Prob         float32 // detector probability that produced this event

@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// Phase 0 adversary gap tests (plan Step 0f). Both are grounded in the ticket's
-// own wording rather than new contract.
+// Phase 0 adversary gap tests (plan Step 0f) for AATK-69. Both are grounded
+// in that ticket's own wording rather than new contract.
 
 // G1 — Behavior 2 says "Each inbound carrier media frame is forwarded as one
 // input_audio_buffer.append": a 1:1 mapping that preserves order. A single-frame

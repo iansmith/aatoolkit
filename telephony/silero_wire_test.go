@@ -165,9 +165,10 @@ func TestSileroDeadlineExceeded(t *testing.T) {
 	}
 }
 
-// TestSileroPerInferenceDeadline guards charter R8: the per-inference budget
-// must stay strictly inside the data-plane buffer it feeds, so a stalled
-// inference fails the window before the buffer would overflow.
+// TestSileroPerInferenceDeadline pins the inequality that keeps a stalled
+// inference from blocking the VAD goroutine: the per-inference budget must
+// stay strictly inside the data-plane buffer it feeds, so a stalled inference
+// fails the window before the buffer would overflow.
 func TestSileroPerInferenceDeadline(t *testing.T) {
 	if vadInferenceDeadline >= DataPlaneBufferMS*time.Millisecond {
 		t.Fatalf("vadInferenceDeadline %s must be < DataPlaneBufferMS (%dms)", vadInferenceDeadline, DataPlaneBufferMS)
