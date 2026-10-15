@@ -313,7 +313,7 @@ func writeVoiceRefusal(w http.ResponseWriter, text string) {
 // html.EscapeString covers the XML metacharacters but passes through what
 // XML 1.0 cannot carry at all: invalid UTF-8, the C0 controls other than tab,
 // LF and CR, and U+FFFE/U+FFFF. One such character makes the whole document
-// unparseable, so they are dropped first. Valid text, tab and newline
+// unparseable, so they are dropped first. Valid text, tab, LF and CR
 // included, escapes to the same bytes as html.EscapeString alone.
 func escapeTwiML(text string) string {
 	text = strings.Map(func(r rune) rune {

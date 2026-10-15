@@ -60,7 +60,7 @@ func TestServeHTTP_AnswerCallRefuseSaysAndHangsUp(t *testing.T) {
 
 // The refusal stays well-formed XML whatever say holds. Characters XML 1.0
 // cannot carry (invalid UTF-8, C0 controls other than tab, LF and CR, and
-// U+FFFE/U+FFFF) are dropped; valid text, tab and newline included, is
+// U+FFFE/U+FFFF) are dropped; valid text, tab, LF and CR included, is
 // escaped to the same bytes as before.
 func TestServeHTTP_AnswerCallRefusalIsWellFormedXML(t *testing.T) {
 	for _, tc := range []struct{ say, wantSay string }{
@@ -71,6 +71,8 @@ func TestServeHTTP_AnswerCallRefusalIsWellFormedXML(t *testing.T) {
 		{"non￾char", "nonchar"},
 		{"non￿char", "nonchar"},
 		{"tab\there\nnext", "tab\there\nnext"},
+		{"a\r\nb", "a\r\nb"},
+		{"line one\rline two", "line one\rline two"},
 		{"Call A & B", "Call A &amp; B"},
 	} {
 		rec := &answerCallRecorder{say: tc.say, refuse: true}
