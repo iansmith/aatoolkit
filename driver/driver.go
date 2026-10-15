@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"github.com/iansmith/aatoolkit/host"
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ---------------------------------------------------------------------------
@@ -82,6 +84,9 @@ type Host struct {
 	history     []message
 	userContext func(queryText string) string // optional user context block
 	histMu      sync.Mutex
+	// tracerProvider is Config.TracerProvider, fixed at New. Nil means the
+	// global provider, resolved at each call and never cached.
+	tracerProvider trace.TracerProvider
 }
 
 // Config is what an agent supplies to stand up a driver: its LLM tiers, TTS
@@ -102,6 +107,26 @@ type Config struct {
 	// bypasses. The engine supplies no default URL: like every other field
 	// here, it is the consumer's to inject.
 	RealtimeURL string
+
+	// TracerProvider supplies the tracer for the span each model request
+	// produces (AATK-159): one CLIENT span per chat-completions request that
+	// is actually sent, named "chat <Tier.Model>". Nil, the default, means
+	// otel.GetTracerProvider() is resolved at each call, so a consumer that
+	// installs its SDK globally, before or after New, gets spans. With nothing
+	// installed, the no-op provider records and sends nothing. The engine
+	// never installs a provider, exporter or propagator, and never adds trace
+	// headers to the upstream request.
+	//
+	// Message content stays off the span by default: it is personal data (the
+	// system prompt, the user-context block, the history and the user's own
+	// text). The environment variable AATOOLKIT_CAPTURE_MESSAGE_CONTENT turns
+	// it on when strconv.ParseBool reads its value as true ("1", "true"):
+	// each request's messages and the model's output are then recorded as
+	// gen_ai.input.messages and gen_ai.output.messages. Unset, empty, false or
+	// unparsable leaves it off. It is read per request, and only for a span
+	// that is recording. Values are not truncated; bound them with the SDK's
+	// span limits (OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT).
+	TracerProvider trace.TracerProvider
 }
 
 // StreamHandler returns the Media Streams handler for the configured
@@ -129,9 +154,10 @@ func New(cfg Config) *Host {
 				return http.ErrUseLastResponse
 			},
 		},
-		prompt:      cfg.Prompt,
-		tts:         cfg.TTS,
-		userContext: cfg.UserContext,
+		prompt:         cfg.Prompt,
+		tts:            cfg.TTS,
+		userContext:    cfg.UserContext,
+		tracerProvider: cfg.TracerProvider,
 	}
 	h.speech = newSpeechQueue(func(text []byte, voice string, speed float64) {
 		if err := h.synthesizeAndPlay(string(text), voice, speed); err != nil {
@@ -240,9 +266,32 @@ func buildStreamPayload(ep Tier, contextWindow []byte) map[string]any {
 	return payload
 }
 
+// upstreamStatusError is a non-200 answer from a tier's upstream: its URL,
+// status and up to 300 bytes of its body. Its text is what the driver has
+// always returned for one; the type lets a span record the status alone.
+type upstreamStatusError struct {
+	url    string
+	status int
+	body   []byte
+}
+
+func (e *upstreamStatusError) Error() string {
+	return fmt.Sprintf("llm %s: status %d (%.300s)", e.url, e.status, e.body)
+}
+
+// upstreamErrorPayload is an {"error": {...}} chunk in the SSE stream. Its
+// text is what the driver has always returned for one; the type lets a span
+// record the kind of failure without the upstream's message.
+type upstreamErrorPayload struct {
+	msg string
+}
+
+func (e *upstreamErrorPayload) Error() string { return "llm error: " + e.msg }
+
 // postStreamRequest POSTs body to ep.URL and returns the still-open streaming
 // response on success. On a non-200 status it reads up to 300 bytes of the
-// error body into the returned error and closes the response itself.
+// error body into the returned *upstreamStatusError and closes the response
+// itself.
 func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", ep.URL, bytes.NewReader(body))
 	if err != nil {
@@ -261,7 +310,7 @@ func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*ht
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 301))
-		return nil, fmt.Errorf("llm %s: status %d (%.300s)", ep.URL, resp.StatusCode, errBody)
+		return nil, &upstreamStatusError{url: ep.URL, status: resp.StatusCode, body: errBody}
 	}
 	return resp, nil
 }
@@ -322,7 +371,7 @@ func (d sseDelta) reasoningText() string {
 // with ok true, including one carrying no choices, which is how an upstream
 // delivers the final usage: its delta is empty, and the chunk's model, id and
 // usage ride beside it as on any other chunk. An upstream error payload comes
-// back as an error, as does a malformed chunk.
+// back as an *upstreamErrorPayload, and a malformed chunk as an error.
 func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 	if line == "" || !strings.HasPrefix(line, "data: ") {
 		return sseDelta{}, false, nil
@@ -336,7 +385,7 @@ func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 		return sseDelta{}, false, fmt.Errorf("decoding SSE chunk: %w", err)
 	}
 	if chunk.Error != nil {
-		return sseDelta{}, false, fmt.Errorf("llm error: %s", chunk.Error.Message)
+		return sseDelta{}, false, &upstreamErrorPayload{msg: chunk.Error.Message}
 	}
 	if len(chunk.Choices) > 0 {
 		delta = chunk.Choices[0].Delta
@@ -467,7 +516,14 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 // its cancellation ends the call wherever it is, and its deadline applies
 // when it is the earlier one. It is the one implementation of a model
 // request: Send, SendStream and SendContext all end here.
-func (h *Host) SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
+//
+// A request that is sent gets one CLIENT span, a child of ctx's span, from
+// Config.TracerProvider or the global provider. It covers the whole call,
+// onSegment's time included, and ends after the last segment; a call that
+// fails before sending (an unknown tier, a window that is not JSON) gets
+// none. The span is ended by a defer, so a panicking onSegment still ends it,
+// as an error of type _OTHER; the panic is not recovered.
+func (h *Host) SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) (content, reasoning []byte, err error) {
 	ep, ok := h.tiers[tier]
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown tier %q (have: fast, deep)", tier)
@@ -476,36 +532,82 @@ func (h *Host) SendStreamContext(ctx context.Context, contextWindow []byte, tier
 	if err != nil {
 		return nil, nil, err
 	}
+	ctx, call := h.startModelSpan(ctx, tier, ep.Model, ep.URL)
+	st := &streamState{acc: newSegmentAccumulator(minSegmentChars)}
+	// What end records if streamChat never returns, because onSegment
+	// panicked.
+	errType := errTypeOther
+	defer func() { call.end(st, ep.MaxTokens, contextWindow, errType) }()
+	content, reasoning, errType, err = h.streamChat(ctx, call, ep, body, st, onSegment)
+	return content, reasoning, err
+}
+
+// streamChat sends one chat-completions request and folds its SSE stream
+// into st, calling onSegment at each segment boundary. Besides the result it
+// returns the error.type for call's span: "" on success. It marks on call
+// when the request went out and when each line arrived, taking the time
+// before the line is processed so onSegment's time is not counted.
+func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []byte, st *streamState, onSegment func(string)) (content, reasoning []byte, errType string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
+	call.requestSent()
 	resp, err := h.postStreamRequest(ctx, ep, body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, streamErrorType(ctx, err, errTypeTransport), err
 	}
 	defer resp.Body.Close()
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 256*1024)
-	st := &streamState{acc: newSegmentAccumulator(minSegmentChars)}
 	for scanner.Scan() {
+		at := call.now()
+		hadChunk, hadContent := st.chunks > 0, st.hasContent
 		if err := processSSELine(scanner.Text(), st, onSegment); err != nil {
-			return nil, nil, err
+			return nil, nil, streamErrorType(ctx, err, errTypeDecode), err
 		}
+		call.observe(st, hadChunk, hadContent, at)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("reading SSE stream: %w", err)
+		err = fmt.Errorf("reading SSE stream: %w", err)
+		return nil, nil, streamErrorType(ctx, err, errTypeStreamRead), err
 	}
 	if !st.hasContent {
+		var err error
 		if st.finishReason != "" {
-			return nil, nil, fmt.Errorf("no content in SSE stream (finish_reason %s)", st.finishReason)
+			err = fmt.Errorf("no content in SSE stream (finish_reason %s)", st.finishReason)
+		} else {
+			err = fmt.Errorf("no content in SSE stream")
 		}
-		return nil, nil, fmt.Errorf("no content in SSE stream")
+		return nil, nil, streamErrorType(ctx, err, errTypeEmpty), err
 	}
 	// Flush any trailing text that didn't hit a boundary.
 	if seg, ok := st.acc.flush(); ok {
 		onSegment(seg)
 	}
-	return []byte(st.contentBuf.String()), []byte(st.reasoningBuf.String()), nil
+	return []byte(st.contentBuf.String()), []byte(st.reasoningBuf.String()), "", nil
+}
+
+// streamErrorType classifies a failed request for its span's error.type.
+// The context comes first, because a deadline or cancellation surfaces as
+// whatever the transport or the stream read was doing when it hit: then an
+// upstream's status code, then an SSE error payload, then fallback, the kind
+// of site that failed. It never reads err's text.
+func streamErrorType(ctx context.Context, err error, fallback string) string {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return errTypeTimeout
+	case errors.Is(ctx.Err(), context.Canceled):
+		return errTypeCanceled
+	}
+	var status *upstreamStatusError
+	if errors.As(err, &status) {
+		return strconv.Itoa(status.status)
+	}
+	var payload *upstreamErrorPayload
+	if errors.As(err, &payload) {
+		return errTypeUpstream
+	}
+	return fallback
 }
 
 // ---------------------------------------------------------------------------
