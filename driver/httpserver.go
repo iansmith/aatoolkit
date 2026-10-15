@@ -103,9 +103,11 @@ func resolveTwilioServerConfig(opts []TwilioServerOption) twilioServerConfig {
 //     context.WithoutCancel(ctx), which keeps the values (the span parent
 //     among them) and drops the cancellation. The same holds for the ctx
 //     HandleSMSStatus and AnswerCall receive.
-//   - With otelhttp, use otelhttp.WithPublicEndpoint(): these requests come
-//     from the provider, not from a traced caller. The engine adds no span
-//     attributes of its own here, From and To included.
+//   - With otelhttp, pass otelhttp.WithPublicEndpointFn returning true
+//     (current otelhttp releases no longer have WithPublicEndpoint): these
+//     requests come from the provider, not from a traced caller, so a trace
+//     context they carry is linked rather than adopted as the parent. The
+//     engine adds no span attributes of its own here, From and To included.
 func WithHandlerWrapper(wrap func(route string, h http.Handler) http.Handler) TwilioServerOption {
 	return func(c *twilioServerConfig) { c.wrap = wrap }
 }

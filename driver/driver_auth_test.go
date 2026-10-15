@@ -12,11 +12,9 @@ import (
 // recordingSSEServer answers one SSE delta and records the Authorization
 // header of the last request it saw.
 func recordingSSEServer(lastAuth *atomic.Value) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lastAuth.Store(r.Header.Get("Authorization"))
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n")
-	}))
+	srv, reqs := newScriptedSSEServer(sseStep{line: textLine("ok")})
+	reqs.onRecord(func(header http.Header, _ []byte) { lastAuth.Store(header.Get("Authorization")) })
+	return srv
 }
 
 // newTestHost builds a Host through New -- the production constructor, so the
