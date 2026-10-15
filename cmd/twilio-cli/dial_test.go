@@ -217,8 +217,9 @@ func TestDial_CancelledContextReturnsError(t *testing.T) {
 }
 
 // TestDial_StartEventSIDsAreDistinct asserts distinct streamSIDs are minted
-// across separate dials, now that CallSid is caller-supplied (single-sourced
-// per PRD D12) rather than internally minted by dial.
+// across separate dials, now that CallSid is caller-supplied (main mints it once
+// and hands the same value to the webhook POST and to dial) rather than
+// internally minted by dial.
 func TestDial_StartEventSIDsAreDistinct(t *testing.T) {
 	callSid := smsfake.NewSID("CA")
 

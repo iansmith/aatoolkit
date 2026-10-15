@@ -260,7 +260,7 @@ func TestSendStreamUnknownTier(t *testing.T) {
 	}
 }
 
-// ParseStreamScheme is the -stream-scheme flag surface (PRD D15): it must
+// ParseStreamScheme is the -stream-scheme flag surface: it must
 // default to "wss" when omitted, accept "ws"/"wss" explicitly, and reject any
 // other value at flag-parse time so an invalid scheme never reaches
 // twilio.Server.StreamScheme.
