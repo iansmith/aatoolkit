@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -123,29 +124,50 @@ type Server struct {
 	// the engine never requires a router to operate.
 	ReplyRouter *telephony.ReplyRouter
 
+	// AnswerCall, if set, decides per call whether to answer with a spoken
+	// refusal instead of opening a stream. It is handed the caller (from) and
+	// the dialed number (to; "" when the webhook's To is missing or not
+	// E.164), so a consumer serving several numbers can answer differently on
+	// each. Returning refuse=true answers <Say>say</Say><Hangup/> and opens
+	// no stream; say is XML-escaped, and anything XML 1.0 cannot carry
+	// (invalid UTF-8, U+0000-U+001F other than tab, LF and CR, U+FFFE and
+	// U+FFFF) is dropped. It runs only for a call that passed signature
+	// validation, the E.164 From check and Authorize; an Authorize refusal
+	// wins and AnswerCall is never consulted. Nil keeps the stream answer
+	// unchanged. Voice only: ServeSMS never calls it, because InboundSMS
+	// already carries To. The engine holds no wording and no identity here;
+	// both belong to the consumer, as with Authorize.
+	AnswerCall func(ctx context.Context, from, to string) (say string, refuse bool)
+
 	fromMu    sync.Mutex
-	fromBySID map[string]string // CallSid -> From, bounded by maxPendingFrom
-	fromOrder []string          // insertion order, for evict-oldest
+	fromBySID map[string]callParties // CallSid -> From/To, bounded by maxPendingFrom
+	fromOrder []string               // insertion order, for evict-oldest
 }
 
-// maxPendingFrom bounds the CallSid->From map recorded by ServeHTTP for
+// callParties is what the voice webhook records under a CallSid for
+// ServeStreams to thread onto the start Frame.
+type callParties struct {
+	from, to string
+}
+
+// maxPendingFrom bounds the CallSid -> From/To map recorded by ServeHTTP for
 // ServeStreams to thread onto the start Frame. Mirrors the maxAbandoned
 // evict-oldest discipline in telephony/stt.go: a call whose stream never
 // opens (or is rejected at the webhook) would otherwise leave a permanent
 // entry, growing unboundedly over a long-running server's lifetime.
 const maxPendingFrom = 1024
 
-// recordFrom remembers from under callSid for a later ServeStreams lookup.
-// A blank callSid is never recorded — it cannot uniquely key a later start
-// frame, so keeping it would just waste an eviction slot.
-func (s *Server) recordFrom(callSid, from string) {
+// recordCall remembers from and to under callSid for a later ServeStreams
+// lookup. A blank callSid is never recorded — it cannot uniquely key a later
+// start frame, so keeping it would just waste an eviction slot.
+func (s *Server) recordCall(callSid, from, to string) {
 	if callSid == "" {
 		return
 	}
 	s.fromMu.Lock()
 	defer s.fromMu.Unlock()
 	if s.fromBySID == nil {
-		s.fromBySID = make(map[string]string)
+		s.fromBySID = make(map[string]callParties)
 	}
 	if _, exists := s.fromBySID[callSid]; !exists {
 		s.fromOrder = append(s.fromOrder, callSid)
@@ -154,12 +176,12 @@ func (s *Server) recordFrom(callSid, from string) {
 			s.fromOrder = s.fromOrder[1:]
 		}
 	}
-	s.fromBySID[callSid] = from
+	s.fromBySID[callSid] = callParties{from: from, to: to}
 }
 
-// lookupFrom returns the From recorded for callSid, or "" if none was ever
-// recorded (unknown/missing case).
-func (s *Server) lookupFrom(callSid string) string {
+// lookupCall returns the From and To recorded for callSid, or "" for both if
+// none was ever recorded (unknown/missing case).
+func (s *Server) lookupCall(callSid string) callParties {
 	s.fromMu.Lock()
 	defer s.fromMu.Unlock()
 	return s.fromBySID[callSid]
@@ -208,7 +230,10 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) bool {
 // request signature (403 on failure, including an empty AuthToken), then validates
 // the caller's E.164 From number (403 on failure), logs From and CallSid, and
 // responds with TwiML instructing Twilio to open the Media Streams WebSocket at
-// /streams.
+// /streams — unless Authorize refuses the caller (VoiceRejectText) or
+// AnswerCall refuses the call (its own say text), each answered with
+// <Say>…</Say><Hangup/>. The dialed To reaches AnswerCall and the start Frame
+// only when it is E.164; otherwise it is "".
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.authenticate(w, r) {
 		return
@@ -223,12 +248,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("twilio: ServeHTTP: From=%s CallSid=%s", from, callSid)
 
-	s.recordFrom(callSid, from)
+	to := r.PostForm.Get("To")
+	if !e164Pattern.MatchString(to) {
+		to = ""
+	}
+	s.recordCall(callSid, from, to)
 
 	if s.Authorize != nil && !s.Authorize(from) {
-		w.Header().Set("Content-Type", "text/xml")
-		fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, html.EscapeString(s.VoiceRejectText))
+		writeVoiceRefusal(w, s.VoiceRejectText)
 		return
+	}
+
+	if s.AnswerCall != nil {
+		if say, refuse := s.AnswerCall(r.Context(), from, to); refuse {
+			writeVoiceRefusal(w, say)
+			return
+		}
 	}
 
 	streamURL := fmt.Sprintf("%s://%s/streams", s.streamScheme(), r.Host)
@@ -248,7 +283,7 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 	from := r.PostForm.Get("From")
 	if s.Authorize != nil && !s.Authorize(from) {
 		w.Header().Set("Content-Type", "text/xml")
-		fmt.Fprintf(w, `<Response><Message>%s</Message></Response>`, html.EscapeString(s.SMSRejectText))
+		fmt.Fprintf(w, `<Response><Message>%s</Message></Response>`, escapeTwiML(s.SMSRejectText))
 		return
 	}
 
@@ -263,6 +298,31 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeEmptyTwiML(w)
+}
+
+// writeVoiceRefusal answers a voice webhook by speaking text (escaped by
+// escapeTwiML) and hanging up, opening no stream. One definition for both
+// refusals in ServeHTTP — Authorize's VoiceRejectText and AnswerCall's say —
+// so the two cannot drift into different documents.
+func writeVoiceRefusal(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/xml")
+	fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, escapeTwiML(text))
+}
+
+// escapeTwiML makes text safe as the content of a TwiML element.
+// html.EscapeString covers the XML metacharacters but passes through what
+// XML 1.0 cannot carry at all: invalid UTF-8, the C0 controls other than tab,
+// LF and CR, and U+FFFE/U+FFFF. One such character makes the whole document
+// unparseable, so they are dropped first. Valid text, tab, LF and CR
+// included, escapes to the same bytes as html.EscapeString alone.
+func escapeTwiML(text string) string {
+	text = strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' || (r >= 0x20 && r != 0xFFFE && r != 0xFFFF) {
+			return r
+		}
+		return -1
+	}, strings.ToValidUTF8(text, ""))
+	return html.EscapeString(text)
 }
 
 // writeEmptyTwiML acknowledges a webhook without asking Twilio to do anything.
@@ -355,7 +415,8 @@ func (s *Server) ServeStreams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f.From = s.lookupFrom(f.CallSID)
+	parties := s.lookupCall(f.CallSID)
+	f.From, f.To = parties.from, parties.to
 
 	if s.ReplyRouter != nil {
 		ctx = ContextWithReplyRouter(ctx, s.ReplyRouter)
