@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -38,51 +36,6 @@ func serverSpanWrapper(tp trace.TracerProvider) func(string, http.Handler) http.
 			defer span.End()
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
-	}
-}
-
-// postInboundSMS serves a twilio.Server whose HandleSMS is handle through
-// StartTwilioServer with opts -- the exported entry point, so the options have
-// to survive the pass-through to newTwilioMux as well as be applied there --
-// and posts it one inbound SMS from from with body, signed the way the
-// provider signs it. It fails the test unless the answer is 200. HandleSMS
-// runs inside ServeSMS, so when this returns, the handler has returned.
-func postInboundSMS(t *testing.T, handle func(context.Context, twilio.InboundSMS), from, body string, opts ...TwilioServerOption) {
-	t.Helper()
-	s := &twilio.Server{
-		AuthToken:    "authtoken",
-		StreamScheme: "ws", // so the signature is reconstructed over http, matching httptest
-		HandleSMS:    handle,
-	}
-	hs := StartTwilioServer("127.0.0.1:0", s, opts...)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		hs.Shutdown(ctx)
-	})
-	ts := httptest.NewServer(hs.Handler)
-	t.Cleanup(ts.Close)
-
-	form := url.Values{
-		"MessageSid": {"SM123"},
-		"From":       {from},
-		"Body":       {body},
-	}
-	rawURL := ts.URL + "/sms/inbound"
-	req, err := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Twilio-Signature", twilio.ComputeSignature("authtoken", rawURL, form))
-
-	resp, err := ts.Client().Do(req)
-	if err != nil {
-		t.Fatalf("POST /sms/inbound: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /sms/inbound status = %d, want 200", resp.StatusCode)
 	}
 }
 

@@ -24,6 +24,8 @@ type sseRequestLog struct {
 	count  int
 	body   []byte
 	header http.Header
+	// observe, when set, sees each request as it is recorded.
+	observe func(header http.Header, body []byte)
 }
 
 func (l *sseRequestLog) record(header http.Header, body []byte) {
@@ -32,6 +34,18 @@ func (l *sseRequestLog) record(header http.Header, body []byte) {
 	l.count++
 	l.body = body
 	l.header = header
+	if l.observe != nil {
+		l.observe(header, body)
+	}
+}
+
+// onRecord has f called with each later request's header and body as the
+// request is recorded, before the response is written, for a caller that
+// keeps its own record of what the server saw.
+func (l *sseRequestLog) onRecord(f func(header http.Header, body []byte)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.observe = f
 }
 
 // LastBody returns the last request's body decoded as a JSON object, or nil

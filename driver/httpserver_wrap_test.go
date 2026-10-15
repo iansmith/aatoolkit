@@ -47,6 +47,51 @@ func postRoute(t *testing.T, client *http.Client, base, path string) (status int
 	return resp.StatusCode, resp.Header.Get(wrapTagHeader)
 }
 
+// postInboundSMS serves a twilio.Server whose HandleSMS is handle through
+// StartTwilioServer with opts -- the exported entry point, so the options have
+// to survive the pass-through to newTwilioMux as well as be applied there --
+// and posts it one inbound SMS from from with body, signed the way the
+// provider signs it. It fails the test unless the answer is 200. HandleSMS
+// runs inside ServeSMS, so when this returns, the handler has returned.
+func postInboundSMS(t *testing.T, handle func(context.Context, twilio.InboundSMS), from, body string, opts ...TwilioServerOption) {
+	t.Helper()
+	s := &twilio.Server{
+		AuthToken:    "authtoken",
+		StreamScheme: "ws", // so the signature is reconstructed over http, matching httptest
+		HandleSMS:    handle,
+	}
+	hs := StartTwilioServer("127.0.0.1:0", s, opts...)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		hs.Shutdown(ctx)
+	})
+	ts := httptest.NewServer(hs.Handler)
+	t.Cleanup(ts.Close)
+
+	form := url.Values{
+		"MessageSid": {"SM123"},
+		"From":       {from},
+		"Body":       {body},
+	}
+	rawURL := ts.URL + "/sms/inbound"
+	req, err := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", twilio.ComputeSignature("authtoken", rawURL, form))
+
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST /sms/inbound: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /sms/inbound status = %d, want 200", resp.StatusCode)
+	}
+}
+
 // allRoutesOnce is the wrapper-call count a wrapper must see: every route,
 // exactly once.
 func allRoutesOnce() map[string]int {
@@ -91,47 +136,12 @@ type wrapperCtxKey struct{}
 // its values while dropping that cancellation.
 func TestWithHandlerWrapper_ContextReachesSMSHandler(t *testing.T) {
 	got := make(chan context.Context, 1)
-	s := &twilio.Server{
-		AuthToken:    "authtoken",
-		StreamScheme: "ws", // so the signature is reconstructed over http, matching httptest
-		HandleSMS:    func(ctx context.Context, _ twilio.InboundSMS) { got <- ctx },
-	}
 	wrap := func(route string, h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), wrapperCtxKey{}, route)))
 		})
 	}
-
-	hs := StartTwilioServer("127.0.0.1:0", s, WithHandlerWrapper(wrap))
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		hs.Shutdown(ctx)
-	})
-	ts := httptest.NewServer(hs.Handler)
-	t.Cleanup(ts.Close)
-
-	form := url.Values{
-		"MessageSid": {"SM123"},
-		"From":       {"+15551234567"},
-		"Body":       {"hello"},
-	}
-	rawURL := ts.URL + "/sms/inbound"
-	req, err := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Twilio-Signature", twilio.ComputeSignature("authtoken", rawURL, form))
-
-	resp, err := ts.Client().Do(req)
-	if err != nil {
-		t.Fatalf("POST /sms/inbound: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /sms/inbound status = %d, want 200", resp.StatusCode)
-	}
+	postInboundSMS(t, func(ctx context.Context, _ twilio.InboundSMS) { got <- ctx }, "+15551234567", "hello", WithHandlerWrapper(wrap))
 
 	var ctx context.Context
 	select {
