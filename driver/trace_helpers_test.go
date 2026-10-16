@@ -118,9 +118,10 @@ func withoutCaptureEnv(t *testing.T) {
 
 // scanSpans looks through everything a span exports -- its name, every
 // attribute key and value (each element of a slice value), its status
-// description, and its events' and links' names and attributes -- for any of
-// needles (case-insensitively) or a match of re (nil skips the regexp). It
-// returns one description per hit.
+// description, its events' names and attributes, its links' attributes, its
+// instrumentation scope's name, version, schema URL and attributes, and its
+// resource's attributes -- for any of needles (case-insensitively) or a
+// match of re (nil skips the regexp). It returns one description per hit.
 func scanSpans(spans []sdktrace.ReadOnlySpan, needles []string, re *regexp.Regexp) []string {
 	var hits []string
 	check := func(span sdktrace.ReadOnlySpan, where, s string) {
@@ -154,6 +155,14 @@ func scanSpans(spans []sdktrace.ReadOnlySpan, needles []string, re *regexp.Regex
 		}
 		for _, l := range span.Links() {
 			checkAttrs(span, "link attribute", l.Attributes)
+		}
+		scope := span.InstrumentationScope()
+		check(span, "scope name", scope.Name)
+		check(span, "scope version", scope.Version)
+		check(span, "scope schema URL", scope.SchemaURL)
+		checkAttrs(span, "scope attribute", scope.Attributes.ToSlice())
+		if res := span.Resource(); res != nil {
+			checkAttrs(span, "resource attribute", res.Attributes())
 		}
 	}
 	return hits
