@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -43,9 +44,10 @@ func closedHostPort() string {
 // error payload echoing both, a transport failure, a timeout -- no span the
 // call ends, the model span or any other, holds the API key, a secret from
 // the URL's userinfo, path or query, an auth header's name or scheme, or an
-// E.164 number. The number is in the window, and on success the model's
-// reasoning and reply echo it, so with capture off a span that recorded
-// input or output would hold it. With capture on, the same holds for the
+// E.164 number. The number is in the window, on success the model's
+// reasoning and reply echo it, and the call's context carries baggage
+// holding it and the key, so with capture off a span that recorded input,
+// output or baggage would hold it. With capture on, the same holds for the
 // secrets and headers, using number-free fixtures.
 func TestModelSpan_NeverRecordsSecretsOrNumbers(t *testing.T) {
 	const apiKey = "sk-scan-secret"
@@ -102,10 +104,31 @@ func TestModelSpan_NeverRecordsSecretsOrNumbers(t *testing.T) {
 		}},
 	}
 
+	// withBaggage puts baggage carrying echo and the key on ctx, as a
+	// consumer's propagated baggage might, so a span that copied the call's
+	// baggage would hold them.
+	withBaggage := func(t *testing.T, ctx context.Context, echo string) context.Context {
+		t.Helper()
+		var members []baggage.Member
+		for _, kv := range [][2]string{{"caller", echo}, {"token", apiKey}} {
+			m, err := baggage.NewMemberRaw(kv[0], kv[1])
+			if err != nil {
+				t.Fatalf("baggage member %s: %v", kv[0], err)
+			}
+			members = append(members, m)
+		}
+		b, err := baggage.New(members...)
+		if err != nil {
+			t.Fatalf("baggage: %v", err)
+		}
+		return baggage.ContextWithBaggage(ctx, b)
+	}
+
 	check := func(t *testing.T, sc scenario, window []byte, echo string, re *regexp.Regexp, wantInput bool) {
 		t.Helper()
 		url, ctx, cleanup := sc.start(t, echo)
 		defer cleanup()
+		ctx = withBaggage(t, ctx, echo)
 		h, rec := tracedHost(t, url, Tier{Model: "test", MaxTokens: 512, APIKey: apiKey})
 		_, _, _ = h.SendStreamContext(ctx, window, "fast", func(string) {})
 		span := onlyModelSpan(t, rec)
@@ -172,7 +195,10 @@ func TestServerAddrPort_StripsUserinfoPathQuery(t *testing.T) {
 // declare, so a field added to a driver.go struct that trace.go takes, such
 // as streamState, counts. trace.go also never names APIKey or the tiers map,
 // never reads a context value (a context.Context is allowed only to parent
-// the span), never calls RecordError, AddEvent or an Error() method, and
+// the span: one it declares is handed to no call but Start and has none of
+// its methods called, and no function named ...FromContext, such as
+// baggage.FromContext, is called), never calls RecordError, AddEvent or an
+// Error() method, and
 // gives every SetStatus the literal "" as its description; it must contain
 // at least one SetStatus, so that rule is not vacuous.
 //
@@ -306,6 +332,27 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 		}
 	}
 
+	// Control: the context rule refuses a ...FromContext call, a method call
+	// on a context, and a context handed to anything but Start, and lets a
+	// context through to Start.
+	for src, wantHit := range map[string]bool{
+		"baggage.FromContext(ctx)":   true,
+		"trace.SpanFromContext(ctx)": true,
+		"note(ctx)":                  true,
+		"ctx.Deadline()":             true,
+		`tr.Start(ctx, "chat")`:      false,
+	} {
+		e, err := parser.ParseExpr(src)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", src, err)
+		}
+		if hit := len(contextReads(e.(*ast.CallExpr), map[string]bool{"ctx": true})) > 0; hit != wantHit {
+			t.Errorf("control: the context rule finds a read in %s = %v, want %v", src, hit, wantHit)
+		}
+	}
+
+	ctxNames := contextNames(f)
+	ctxToStart := 0
 	setStatus := 0
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
@@ -335,9 +382,19 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 				t.Errorf("%s: references %s", pos(x), x.Name)
 			}
 		case *ast.CallExpr:
+			for _, hit := range contextReads(x, ctxNames) {
+				t.Errorf("%s: %s", pos(x), hit)
+			}
 			sel, ok := x.Fun.(*ast.SelectorExpr)
 			if !ok {
 				return true
+			}
+			if sel.Sel.Name == "Start" {
+				for _, arg := range x.Args {
+					if id, ok := arg.(*ast.Ident); ok && ctxNames[id.Name] {
+						ctxToStart++
+					}
+				}
 			}
 			switch {
 			case sel.Sel.Name == "RecordError" || sel.Sel.Name == "AddEvent":
@@ -362,6 +419,69 @@ func TestTraceSource_NoSecretsReachSpanCode(t *testing.T) {
 	if setStatus == 0 {
 		t.Error("trace.go calls SetStatus nowhere; the status rule above checked nothing")
 	}
+	if ctxToStart == 0 {
+		t.Error("trace.go hands no context to Start; the context rule above checked nothing")
+	}
+}
+
+// contextNames returns the names declared with type context.Context in f:
+// parameters, results, struct fields and variables.
+func contextNames(f ast.Node) map[string]bool {
+	isContext := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		id, ok := sel.X.(*ast.Ident)
+		return ok && id.Name == "context" && sel.Sel.Name == "Context"
+	}
+	names := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.Field:
+			if isContext(x.Type) {
+				for _, nm := range x.Names {
+					names[nm.Name] = true
+				}
+			}
+		case *ast.ValueSpec:
+			if x.Type != nil && isContext(x.Type) {
+				for _, nm := range x.Names {
+					names[nm.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return names
+}
+
+// contextReads describes each way call uses a context for more than
+// parenting a span, given the names declared as a context.Context: a call
+// of a function or method named ...FromContext (baggage.FromContext,
+// trace.SpanFromContext), a method call on a context, or a context handed to
+// any call but Start.
+func contextReads(call *ast.CallExpr, ctxNames map[string]bool) []string {
+	var hits []string
+	name := ""
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		name = fn.Name
+	case *ast.SelectorExpr:
+		name = fn.Sel.Name
+		if id, ok := fn.X.(*ast.Ident); ok && ctxNames[id.Name] {
+			hits = append(hits, fmt.Sprintf("calls %s.%s, a method of a context", id.Name, name))
+		}
+	}
+	if strings.HasSuffix(name, "FromContext") {
+		hits = append(hits, fmt.Sprintf("calls %s, which reads a context", name))
+	}
+	for _, arg := range call.Args {
+		if id, ok := arg.(*ast.Ident); ok && ctxNames[id.Name] && name != "Start" {
+			hits = append(hits, fmt.Sprintf("hands context %s to %s; a context may only parent the span, through Start", id.Name, name))
+		}
+	}
+	return hits
 }
 
 // spanTypesAllowed lists the types from outside the package that trace.go
