@@ -8,8 +8,8 @@ import "context"
 
 // ContextSender is the context-taking form of Host's Send and SendStream. ctx
 // parents the span each model request produces and bounds the call: its
-// deadline and cancellation apply, and the driver's own ceiling still applies
-// on top. ctx is a context.Context; it is unrelated to Host.Context(queryText),
+// deadline and cancellation apply, and the driver's own ceiling (300 s for
+// driver.Host) still applies on top. ctx is a context.Context; it is unrelated to Host.Context(queryText),
 // which returns the messages array. It is separate from Host so that adding it
 // breaks no existing Host implementation. An interpreted policy reaches it by
 // type-asserting its host.Host, which works only if the consumer injects this

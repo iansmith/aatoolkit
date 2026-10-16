@@ -39,12 +39,15 @@ import (
 
 // sendTimeout bounds one model request end to end: the connection, the
 // response headers and the whole stream. It composes with the caller's
-// context, so an earlier caller deadline wins.
+// context, so an earlier caller deadline wins. It is unexported, so the
+// exported docs that bound a call by it (Tier, Send, SendStream,
+// SendStreamContext, host.ContextSender) and the README give its value as
+// 300 s: change them with it.
 const sendTimeout = 300 * time.Second
 
 // Tier describes one tier's llama-server. reasoning=false asks the model to
 // skip its thinking trace; maxTokens caps a single turn so a runaway generation
-// can't burn the whole sendTimeout.
+// can't burn the whole sendTimeout (300 s).
 type Tier struct {
 	URL, Model string
 	Reasoning  bool
@@ -191,7 +194,7 @@ const minSegmentChars = 30 // minimum buffer length before a punctuation boundar
 // Send implements host.Host. contextWindow is the already serialized `messages`
 // array; tier is "fast" | "deep". Returns content, reasoning (empty if the
 // model/flags don't emit it), error. It is SendContext under
-// context.Background(), so sendTimeout alone bounds it.
+// context.Background(), so sendTimeout (300 s) alone bounds it.
 func (h *Host) Send(contextWindow []byte, tier string) ([]byte, []byte, error) {
 	return h.SendContext(context.Background(), contextWindow, tier)
 }
@@ -560,24 +563,25 @@ func processSSELine(line string, st *streamState, onSegment func(string)) error 
 // flushed when the buffer crosses ~30 chars and a delimiter (. ? ! , \n) is
 // seen; the delimiter is kept at the end of the segment so the TTS has the
 // punctuation it needs for natural cadence. It is SendStreamContext under
-// context.Background(), so sendTimeout alone bounds it.
+// context.Background(), so sendTimeout (300 s) alone bounds it.
 func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
 	return h.SendStreamContext(context.Background(), contextWindow, tier, onSegment)
 }
 
 // SendStreamContext implements host.ContextSender: SendStream under ctx. The
-// request runs under ctx bounded by sendTimeout, so ctx's values reach it and
-// its deadline applies when it is the earlier one. Once ctx is done the call
-// fails at the next read, line or segment, even when the rest of the stream
-// is already buffered: no onSegment call starts after that, though one
-// already running is not interrupted. Wherever the call stops once ctx is
-// done (sending, waiting for the response headers, reading a non-200 status
-// body or the stream, or between lines), and over HTTP/1 or HTTP/2 alike,
-// the error matches both ctx.Err() and context.Cause(ctx) under errors.Is:
-// for a context cancelled or timed out with a cause (context.WithCancelCause,
-// WithTimeoutCause, WithDeadlineCause), it matches that cause as well as
-// context.Canceled or DeadlineExceeded. It is the one implementation of a
-// model request: Send, SendStream and SendContext all end here.
+// request runs under ctx bounded by sendTimeout (300 s), so ctx's values
+// reach it and its deadline applies when it is the earlier one. Once ctx is
+// done the call fails at the next read, line or segment, even when the rest
+// of the stream is already buffered: no onSegment call starts after that,
+// though one already running is not interrupted. Wherever the call stops
+// once ctx is done (sending, waiting for the response headers, reading a
+// non-200 status body or the stream, or between lines), and over HTTP/1 or
+// HTTP/2 alike, the error matches both ctx.Err() and context.Cause(ctx)
+// under errors.Is: for a context cancelled or timed out with a cause
+// (context.WithCancelCause, WithTimeoutCause, WithDeadlineCause), it matches
+// that cause as well as context.Canceled or DeadlineExceeded. It is the one
+// implementation of a model request: Send, SendStream and SendContext all
+// end here.
 //
 // Once its tier is found and its window encodes, a call gets one CLIENT
 // span, a child of ctx's span, from Config.TracerProvider or the global
