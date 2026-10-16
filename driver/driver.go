@@ -686,7 +686,7 @@ func foldLine(call *modelCall, st *streamState, line string, onSegment func(stri
 }
 
 // streamReadError is the error for a stream that could not be read to its
-// end: err is the read's failure, or ctx's cause when ctx was done first.
+// end: err is the read's failure, or ctx's cause once ctx is done.
 func streamReadError(err error) error {
 	return fmt.Errorf("reading SSE stream: %w", err)
 }
