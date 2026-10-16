@@ -55,14 +55,18 @@ func modelSpans(rec *tracetest.SpanRecorder) []sdktrace.ReadOnlySpan {
 	return out
 }
 
-// driverSpans returns every span rec saw start, ended or not, that the
-// driver could have made: one of kind CLIENT, or one from the driver's
-// instrumentation scope. A span a test starts itself (scope "test", kind
-// internal) or a webhook wrapper's SERVER span is not one.
+// testScope is the instrumentation scope of every span a test starts
+// itself: a caller span, or a webhook wrapper's SERVER span. driverSpans
+// tells those apart from the driver's by it.
+const testScope = "test"
+
+// driverSpans returns every span rec saw start, ended or not, except the
+// ones a test started itself under testScope: so every span the driver
+// made, whatever its kind or scope.
 func driverSpans(rec *tracetest.SpanRecorder) []sdktrace.ReadOnlySpan {
 	var out []sdktrace.ReadOnlySpan
 	for _, s := range rec.Started() {
-		if s.SpanKind() == trace.SpanKindClient || s.InstrumentationScope().Name == tracerName {
+		if s.InstrumentationScope().Name != testScope {
 			out = append(out, s)
 		}
 	}
@@ -70,7 +74,8 @@ func driverSpans(rec *tracetest.SpanRecorder) []sdktrace.ReadOnlySpan {
 }
 
 // onlyModelSpan fails the test unless rec holds exactly one model span and
-// saw no other span the driver could have made, and returns the model span.
+// saw no other span start besides the ones the test started itself, and
+// returns the model span.
 func onlyModelSpan(t *testing.T, rec *tracetest.SpanRecorder) sdktrace.ReadOnlySpan {
 	t.Helper()
 	spans := modelSpans(rec)
@@ -78,7 +83,7 @@ func onlyModelSpan(t *testing.T, rec *tracetest.SpanRecorder) sdktrace.ReadOnlyS
 		t.Fatalf("got %d model spans, want exactly 1", len(spans))
 	}
 	if n := len(driverSpans(rec)); n != 1 {
-		t.Fatalf("saw %d spans of kind CLIENT or from the driver's scope; want 1, the model span", n)
+		t.Fatalf("saw %d spans the test did not start itself; want 1, the model span", n)
 	}
 	return spans[0]
 }

@@ -1036,7 +1036,7 @@ func TestSendStreamContext_NoSpanWithoutRequest(t *testing.T) {
 		t.Errorf("after two calls that send nothing: %d model spans, %d requests; want 0 and 0", n, reqs.Count())
 	}
 	if n := len(driverSpans(rec)); n != 0 {
-		t.Errorf("after two calls that send nothing: %d spans of kind CLIENT or from the driver's scope; want 0", n)
+		t.Errorf("after two calls that send nothing: %d spans the test did not start itself; want 0", n)
 	}
 
 	if _, _, err := h.SendStreamContext(context.Background(), traceWindow, "fast", func(string) {}); err != nil {
@@ -1073,7 +1073,7 @@ func TestSendStreamContext_SpanFollowsWindowEncoding(t *testing.T) {
 				t.Fatalf("%d model spans and %d requests (error %v); want %d of each", n, reqs.Count(), err, tc.wantSpans)
 			}
 			if n := len(driverSpans(rec)); n != tc.wantSpans {
-				t.Fatalf("%d spans of kind CLIENT or from the driver's scope; want %d", n, tc.wantSpans)
+				t.Fatalf("%d spans the test did not start itself; want %d", n, tc.wantSpans)
 			}
 			if tc.wantSpans == 0 {
 				if err == nil {

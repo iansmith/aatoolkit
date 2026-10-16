@@ -116,9 +116,9 @@ func requireNoAttrs(t *testing.T, span sdktrace.ReadOnlySpan, keys ...string) {
 }
 
 // TestSendStreamContext_OneClientSpanUnderCaller (DoD a): one model request
-// sent under a caller's span produces exactly one CLIENT span and no other
-// span from the driver (onlyModelSpan counts both). That span is the
-// caller's child and carries the request and response attributes, the two
+// sent under a caller's span produces exactly one span besides the caller's
+// (onlyModelSpan counts every span the test did not start itself), a CLIENT
+// span. That span is the caller's child and carries the request and response attributes, the two
 // first-arrival times, and an unset status -- and the call still returns the
 // streamed content and segments.
 func TestSendStreamContext_OneClientSpanUnderCaller(t *testing.T) {
@@ -133,7 +133,7 @@ func TestSendStreamContext_OneClientSpanUnderCaller(t *testing.T) {
 	defer srv.Close()
 	h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
 
-	ctx, caller := h.tracerProvider.Tracer("test").Start(context.Background(), "caller")
+	ctx, caller := h.tracerProvider.Tracer(testScope).Start(context.Background(), "caller")
 	var segs []string
 	content, reasoning, err := h.SendStreamContext(ctx, traceWindow, "fast", func(s string) { segs = append(segs, s) })
 	caller.End()
@@ -449,7 +449,7 @@ func TestWithContext_SpansParentToBoundContext(t *testing.T) {
 			srv, _ := newScriptedSSEServer(okSteps()...)
 			defer srv.Close()
 			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
-			ctx, caller := h.tracerProvider.Tracer("test").Start(context.Background(), "inbound request")
+			ctx, caller := h.tracerProvider.Tracer(testScope).Start(context.Background(), "inbound request")
 			err := call(h.WithContext(ctx))
 			caller.End()
 			if err != nil {
@@ -841,7 +841,7 @@ func TestSendStreamContext_ConcurrentCallsOwnTheirSpans(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ctx, caller := h.tracerProvider.Tracer("test").Start(context.Background(), fmt.Sprintf("caller-%d", i))
+			ctx, caller := h.tracerProvider.Tracer(testScope).Start(context.Background(), fmt.Sprintf("caller-%d", i))
 			callers[i] = caller.SpanContext()
 			window := []byte(fmt.Sprintf(`[{"role":"user","content":"call-%d"}]`, i))
 			_, _, errs[i] = h.SendStreamContext(ctx, window, "fast", func(string) {})
@@ -860,7 +860,7 @@ func TestSendStreamContext_ConcurrentCallsOwnTheirSpans(t *testing.T) {
 		t.Fatalf("got %d model spans, want %d", len(spans), n)
 	}
 	if got := len(driverSpans(rec)); got != n {
-		t.Fatalf("saw %d spans of kind CLIENT or from the driver's scope; want %d, the model spans", got, n)
+		t.Fatalf("saw %d spans the test did not start itself; want %d, the model spans", got, n)
 	}
 	byParent := map[trace.SpanID]sdktrace.ReadOnlySpan{}
 	for _, s := range spans {

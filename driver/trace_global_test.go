@@ -86,7 +86,7 @@ func globalProviderChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("baggage: %v", err)
 	}
-	ctx, caller := tpB.Tracer("test").Start(baggage.ContextWithBaggage(context.Background(), bag), "caller")
+	ctx, caller := tpB.Tracer(testScope).Start(baggage.ContextWithBaggage(context.Background(), bag), "caller")
 	defer caller.End()
 	// The installed propagator has something to inject from ctx, so the
 	// header check below is not vacuous.

@@ -29,7 +29,7 @@ const (
 // it starts a SERVER span named after the route, from tp, serves the request
 // with that span in its context, and ends the span when the handler returns.
 func serverSpanWrapper(tp trace.TracerProvider) func(string, http.Handler) http.Handler {
-	tracer := tp.Tracer("webhook-test")
+	tracer := tp.Tracer(testScope)
 	return func(route string, next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx, span := tracer.Start(r.Context(), route, trace.WithSpanKind(trace.SpanKindServer))
