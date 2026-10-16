@@ -230,7 +230,9 @@ func TestSendStreamContext_CallerCancelEndsCall(t *testing.T) {
 // no network read is left to fail. That holds for lines still to be
 // processed (a malformed one included, which would otherwise fail the call
 // its own way), for segments still to be cut from the line in hand, and for
-// the end-of-stream flush, and the span records the failure.
+// the end-of-stream flush, and the span records the failure. sseServer
+// writes each of these short bodies in one write and returns without
+// flushing, so net/http sends it whole, with a Content-Length.
 func TestSendStreamContext_DoneContextStopsBufferedStream(t *testing.T) {
 	const s1, s2, s3 = "The quick brown fox jumps over the lazy dog.",
 		" A second sentence follows the first one here.",

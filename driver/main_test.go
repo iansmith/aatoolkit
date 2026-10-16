@@ -2,10 +2,8 @@ package driver
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -36,17 +34,12 @@ func TestPadWAVSilenceAlwaysAppendsTail(t *testing.T) {
 // Phase 0 — Send() streaming
 // ---------------------------------------------------------------------------
 
-// sseServer builds a httptest.Server that answers every request with lines,
-// each ended by a newline, as one complete SSE body written at once with its
-// Content-Length, so a client can hold the whole stream before it processes
-// the first line. It drains the request body first.
+// sseServer builds a httptest.Server that responds with SSE-formatted lines.
 func sseServer(lines ...string) *httptest.Server {
-	body := strings.Join(lines, "\n") + "\n"
+	body := strings.Join(lines, "\n")
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		_, _ = io.WriteString(w, body)
+		fmt.Fprint(w, body)
 	}))
 }
 
