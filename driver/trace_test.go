@@ -955,6 +955,66 @@ func TestModelSpan_NotRecordingSkipsCapture(t *testing.T) {
 	}
 }
 
+// TestModelSpan_NotRecordingStillEnds: a model span that is not recording is
+// still ended, once, whether the call succeeds or fails, so a provider that
+// tracks its spans until End -- one that pools them, or counts the open
+// ones -- sees every unsampled model span end.
+func TestModelSpan_NotRecordingStillEnds(t *testing.T) {
+	if (endCountingSpan{}).IsRecording() {
+		t.Fatal("control: the counting provider's spans record, so this test cannot see a non-recording span")
+	}
+	okSrv, _ := newScriptedSSEServer(okSteps()...)
+	defer okSrv.Close()
+	statusSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "overloaded", http.StatusServiceUnavailable)
+	}))
+	defer statusSrv.Close()
+	for name, url := range map[string]string{"success": chatURL(okSrv), "failure": chatURL(statusSrv)} {
+		t.Run(name, func(t *testing.T) {
+			tp := &endCountingProvider{}
+			h := New(Config{
+				Tiers:          map[string]Tier{"fast": {URL: url, Model: "test", MaxTokens: 512}},
+				Prompt:         func() string { return "" },
+				TracerProvider: tp,
+			})
+			_, _, _ = h.SendStream(traceWindow, "fast", func(string) {})
+			if started, ended := tp.started.Load(), tp.ended.Load(); started != 1 || ended != 1 {
+				t.Errorf("started %d spans and ended %d; want 1 and 1", started, ended)
+			}
+		})
+	}
+}
+
+// endCountingProvider is a TracerProvider whose spans never record and which
+// counts how many spans it starts and how many of them are ended.
+type endCountingProvider struct {
+	noop.TracerProvider
+	started, ended atomic.Int32
+}
+
+func (p *endCountingProvider) Tracer(string, ...trace.TracerOption) trace.Tracer {
+	return endCountingTracer{p: p}
+}
+
+type endCountingTracer struct {
+	noop.Tracer
+	p *endCountingProvider
+}
+
+func (t endCountingTracer) Start(ctx context.Context, _ string, _ ...trace.SpanStartOption) (context.Context, trace.Span) {
+	t.p.started.Add(1)
+	span := endCountingSpan{p: t.p}
+	return trace.ContextWithSpan(ctx, span), span
+}
+
+// endCountingSpan is noop.Span, which never records, with End counted.
+type endCountingSpan struct {
+	noop.Span
+	p *endCountingProvider
+}
+
+func (s endCountingSpan) End(...trace.SpanEndOption) { s.p.ended.Add(1) }
+
 // TestModelSpan_NoProviderReadsNoCaptureVariable: with no provider, a call
 // never reads the capture variable, and never parses it; a traced call reads
 // it once, when its span ends. The reads are counted over whole calls through
