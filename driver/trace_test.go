@@ -1,0 +1,1145 @@
+package driver
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"reflect"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/iansmith/aatoolkit/host"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+)
+
+// traceWindow is the messages array the span tests send.
+var traceWindow = []byte(`[{"role":"user","content":"hello"}]`)
+
+// roleOnlyLine is the first chunk a role-first upstream sends: a role and
+// empty content, no text.
+const roleOnlyLine = `data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null}]}`
+
+// doneLine ends every scripted stream.
+const doneLine = `data: [DONE]`
+
+// textLine is a chunk carrying one content delta and no finish reason.
+func textLine(text string) string {
+	b, _ := json.Marshal(text)
+	return `data: {"choices":[{"delta":{"content":` + string(b) + `},"finish_reason":null}]}`
+}
+
+// finishLine is a chunk with an empty delta and the given finish reason.
+func finishLine(reason string) string {
+	return `data: {"choices":[{"delta":{},"finish_reason":"` + reason + `"}]}`
+}
+
+// okSteps is a minimal successful stream: one content chunk that ends in a
+// segment boundary, a stop finish, and [DONE].
+func okSteps() []sseStep {
+	return []sseStep{
+		{line: textLine("The quick brown fox jumps over the lazy dog.")},
+		{line: finishLine("stop")},
+		{line: doneLine},
+	}
+}
+
+// chatURL is the chat-completions URL on a test server.
+func chatURL(srv *httptest.Server) string { return srv.URL + "/v1/chat/completions" }
+
+// serverPort is the port a test server listens on.
+func serverPort(t *testing.T, srv *httptest.Server) int {
+	t.Helper()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", srv.URL, err)
+	}
+	p, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("port of %s: %v", srv.URL, err)
+	}
+	return p
+}
+
+// startAttrs is what every model span sent to srv's "fast" tier with Model
+// "test" carries from its start.
+func startAttrs(t *testing.T, srv *httptest.Server) map[string]any {
+	return map[string]any{
+		"gen_ai.operation.name": "chat",
+		"gen_ai.provider.name":  "openai",
+		"gen_ai.request.model":  "test",
+		"gen_ai.request.stream": true,
+		"server.address":        "127.0.0.1",
+		"server.port":           serverPort(t, srv),
+		"aatoolkit.llm.tier":    "fast",
+	}
+}
+
+// requireAttrs fails for every key in want that span lacks or holds another
+// value under. An int in want is compared as the int64 the SDK stores.
+func requireAttrs(t *testing.T, span sdktrace.ReadOnlySpan, want map[string]any) {
+	t.Helper()
+	got := attrMap(span)
+	for k, w := range want {
+		v, ok := got[k]
+		if !ok {
+			t.Errorf("attribute %s missing; want %v", k, w)
+			continue
+		}
+		if i, isInt := w.(int); isInt {
+			w = int64(i)
+		}
+		if !reflect.DeepEqual(v.AsInterface(), w) {
+			t.Errorf("attribute %s = %#v, want %#v", k, v.AsInterface(), w)
+		}
+	}
+}
+
+// requireNoAttrs fails for every key in keys that span carries.
+func requireNoAttrs(t *testing.T, span sdktrace.ReadOnlySpan, keys ...string) {
+	t.Helper()
+	got := attrMap(span)
+	for _, k := range keys {
+		if v, ok := got[k]; ok {
+			t.Errorf("attribute %s = %v; want it absent", k, v.Emit())
+		}
+	}
+}
+
+// TestSendStreamContext_OneClientSpanUnderCaller (DoD a): one model request
+// sent under a caller's span produces exactly one span besides the caller's
+// (onlyModelSpan counts every span the test did not start itself), a CLIENT
+// span. That span is the caller's child and carries the request and response attributes, the two
+// first-arrival times, and an unset status -- and the call still returns the
+// streamed content and segments.
+func TestSendStreamContext_OneClientSpanUnderCaller(t *testing.T) {
+	const gap = 20 * time.Millisecond
+	srv, _ := newScriptedSSEServer(
+		sseStep{line: roleOnlyLine},
+		sseStep{delay: gap, line: `data: {"id":"r1","model":"served-model","choices":[{"delta":{"content":"The quick brown fox jumps over the lazy dog."},"finish_reason":null}]}`},
+		sseStep{line: `data: {"id":"r1","model":"served-model","choices":[{"delta":{"content":" Done."},"finish_reason":null}]}`},
+		sseStep{line: `data: {"id":"r1","model":"served-model","choices":[{"delta":{},"finish_reason":"stop"}]}`},
+		sseStep{line: doneLine},
+	)
+	defer srv.Close()
+	h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+
+	ctx, caller := h.tracerProvider.Tracer(testScope).Start(context.Background(), "caller")
+	var segs []string
+	content, reasoning, err := h.SendStreamContext(ctx, traceWindow, "fast", func(s string) { segs = append(segs, s) })
+	caller.End()
+	if err != nil {
+		t.Fatalf("SendStreamContext: %v", err)
+	}
+	if string(content) != "The quick brown fox jumps over the lazy dog. Done." || len(reasoning) != 0 {
+		t.Errorf("content, reasoning = %q, %q; want the streamed text and no reasoning", content, reasoning)
+	}
+	if want := []string{"The quick brown fox jumps over the lazy dog.", " Done."}; !reflect.DeepEqual(segs, want) {
+		t.Errorf("segments = %q, want %q", segs, want)
+	}
+
+	span := onlyModelSpan(t, rec)
+	if span.Parent().SpanID() != caller.SpanContext().SpanID() || span.SpanContext().TraceID() != caller.SpanContext().TraceID() {
+		t.Errorf("model span parent %v trace %v; want the caller's span %v in trace %v",
+			span.Parent().SpanID(), span.SpanContext().TraceID(), caller.SpanContext().SpanID(), caller.SpanContext().TraceID())
+	}
+	if span.SpanKind() != trace.SpanKindClient {
+		t.Errorf("kind = %v, want client", span.SpanKind())
+	}
+	if span.Name() != "chat test" {
+		t.Errorf("name = %q, want %q", span.Name(), "chat test")
+	}
+	if sc := span.InstrumentationScope(); sc.Name != "github.com/iansmith/aatoolkit/driver" || sc.SchemaURL != "https://opentelemetry.io/schemas/1.41.0" {
+		t.Errorf("scope = %q schema %q; want the driver package and semconv 1.41.0", sc.Name, sc.SchemaURL)
+	}
+	requireAttrs(t, span, startAttrs(t, srv))
+	requireAttrs(t, span, map[string]any{
+		"gen_ai.response.model":          "served-model",
+		"gen_ai.response.id":             "r1",
+		"gen_ai.response.finish_reasons": []string{"stop"},
+		"gen_ai.request.max_tokens":      512,
+	})
+	requireNoAttrs(t, span, "error.type")
+	if span.Status().Code != codes.Unset {
+		t.Errorf("status = %v %q, want unset", span.Status().Code, span.Status().Description)
+	}
+
+	attrs := attrMap(span)
+	firstChunk, firstContent := attrs["gen_ai.response.time_to_first_chunk"], attrs["aatoolkit.llm.time_to_first_content"]
+	if firstChunk.AsFloat64() <= 0 {
+		t.Errorf("gen_ai.response.time_to_first_chunk = %v, want > 0", firstChunk.Emit())
+	}
+	if d := firstContent.AsFloat64() - firstChunk.AsFloat64(); d < 0.015 {
+		t.Errorf("time_to_first_content %v - time_to_first_chunk %v = %v s; want >= 0.015 (the scripted %v gap)",
+			firstContent.Emit(), firstChunk.Emit(), d, gap)
+	}
+}
+
+// TestModelSpan_StartOmitsWhatIsUnknown: a span leaves out a start value it
+// does not have rather than recording it empty. With no Tier.Model the span
+// is named "chat" and has no gen_ai.request.model; with a tier URL that does
+// not parse, or parses with no host, it has no server.address and so no
+// server.port either, even when the URL gives a port or its scheme has a
+// default one; and with a scheme that has no default port and none given,
+// it has no server.port. The host-less URLs go to an in-memory transport,
+// since a URL with a port and no host would dial this machine.
+func TestModelSpan_StartOmitsWhatIsUnknown(t *testing.T) {
+	srv, _ := newScriptedSSEServer(okSteps()...)
+	defer srv.Close()
+	cases := []struct {
+		name, url, model string
+		inMemory         bool
+		wantName         string
+		want             map[string]any
+		wantAbsent       []string
+	}{
+		{
+			name: "no model", url: chatURL(srv), model: "",
+			wantName:   "chat",
+			want:       map[string]any{"server.address": "127.0.0.1", "server.port": serverPort(t, srv)},
+			wantAbsent: []string{"gen_ai.request.model"},
+		},
+		{
+			name: "unparsable URL", url: "http://bad host/v1/chat/completions", model: "test",
+			wantName:   "chat test",
+			want:       map[string]any{"gen_ai.request.model": "test"},
+			wantAbsent: []string{"server.address", "server.port"},
+		},
+		{
+			name: "no host, scheme default port", url: "http:///v1/chat/completions", model: "test", inMemory: true,
+			wantName:   "chat test",
+			want:       map[string]any{"gen_ai.request.model": "test"},
+			wantAbsent: []string{"server.address", "server.port"},
+		},
+		{
+			name: "no host, explicit port", url: "http://:8080/v1/chat/completions", model: "test", inMemory: true,
+			wantName:   "chat test",
+			want:       map[string]any{"gen_ai.request.model": "test"},
+			wantAbsent: []string{"server.address", "server.port"},
+		},
+		{
+			name: "no port", url: "ftp://files.example.invalid/v1/chat/completions", model: "test",
+			wantName:   "chat test",
+			want:       map[string]any{"server.address": "files.example.invalid"},
+			wantAbsent: []string{"server.port"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rec := tracedHost(t, tc.url, Tier{Model: tc.model, MaxTokens: 512})
+			if tc.inMemory {
+				h.client.Transport = &ctxRecordingTransport{}
+			}
+			_, _, _ = h.SendStream(traceWindow, "fast", func(string) {})
+			span := onlyModelSpan(t, rec)
+			if span.Name() != tc.wantName {
+				t.Errorf("name = %q, want %q", span.Name(), tc.wantName)
+			}
+			requireAttrs(t, span, tc.want)
+			requireNoAttrs(t, span, tc.wantAbsent...)
+		})
+	}
+}
+
+// TestModelSpan_EndOmitsWhatIsUnknown: a span leaves out an end value the
+// call never had rather than recording it as zero or empty. With no
+// Tier.MaxTokens it has no gen_ai.request.max_tokens; with no model or id in
+// the stream, no gen_ai.response.model or gen_ai.response.id; with no chunk
+// before the call failed, neither first-arrival time; and with chunks but no
+// content, a time to first chunk and no time to first content.
+func TestModelSpan_EndOmitsWhatIsUnknown(t *testing.T) {
+	statusSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "overloaded", http.StatusServiceUnavailable)
+	}))
+	defer statusSrv.Close()
+	toolCalls, _ := newScriptedSSEServer(sseStep{line: roleOnlyLine}, sseStep{line: finishLine("tool_calls")}, sseStep{line: doneLine})
+	defer toolCalls.Close()
+	okSrv, _ := newScriptedSSEServer(okSteps()...)
+	defer okSrv.Close()
+
+	cases := []struct {
+		name       string
+		url        string
+		maxTokens  int
+		want       []string
+		wantAbsent []string
+	}{
+		{
+			name: "no max tokens", url: chatURL(okSrv), maxTokens: 0,
+			want:       []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"},
+			wantAbsent: []string{"gen_ai.request.max_tokens"},
+		},
+		{
+			name: "no model or id in the stream", url: chatURL(okSrv), maxTokens: 512,
+			want:       []string{"gen_ai.request.max_tokens"},
+			wantAbsent: []string{"gen_ai.response.model", "gen_ai.response.id"},
+		},
+		{
+			name: "transport failure before any chunk", url: "http://" + closedHostPort() + "/v1/chat/completions", maxTokens: 512,
+			wantAbsent: []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"},
+		},
+		{
+			name: "status 503 before any chunk", url: chatURL(statusSrv), maxTokens: 512,
+			wantAbsent: []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"},
+		},
+		{
+			name: "chunks but no content", url: chatURL(toolCalls), maxTokens: 512,
+			want:       []string{"gen_ai.response.time_to_first_chunk"},
+			wantAbsent: []string{"aatoolkit.llm.time_to_first_content"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rec := tracedHost(t, tc.url, Tier{Model: "test", MaxTokens: tc.maxTokens})
+			_, _, _ = h.SendStream(traceWindow, "fast", func(string) {})
+			span := onlyModelSpan(t, rec)
+			attrs := attrMap(span)
+			for _, k := range tc.want {
+				if _, ok := attrs[k]; !ok {
+					t.Errorf("attribute %s missing", k)
+				}
+			}
+			requireNoAttrs(t, span, tc.wantAbsent...)
+		})
+	}
+}
+
+// TestSendStreamContext_TimeToFirstContentAfterRoleOnlyChunk: on a role-first
+// upstream the first chunk arrives at once and the first text later; the
+// span's time to first content is the later one, not the first chunk's.
+func TestSendStreamContext_TimeToFirstContentAfterRoleOnlyChunk(t *testing.T) {
+	srv, _ := newScriptedSSEServer(
+		sseStep{line: roleOnlyLine},
+		sseStep{delay: 60 * time.Millisecond, line: textLine("Hello there, this is the first content.")},
+		sseStep{line: finishLine("stop")},
+		sseStep{line: doneLine},
+	)
+	defer srv.Close()
+	h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+	if _, _, err := h.SendStream(traceWindow, "fast", func(string) {}); err != nil {
+		t.Fatalf("SendStream: %v", err)
+	}
+	attrs := attrMap(onlyModelSpan(t, rec))
+	firstChunk, okChunk := attrs["gen_ai.response.time_to_first_chunk"]
+	firstContent, okContent := attrs["aatoolkit.llm.time_to_first_content"]
+	if !okChunk || !okContent {
+		t.Fatalf("first-chunk present %v, first-content present %v; want both", okChunk, okContent)
+	}
+	if !(firstChunk.AsFloat64() < 0.05 && 0.05 <= firstContent.AsFloat64()) {
+		t.Errorf("time_to_first_chunk %v, time_to_first_content %v; want first chunk < 0.05 <= first content",
+			firstChunk.Emit(), firstContent.Emit())
+	}
+}
+
+// TestSendStreamContext_FirstArrivalCountsFromSend: the first-arrival times
+// are measured from when the request is sent, not from when the response
+// headers arrive. Many upstreams send their headers only once the first
+// token is ready, as this scripted one does (its headers go out with its
+// first flush), so timing from the headers would report near zero and drop
+// the wait for the first token.
+func TestSendStreamContext_FirstArrivalCountsFromSend(t *testing.T) {
+	const wait = 60 * time.Millisecond
+	srv, _ := newScriptedSSEServer(
+		sseStep{delay: wait, line: textLine("The quick brown fox jumps over the lazy dog.")},
+		sseStep{line: finishLine("stop")},
+		sseStep{line: doneLine},
+	)
+	defer srv.Close()
+	h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+	if _, _, err := h.SendStream(traceWindow, "fast", func(string) {}); err != nil {
+		t.Fatalf("SendStream: %v", err)
+	}
+	attrs := attrMap(onlyModelSpan(t, rec))
+	for _, key := range []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"} {
+		v, ok := attrs[key]
+		if !ok {
+			t.Errorf("%s missing", key)
+			continue
+		}
+		if v.AsFloat64() < wait.Seconds()*0.8 {
+			t.Errorf("%s = %v s; want at least about the %v the upstream took before its headers", key, v.Emit(), wait)
+		}
+	}
+}
+
+// TestSendStreamContext_FirstContentExcludesOnSegment: the first-arrival
+// times are taken before a line is processed, so a slow onSegment fired by
+// the first content line does not count toward time to first content; it
+// does count toward the span's duration, which covers the whole call.
+func TestSendStreamContext_FirstContentExcludesOnSegment(t *testing.T) {
+	const slow = 80 * time.Millisecond
+	srv, _ := newScriptedSSEServer(okSteps()...)
+	defer srv.Close()
+	h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+	segments := 0
+	if _, _, err := h.SendStream(traceWindow, "fast", func(string) { segments++; time.Sleep(slow) }); err != nil {
+		t.Fatalf("SendStream: %v", err)
+	}
+	if segments != 1 {
+		t.Fatalf("got %d segments, want 1 from the first content line", segments)
+	}
+	span := onlyModelSpan(t, rec)
+	firstContent, ok := attrMap(span)["aatoolkit.llm.time_to_first_content"]
+	if !ok {
+		t.Fatal("aatoolkit.llm.time_to_first_content missing")
+	}
+	if firstContent.AsFloat64() >= slow.Seconds() {
+		t.Errorf("time_to_first_content = %v s; want under the %v onSegment took", firstContent.Emit(), slow)
+	}
+	if d := span.EndTime().Sub(span.StartTime()); d < slow {
+		t.Errorf("span lasted %v; want at least the %v onSegment took", d, slow)
+	}
+}
+
+// TestSendAndSendStream_ProduceOrphanRootSpan (DoD c): the context-free
+// methods run on the traced path with no caller span, so each gives one model
+// span with no parent and the same start attributes.
+func TestSendAndSendStream_ProduceOrphanRootSpan(t *testing.T) {
+	calls := map[string]func(h *Host) error{
+		"Send": func(h *Host) error {
+			_, _, err := h.Send(traceWindow, "fast")
+			return err
+		},
+		"SendStream": func(h *Host) error {
+			_, _, err := h.SendStream(traceWindow, "fast", func(string) {})
+			return err
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := newScriptedSSEServer(okSteps()...)
+			defer srv.Close()
+			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+			if err := call(h); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			span := onlyModelSpan(t, rec)
+			if span.Parent().IsValid() {
+				t.Errorf("model span has parent %v; want a root span", span.Parent().SpanID())
+			}
+			requireAttrs(t, span, startAttrs(t, srv))
+		})
+	}
+}
+
+// TestWithContext_SpansParentToBoundContext: Send and SendStream on the view
+// WithContext returns produce spans under the bound context's span.
+func TestWithContext_SpansParentToBoundContext(t *testing.T) {
+	calls := map[string]func(v host.Host) error{
+		"Send": func(v host.Host) error {
+			_, _, err := v.Send(traceWindow, "fast")
+			return err
+		},
+		"SendStream": func(v host.Host) error {
+			_, _, err := v.SendStream(traceWindow, "fast", func(string) {})
+			return err
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := newScriptedSSEServer(okSteps()...)
+			defer srv.Close()
+			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+			ctx, caller := h.tracerProvider.Tracer(testScope).Start(context.Background(), "inbound request")
+			err := call(h.WithContext(ctx))
+			caller.End()
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			span := onlyModelSpan(t, rec)
+			if span.Parent().SpanID() != caller.SpanContext().SpanID() {
+				t.Errorf("model span parent = %v (valid %v); want the bound context's span %v",
+					span.Parent().SpanID(), span.Parent().IsValid(), caller.SpanContext().SpanID())
+			}
+		})
+	}
+}
+
+// TestModelSpan_UsageBecomesTokenAttributes (DoD d): token usage the stream
+// carries -- on a final choice-less chunk or on the finish chunk, asked for
+// or not -- lands on the span as the input and output token counts, without
+// disturbing the finish reason; a stream without usage records neither.
+func TestModelSpan_UsageBecomesTokenAttributes(t *testing.T) {
+	cases := []struct {
+		name         string
+		includeUsage bool
+		steps        []sseStep
+		wantUsage    bool
+		wantIn       int
+		wantOut      int
+		wantFinish   []string
+	}{
+		{
+			name:         "choice-less usage chunk after finish length",
+			includeUsage: true,
+			steps: []sseStep{
+				{line: `data: {"choices":[{"delta":{"content":"Cut short"},"finish_reason":null}],"usage":null}`},
+				{line: `data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":null}`},
+				{line: `data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":8,"total_tokens":18}}`},
+				{line: doneLine},
+			},
+			wantUsage: true, wantIn: 10, wantOut: 8, wantFinish: []string{"length"},
+		},
+		{
+			name:         "usage on the finish chunk",
+			includeUsage: true,
+			steps: []sseStep{
+				{line: textLine("All of it.")},
+				{line: `data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`},
+				{line: doneLine},
+			},
+			wantUsage: true, wantIn: 7, wantOut: 3, wantFinish: []string{"stop"},
+		},
+		{
+			name:         "flag off but the upstream sends usage",
+			includeUsage: false,
+			steps: []sseStep{
+				{line: `data: {"choices":[{"delta":{"content":"Unasked."},"finish_reason":"stop"}],"usage":null}`},
+				{line: `data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":5}}`},
+				{line: doneLine},
+			},
+			wantUsage: true, wantIn: 12, wantOut: 5, wantFinish: []string{"stop"},
+		},
+		{
+			name:         "no usage",
+			includeUsage: true,
+			steps:        okSteps(),
+			wantUsage:    false, wantFinish: []string{"stop"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newScriptedSSEServer(tc.steps...)
+			defer srv.Close()
+			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512, IncludeUsage: tc.includeUsage})
+			if _, _, err := h.SendStream(traceWindow, "fast", func(string) {}); err != nil {
+				t.Fatalf("SendStream: %v", err)
+			}
+			span := onlyModelSpan(t, rec)
+			requireAttrs(t, span, map[string]any{"gen_ai.response.finish_reasons": tc.wantFinish})
+			if tc.wantUsage {
+				requireAttrs(t, span, map[string]any{
+					"gen_ai.usage.input_tokens":  tc.wantIn,
+					"gen_ai.usage.output_tokens": tc.wantOut,
+				})
+			} else {
+				requireNoAttrs(t, span, "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens")
+			}
+		})
+	}
+}
+
+// TestCaptureMessageContent_OffByDefault (DoD e): unless the capture variable
+// parses as true, a model span carries no message content.
+func TestCaptureMessageContent_OffByDefault(t *testing.T) {
+	settings := []struct {
+		name  string
+		set   bool
+		value string
+	}{
+		{name: "unset"},
+		{name: "empty", set: true, value: ""},
+		{name: "zero", set: true, value: "0"},
+		{name: "false", set: true, value: "false"},
+		{name: "unparsable", set: true, value: "yes please"},
+	}
+	for _, s := range settings {
+		t.Run(s.name, func(t *testing.T) {
+			if s.set {
+				withCaptureEnv(t, s.value)
+			} else {
+				withoutCaptureEnv(t)
+			}
+			srv, _ := newScriptedSSEServer(okSteps()...)
+			defer srv.Close()
+			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+			if _, _, err := h.SendStream(traceWindow, "fast", func(string) {}); err != nil {
+				t.Fatalf("SendStream: %v", err)
+			}
+			requireNoAttrs(t, onlyModelSpan(t, rec), "gen_ai.input.messages", "gen_ai.output.messages", "gen_ai.system_instructions")
+		})
+	}
+}
+
+// TestCaptureMessageContent_OnRecordsGenAIMessages (DoD e): with capture on,
+// the span carries the request's messages and the model's output as GenAI
+// message JSON. System messages stay in the input; array content keeps its
+// text parts; reasoning is its own part; partial output on an error is
+// recorded, and none is invented when the stream failed before any.
+func TestCaptureMessageContent_OnRecordsGenAIMessages(t *testing.T) {
+	type result struct {
+		input, output       string
+		hasInput, hasOutput bool
+		errType             string
+	}
+	run := func(t *testing.T, capture string, window []byte, steps ...sseStep) result {
+		t.Helper()
+		withCaptureEnv(t, capture)
+		srv, _ := newScriptedSSEServer(steps...)
+		defer srv.Close()
+		h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+		_, _, _ = h.SendStream(window, "fast", func(string) {})
+		attrs := attrMap(onlyModelSpan(t, rec))
+		in, hasIn := attrs["gen_ai.input.messages"]
+		out, hasOut := attrs["gen_ai.output.messages"]
+		et := attrs["error.type"]
+		return result{input: in.AsString(), output: out.AsString(), hasInput: hasIn, hasOutput: hasOut, errType: et.AsString()}
+	}
+
+	t.Run("a Host.Context window", func(t *testing.T) {
+		h := New(Config{
+			Prompt:      func() string { return "You are terse." },
+			UserContext: func(string) string { return "The caller prefers mornings." },
+		})
+		h.Remember("user", []byte("What time is it?"))
+		window := h.Context("What time is it?")
+		r := run(t, "1", window,
+			sseStep{line: textLine("It is noon.")},
+			sseStep{line: finishLine("stop")},
+			sseStep{line: doneLine},
+		)
+		wantIn := `[{"role":"system","parts":[{"type":"text","content":"You are terse."}]},` +
+			`{"role":"system","parts":[{"type":"text","content":"The caller prefers mornings."}]},` +
+			`{"role":"user","parts":[{"type":"text","content":"What time is it?"}]}]`
+		if r.input != wantIn {
+			t.Errorf("gen_ai.input.messages =\n%s\nwant\n%s", r.input, wantIn)
+		}
+		wantOut := `[{"role":"assistant","parts":[{"type":"text","content":"It is noon."}],"finish_reason":"stop"}]`
+		if r.output != wantOut {
+			t.Errorf("gen_ai.output.messages =\n%s\nwant\n%s", r.output, wantOut)
+		}
+	})
+
+	t.Run("true turns it on", func(t *testing.T) {
+		r := run(t, "true", traceWindow, okSteps()...)
+		if !r.hasInput || !r.hasOutput {
+			t.Errorf("input present %v, output present %v with the variable \"true\"; want both", r.hasInput, r.hasOutput)
+		}
+	})
+
+	t.Run("array content keeps its text parts", func(t *testing.T) {
+		window := []byte(`[{"role":"user","content":[{"type":"text","text":"Look at this."},{"type":"image_url","image_url":{"url":"https://example.invalid/a.png"}}]},` +
+			`{"role":"assistant","content":null},{"role":"tool"}]`)
+		r := run(t, "1", window, okSteps()...)
+		want := `[{"role":"user","parts":[{"type":"text","content":"Look at this."}]},{"role":"assistant","parts":[]},{"role":"tool","parts":[]}]`
+		if r.input != want {
+			t.Errorf("gen_ai.input.messages =\n%s\nwant\n%s", r.input, want)
+		}
+	})
+
+	t.Run("a window that is not an array of objects is omitted", func(t *testing.T) {
+		r := run(t, "1", []byte(`["just a string"]`), okSteps()...)
+		if r.hasInput {
+			t.Errorf("gen_ai.input.messages = %s; want it omitted", r.input)
+		}
+		if !r.hasOutput {
+			t.Error("gen_ai.output.messages missing; the output does not depend on the window")
+		}
+	})
+
+	t.Run("reasoning is its own part", func(t *testing.T) {
+		r := run(t, "1", traceWindow,
+			sseStep{line: `data: {"choices":[{"delta":{"reasoning_content":"Thinking it over."},"finish_reason":null}]}`},
+			sseStep{line: `data: {"choices":[{"delta":{"content":"Answer."},"finish_reason":"stop"}]}`},
+			sseStep{line: doneLine},
+		)
+		want := `[{"role":"assistant","parts":[{"type":"reasoning","content":"Thinking it over."},{"type":"text","content":"Answer."}],"finish_reason":"stop"}]`
+		if r.output != want {
+			t.Errorf("gen_ai.output.messages =\n%s\nwant\n%s", r.output, want)
+		}
+	})
+
+	// The output-messages schema requires finish_reason, as a string. A
+	// stream that succeeds without sending one gets the empty string: the key
+	// is kept and no reason is invented.
+	t.Run("a stream with no finish reason keeps the key empty", func(t *testing.T) {
+		endings := map[string][]sseStep{
+			"ended by [DONE]":  {{line: textLine("The quick brown fox jumps over the lazy dog.")}, {line: doneLine}},
+			"ended by a close": {{line: textLine("The quick brown fox jumps over the lazy dog.")}},
+		}
+		for name, steps := range endings {
+			t.Run(name, func(t *testing.T) {
+				r := run(t, "1", traceWindow, steps...)
+				if r.errType != "" {
+					t.Fatalf("error.type = %q; want a successful call", r.errType)
+				}
+				want := `[{"role":"assistant","parts":[{"type":"text","content":"The quick brown fox jumps over the lazy dog."}],"finish_reason":""}]`
+				if r.output != want {
+					t.Errorf("gen_ai.output.messages =\n%s\nwant\n%s", r.output, want)
+				}
+			})
+		}
+	})
+
+	t.Run("partial output on a mid-stream error", func(t *testing.T) {
+		r := run(t, "1", traceWindow,
+			sseStep{line: textLine("Partial answer")},
+			sseStep{line: `data: {"error":{"message":"upstream overloaded"}}`},
+		)
+		if r.errType != "upstream_error" {
+			t.Errorf("error.type = %q, want upstream_error", r.errType)
+		}
+		want := `[{"role":"assistant","parts":[{"type":"text","content":"Partial answer"}],"finish_reason":"error"}]`
+		if r.output != want {
+			t.Errorf("gen_ai.output.messages =\n%s\nwant\n%s", r.output, want)
+		}
+	})
+
+	t.Run("no output when failing before content", func(t *testing.T) {
+		r := run(t, "1", traceWindow,
+			sseStep{line: `data: {"error":{"message":"upstream overloaded"}}`},
+		)
+		if r.errType != "upstream_error" {
+			t.Errorf("error.type = %q, want upstream_error", r.errType)
+		}
+		if r.hasOutput {
+			t.Errorf("gen_ai.output.messages = %s; want none when no output arrived", r.output)
+		}
+		if !r.hasInput {
+			t.Error("gen_ai.input.messages missing; the request was sent")
+		}
+	})
+}
+
+// TestModelSpan_EndsOnceAfterLastSegment: the span ends after the call's last
+// onSegment, the end-of-stream flush included, and a panicking onSegment
+// still ends it -- as an error of type _OTHER -- while the panic propagates.
+func TestModelSpan_EndsOnceAfterLastSegment(t *testing.T) {
+	t.Run("after the last segment", func(t *testing.T) {
+		srv, _ := newScriptedSSEServer(
+			sseStep{line: textLine("The quick brown fox jumps over the lazy dog.")},
+			sseStep{line: textLine(" A trailing clause with no stop")},
+			sseStep{line: finishLine("stop")},
+			sseStep{line: doneLine},
+		)
+		defer srv.Close()
+		h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+		var stamps []time.Time
+		if _, _, err := h.SendStream(traceWindow, "fast", func(string) { stamps = append(stamps, time.Now()) }); err != nil {
+			t.Fatalf("SendStream: %v", err)
+		}
+		if len(stamps) != 2 {
+			t.Fatalf("got %d segments, want 2 (one at the boundary, one from the end-of-stream flush)", len(stamps))
+		}
+		span := onlyModelSpan(t, rec)
+		for i, at := range stamps {
+			if at.After(span.EndTime()) {
+				t.Errorf("segment %d at %v is after the span ended at %v", i, at, span.EndTime())
+			}
+		}
+	})
+
+	t.Run("a panicking onSegment", func(t *testing.T) {
+		srv, _ := newScriptedSSEServer(okSteps()...)
+		defer srv.Close()
+		h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("onSegment's panic did not propagate out of SendStream")
+				}
+			}()
+			_, _, _ = h.SendStream(traceWindow, "fast", func(string) { panic("onSegment failed") })
+		}()
+		span := onlyModelSpan(t, rec)
+		requireAttrs(t, span, map[string]any{"error.type": "_OTHER"})
+		if st := span.Status(); st.Code != codes.Error || st.Description != "" {
+			t.Errorf("status = %v %q, want Error with an empty description", st.Code, st.Description)
+		}
+	})
+}
+
+// TestModelSpan_PanickingOnSegmentKeepsFirstArrival: a line's first-arrival
+// marks are taken even when onSegment panics while that line is processed,
+// so the span of a call that failed that way still carries the time to first
+// chunk and the time to first content, which arrived.
+func TestModelSpan_PanickingOnSegmentKeepsFirstArrival(t *testing.T) {
+	cases := map[string][]sseStep{
+		"content first": okSteps(),
+		"after a role-only chunk": {
+			{line: roleOnlyLine},
+			{line: textLine("The quick brown fox jumps over the lazy dog.")},
+			{line: finishLine("stop")},
+			{line: doneLine},
+		},
+	}
+	for name, steps := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := newScriptedSSEServer(steps...)
+			defer srv.Close()
+			h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Error("onSegment's panic did not propagate out of SendStream")
+					}
+				}()
+				_, _, _ = h.SendStream(traceWindow, "fast", func(string) { panic("onSegment failed") })
+			}()
+			span := onlyModelSpan(t, rec)
+			requireAttrs(t, span, map[string]any{"error.type": "_OTHER"})
+			attrs := attrMap(span)
+			for _, key := range []string{"gen_ai.response.time_to_first_chunk", "aatoolkit.llm.time_to_first_content"} {
+				if _, ok := attrs[key]; !ok {
+					t.Errorf("%s missing; the line that panicked carried it", key)
+				}
+			}
+		})
+	}
+}
+
+// TestSendStreamContext_ConcurrentCallsOwnTheirSpans: concurrent calls on one
+// Host each get their own span, under their own caller, carrying their own
+// response. Run it under -race.
+func TestSendStreamContext_ConcurrentCallsOwnTheirSpans(t *testing.T) {
+	// The upstream answers each request with an id naming the caller, taken
+	// from the request's one user message, so a span holding another call's
+	// state shows up as the wrong id.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) != 1 {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		id := req.Messages[0].Content
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for _, line := range []string{
+			`data: {"id":"` + id + `","choices":[{"delta":{"content":"Reply to ` + id + `,"},"finish_reason":null}]}`,
+			`data: {"id":"` + id + `","choices":[{"delta":{"content":" done."},"finish_reason":"stop"}]}`,
+			doneLine,
+		} {
+			_, _ = io.WriteString(w, line+"\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+	h, rec := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+
+	const n = 8
+	callers := make([]trace.SpanContext, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ctx, caller := h.tracerProvider.Tracer(testScope).Start(context.Background(), fmt.Sprintf("caller-%d", i))
+			callers[i] = caller.SpanContext()
+			window := []byte(fmt.Sprintf(`[{"role":"user","content":"call-%d"}]`, i))
+			_, _, errs[i] = h.SendStreamContext(ctx, window, "fast", func(string) {})
+			caller.End()
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("call %d: %v", i, err)
+		}
+	}
+
+	spans := modelSpans(rec)
+	if len(spans) != n {
+		t.Fatalf("got %d model spans, want %d", len(spans), n)
+	}
+	if got := len(driverSpans(rec)); got != n {
+		t.Fatalf("saw %d spans the test did not start itself; want %d, the model spans", got, n)
+	}
+	byParent := map[trace.SpanID]sdktrace.ReadOnlySpan{}
+	for _, s := range spans {
+		if _, dup := byParent[s.Parent().SpanID()]; dup {
+			t.Errorf("two model spans share parent %v", s.Parent().SpanID())
+		}
+		byParent[s.Parent().SpanID()] = s
+	}
+	for i, c := range callers {
+		s, ok := byParent[c.SpanID()]
+		if !ok {
+			t.Errorf("caller %d has no model span", i)
+			continue
+		}
+		if s.SpanContext().TraceID() != c.TraceID() {
+			t.Errorf("caller %d's model span is in trace %v, want %v", i, s.SpanContext().TraceID(), c.TraceID())
+		}
+		requireAttrs(t, s, map[string]any{"gen_ai.response.id": fmt.Sprintf("call-%d", i)})
+	}
+}
+
+// TestSendStream_NoProviderIsNoOp: with no tracer provider configured and
+// none installed globally, a call returns exactly what it did before tracing
+// existed, through New and through a struct-literal Host alike.
+func TestSendStream_NoProviderIsNoOp(t *testing.T) {
+	srv, _ := newScriptedSSEServer(
+		sseStep{line: roleOnlyLine},
+		sseStep{line: textLine("The quick brown fox jumps over the lazy dog.")},
+		sseStep{line: textLine(" Done.")},
+		sseStep{line: finishLine("stop")},
+		sseStep{line: doneLine},
+	)
+	defer srv.Close()
+	tiers := map[string]Tier{"fast": {URL: chatURL(srv), Model: "test", MaxTokens: 512}}
+	hosts := map[string]*Host{
+		"New with a zero TracerProvider": New(Config{Tiers: tiers, Prompt: func() string { return "" }}),
+		"struct literal":                 {client: srv.Client(), tiers: tiers},
+	}
+	for name, h := range hosts {
+		t.Run(name, func(t *testing.T) {
+			var segs []string
+			content, reasoning, err := h.SendStream(traceWindow, "fast", func(s string) { segs = append(segs, s) })
+			if err != nil {
+				t.Fatalf("SendStream: %v", err)
+			}
+			if string(content) != "The quick brown fox jumps over the lazy dog. Done." || len(reasoning) != 0 {
+				t.Errorf("content, reasoning = %q, %q", content, reasoning)
+			}
+			if want := []string{"The quick brown fox jumps over the lazy dog.", " Done."}; !reflect.DeepEqual(segs, want) {
+				t.Errorf("segments = %q, want %q", segs, want)
+			}
+		})
+	}
+}
+
+// TestModelSpan_NotRecordingSkipsCapture: on a span that is not recording,
+// ending it does no work that grows with the request -- with capture on and
+// with it off, a 1000-message window costs no more allocations than a
+// 1-message one. The control first shows that on a recording span with
+// capture on it does, so the measurement can see capture's cost.
+func TestModelSpan_NotRecordingSkipsCapture(t *testing.T) {
+	withCaptureEnv(t, "1")
+	msgs := make([]message, 1000)
+	for i := range msgs {
+		msgs[i] = message{Role: "user", Content: fmt.Sprintf("message number %d of the window", i)}
+	}
+	big, _ := json.Marshal(msgs)
+	small, _ := json.Marshal(msgs[:1])
+	st := &streamState{acc: newSegmentAccumulator(minSegmentChars), hasContent: true, finishReason: "stop"}
+	st.contentBuf.WriteString("An answer.")
+
+	endAllocs := func(tp trace.TracerProvider, window []byte) float64 {
+		h := &Host{tracerProvider: tp}
+		return testing.AllocsPerRun(20, func() {
+			_, call := startModelSpan(context.Background(), h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+			call.end(st, 512, window, "")
+		})
+	}
+
+	_, recording := newRecorder(t)
+	if s, b := endAllocs(recording, small), endAllocs(recording, big); b <= s {
+		t.Fatalf("control: on a recording span a 1000-message window took %v allocs and a 1-message one %v; "+
+			"want more, or this test cannot see capture", b, s)
+	}
+	none := noop.NewTracerProvider()
+	if s, b := endAllocs(none, small), endAllocs(none, big); b > s {
+		t.Errorf("capture on: on a non-recording span a 1000-message window took %v allocs and a 1-message one %v; want no more", b, s)
+	}
+	withoutCaptureEnv(t)
+	if s, b := endAllocs(none, small), endAllocs(none, big); b > s {
+		t.Errorf("capture off: on a non-recording span a 1000-message window took %v allocs and a 1-message one %v; want no more", b, s)
+	}
+}
+
+// TestModelSpan_NotRecordingStillEnds: a model span that is not recording is
+// still ended, once, whether the call succeeds or fails, so a provider that
+// tracks its spans until End -- one that pools them, or counts the open
+// ones -- sees every unsampled model span end.
+func TestModelSpan_NotRecordingStillEnds(t *testing.T) {
+	if (endCountingSpan{}).IsRecording() {
+		t.Fatal("control: the counting provider's spans record, so this test cannot see a non-recording span")
+	}
+	okSrv, _ := newScriptedSSEServer(okSteps()...)
+	defer okSrv.Close()
+	statusSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "overloaded", http.StatusServiceUnavailable)
+	}))
+	defer statusSrv.Close()
+	for name, url := range map[string]string{"success": chatURL(okSrv), "failure": chatURL(statusSrv)} {
+		t.Run(name, func(t *testing.T) {
+			tp := &endCountingProvider{}
+			h := New(Config{
+				Tiers:          map[string]Tier{"fast": {URL: url, Model: "test", MaxTokens: 512}},
+				Prompt:         func() string { return "" },
+				TracerProvider: tp,
+			})
+			_, _, _ = h.SendStream(traceWindow, "fast", func(string) {})
+			if started, ended := tp.started.Load(), tp.ended.Load(); started != 1 || ended != 1 {
+				t.Errorf("started %d spans and ended %d; want 1 and 1", started, ended)
+			}
+		})
+	}
+}
+
+// endCountingProvider is a TracerProvider whose spans never record and which
+// counts how many spans it starts and how many of them are ended.
+type endCountingProvider struct {
+	noop.TracerProvider
+	started, ended atomic.Int32
+}
+
+func (p *endCountingProvider) Tracer(string, ...trace.TracerOption) trace.Tracer {
+	return endCountingTracer{p: p}
+}
+
+type endCountingTracer struct {
+	noop.Tracer
+	p *endCountingProvider
+}
+
+func (t endCountingTracer) Start(ctx context.Context, _ string, _ ...trace.SpanStartOption) (context.Context, trace.Span) {
+	t.p.started.Add(1)
+	span := endCountingSpan{p: t.p}
+	return trace.ContextWithSpan(ctx, span), span
+}
+
+// endCountingSpan is noop.Span, which never records, with End counted.
+type endCountingSpan struct {
+	noop.Span
+	p *endCountingProvider
+}
+
+func (s endCountingSpan) End(...trace.SpanEndOption) { s.p.ended.Add(1) }
+
+// TestModelSpan_NoProviderReadsNoCaptureVariable: with no provider, a call
+// never reads the capture variable, and never parses it; a traced call reads
+// it once, when its span ends. The reads are counted over whole calls through
+// getenv, which TestTraceSource_CaptureVariableReadOnlyThroughGetenv keeps
+// the one lookup of the variable. The parse is probed through
+// strconv.ParseBool's error path, which allocates: where the variable is
+// parsed, an unparsable value costs more allocations than "0", and where it
+// is not, the two cost the same. Each probe has a control showing it sees
+// the read or the parse on a recording span.
+func TestModelSpan_NoProviderReadsNoCaptureVariable(t *testing.T) {
+	t.Run("read", func(t *testing.T) {
+		withCaptureEnv(t, "1")
+		var reads atomic.Int32
+		lookup := getenv
+		getenv = func(k string) string {
+			reads.Add(1)
+			return lookup(k)
+		}
+		t.Cleanup(func() { getenv = lookup })
+		srv, _ := newScriptedSSEServer(okSteps()...)
+		defer srv.Close()
+
+		traced, _ := tracedHost(t, chatURL(srv), Tier{Model: "test", MaxTokens: 512})
+		if _, _, err := traced.SendStream(traceWindow, "fast", func(string) {}); err != nil {
+			t.Fatalf("traced SendStream: %v", err)
+		}
+		if n := reads.Swap(0); n != 1 {
+			t.Fatalf("control: a traced call read the capture variable %d times; want once, "+
+				"or this test cannot see a read", n)
+		}
+		untraced := New(Config{
+			Tiers:  map[string]Tier{"fast": {URL: chatURL(srv), Model: "test", MaxTokens: 512}},
+			Prompt: func() string { return "" },
+		})
+		if _, _, err := untraced.SendStream(traceWindow, "fast", func(string) {}); err != nil {
+			t.Fatalf("SendStream with no provider: %v", err)
+		}
+		if n := reads.Load(); n != 0 {
+			t.Errorf("a call with no provider read the capture variable %d times; want none", n)
+		}
+	})
+
+	t.Run("parse", func(t *testing.T) {
+		st := &streamState{acc: newSegmentAccumulator(minSegmentChars), hasContent: true, finishReason: "stop"}
+		st.contentBuf.WriteString("An answer.")
+		callAllocs := func(t *testing.T, h *Host, capture string) float64 {
+			t.Helper()
+			withCaptureEnv(t, capture)
+			return testing.AllocsPerRun(50, func() {
+				_, call := startModelSpan(context.Background(), h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+				call.requestSent()
+				call.end(st, 512, traceWindow, "")
+			})
+		}
+
+		// A provider with no span processor: its spans record, and ending one
+		// does the same work every time.
+		recording := sdktrace.NewTracerProvider()
+		t.Cleanup(func() { _ = recording.Shutdown(context.Background()) })
+		traced := &Host{tracerProvider: recording}
+		if zero, bad := callAllocs(t, traced, "0"), callAllocs(t, traced, "not-a-bool"); bad <= zero {
+			t.Fatalf("control: on a recording span an unparsable capture variable took %v allocs and \"0\" %v; "+
+				"want more, or this test cannot see the variable being parsed", bad, zero)
+		}
+		untraced := &Host{}
+		if zero, bad := callAllocs(t, untraced, "0"), callAllocs(t, untraced, "not-a-bool"); bad != zero {
+			t.Errorf("with no provider an unparsable capture variable took %v allocs and \"0\" %v; "+
+				"want the same: the variable was read and parsed", bad, zero)
+		}
+	})
+}
+
+// TestModelSpan_NoProviderReadsNoClock: with no provider, tracing adds no
+// clock read to a call. TestTraceSource_ClockReadOnlyInModelCallMarks keeps
+// every clock read in the package in modelCall's requestSent and now; this
+// test shows both skip the clock when the span is not recording: marking the
+// request sent records no time, and the per-line time is the zero time. The
+// control shows both read the clock on a recording span. (The request's own
+// timeout, context.WithTimeout, reads the clock as it did before tracing.)
+func TestModelSpan_NoProviderReadsNoClock(t *testing.T) {
+	marks := func(h *Host) (issued, at time.Time) {
+		_, call := startModelSpan(context.Background(), h.tracerProvider, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+		defer call.end(&streamState{acc: newSegmentAccumulator(minSegmentChars)}, 512, traceWindow, "")
+		call.requestSent()
+		return call.issued, call.now()
+	}
+
+	recording := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = recording.Shutdown(context.Background()) })
+	if issued, at := marks(&Host{tracerProvider: recording}); issued.IsZero() || at.IsZero() {
+		t.Fatalf("control: on a recording span issued = %v and now() = %v; want both read from the clock", issued, at)
+	}
+	if issued, at := marks(&Host{}); !issued.IsZero() || !at.IsZero() {
+		t.Errorf("with no provider issued = %v and now() = %v; want the zero time for both", issued, at)
+	}
+}
+
+// TestModelSpan_FinishedMarksReadNoClock: on a recording span, the per-line
+// time is read only while a first-arrival mark is pending. After the first
+// chunk it is still read, because the first content may come later; once
+// both marks are taken it is the zero time, so the rest of the stream reads
+// no clock per line.
+func TestModelSpan_FinishedMarksReadNoClock(t *testing.T) {
+	recording := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = recording.Shutdown(context.Background()) })
+	st := &streamState{acc: newSegmentAccumulator(minSegmentChars)}
+	_, call := startModelSpan(context.Background(), recording, "fast", "test", "http://127.0.0.1:8080/v1/chat/completions")
+	defer call.end(st, 512, traceWindow, "")
+	call.requestSent()
+
+	at := call.now()
+	if at.IsZero() {
+		t.Fatal("control: before any line, now() is the zero time; want a clock read")
+	}
+	st.chunks = 1
+	call.observe(st, false, false, at)
+	if at = call.now(); at.IsZero() {
+		t.Error("after the first chunk, with no content yet, now() is the zero time; want a clock read")
+	}
+	st.chunks, st.hasContent = 2, true
+	call.observe(st, true, false, at)
+	if !call.sawChunk || !call.sawContent {
+		t.Fatalf("marks taken: chunk %v, content %v; want both", call.sawChunk, call.sawContent)
+	}
+	if at := call.now(); !at.IsZero() {
+		t.Errorf("with both marks taken, now() = %v; want the zero time", at)
+	}
+}

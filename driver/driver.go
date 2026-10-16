@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -23,9 +24,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/iansmith/aatoolkit/host"
 	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ---------------------------------------------------------------------------
@@ -33,9 +37,17 @@ import (
 // llama-server instances, no proxy. The policy only ever names a tier.
 // ---------------------------------------------------------------------------
 
+// sendTimeout bounds one model request end to end: the connection, the
+// response headers and the whole stream. It composes with the caller's
+// context, so an earlier caller deadline wins. It is unexported, so the
+// exported docs that bound a call by it (Tier, Send, SendStream,
+// SendStreamContext, host.ContextSender) and the README give its value as
+// 300 s: change them with it.
+const sendTimeout = 300 * time.Second
+
 // Tier describes one tier's llama-server. reasoning=false asks the model to
 // skip its thinking trace; maxTokens caps a single turn so a runaway generation
-// can't burn the whole 300s timeout.
+// can't burn the whole sendTimeout (300 s).
 type Tier struct {
 	URL, Model string
 	Reasoning  bool
@@ -52,6 +64,17 @@ type Tier struct {
 	// tool_choice "none" was measured not to. Off by default: the local
 	// servers have not been exercised against an empty tools array.
 	NoTools bool
+	// IncludeUsage, when true, sends "stream_options": {"include_usage": true}
+	// on this tier's chat request (AATK-159), asking the upstream to report
+	// the request's token usage at the end of the stream. Off by default,
+	// because not every OpenAI-compatible upstream accepts the key; with it
+	// off the request body is byte-identical to before the field existed.
+	// Measured on one hosted OpenAI-compatible provider: it accepts the key,
+	// and it also sends a final usage chunk without it. A local mlx-serve has
+	// not been measured, so keep IncludeUsage off on local tiers until it is.
+	// Usage is recorded on the span whenever the stream carries it, whatever
+	// this flag says.
+	IncludeUsage bool
 }
 
 // Host is the driver's concrete host.Host: it turns a (messages, tier) pair
@@ -65,6 +88,9 @@ type Host struct {
 	history     []message
 	userContext func(queryText string) string // optional user context block
 	histMu      sync.Mutex
+	// tracerProvider is Config.TracerProvider, fixed at New. Nil means the
+	// global provider, resolved at each call and never cached.
+	tracerProvider trace.TracerProvider
 }
 
 // Config is what an agent supplies to stand up a driver: its LLM tiers, TTS
@@ -85,6 +111,28 @@ type Config struct {
 	// bypasses. The engine supplies no default URL: like every other field
 	// here, it is the consumer's to inject.
 	RealtimeURL string
+
+	// TracerProvider supplies the tracer for the span each model call
+	// produces (AATK-159): one CLIENT span, named "chat <Tier.Model>", per
+	// call whose tier is found and whose window encodes. That includes a call
+	// that sends nothing because its context is already done or its tier URL
+	// cannot be requested; its span records why it failed. Nil, the default,
+	// means otel.GetTracerProvider() is resolved at each call, so a consumer
+	// that installs its SDK globally, before or after New, gets spans. With
+	// nothing installed, the no-op provider records and sends nothing. The
+	// engine never installs a provider, exporter or propagator, and never adds
+	// trace headers to the upstream request.
+	//
+	// Message content stays off the span by default: it is personal data (the
+	// system prompt, the user-context block, the history and the user's own
+	// text). The environment variable AATOOLKIT_CAPTURE_MESSAGE_CONTENT turns
+	// it on when strconv.ParseBool reads its value as true ("1", "true"):
+	// each request's messages and the model's output are then recorded as
+	// gen_ai.input.messages and gen_ai.output.messages. Unset, empty, false or
+	// unparsable leaves it off. It is read per request, and only for a span
+	// that is recording. Values are not truncated; bound them with the SDK's
+	// span limits (OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT).
+	TracerProvider trace.TracerProvider
 }
 
 // StreamHandler returns the Media Streams handler for the configured
@@ -112,9 +160,10 @@ func New(cfg Config) *Host {
 				return http.ErrUseLastResponse
 			},
 		},
-		prompt:      cfg.Prompt,
-		tts:         cfg.TTS,
-		userContext: cfg.UserContext,
+		prompt:         cfg.Prompt,
+		tts:            cfg.TTS,
+		userContext:    cfg.UserContext,
+		tracerProvider: cfg.TracerProvider,
 	}
 	h.speech = newSpeechQueue(func(text []byte, voice string, speed float64) {
 		if err := h.synthesizeAndPlay(string(text), voice, speed); err != nil {
@@ -144,10 +193,49 @@ const minSegmentChars = 30 // minimum buffer length before a punctuation boundar
 
 // Send implements host.Host. contextWindow is the already serialized `messages`
 // array; tier is "fast" | "deep". Returns content, reasoning (empty if the
-// model/flags don't emit it), error. It's SendStream without the per-segment
-// callback — the full assembled text is all the caller wants.
+// model/flags don't emit it), error. It is SendContext under
+// context.Background(), so sendTimeout (300 s) alone bounds it.
 func (h *Host) Send(contextWindow []byte, tier string) ([]byte, []byte, error) {
-	return h.SendStream(contextWindow, tier, func(string) {})
+	return h.SendContext(context.Background(), contextWindow, tier)
+}
+
+// SendContext implements host.ContextSender: Send under ctx. It's
+// SendStreamContext without the per-segment callback — the full assembled
+// text is all the caller wants.
+func (h *Host) SendContext(ctx context.Context, contextWindow []byte, tier string) ([]byte, []byte, error) {
+	return h.SendStreamContext(ctx, contextWindow, tier, func(string) {})
+}
+
+// WithContext returns a host.Host whose Send and SendStream run under ctx: their
+// spans are children of ctx's span, and ctx's deadline and cancellation bound
+// them. Every other method is the receiver's own, and SendContext/
+// SendStreamContext keep their explicit ctx. Make one per inbound request and do
+// not keep it beyond that request. For work that outlives an HTTP handler, pass
+// context.WithoutCancel(ctx). A nil ctx panics, as http.Request.WithContext does.
+func (h *Host) WithContext(ctx context.Context) host.Host {
+	if ctx == nil {
+		panic("driver: WithContext called with a nil context")
+	}
+	return &boundHost{Host: h, ctx: ctx}
+}
+
+// boundHost is the view WithContext returns: the receiver, with ctx bound to
+// its two context-free sends. It must override both. Were Send left promoted,
+// it would run (*Host).Send, which sends under context.Background() and loses
+// ctx. A boundHost is never modified after WithContext builds it.
+type boundHost struct {
+	*Host
+	ctx context.Context
+}
+
+// Send implements host.Host: SendContext under the bound context.
+func (b *boundHost) Send(contextWindow []byte, tier string) ([]byte, []byte, error) {
+	return b.Host.SendContext(b.ctx, contextWindow, tier)
+}
+
+// SendStream implements host.Host: SendStreamContext under the bound context.
+func (b *boundHost) SendStream(contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
+	return b.Host.SendStreamContext(b.ctx, contextWindow, tier, onSegment)
 }
 
 // SystemPrompt implements host.Host: the current system prompt, reloaded from
@@ -176,12 +264,40 @@ func buildStreamPayload(ep Tier, contextWindow []byte) map[string]any {
 		// (AATK-113). tool_choice "none" was measured not to stop it.
 		payload["tools"] = []any{}
 	}
+	if ep.IncludeUsage {
+		// Asks the upstream for a final usage chunk (AATK-159). Off, the key
+		// is absent and the body is what it was before the flag existed.
+		payload["stream_options"] = map[string]any{"include_usage": true}
+	}
 	return payload
 }
 
+// upstreamStatusError is a non-200 answer from a tier's upstream: its URL,
+// status and up to 300 bytes of its body. Its text is what the driver has
+// always returned for one; the type lets a span record the status alone.
+type upstreamStatusError struct {
+	url    string
+	status int
+	body   []byte
+}
+
+func (e *upstreamStatusError) Error() string {
+	return fmt.Sprintf("llm %s: status %d (%.300s)", e.url, e.status, e.body)
+}
+
+// upstreamErrorPayload is an {"error": {...}} chunk in the SSE stream. Its
+// text is what the driver has always returned for one; the type lets a span
+// record the kind of failure without the upstream's message.
+type upstreamErrorPayload struct {
+	msg string
+}
+
+func (e *upstreamErrorPayload) Error() string { return "llm error: " + e.msg }
+
 // postStreamRequest POSTs body to ep.URL and returns the still-open streaming
 // response on success. On a non-200 status it reads up to 300 bytes of the
-// error body into the returned error and closes the response itself.
+// error body into the returned *upstreamStatusError and closes the response
+// itself.
 func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", ep.URL, bytes.NewReader(body))
 	if err != nil {
@@ -200,21 +316,69 @@ func (h *Host) postStreamRequest(ctx context.Context, ep Tier, body []byte) (*ht
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 301))
-		return nil, fmt.Errorf("llm %s: status %d (%.300s)", ep.URL, resp.StatusCode, errBody)
+		return nil, &upstreamStatusError{url: ep.URL, status: resp.StatusCode, body: errBody}
 	}
 	return resp, nil
 }
 
 // sseChunk is one decoded `data: {...}` line from the chat-completions SSE
-// stream.
+// stream. ID, Model and Usage feed only the span, so they are decoded best
+// effort: a value of an unexpected type is dropped and never fails the chunk.
 type sseChunk struct {
+	ID      chunkString `json:"id"`
+	Model   chunkString `json:"model"`
 	Choices []struct {
 		Delta        sseDelta `json:"delta"`
 		FinishReason string   `json:"finish_reason"`
 	} `json:"choices"`
+	Usage chunkUsage `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// chunkString is a chunk's id or model, decoded best effort: a JSON string is
+// taken, and any other value, null included, leaves it empty; either way
+// decoding the chunk carries on, as it did before the field was read at all.
+// Upstreams send both on every chunk, so a string with no escapes and valid
+// UTF-8, which needs no unquoting, is taken from the bytes directly: it costs
+// the string's one allocation and no second decode.
+type chunkString string
+
+func (s *chunkString) UnmarshalJSON(b []byte) error {
+	if len(b) < 2 || b[0] != '"' {
+		return nil
+	}
+	if raw := b[1 : len(b)-1]; bytes.IndexByte(raw, '\\') < 0 && utf8.Valid(raw) {
+		*s = chunkString(raw)
+		return nil
+	}
+	var v string
+	if json.Unmarshal(b, &v) == nil {
+		*s = chunkString(v)
+	}
+	return nil
+}
+
+// chunkUsage is a chunk's usage, decoded best effort: an object that decodes
+// as sseUsage is taken whole, never half read, and any other value, null
+// included, leaves ok false without failing the chunk. Only a value that
+// opens an object is decoded, so the null a hosted upstream sends on every
+// chunk but the last costs nothing.
+type chunkUsage struct {
+	v  sseUsage
+	ok bool
+}
+
+func (u *chunkUsage) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || b[0] != '{' {
+		return nil
+	}
+	var v sseUsage
+	if json.Unmarshal(b, &v) == nil {
+		u.v, u.ok = v, true
+	}
+	return nil
 }
 
 // sseDelta is the incremental text one chunk carries.
@@ -226,6 +390,21 @@ type sseDelta struct {
 	// an empty stream can say why it ended ("tool_calls", "length"). Not a
 	// JSON field of the delta itself.
 	finishReason string
+	// model, id and usage are the chunk's own top-level fields, carried beside
+	// the delta the same way finishReason is, so the stream state can say
+	// which model answered and what the request cost. A choice-less chunk
+	// carries them beside an empty delta. Not JSON fields of the delta itself.
+	model, id string
+	usage     *sseUsage
+}
+
+// sseUsage is the token usage an OpenAI-compatible stream reports. A hosted
+// upstream sends it on a final choice-less chunk and "usage": null on every
+// chunk before it, hence the pointer in sseDelta and streamState. Provider
+// extras (totals, cached-token details) are ignored.
+type sseUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
 }
 
 // reasoningText returns the delta's reasoning, tolerating both spellings
@@ -239,8 +418,13 @@ func (d sseDelta) reasoningText() string {
 
 // decodeSSELine parses one line of the SSE stream into the delta it carries.
 // ok is false for lines with nothing to apply — blank lines, lines without the
-// "data: " prefix, the "[DONE]" terminator, and chunks carrying no choices. An
-// upstream error payload comes back as an error, as does a malformed chunk.
+// "data: " prefix, and the "[DONE]" terminator. Every other data chunk decodes
+// with ok true, including one carrying no choices, which is how an upstream
+// delivers the final usage: its delta is empty, and the chunk's model, id and
+// usage ride beside it as on any other chunk. Those three are decoded best
+// effort, so one of an unexpected type comes back empty instead of failing
+// the chunk. An upstream error payload comes back as an
+// *upstreamErrorPayload, and a malformed chunk as an error.
 func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 	if line == "" || !strings.HasPrefix(line, "data: ") {
 		return sseDelta{}, false, nil
@@ -254,13 +438,17 @@ func decodeSSELine(line string) (delta sseDelta, ok bool, err error) {
 		return sseDelta{}, false, fmt.Errorf("decoding SSE chunk: %w", err)
 	}
 	if chunk.Error != nil {
-		return sseDelta{}, false, fmt.Errorf("llm error: %s", chunk.Error.Message)
+		return sseDelta{}, false, &upstreamErrorPayload{msg: chunk.Error.Message}
 	}
-	if len(chunk.Choices) == 0 {
-		return sseDelta{}, false, nil
+	if len(chunk.Choices) > 0 {
+		delta = chunk.Choices[0].Delta
+		delta.finishReason = chunk.Choices[0].FinishReason
 	}
-	delta = chunk.Choices[0].Delta
-	delta.finishReason = chunk.Choices[0].FinishReason
+	delta.model, delta.id = string(chunk.Model), string(chunk.ID)
+	if chunk.Usage.ok {
+		u := chunk.Usage.v
+		delta.usage = &u
+	}
 	return delta, true, nil
 }
 
@@ -316,18 +504,25 @@ func (s *segmentAccumulator) take() (string, bool) {
 
 // streamState carries the accumulation state threaded through a run of
 // processSSELine calls: the assembled content and reasoning, the segment
-// accumulator, and whether any content chunk has been seen yet.
+// accumulator, whether any content chunk has been seen yet, and what the
+// chunks said about the response itself.
 type streamState struct {
 	contentBuf, reasoningBuf strings.Builder
 	acc                      *segmentAccumulator
 	hasContent               bool
 	finishReason             string // the last non-empty finish_reason seen
+
+	chunks    int       // decoded data chunks, choice-less ones included
+	model, id string    // the first non-empty value of each
+	usage     *sseUsage // the last non-nil usage seen
 }
 
 // processSSELine decodes one SSE line, folds it into st, and calls onSegment
 // for any TTS segment boundary the new content crosses. It returns an error
 // for a malformed chunk or an upstream error payload; lines needing no work
-// (blank, non-data, [DONE], choice-less) are a no-op.
+// (blank, non-data, [DONE]) are a no-op. A choice-less chunk counts as a
+// chunk and contributes its model, id and usage, but its empty delta leaves
+// the content, reasoning, hasContent and finishReason as they were.
 func processSSELine(line string, st *streamState, onSegment func(string)) error {
 	d, ok, err := decodeSSELine(line)
 	if err != nil {
@@ -335,6 +530,16 @@ func processSSELine(line string, st *streamState, onSegment func(string)) error 
 	}
 	if !ok {
 		return nil
+	}
+	st.chunks++
+	if st.model == "" {
+		st.model = d.model
+	}
+	if st.id == "" {
+		st.id = d.id
+	}
+	if d.usage != nil {
+		st.usage = d.usage
 	}
 	st.contentBuf.WriteString(d.Content)
 	st.reasoningBuf.WriteString(d.reasoningText())
@@ -357,8 +562,38 @@ func processSSELine(line string, st *streamState, onSegment func(string)) error 
 // returned slices are the fully assembled (content, reasoning). Segments are
 // flushed when the buffer crosses ~30 chars and a delimiter (. ? ! , \n) is
 // seen; the delimiter is kept at the end of the segment so the TTS has the
-// punctuation it needs for natural cadence.
+// punctuation it needs for natural cadence. It is SendStreamContext under
+// context.Background(), so sendTimeout (300 s) alone bounds it.
 func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
+	return h.SendStreamContext(context.Background(), contextWindow, tier, onSegment)
+}
+
+// SendStreamContext implements host.ContextSender: SendStream under ctx. The
+// request runs under ctx bounded by sendTimeout (300 s), so ctx's values
+// reach it and its deadline applies when it is the earlier one. Once ctx is
+// done the call fails at the next read, line or segment, even when the rest
+// of the stream is already buffered: no onSegment call starts after that,
+// though one already running is not interrupted. Wherever the call stops
+// once ctx is done (sending, waiting for the response headers, reading a
+// non-200 status body or the stream, or between lines), and over HTTP/1 or
+// HTTP/2 alike, the error matches both ctx.Err() and context.Cause(ctx)
+// under errors.Is: for a context cancelled or timed out with a cause
+// (context.WithCancelCause, WithTimeoutCause, WithDeadlineCause), it matches
+// that cause as well as context.Canceled or DeadlineExceeded. It is the one
+// implementation of a model request: Send, SendStream and SendContext all
+// end here.
+//
+// Once its tier is found and its window encodes, a call gets one CLIENT
+// span, a child of ctx's span, from Config.TracerProvider or the global
+// provider. An unknown tier, or a window that does not encode (bytes that
+// are not JSON, or an empty non-nil slice), gets none and sends nothing; a
+// nil window encodes as null and is sent, as it always was. A call that
+// then sends nothing, because ctx is already done or the tier URL cannot be
+// requested, still gets its span, which records why it failed.
+// The span covers the whole call, onSegment's time included, and ends after
+// the last segment. It is ended by a defer, so a panicking onSegment still
+// ends it, as an error of type _OTHER; the panic is not recovered.
+func (h *Host) SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) (content, reasoning []byte, err error) {
 	ep, ok := h.tiers[tier]
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown tier %q (have: fast, deep)", tier)
@@ -367,36 +602,145 @@ func (h *Host) SendStream(contextWindow []byte, tier string, onSegment func(stri
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, call := startModelSpan(ctx, h.tracerProvider, tier, ep.Model, ep.URL)
+	st := &streamState{acc: newSegmentAccumulator(minSegmentChars)}
+	// What end records if streamChat never returns, because onSegment
+	// panicked.
+	errType := errTypeOther
+	defer func() { call.end(st, ep.MaxTokens, contextWindow, errType) }()
+	content, reasoning, errType, err = h.streamChat(ctx, call, ep, body, st, onSegment)
+	return content, reasoning, err
+}
+
+// streamChat sends one chat-completions request and folds its SSE stream
+// into st, calling onSegment at each segment boundary. Besides the result it
+// returns the error.type for call's span: "" on success. It marks on call
+// when the request went out and when each line arrived, taking the time
+// before the line is processed so onSegment's time is not counted.
+func (h *Host) streamChat(ctx context.Context, call *modelCall, ep Tier, body []byte, st *streamState, onSegment func(string)) (content, reasoning []byte, errType string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
+	call.requestSent()
 	resp, err := h.postStreamRequest(ctx, ep, body)
 	if err != nil {
-		return nil, nil, err
+		return failed(ctx, err, errTypeTransport)
 	}
 	defer resp.Body.Close()
 
+	// A done ctx fails the next network read, but lines the transport has
+	// already buffered need none. So ctx is also checked before each line and
+	// before the end-of-stream flush, and a segment cut once it is done is
+	// dropped: no onSegment call starts after ctx is done. Once ctx is done a
+	// read fails with ctx's cause, whatever the transport's read returned
+	// (net/http's HTTP/2 transport returns ctx.Err() where HTTP/1 returns the
+	// cause), so the error does not depend on the protocol or on which site
+	// saw ctx done first.
+	emit := func(seg string) {
+		if ctx.Err() == nil {
+			onSegment(seg)
+		}
+	}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 256*1024)
-	st := &streamState{acc: newSegmentAccumulator(minSegmentChars)}
 	for scanner.Scan() {
-		if err := processSSELine(scanner.Text(), st, onSegment); err != nil {
-			return nil, nil, err
+		if err := context.Cause(ctx); err != nil {
+			return failed(ctx, streamReadError(err), errTypeStreamRead)
+		}
+		if err := foldLine(call, st, scanner.Text(), emit); err != nil {
+			return failed(ctx, err, errTypeDecode)
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("reading SSE stream: %w", err)
+	err = scanner.Err()
+	if cause := context.Cause(ctx); cause != nil {
+		err = cause
+	}
+	if err != nil {
+		return failed(ctx, streamReadError(err), errTypeStreamRead)
 	}
 	if !st.hasContent {
+		var err error
 		if st.finishReason != "" {
-			return nil, nil, fmt.Errorf("no content in SSE stream (finish_reason %s)", st.finishReason)
+			err = fmt.Errorf("no content in SSE stream (finish_reason %s)", st.finishReason)
+		} else {
+			err = fmt.Errorf("no content in SSE stream")
 		}
-		return nil, nil, fmt.Errorf("no content in SSE stream")
+		return failed(ctx, err, errTypeEmpty)
 	}
 	// Flush any trailing text that didn't hit a boundary.
 	if seg, ok := st.acc.flush(); ok {
 		onSegment(seg)
 	}
-	return []byte(st.contentBuf.String()), []byte(st.reasoningBuf.String()), nil
+	return []byte(st.contentBuf.String()), []byte(st.reasoningBuf.String()), "", nil
+}
+
+// foldLine folds one SSE line into st through processSSELine and takes, on
+// call, the first-arrival marks the line produced. The time is read before
+// the line is processed, so the onSegment calls it triggers are not counted,
+// and the marks are taken by a defer, so a panicking onSegment still leaves
+// them for the span.
+func foldLine(call *modelCall, st *streamState, line string, onSegment func(string)) error {
+	at := call.now()
+	hadChunk, hadContent := st.chunks > 0, st.hasContent
+	defer call.observe(st, hadChunk, hadContent, at)
+	return processSSELine(line, st, onSegment)
+}
+
+// streamReadError is the error for a stream that could not be read to its
+// end: err is the read's failure, or ctx's cause once ctx is done.
+func streamReadError(err error) error {
+	return fmt.Errorf("reading SSE stream: %w", err)
+}
+
+// failed is what streamChat returns for a request that failed with err: no
+// content, the error.type for its span, and the error for the caller. Once
+// ctx is done, that error matches both ctx.Err() and context.Cause(ctx)
+// under errors.Is, whichever site failed: it is err when err already does,
+// and a contextDoneError around err otherwise. ctx must be checked before
+// streamChat's own cancel runs, which the return statement guarantees.
+func failed(ctx context.Context, err error, fallback string) ([]byte, []byte, string, error) {
+	errType := streamErrorType(ctx, err, fallback)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if cause := context.Cause(ctx); !errors.Is(err, ctxErr) || !errors.Is(err, cause) {
+			err = &contextDoneError{err: err, ctxErr: ctxErr, cause: cause}
+		}
+	}
+	return nil, nil, errType, err
+}
+
+// contextDoneError is the error of a request that failed once its context
+// was done. It keeps the failing site's error, text and all, and adds the
+// context's error and cause to what errors.Is and errors.As see: net/http's
+// HTTP/1 transport fails a request cut short by its context with the cause,
+// its HTTP/2 transport with ctx.Err(), and a status error whose body read the
+// context cut short with neither.
+type contextDoneError struct {
+	err, ctxErr, cause error
+}
+
+func (e *contextDoneError) Error() string   { return e.err.Error() }
+func (e *contextDoneError) Unwrap() []error { return []error{e.err, e.ctxErr, e.cause} }
+
+// streamErrorType classifies a failed request for its span's error.type.
+// The context comes first, because a deadline or cancellation surfaces as
+// whatever the transport or the stream read was doing when it hit: then an
+// upstream's status code, then an SSE error payload, then fallback, the kind
+// of site that failed. It never reads err's text.
+func streamErrorType(ctx context.Context, err error, fallback string) string {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return errTypeTimeout
+	case errors.Is(ctx.Err(), context.Canceled):
+		return errTypeCanceled
+	}
+	var status *upstreamStatusError
+	if errors.As(err, &status) {
+		return strconv.Itoa(status.status)
+	}
+	var payload *upstreamErrorPayload
+	if errors.As(err, &payload) {
+		return errTypeUpstream
+	}
+	return fallback
 }
 
 // ---------------------------------------------------------------------------

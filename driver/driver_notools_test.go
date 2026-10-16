@@ -3,11 +3,9 @@ package driver
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -15,25 +13,14 @@ import (
 // the last request.
 func bodyRecordingServer(t *testing.T) (*httptest.Server, func() map[string]json.RawMessage) {
 	t.Helper()
-	var mu sync.Mutex
-	var last map[string]json.RawMessage
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
+	srv, reqs := newScriptedSSEServer(sseStep{line: textLine("ok")})
+	reqs.onRecord(func(_ http.Header, raw []byte) {
 		var body map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &body); err != nil {
 			t.Errorf("request body is not JSON: %v", err)
 		}
-		mu.Lock()
-		last = body
-		mu.Unlock()
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n")
-	}))
-	return srv, func() map[string]json.RawMessage {
-		mu.Lock()
-		defer mu.Unlock()
-		return last
-	}
+	})
+	return srv, reqs.LastBody
 }
 
 // TestTierNoTools_DeclaresAnEmptyToolsList (AATK-113): a tier with NoTools
