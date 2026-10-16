@@ -116,10 +116,11 @@ func requireNoAttrs(t *testing.T, span sdktrace.ReadOnlySpan, keys ...string) {
 }
 
 // TestSendStreamContext_OneClientSpanUnderCaller (DoD a): one model request
-// sent under a caller's span produces exactly one CLIENT span, its child,
-// carrying the request and response attributes, the two first-arrival times,
-// and an unset status -- and the call still returns the streamed content and
-// segments.
+// sent under a caller's span produces exactly one CLIENT span and no other
+// span from the driver (onlyModelSpan counts both). That span is the
+// caller's child and carries the request and response attributes, the two
+// first-arrival times, and an unset status -- and the call still returns the
+// streamed content and segments.
 func TestSendStreamContext_OneClientSpanUnderCaller(t *testing.T) {
 	const gap = 20 * time.Millisecond
 	srv, _ := newScriptedSSEServer(
@@ -857,6 +858,9 @@ func TestSendStreamContext_ConcurrentCallsOwnTheirSpans(t *testing.T) {
 	spans := modelSpans(rec)
 	if len(spans) != n {
 		t.Fatalf("got %d model spans, want %d", len(spans), n)
+	}
+	if got := len(driverSpans(rec)); got != n {
+		t.Fatalf("saw %d spans of kind CLIENT or from the driver's scope; want %d, the model spans", got, n)
 	}
 	byParent := map[trace.SpanID]sdktrace.ReadOnlySpan{}
 	for _, s := range spans {
