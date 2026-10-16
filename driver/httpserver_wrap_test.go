@@ -250,6 +250,30 @@ func upgradeStatus(t *testing.T, client *http.Client, rawURL string) int {
 	return resp.StatusCode
 }
 
+// A wrapper that returns a nil handler for a route panics when the routes are
+// built, as WithHandlerWrapper documents, rather than leaving that route
+// served unwrapped. Each route is tried alone, the others wrapped as they
+// came.
+func TestWithHandlerWrapper_NilHandlerPanicsAtConstruction(t *testing.T) {
+	s := &twilio.Server{AuthToken: "authtoken"}
+	for _, nilRoute := range twilioRoutePaths {
+		t.Run(nilRoute, func(t *testing.T) {
+			wrap := func(route string, h http.Handler) http.Handler {
+				if route == nilRoute {
+					return nil
+				}
+				return h
+			}
+			defer func() {
+				if recover() == nil {
+					t.Errorf("newTwilioMux returned for a wrapper giving %s a nil handler; want a panic", nilRoute)
+				}
+			}()
+			newTwilioMux(s, WithHandlerWrapper(wrap))
+		})
+	}
+}
+
 // /streams is a WebSocket upgrade, which takes over the connection through the
 // ResponseWriter's http.Hijacker. A wrapper that passes the writer on as it
 // came, or wraps it in one that still offers Unwrap, keeps the upgrade
