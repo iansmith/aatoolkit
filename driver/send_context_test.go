@@ -339,7 +339,10 @@ func cancelOnFirstSegment() (context.Context, func(), context.CancelFunc) {
 // upstream, or the request still waiting for its response headers. So
 // errors.Is against the cause tells the caller's own stop apart from an
 // upstream failure in every case, and errors.Is against context.Canceled or
-// DeadlineExceeded still holds. The span still records canceled or timeout.
+// DeadlineExceeded still holds. A stream read that fails this way reads
+// "reading SSE stream: " and the cause's own text at each of its sites, so
+// the text does not depend on which one saw the context done. The span still
+// records canceled or timeout.
 // TestSendStreamContext_DoneContextErrorOverHTTP1AndHTTP2 runs the network
 // sites over both protocols.
 func TestSendStreamContext_DoneContextFailsWithItsCause(t *testing.T) {
@@ -383,14 +386,18 @@ func TestSendStreamContext_DoneContextFailsWithItsCause(t *testing.T) {
 		inSegment bool
 		wantCause error
 		wantType  string
+		// wantText is the start of the error's text, and all of it when
+		// wholeText is set. A request error names the URL, so only its
+		// start is fixed.
 		wantText  string
+		wholeText bool
 	}{
-		{"cancel cause, lines already buffered", buffered, cancelCause, true, errStop, "canceled", "reading SSE stream: "},
-		{"cancel cause, after the last line", lastLine, cancelCause, true, errStop, "canceled", "reading SSE stream: "},
-		{"cancel cause, upstream stalled", stalled, cancelCause, true, errStop, "canceled", "reading SSE stream: "},
-		{"cancel cause, before the response headers", noHeaders, cancelCause, false, errStop, "canceled", "calling "},
-		{"timeout cause, lines already buffered", buffered, timeoutCause, true, errSlow, "timeout", "reading SSE stream: "},
-		{"timeout cause, upstream stalled", stalled, timeoutCause, false, errSlow, "timeout", "reading SSE stream: "},
+		{"cancel cause, lines already buffered", buffered, cancelCause, true, errStop, "canceled", "reading SSE stream: caller stopped the turn", true},
+		{"cancel cause, after the last line", lastLine, cancelCause, true, errStop, "canceled", "reading SSE stream: caller stopped the turn", true},
+		{"cancel cause, upstream stalled", stalled, cancelCause, true, errStop, "canceled", "reading SSE stream: caller stopped the turn", true},
+		{"cancel cause, before the response headers", noHeaders, cancelCause, false, errStop, "canceled", "calling ", false},
+		{"timeout cause, lines already buffered", buffered, timeoutCause, true, errSlow, "timeout", "reading SSE stream: caller gave up waiting", true},
+		{"timeout cause, upstream stalled", stalled, timeoutCause, false, errSlow, "timeout", "reading SSE stream: caller gave up waiting", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -420,7 +427,9 @@ func TestSendStreamContext_DoneContextFailsWithItsCause(t *testing.T) {
 			if ctxErr := ctx.Err(); !errors.Is(err, ctxErr) {
 				t.Errorf("error %q does not wrap the context's error %v", err, ctxErr)
 			}
-			if !strings.HasPrefix(err.Error(), tc.wantText) {
+			if tc.wholeText && err.Error() != tc.wantText {
+				t.Errorf("error = %q, want %q", err, tc.wantText)
+			} else if !strings.HasPrefix(err.Error(), tc.wantText) {
 				t.Errorf("error = %q; want it to start %q", err, tc.wantText)
 			}
 			requireAttrs(t, onlyModelSpan(t, rec), map[string]any{"error.type": tc.wantType})
