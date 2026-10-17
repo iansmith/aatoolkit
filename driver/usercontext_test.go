@@ -49,7 +49,7 @@ func TestDriver_UserContextInjected(t *testing.T) {
 		client:      &http.Client{},
 		prompt:      func() string { return systemPrompt },
 		tiers:       testTiers,
-		userContext: func(string) string { return userContextBlock },
+		userContext: func(context.Context, string) string { return userContextBlock },
 		history:     []message{},
 	}
 

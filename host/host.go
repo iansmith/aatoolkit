@@ -9,9 +9,10 @@ import "context"
 // ContextSender is the context-taking form of Host's Send and SendStream. ctx
 // parents the span each model request produces and bounds the call: its
 // deadline and cancellation apply, and the driver's own ceiling (300 s for
-// driver.Host) still applies on top. ctx is a context.Context; it is unrelated to Host.Context(queryText),
-// which returns the messages array. It is separate from Host so that adding it
-// breaks no existing Host implementation. An interpreted policy reaches it by
+// driver.Host) still applies on top. ctx is a context.Context, not
+// Host.Context(queryText), which returns the messages array; ContextBuilder is
+// that method's ctx-taking form. ContextSender is separate from Host so that
+// adding it breaks no existing Host implementation. An interpreted policy reaches it by
 // type-asserting its host.Host, which works only if the consumer injects this
 // symbol.
 type ContextSender interface {
@@ -73,7 +74,8 @@ type Host interface {
 	// remembered history, as a JSON array ready for Send. queryText is the
 	// current turn's text, handed to that user-context provider so its block
 	// can depend on it (e.g. retrieval keyed on the query); pass "" when there
-	// is none.
+	// is none. It runs the provider under context.Background();
+	// ContextBuilder.ContextFor is the form that takes a ctx.
 	Context(queryText string) []byte
 
 	// Forget drops the most recently remembered message. The policy uses it to
