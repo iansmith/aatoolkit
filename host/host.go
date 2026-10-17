@@ -19,6 +19,18 @@ type ContextSender interface {
 	SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error)
 }
 
+// ContextBuilder is the context-taking form of Host.Context. ctx is handed to
+// the user-context provider the host was configured with, so the provider's
+// I/O (e.g. retrieval) runs under the caller's span and cancellation. It adds
+// no deadline and no error path: the provider still bounds its own I/O and
+// returns "" on failure. It is separate from Host, as ContextSender is, so
+// adding it breaks no existing Host implementation. An interpreted policy
+// reaches it by type-asserting its host.Host, which works only if the
+// consumer injects this symbol.
+type ContextBuilder interface {
+	ContextFor(ctx context.Context, queryText string) []byte
+}
+
 // Host is the capability set the chat policy calls into. Today that's just LLM
 // transport by tier — add methods here as the policy needs more from the driver.
 type Host interface {

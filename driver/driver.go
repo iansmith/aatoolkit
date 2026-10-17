@@ -104,6 +104,8 @@ type Config struct {
 	Prompt      func() string
 	UserContext func(queryText string) string // optional user context block injected after system prompt; queryText is what the policy passed to Context
 
+	UserContextCtx func(ctx context.Context, queryText string) string
+
 	// RealtimeURL selects the voice transport. Empty — the default — runs the
 	// existing VAD/STT/TTS sidecar path and constructs no realtime client. Set
 	// to a backend websocket URL, calls run over that backend instead, which
@@ -805,6 +807,11 @@ func (h *Host) Context(queryText string) []byte {
 	h.histMu.Unlock()
 	b, _ := json.Marshal(msgs)
 	return b
+}
+
+// ContextFor implements host.ContextBuilder. RED stub: ignores ctx.
+func (h *Host) ContextFor(ctx context.Context, queryText string) []byte {
+	return h.Context(queryText)
 }
 
 // Speak implements host.Host. It queues synthesis+playback on the serial speech

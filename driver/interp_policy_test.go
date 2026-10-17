@@ -10,12 +10,14 @@ import (
 )
 
 // policyInject is what a consumer injects for the host package: the Host
-// interface every policy names, plus ContextSender, which recipe R2 needs to
-// assert -- an interface the policy declared itself would not do.
+// interface every policy names, plus ContextSender and ContextBuilder, which
+// recipe R2 needs to assert -- an interface the policy declared itself would
+// not do.
 var policyInject = interp.Inject{
 	"github.com/iansmith/aatoolkit/host/host": {
-		"Host":          reflect.ValueOf((*host.Host)(nil)),
-		"ContextSender": reflect.ValueOf((*host.ContextSender)(nil)),
+		"Host":           reflect.ValueOf((*host.Host)(nil)),
+		"ContextSender":  reflect.ValueOf((*host.ContextSender)(nil)),
+		"ContextBuilder": reflect.ValueOf((*host.ContextBuilder)(nil)),
 	},
 }
 
@@ -37,9 +39,6 @@ var hostOnlyInject = interp.Inject{
 // carries none.
 func TestPolicy_ReachesContextFormsThroughInterp(t *testing.T) {
 	window := []byte(`[{"role":"user","content":"hi"}]`)
-	withValue := func(v string) context.Context {
-		return context.WithValue(context.Background(), ctxKey{}, v)
-	}
 
 	v, err := interp.Load("testdata/boundpolicy", "policy", policyInject, "policy.Turn")
 	if err != nil {
@@ -73,16 +72,16 @@ func TestPolicy_ReachesContextFormsThroughInterp(t *testing.T) {
 		turn func(h *Host) (string, error)
 		want any
 	}{
-		{"R1 WithContext view", func(h *Host) (string, error) { return r1(h.WithContext(withValue("policy")), window) }, "policy"},
+		{"R1 WithContext view", func(h *Host) (string, error) { return r1(h.WithContext(withCtxValue("policy")), window) }, "policy"},
 		{"R1 unbound host", func(h *Host) (string, error) { return r1(h, window) }, nil},
 		{"R1 WithContext view, Host-only Inject", func(h *Host) (string, error) {
-			return r1HostOnly(h.WithContext(withValue("policy")), window)
+			return r1HostOnly(h.WithContext(withCtxValue("policy")), window)
 		}, "policy"},
 		{"R1 unbound host, Host-only Inject", func(h *Host) (string, error) { return r1HostOnly(h, window) }, nil},
-		{"R2 explicit context", func(h *Host) (string, error) { return r2(withValue("policy"), h, window) }, "policy"},
+		{"R2 explicit context", func(h *Host) (string, error) { return r2(withCtxValue("policy"), h, window) }, "policy"},
 		{"R2 context without the value", func(h *Host) (string, error) { return r2(context.Background(), h, window) }, nil},
 		{"R2 explicit context on a bound view", func(h *Host) (string, error) {
-			return r2(withValue("explicit"), h.WithContext(withValue("bound")), window)
+			return r2(withCtxValue("explicit"), h.WithContext(withCtxValue("bound")), window)
 		}, "explicit"},
 	}
 	for _, tc := range cases {
@@ -104,4 +103,31 @@ func TestPolicy_ReachesContextFormsThroughInterp(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPolicy_ReachesContextForThroughInterp: an interpreted policy, loaded with
+// the real interp.Load and an Inject carrying ContextBuilder, builds its window
+// under the ctx it is given by asserting host.ContextBuilder, and that ctx
+// reaches the UserContextCtx provider.
+func TestPolicy_ReachesContextForThroughInterp(t *testing.T) {
+	v, err := interp.Load("testdata/ctxbuilderpolicy", "policy", policyInject, "policy.Window")
+	if err != nil {
+		t.Fatalf("Load ctxbuilderpolicy: %v", err)
+	}
+	window, ok := v.Interface().(func(context.Context, host.Host, string) ([]byte, error))
+	if !ok {
+		t.Fatalf("ctxbuilderpolicy.Window has type %T", v.Interface())
+	}
+
+	p := &ctxProbe{result: "ctx block"}
+	h := New(Config{Tiers: testTiers, Prompt: func() string { return "sys" }, UserContextCtx: p.provide})
+
+	got, err := window(withCtxValue("policy"), h, "q")
+	if err != nil {
+		t.Fatalf("policy Window: %v", err)
+	}
+	if calls, _, value, q := p.last(); calls != 1 || value != "policy" || q != "q" {
+		t.Fatalf("provider saw calls=%d value=%v query=%q; want 1, %q, %q", calls, value, q, "policy", "q")
+	}
+	assertSystemMessages(t, got, "sys", "ctx block")
 }
