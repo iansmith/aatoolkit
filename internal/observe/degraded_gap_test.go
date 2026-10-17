@@ -25,7 +25,6 @@ import (
 	"github.com/iansmith/aatoolkit/internal/observe"
 )
 
-// slopstop:test contract
 func TestTreeListenSet_ForcedEmptyReadOnChildOnly_DegradesChildKeepsRootHolder(t *testing.T) {
 	rootPort := freePort(t)
 	childPort := freePort(t)
@@ -75,7 +74,6 @@ func TestTreeListenSet_ForcedEmptyReadOnChildOnly_DegradesChildKeepsRootHolder(t
 	}
 }
 
-// slopstop:test contract
 func TestTreeListenSet_HostWideCorroborationFails_DegradesRatherThanConfirmsEmpty(t *testing.T) {
 	port := freePort(t)
 	sl := spawnListener(t, port, 0)

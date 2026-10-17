@@ -110,8 +110,6 @@ func keyPathsOf(t *testing.T, raw json.RawMessage) []string {
 // so it cannot be the red test on its own; "a session.update arrives" alone
 // would be satisfied by an implementation that sends one and then wedges or
 // ends the call.
-//
-// slopstop:test contract
 func TestVoiceUpdateChan_VoiceReachesBackendAndCallContinues(t *testing.T) {
 	voices := make(chan string, testChanBuffer)
 	events := make(chan json.RawMessage, testChanBuffer)
@@ -169,8 +167,6 @@ func TestVoiceUpdateChan_VoiceReachesBackendAndCallContinues(t *testing.T) {
 //
 // The assertion is a key-set walk of the decoded document, not a substring
 // check: "no format key anywhere" is a statement about the whole tree.
-//
-// slopstop:test contract
 func TestVoiceUpdateChan_UpdateCarriesVoiceAndNothingElse(t *testing.T) {
 	voices := make(chan string, testChanBuffer)
 
@@ -202,7 +198,7 @@ func TestVoiceUpdateChan_UpdateCarriesVoiceAndNothingElse(t *testing.T) {
 // puts a session.update on the live connection, whatever else the call does.
 // Not a red test — it is green at base and must stay green.
 //
-// slopstop:test regression — guards: "with no voice-update option supplied, the frames the backend receives are what it receives today"
+// regression — guards: "with no voice-update option supplied, the frames the backend receives are what it receives today"
 func TestVoiceUpdateChan_NoOptionSendsNoSessionUpdate(t *testing.T) {
 	events := make(chan json.RawMessage, testChanBuffer)
 
@@ -230,8 +226,6 @@ func TestVoiceUpdateChan_NoOptionSendsNoSessionUpdate(t *testing.T) {
 // The real id written afterwards is what makes this discriminating: without
 // it, "exactly one session.update" would also hold for an implementation that
 // dropped every voice update.
-//
-// slopstop:test contract
 func TestVoiceUpdateChan_EmptyStringSendsNothing(t *testing.T) {
 	voices := make(chan string, testChanBuffer)
 
@@ -265,7 +259,7 @@ func TestVoiceUpdateChan_EmptyStringSendsNothing(t *testing.T) {
 // The positive proof comes first: without it, "the idle timer still fires"
 // holds trivially against an implementation that never reads the channel.
 //
-// slopstop:test non-interference — paired: asserts one voice update actually reaches the backend before checking that steady voice traffic against a silent backend still ends the call with "idle timeout"
+// non-interference — paired: asserts one voice update actually reaches the backend before checking that steady voice traffic against a silent backend still ends the call with "idle timeout"
 func TestVoiceUpdateChan_DoesNotResetIdleTimer(t *testing.T) {
 	voices := make(chan string, 1)
 
@@ -317,8 +311,6 @@ func TestVoiceUpdateChan_DoesNotResetIdleTimer(t *testing.T) {
 // behaviour 8: closing the channel stops the case firing rather than ending
 // the call or busy-looping on a ready receive of the zero value. Exactly what
 // a closed client-event channel does today.
-//
-// slopstop:test contract
 func TestVoiceUpdateChan_ClosedChannelLeavesCallRunning(t *testing.T) {
 	voices := make(chan string, testChanBuffer)
 	events := make(chan json.RawMessage, testChanBuffer)
@@ -353,8 +345,6 @@ func TestVoiceUpdateChan_ClosedChannelLeavesCallRunning(t *testing.T) {
 // TestClientEventChanFor_VariesPerCallThroughOneHandler: two calls through the
 // SAME handler must route to two different channels, which is the assertion
 // WithVoiceUpdateChan's constant channel cannot satisfy.
-//
-// slopstop:test contract
 func TestVoiceUpdateChanFor_VariesPerCallThroughOneHandler(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 
@@ -439,7 +429,7 @@ func waitForVoiceUpdateCount(t *testing.T, be *fakeRealtimeBackend, n int, d tim
 // headroom: a genuine busy loop burns an entire core continuously, orders of
 // magnitude more than idle call machinery.
 //
-// slopstop:test regression — guards: "a closed voice-update channel retires its select case rather than busy-looping on the zero value"
+// regression — guards: "a closed voice-update channel retires its select case rather than busy-looping on the zero value"
 func TestVoiceUpdateChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("getrusage is not available on windows")
@@ -472,8 +462,6 @@ func TestVoiceUpdateChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
 // Mutation-verified: swallowing the send error (`return ch, nil` in place of
 // the wrapped return) left the whole telephony suite green before this test
 // existed.
-//
-// slopstop:test contract
 func TestVoiceUpdateChan_SendFailureEndsCallWithLoggedError(t *testing.T) {
 	var buf syncBuffer
 	origOutput := log.Writer()
@@ -529,7 +517,7 @@ func TestVoiceUpdateChan_SendFailureEndsCallWithLoggedError(t *testing.T) {
 // context.WithCancel(ctx) left the whole telephony suite green before this
 // test existed.
 //
-// slopstop:test regression — guards: "a voice-update write that never completes is bounded, so it cannot park HandleStreamRealtime's select loop, and the call ends naming the voice-update send"
+// regression — guards: "a voice-update write that never completes is bounded, so it cannot park HandleStreamRealtime's select loop, and the call ends naming the voice-update send"
 func TestVoiceUpdateChan_SendThatNeverCompletesEndsCallOnItsBound(t *testing.T) {
 	hc, stall := stalledHTTPClient()
 	origDial := dialRealtime
@@ -576,7 +564,7 @@ func TestVoiceUpdateChan_SendThatNeverCompletesEndsCallOnItsBound(t *testing.T) 
 // Mutation-verified: moving the resolution below newIdleGuard left the whole
 // telephony suite green before this test existed.
 //
-// slopstop:test regression — guards: "arming the idle guard happens after the voice-update resolver runs, so a slow consumer resolver cannot spend the guard's first window and end a healthy call with a bogus idle timeout"
+// regression — guards: "arming the idle guard happens after the voice-update resolver runs, so a slow consumer resolver cannot spend the guard's first window and end a healthy call with a bogus idle timeout"
 func TestVoiceUpdateChanFor_SlowResolverDoesNotBurnTheIdleWindow(t *testing.T) {
 	const (
 		idleTimeout  = 1500 * time.Millisecond

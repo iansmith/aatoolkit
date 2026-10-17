@@ -98,7 +98,7 @@ func TestMarkTracker_BoundStillFiresForTheLiveArming(t *testing.T) {
 // `return nil, nil` with `return ch, nil` left
 // TestMarkRequestChan_ClosedChannelLeavesTheCallRunning green.
 //
-// slopstop:test regression — guards: "a closed mark-request channel retires its select case rather than busy-looping on the zero value"
+// regression — guards: "a closed mark-request channel retires its select case rather than busy-looping on the zero value"
 func TestMarkRequestChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("getrusage is not available on windows")
@@ -133,7 +133,7 @@ func TestMarkRequestChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
 // sub-millisecond by construction, so the assertion is on equality with
 // MuLawDuration rather than on a tolerance.
 //
-// slopstop:test regression — guards: "playout arithmetic goes through
+// regression — guards: "playout arithmetic goes through
 // telephony.MuLawDuration, never a restated longhand"
 func TestMarkEchoBound_KeepsTheSubMillisecondRemainder(t *testing.T) {
 	// Deliberately not a multiple of 8: the whole point is the remainder the
@@ -224,7 +224,7 @@ func (b *blockingWSWriter) writes() int {
 // with a bare `s.writeSem <- struct{}{}` left the whole package green under
 // -race.
 //
-// slopstop:test regression — guards: "a mark reaches the carrier after every
+// regression — guards: "a mark reaches the carrier after every
 // media frame the engine had already written, never from a goroutine racing
 // the sink's writer"
 func TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight(t *testing.T) {
@@ -314,7 +314,7 @@ func TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight(t *testing.T) {
 // late after the bare grace, or a mark written after a barge-in waiting out the
 // abandoned reply nobody will hear.
 //
-// slopstop:test regression — guards: "a mark's echo bound is derived from the
+// regression — guards: "a mark's echo bound is derived from the
 // playout the sink itself has written, and a clear discards it"
 func TestCarrierMediaSink_BoundTracksItsOwnWrites(t *testing.T) {
 	// One second of μ-law audio, in the 20 ms frames the backend sends.
@@ -374,7 +374,7 @@ func TestCarrierMediaSink_BoundTracksItsOwnWrites(t *testing.T) {
 // reporting TimedOut here is exactly the false alarm the derivation exists to
 // prevent.
 //
-// slopstop:test regression — guards: "a mark's echo bound is derived from the
+// regression — guards: "a mark's echo bound is derived from the
 // playout the sink itself has written, and a clear discards it"
 func TestCarrierMediaSink_MarkArmsTheDerivedBound(t *testing.T) {
 	const frames = 50

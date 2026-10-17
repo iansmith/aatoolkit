@@ -130,8 +130,6 @@ func faultyHTTPClient() (*http.Client, *atomic.Bool) {
 // TestClientEventChan_ConsumerEventReachesBackendByteForByte is the ticket's
 // own RED-first case at the twilio wiring layer: a consumer-supplied event
 // put on the channel must reach the backend exactly as supplied.
-//
-// slopstop:test contract
 func TestClientEventChan_ConsumerEventReachesBackendByteForByte(t *testing.T) {
 	ch := make(chan json.RawMessage, testChanBuffer)
 
@@ -149,8 +147,6 @@ func TestClientEventChan_ConsumerEventReachesBackendByteForByte(t *testing.T) {
 // TestServerEventChanFor_VariesPerCallThroughOneHandler: two calls through
 // the SAME handler must route to two different channels, which is the
 // assertion WithClientEventChan's constant channel cannot satisfy.
-//
-// slopstop:test contract
 func TestClientEventChanFor_VariesPerCallThroughOneHandler(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 
@@ -189,8 +185,6 @@ func TestClientEventChanFor_VariesPerCallThroughOneHandler(t *testing.T) {
 // The positive delivery check on each call is what actually exercises this
 // ticket's wiring — a negative-only "still open" check would pass against an
 // inert stub that never touches the channel at all.
-//
-// slopstop:test contract
 func TestClientEventChan_EngineNeverClosesTheConsumersChannel(t *testing.T) {
 	ch := make(chan json.RawMessage, testChanBuffer)
 
@@ -228,7 +222,7 @@ func TestClientEventChan_EngineNeverClosesTheConsumersChannel(t *testing.T) {
 // inert stub that never reads the channel at all, which proves nothing about
 // WithClientEventChan's wiring.
 //
-// slopstop:test non-interference — paired: asserts one consumer event actually reaches the backend before checking that steady consumer traffic against a silent backend still ends the call with "idle timeout"
+// non-interference — paired: asserts one consumer event actually reaches the backend before checking that steady consumer traffic against a silent backend still ends the call with "idle timeout"
 func TestClientEventChan_ConsumerEventDoesNotResetIdleTimer(t *testing.T) {
 	ch := make(chan json.RawMessage, 1)
 
@@ -293,7 +287,7 @@ func TestClientEventChan_ConsumerEventDoesNotResetIdleTimer(t *testing.T) {
 // with generous headroom: a genuine busy loop burns an entire CPU core
 // continuously, orders of magnitude more than idle call machinery.
 //
-// slopstop:test regression — guards: "a closed consumer channel must not busy-loop / consume unbounded CPU"
+// regression — guards: "a closed consumer channel must not busy-loop / consume unbounded CPU"
 func TestClientEventChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("getrusage is not available on windows")
@@ -328,7 +322,7 @@ func TestClientEventChan_ClosedChannelDoesNotBusyLoop(t *testing.T) {
 // implementation from an inert stub, since a channel with nothing on it
 // leaks nothing either way regardless of whether anything reads it.
 //
-// slopstop:test non-interference — paired: asserts the consumer channel actually gets read (its one event reaches the backend) on each call before measuring goroutine growth against a run with no option
+// non-interference — paired: asserts the consumer channel actually gets read (its one event reaches the backend) on each call before measuring goroutine growth against a run with no option
 func TestClientEventChan_NoEngineGoroutineOutlivesTheCall(t *testing.T) {
 	const calls = 5
 
@@ -399,8 +393,6 @@ func TestClientEventChan_NoEngineGoroutineOutlivesTheCall(t *testing.T) {
 // is logged (never silently swallowed) and the call ends with a non-nil,
 // attributable error, rather than continuing against a connection whose
 // write half is dead forever.
-//
-// slopstop:test contract
 func TestClientEventChan_SendFailureEndsCallWithLoggedError(t *testing.T) {
 	var buf syncBuffer
 	origOutput := log.Writer()
@@ -448,7 +440,7 @@ func TestClientEventChan_SendFailureEndsCallWithLoggedError(t *testing.T) {
 // select case blocks on nothing it does not already block on, precisely
 // because select never blocks on one case when another is ready.
 //
-// slopstop:test regression — guards: "The engine never blocks waiting for the consumer to send, survives the channel never being written to, and never requires it to be closed."
+// regression — guards: "The engine never blocks waiting for the consumer to send, survives the channel never being written to, and never requires it to be closed."
 func TestClientEventChan_NeverWrittenChannelDoesNotBlockTheCall(t *testing.T) {
 	ch := make(chan json.RawMessage) // unbuffered, never written, never closed
 
@@ -471,7 +463,7 @@ func TestClientEventChan_NeverWrittenChannelDoesNotBlockTheCall(t *testing.T) {
 // to today." Supplying no WithClientEventChan option must leave the call
 // running exactly as it did before this option existed.
 //
-// slopstop:test regression — guards: "With no option supplied, behaviour is byte-identical to today."
+// regression — guards: "With no option supplied, behaviour is byte-identical to today."
 func TestClientEventChan_AbsentOptionIsTodaysBehaviour(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := newRealtimeHarness(t, be.url())
@@ -554,8 +546,6 @@ func waitForRawEvent(t *testing.T, be *fakeRealtimeBackend, want json.RawMessage
 // own session.update into b.handshakes, separately from b.received
 // (realtime_wiring_test.go:109, :132), so the handshake cannot defeat this
 // assertion.
-//
-// slopstop:test contract
 func TestClientEventChan_SessionUpdateRefusedButCallContinues(t *testing.T) {
 	ch := make(chan json.RawMessage, testChanBuffer)
 
@@ -584,8 +574,6 @@ func TestClientEventChan_SessionUpdateRefusedButCallContinues(t *testing.T) {
 // in the tree today, so this is red at base. Uses the package's existing
 // syncBuffer capture pattern (TestClientEventChan_SendFailureEndsCallWithLoggedError,
 // above), not a new fixture.
-//
-// slopstop:test contract
 func TestClientEventChan_SessionUpdateRefusalIsLogged(t *testing.T) {
 	var buf syncBuffer
 	origOutput := log.Writer()
@@ -620,8 +608,6 @@ func TestClientEventChan_SessionUpdateRefusalIsLogged(t *testing.T) {
 // cardinality and would not catch a log-once-per-call implementation. Red at
 // base for the same reason as the log assertion: the phrase does not exist
 // in the tree today, so the count is 0, never 2.
-//
-// slopstop:test contract
 func TestClientEventChan_SessionUpdateRefusalLoggedOncePerOccurrence(t *testing.T) {
 	var buf syncBuffer
 	origOutput := log.Writer()
@@ -658,7 +644,7 @@ func TestClientEventChan_SessionUpdateRefusalLoggedOncePerOccurrence(t *testing.
 // base because nothing is refused at base; must keep passing after the fix
 // because the fix probes only the decoded type field, never the raw bytes.
 //
-// slopstop:test regression — guards: "The refusal is an equality test on the decoded type, not a prefix or substring match."
+// regression — guards: "The refusal is an equality test on the decoded type, not a prefix or substring match."
 func TestClientEventChan_TypeMentioningSessionUpdateStillReachesBackend(t *testing.T) {
 	ch := make(chan json.RawMessage, testChanBuffer)
 	be := newFakeRealtimeBackend(t)
@@ -684,7 +670,7 @@ func TestClientEventChan_TypeMentioningSessionUpdateStillReachesBackend(t *testi
 // equal to "session.update", and must still reach the backend byte-for-byte
 // with the call still running.
 //
-// slopstop:test regression — guards: "The refusal is an equality test on the decoded type, not a prefix or substring match."
+// regression — guards: "The refusal is an equality test on the decoded type, not a prefix or substring match."
 func TestClientEventChan_SessionPrefixedTypeStillReachesBackend(t *testing.T) {
 	ch := make(chan json.RawMessage, testChanBuffer)
 	be := newFakeRealtimeBackend(t)
@@ -706,7 +692,7 @@ func TestClientEventChan_SessionPrefixedTypeStillReachesBackend(t *testing.T) {
 // this ticket deliberately leaves reachable; see Context, "Not closed, and
 // declared out of scope by the goals themselves."
 //
-// slopstop:test regression — guards: "Every other client-event type still reaches the backend byte-for-byte"
+// regression — guards: "Every other client-event type still reaches the backend byte-for-byte"
 func TestClientEventChan_ResponseCreateReachesBackendByteForByte(t *testing.T) {
 	ch := make(chan json.RawMessage, testChanBuffer)
 	be := newFakeRealtimeBackend(t)
@@ -729,7 +715,7 @@ func TestClientEventChan_ResponseCreateReachesBackendByteForByte(t *testing.T) {
 // per its contract (the select arm in HandleStreamRealtime that calls it),
 // a non-nil error there ends the call.
 //
-// slopstop:test regression — guards: "An event whose type cannot be read — malformed JSON, or valid JSON with no type — is forwarded unchanged, exactly as today. A parse failure never refuses and never ends the call."
+// regression — guards: "An event whose type cannot be read — malformed JSON, or valid JSON with no type — is forwarded unchanged, exactly as today. A parse failure never refuses and never ends the call."
 func TestClientEventChan_UnreadableTypeForwardedUnchanged(t *testing.T) {
 	cases := []struct {
 		name string
@@ -764,7 +750,7 @@ func TestClientEventChan_UnreadableTypeForwardedUnchanged(t *testing.T) {
 // read — malformed JSON, or valid JSON with no type — is forwarded unchanged,
 // exactly as today. A parse failure never refuses and never ends the call."
 //
-// slopstop:test regression — guards: "An event whose type cannot be read — malformed JSON, or valid JSON with no type — is forwarded unchanged, exactly as today. A parse failure never refuses and never ends the call."
+// regression — guards: "An event whose type cannot be read — malformed JSON, or valid JSON with no type — is forwarded unchanged, exactly as today. A parse failure never refuses and never ends the call."
 func TestClientEventChan_NonStringTypeForwardedUnchanged(t *testing.T) {
 	cases := []struct {
 		name string
@@ -795,8 +781,6 @@ func TestClientEventChan_NonStringTypeForwardedUnchanged(t *testing.T) {
 // legitimate event A arrives, then a session.update, then a legitimate event
 // B — proving the refusal drops exactly the one offending event in the
 // middle of a stream without disturbing what arrives before or after it.
-//
-// slopstop:test contract
 func TestClientEventChan_SessionUpdateRefusedMidStreamDoesNotDisturbSurroundingEvents(t *testing.T) {
 	ch := make(chan json.RawMessage, testChanBuffer)
 
@@ -831,8 +815,6 @@ func TestClientEventChan_SessionUpdateRefusedMidStreamDoesNotDisturbSurroundingE
 // completely unprotected. Mirrors
 // TestClientEventChanFor_VariesPerCallThroughOneHandler's resolver setup,
 // but asserts the refusal rather than per-call channel identity.
-//
-// slopstop:test contract
 func TestClientEventChanFor_SessionUpdateRefusedOnResolverPath(t *testing.T) {
 	ch := make(chan json.RawMessage, testChanBuffer)
 
@@ -875,7 +857,7 @@ func TestClientEventChanFor_SessionUpdateRefusedOnResolverPath(t *testing.T) {
 // session.update is forwarded today, and forwarding already does not reset
 // the timer. Its value is proven by mutation, not by being red.
 //
-// slopstop:test regression — guards: "Deliberately does NOT call idle.reset(): a consumer event is not backend activity, and a chatty consumer against a silent backend must not mask that silence." — and a refused session.update is still a consumer event.
+// regression — guards: "Deliberately does NOT call idle.reset(): a consumer event is not backend activity, and a chatty consumer against a silent backend must not mask that silence." — and a refused session.update is still a consumer event.
 func TestClientEventChan_SessionUpdateRefusalDoesNotResetIdleTimer(t *testing.T) {
 	ch := make(chan json.RawMessage, 1)
 

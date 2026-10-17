@@ -18,8 +18,6 @@ import (
 // fields ServerEvent models. A field ServerEvent does not know about
 // ("unmodelled_field" below) proves this is the raw wire bytes and not a
 // reconstruction from the decoded struct.
-//
-// slopstop:test contract
 func TestClientRead_RawCarriesWholeFrameVerbatim(t *testing.T) {
 	be := newFakeBackend(t)
 	be.toSend = []any{map[string]any{
@@ -71,8 +69,6 @@ func TestClientRead_RawCarriesWholeFrameVerbatim(t *testing.T) {
 // switch never cases it — it is the ticket's own example of an unmodelled
 // type — so this is the discriminating case an implementation that only wires
 // the four modelled types into Events() would still fail.
-//
-// slopstop:test contract
 func TestBridgeEvents_ReceivesUnmodelledEventWithRaw(t *testing.T) {
 	be := newFakeBackend(t)
 	be.toSend = []any{ServerEvent{Type: EventSpeechStopped}}
@@ -113,7 +109,7 @@ func TestBridgeEvents_ReceivesUnmodelledEventWithRaw(t *testing.T) {
 // saw before Events() existed. Passing here is the point: this must hold both
 // before and after the new channel is wired up.
 //
-// slopstop:test regression — guards: "Modelled events still reach their existing destinations unchanged; transcripts and audio are unaffected."
+// regression — guards: "Modelled events still reach their existing destinations unchanged; transcripts and audio are unaffected."
 func TestBridgeRun_ModelledEventsStillReachExistingDestinations(t *testing.T) {
 	delta := frameB64()
 	be := newFakeBackend(t)
@@ -192,7 +188,7 @@ func TestBridgeRun_ModelledEventsStillReachExistingDestinations(t *testing.T) {
 // This exercises current, unmodified CAS-refusal behavior — it must keep
 // passing exactly as it does today once Events() is wired into Run.
 //
-// slopstop:test regression — guards: "write a test asserting a concurrent second `Run` still returns the refusal error (\"realtime: Run already in progress\") without panicking."
+// regression — guards: "write a test asserting a concurrent second `Run` still returns the refusal error (\"realtime: Run already in progress\") without panicking."
 func TestBridgeRun_ConcurrentSecondRunReturnsRefusalWithoutPanic(t *testing.T) {
 	be := newFakeBackend(t)
 	ctx := testCtx(t)

@@ -232,11 +232,11 @@ func TestExpandTilde_LeadingTildeSlash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UserHomeDir: %v", err)
 	}
-	got, err := expandTilde("~/slopstop/router")
+	got, err := expandTilde("~/example/router")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := filepath.Join(home, "slopstop/router")
+	want := filepath.Join(home, "example/router")
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
@@ -293,11 +293,11 @@ func TestInsertGoDirFlag_ExpandsTilde(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UserHomeDir: %v", err)
 	}
-	got, err := insertGoDirFlag([]string{"go", "build", "-o", "/tmp/x", "."}, "~/slopstop/router")
+	got, err := insertGoDirFlag([]string{"go", "build", "-o", "/tmp/x", "."}, "~/example/router")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := filepath.Join(home, "slopstop/router")
+	want := filepath.Join(home, "example/router")
 	if got[2] != want {
 		t.Fatalf("expected expanded dir %q at index 2, got %v", want, got)
 	}

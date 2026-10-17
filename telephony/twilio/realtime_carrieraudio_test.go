@@ -136,8 +136,6 @@ func distinctCarrierPayload(fill byte) string {
 // asserted against captureCarrierWire's record of what the carrier actually
 // received, per the ticket's test expectations, not against the delta value
 // the test itself chose to send.
-//
-// slopstop:test contract
 func TestCarrierAudioChan_ConsumerReceivesMediaPayload(t *testing.T) {
 	ch := make(chan CarrierAudio, testChanBuffer)
 
@@ -178,8 +176,6 @@ func TestCarrierAudioChan_ConsumerReceivesMediaPayload(t *testing.T) {
 // realtime_idle_gaps_test.go:118), and the record the consumer receives for
 // it must be distinguishable from a media record — barge-in observable, not
 // just audio.
-//
-// slopstop:test contract
 func TestCarrierAudioChan_ConsumerReceivesClearRecord(t *testing.T) {
 	ch := make(chan CarrierAudio, testChanBuffer)
 
@@ -211,8 +207,6 @@ func TestCarrierAudioChan_ConsumerReceivesClearRecord(t *testing.T) {
 // The positive delivery check on each call is what actually exercises this
 // ticket's wiring — a negative-only "still open" check would pass against an
 // inert stub that never touches the channel at all.
-//
-// slopstop:test contract
 func TestCarrierAudioChan_EngineNeverClosesTheConsumersChannel(t *testing.T) {
 	ch := make(chan CarrierAudio, testChanBuffer)
 
@@ -252,7 +246,7 @@ func TestCarrierAudioChan_EngineNeverClosesTheConsumersChannel(t *testing.T) {
 // undrained consumer channel must not slow the carrier-facing writes that
 // share the same backend read loop.
 //
-// slopstop:test non-interference — paired: first proves the channel is
+// non-interference — paired: first proves the channel is
 // genuinely wired (one record must actually reach it) before checking that
 // 50 further media frames still reach the carrier (h.countMediaFrames) while
 // the channel is never drained again — an inert stub would pass the
@@ -293,7 +287,7 @@ func TestCarrierAudioChan_ConsumerThatNeverReadsDoesNotStallAudio(t *testing.T) 
 // TestTranscriptChan_ConsumerThatNeverReadsDoesNotTripTheIdleTimer guards for
 // transcripts.
 //
-// slopstop:test non-interference — paired: first proves the channel is
+// non-interference — paired: first proves the channel is
 // genuinely wired (one record must actually reach it) before checking that
 // carrier audio keeps arriving (h.countMediaFrames) and the idle timer never
 // fires while the channel goes undrained for the rest of the test — without
@@ -345,7 +339,7 @@ func TestCarrierAudioChan_ConsumerThatNeverReadsDoesNotTripTheIdleTimer(t *testi
 // httptest server and carrier conn live until t.Cleanup), so an absolute
 // count proves nothing.
 //
-// slopstop:test non-interference — paired: asserts the consumer channel
+// non-interference — paired: asserts the consumer channel
 // actually receives one record per call (proving genuine wiring, not an
 // inert stub) before measuring goroutine growth against a run with no option
 func TestCarrierAudioChan_NoEngineGoroutineOutlivesTheCall(t *testing.T) {
@@ -415,8 +409,6 @@ func TestCarrierAudioChan_NoEngineGoroutineOutlivesTheCall(t *testing.T) {
 // log-capture pattern. This test does not pin whether Media and Clear drops
 // share one counter or are counted separately — the ticket leaves that
 // choice open — only that a drop is logged at all.
-//
-// slopstop:test contract
 func TestCarrierAudioChan_DropIsLogged(t *testing.T) {
 	// syncBuffer, not bytes.Buffer: a compliant implementation may log drops
 	// from a goroutine other than this test's, so an unguarded buffer read
@@ -454,7 +446,7 @@ func TestCarrierAudioChan_DropIsLogged(t *testing.T) {
 // option must leave the call running exactly as it did before this option
 // existed.
 //
-// slopstop:test regression — guards: "With no option supplied, behaviour is
+// regression — guards: "With no option supplied, behaviour is
 // byte-identical to today."
 func TestCarrierAudioChan_AbsentOptionIsTodaysBehaviour(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
@@ -489,8 +481,6 @@ func TestCarrierAudioChan_AbsentOptionIsTodaysBehaviour(t *testing.T) {
 //
 // The existing Clear test is frozen by the Phase 0 commit and is deliberately
 // NOT edited; this adds the missing cross-check beside it as a pure addition.
-//
-// slopstop:test contract
 func TestCarrierAudioChan_ClearRecordMatchesTheCarrierWire(t *testing.T) {
 	ch := make(chan CarrierAudio, testChanBuffer)
 
@@ -547,8 +537,6 @@ func TestCarrierAudioChan_ClearRecordMatchesTheCarrierWire(t *testing.T) {
 // was injected into the Media path. So this is a real guard against scrambling
 // under production timing skew, not a proof that no such implementation can
 // pass under a light cadence.
-//
-// slopstop:test contract
 func TestCarrierAudioChan_RecordsArriveInOrder(t *testing.T) {
 	ch := make(chan CarrierAudio, testChanBuffer)
 
@@ -646,7 +634,7 @@ func TestCarrierAudioChan_RecordsArriveInOrder(t *testing.T) {
 // rebuilds a drain instead of instrumenting the sink is a conformance failure
 // against the ticket, which is a different gate's question and not this file's.
 //
-// slopstop:test non-interference — paired: the positive half is that all N clears
+// non-interference — paired: the positive half is that all N clears
 // reach the consumer's carrier-audio channel (an inert or unwired option fails here
 // first, so the negative half cannot pass vacuously); the negative half is that
 // installing WithCarrierAudioChan costs WithServerEventChan none of its events
@@ -728,7 +716,7 @@ func TestCarrierAudioChan_ClearsDoNotComeFromTheServerEventStream(t *testing.T) 
 // the file's gap, not this test's, and it is recorded in one place rather than
 // twice (universal §5).
 //
-// slopstop:test non-interference — paired: the positive half is that all N media
+// non-interference — paired: the positive half is that all N media
 // payloads reach the consumer's carrier-audio channel, byte-identical to what the
 // carrier received (an inert or unwired option fails here first, so the negative
 // half cannot pass vacuously); the negative half is that installing

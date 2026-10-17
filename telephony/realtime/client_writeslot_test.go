@@ -32,7 +32,7 @@ import (
 // cancelled — and it is why the chokepoint is a one-slot channel selected on
 // alongside ctx.Done().
 //
-// slopstop:test regression — guards: "acquiring the write slot honours the caller's context, so a bounded write cannot be preceded by an unbounded wait"
+// regression — guards: "acquiring the write slot honours the caller's context, so a bounded write cannot be preceded by an unbounded wait"
 func TestWriteSlotAcquisition_HonoursCallerContext(t *testing.T) {
 	// No conn: a Send that correctly gives up on the slot never reaches one,
 	// so needing a live connection here would only be able to hide the bug.

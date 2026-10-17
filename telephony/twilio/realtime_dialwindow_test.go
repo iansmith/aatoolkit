@@ -66,7 +66,7 @@ func recordDialBudget(t *testing.T) <-chan dialBudget {
 // The dial must still carry a deadline: a fix that moved the resolver by
 // dropping the bound would leave the full budget "available" and be wrong.
 //
-// slopstop:test regression — guards: "a handshake resolver runs before the dial timeout starts, so its cost is not charged against the backend's handshake budget"
+// regression — guards: "a handshake resolver runs before the dial timeout starts, so its cost is not charged against the backend's handshake budget"
 func TestDialWindow_SlowResolverDoesNotSpendTheDialBudget(t *testing.T) {
 	const resolverWork = 250 * time.Millisecond
 
@@ -137,7 +137,7 @@ func TestDialWindow_SlowResolverDoesNotSpendTheDialBudget(t *testing.T) {
 // site alone, and running them together keeps this at one 10 s wait. They
 // swap no globals and capture no log, so they are safe to overlap.
 //
-// slopstop:test regression — guards: "a handshake resolver slower than realtimeDialTimeout neither fails the dial nor is replaced by a fallback value"
+// regression — guards: "a handshake resolver slower than realtimeDialTimeout neither fails the dial nor is replaced by a fallback value"
 func TestDialWindow_ResolverSlowerThanTheDialTimeoutStillDials(t *testing.T) {
 	for _, r := range dialWindowResolvers {
 		t.Run(r.name, func(t *testing.T) {
@@ -174,7 +174,7 @@ func TestDialWindow_ResolverSlowerThanTheDialTimeoutStillDials(t *testing.T) {
 // drives the timeout itself; TestHandleStreamRealtime_DialFailureEndsCallAndClosesCarrier
 // uses a backend that refuses at once and so never reaches it.
 //
-// slopstop:test regression — guards: "the handshake is still bounded by realtimeDialTimeout against a backend that never answers"
+// regression — guards: "the handshake is still bounded by realtimeDialTimeout against a backend that never answers"
 func TestDialWindow_UnresponsiveBackendStillEndsOnTheDialTimeout(t *testing.T) {
 	silent := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
@@ -215,7 +215,7 @@ func TestDialWindow_UnresponsiveBackendStillEndsOnTheDialTimeout(t *testing.T) {
 // It names the RIGHT resolver: the other one returns at once, and its name
 // must not appear.
 //
-// slopstop:test regression — guards: "a handshake resolver still running after realtimeSlowResolverWarning is logged by name before it returns"
+// regression — guards: "a handshake resolver still running after realtimeSlowResolverWarning is logged by name before it returns"
 func TestDialWindow_WedgedResolverIsLoggedWhileItIsStillRunning(t *testing.T) {
 	for _, r := range dialWindowResolvers {
 		t.Run(r.name, func(t *testing.T) {
@@ -288,7 +288,7 @@ func TestDialWindow_WedgedResolverIsLoggedWhileItIsStillRunning(t *testing.T) {
 // down to fire on an ordinary cache miss or database round trip would log on
 // every call, and fails here.
 //
-// slopstop:test regression — guards: "a handshake resolver that returns before realtimeSlowResolverWarning, even after a realistic lookup, is never reported as slow"
+// regression — guards: "a handshake resolver that returns before realtimeSlowResolverWarning, even after a realistic lookup, is never reported as slow"
 func TestDialWindow_PromptResolverIsNotLogged(t *testing.T) {
 	const promptWork = 750 * time.Millisecond
 	logs := captureLog(t)

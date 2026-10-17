@@ -13,8 +13,6 @@ import (
 // TestRead_SessionUpdatedLargerThanDefaultReadLimit pushes a ~64 KiB
 // session.updated — twice the default limit — through Client.Read after a
 // successful Dial, and requires the verbatim frame back.
-//
-// slopstop:test contract
 func TestRead_SessionUpdatedLargerThanDefaultReadLimit(t *testing.T) {
 	const defaultReadLimit = 32768 // coder/websocket's default, the limit being lifted
 	frame := []byte(`{"type":"session.updated","session":{"instructions":"` +

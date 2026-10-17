@@ -129,8 +129,6 @@ func markIndexes(records []carrierWireRecord) []int {
 // `go test`. That property is pinned by
 // TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight
 // (realtime_marks_gaps_test.go), which holds the slot open across the mark.
-//
-// slopstop:test contract
 func TestMarkRequestChan_MarkReachesCarrierAfterQueuedAudio(t *testing.T) {
 	requests := make(chan string, testChanBuffer)
 	echoes := make(chan MarkEcho, testChanBuffer)
@@ -176,8 +174,6 @@ func TestMarkRequestChan_MarkReachesCarrierAfterQueuedAudio(t *testing.T) {
 // contract is that the name the CARRIER echoed is the name delivered, so
 // reading it back off the frame the handler wrote is what makes a hard-coded
 // or reassigned name fail.
-//
-// slopstop:test contract
 func TestMarkEchoChan_EchoReachesTheConsumerWithItsName(t *testing.T) {
 	requests := make(chan string, testChanBuffer)
 	echoes := make(chan MarkEcho, testChanBuffer)
@@ -216,8 +212,6 @@ func TestMarkEchoChan_EchoReachesTheConsumerWithItsName(t *testing.T) {
 // delivered as a match. handleMarkEchoControlEvent already draws exactly that
 // distinction on the classic path, and it is what stops a consumer with two
 // marks in flight from reading one as the other.
-//
-// slopstop:test contract
 func TestMarkEchoChan_UnrequestedEchoIsNotDeliveredAsAMatch(t *testing.T) {
 	requests := make(chan string, testChanBuffer)
 	echoes := make(chan MarkEcho, testChanBuffer)
@@ -274,7 +268,7 @@ func TestMarkEchoChan_UnrequestedEchoIsNotDeliveredAsAMatch(t *testing.T) {
 // realtime_instructions_test.go's handshakeBaseline comment says about a
 // baseline that is not pinned.
 //
-// slopstop:test regression — guards: "A call that supplies neither option
+// regression — guards: "A call that supplies neither option
 // behaves byte-for-byte as it does today."
 func TestRealtime_NoMarkOptionsIsByteIdenticalToToday(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
@@ -315,8 +309,6 @@ func TestRealtime_NoMarkOptionsIsByteIdenticalToToday(t *testing.T) {
 // adds atop the clip's playout. The assertion allows generous slack above that
 // but is still far below the test's own failure deadline, so an implementation
 // with no bound at all fails here rather than passing slowly.
-//
-// slopstop:test contract
 func TestMarkRequestChan_NonEchoingCarrierDoesNotHang(t *testing.T) {
 	requests := make(chan string, testChanBuffer)
 	echoes := make(chan MarkEcho, testChanBuffer)
@@ -360,8 +352,6 @@ func TestMarkRequestChan_NonEchoingCarrierDoesNotHang(t *testing.T) {
 // longhand substituted into playoutClock.fed leaves this test green. That
 // property is pinned by TestMarkEchoBound_KeepsTheSubMillisecondRemainder
 // (realtime_marks_gaps_test.go), which uses a byte count that is not.
-//
-// slopstop:test contract
 func TestMarkRequestChan_BoundCoversQueuedPlayout(t *testing.T) {
 	// One second of μ-law audio, so the playout term dominates the grace and a
 	// bound that ignored it would be unmistakable.
@@ -403,7 +393,7 @@ func (discardWSWriter) Write(context.Context, websocket.MessageType, []byte) err
 // unnamed mark cannot be matched against an echo, so sending one would put a
 // frame on the wire that no echo can ever resolve.
 //
-// slopstop:test regression — guards: "An echo whose name matches nothing
+// regression — guards: "An echo whose name matches nothing
 // outstanding is logged and not delivered as a match."
 func TestMarkRequestChan_EmptyNameIsNotSent(t *testing.T) {
 	requests := make(chan string, testChanBuffer)
@@ -434,7 +424,7 @@ func TestMarkRequestChan_EmptyNameIsNotSent(t *testing.T) {
 // TestMarkRequestChan_ClosedChannelDoesNotBusyLoop
 // (realtime_marks_gaps_test.go).
 //
-// slopstop:test regression — guards: "A call that supplies neither option
+// regression — guards: "A call that supplies neither option
 // behaves byte-for-byte as it does today."
 func TestMarkRequestChan_ClosedChannelLeavesTheCallRunning(t *testing.T) {
 	requests := make(chan string, testChanBuffer)
@@ -455,7 +445,7 @@ func TestMarkRequestChan_ClosedChannelLeavesTheCallRunning(t *testing.T) {
 // consumer event, not backend activity, so a consumer marking steadily against
 // a backend that has gone silent must not mask that silence.
 //
-// slopstop:test regression — guards: "A mark request does not reset the idle
+// regression — guards: "A mark request does not reset the idle
 // timeout."
 func TestMarkRequestChan_DoesNotResetTheIdleGuard(t *testing.T) {
 	requests := make(chan string, testChanBuffer)

@@ -35,8 +35,6 @@ const declaredToolsRaw = `[{"type":  "function","name":"lookup_weather","descrip
 // TestDial_HandshakeCarriesDeclaredToolsUnmodified pins observable behavior 1:
 // a consumer can declare tool definitions in the handshake, and they arrive
 // at the backend byte-for-byte.
-//
-// slopstop:test contract
 func TestDial_HandshakeCarriesDeclaredToolsUnmodified(t *testing.T) {
 	be := newFakeBackend(t)
 	ctx := testCtx(t)
@@ -71,7 +69,7 @@ func TestDial_HandshakeCarriesDeclaredToolsUnmodified(t *testing.T) {
 // TestSessionUpdate_UnsetToolsIsByteIdenticalToToday
 // (telephony/twilio/realtime_tools_test.go).
 //
-// slopstop:test regression — guards: "Unset omits the field entirely, byte-identical to today."
+// regression — guards: "Unset omits the field entirely, byte-identical to today."
 func TestDial_HandshakeWithNoToolsOmitsTheField(t *testing.T) {
 	be := newFakeBackend(t)
 	ctx := testCtx(t)

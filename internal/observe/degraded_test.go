@@ -33,7 +33,6 @@ import (
 	"github.com/iansmith/aatoolkit/internal/observe"
 )
 
-// slopstop:test contract
 func TestTreeListenSet_ForcedEmptyReadOnConfirmedListener_RecordsDegraded(t *testing.T) {
 	port := freePort(t)
 	sl := spawnListener(t, port, 0)
@@ -69,7 +68,7 @@ func TestTreeListenSet_ForcedEmptyReadOnConfirmedListener_RecordsDegraded(t *tes
 	}
 }
 
-// slopstop:test regression — guards: "distinguishably from a process confirmed to hold no ports" (ticket "Observable behaviors" §1)
+// regression — guards: "distinguishably from a process confirmed to hold no ports" (ticket "Observable behaviors" §1)
 func TestTreeListenSet_RealNonListeningProcess_NotDegraded(t *testing.T) {
 	// A real, running process that genuinely binds no ports at all, read
 	// through the real (unmocked) gopsutil call — no seam substitution here.

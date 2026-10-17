@@ -86,8 +86,6 @@ func errorFrame(message string) map[string]any {
 //
 // Measured: with only the first case present, mutating Dial to keep the first
 // frame passed. Each case kills exactly the mutant the other misses.
-//
-// slopstop:test contract
 func TestDial_RejectedHandshakeSurfacesTheBackendsRefusal(t *testing.T) {
 	const reason = "Unknown parameter: 'session.client_session_id'."
 	benign := map[string]any{"type": benignFrameType, "rate_limits": []any{}}
@@ -133,7 +131,7 @@ func TestDial_RejectedHandshakeSurfacesTheBackendsRefusal(t *testing.T) {
 // half: a backend that says NOTHING at all must still produce the error it
 // always did, with no empty frame clause appended to it.
 //
-// slopstop:test regression — guards: "A silent backend's dial error is unchanged."
+// regression — guards: "A silent backend's dial error is unchanged."
 func TestDial_RejectedHandshakeWithNoFrameStillReportsTheDeadline(t *testing.T) {
 	url := refusingBackend(t)
 

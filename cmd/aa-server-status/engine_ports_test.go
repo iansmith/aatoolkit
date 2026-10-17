@@ -194,8 +194,6 @@ func TestRealEngine_Up_ExactListenSet_StillSucceeds(t *testing.T) {
 // *lifecycle.Process wrapping an actual PID, but not launched through
 // upOne/tdlistener — pollReady is exercised directly, with no mock standing
 // in for internal/observe or internal/health.
-//
-// slopstop:test contract
 func TestPollReady_PortVerdictStillRendersAfterHealthTimesOut(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
@@ -272,8 +270,6 @@ func TestPollReady_PortVerdictStillRendersAfterHealthTimesOut(t *testing.T) {
 // possible source for the error without changing what actually happens.
 // With no health declared, the only way pollReady can return an error here
 // is warm-up failing.
-//
-// slopstop:test contract
 func TestPollReady_PortVerdictStillRendersAfterWarmUpTimesOut(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
@@ -367,8 +363,6 @@ func TestPollReady_PortVerdictStillRendersAfterWarmUpTimesOut(t *testing.T) {
 // (warm_order_test.go) already pins that a failing warm-up means health is
 // never probed, so declaring one here would add a second possible source
 // for the error without changing what actually happens.
-//
-// slopstop:test contract
 func TestPollReady_PortVerdictStillRendersAfterWarmUpFastRejects(t *testing.T) {
 	var mu sync.Mutex
 	var order []string

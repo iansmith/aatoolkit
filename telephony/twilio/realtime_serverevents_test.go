@@ -58,8 +58,6 @@ func assertServerEventItemID(t *testing.T, ch <-chan ServerEvent, want string) {
 // ticket's own example — reaches the consumer's channel with Raw carrying
 // the whole original frame, including a field ServerEvent does not know
 // about.
-//
-// slopstop:test contract
 func TestServerEventChan_UnmodelledEventReachesConsumerWithRaw(t *testing.T) {
 	ch := make(chan ServerEvent, testChanBuffer)
 
@@ -79,7 +77,7 @@ func TestServerEventChan_UnmodelledEventReachesConsumerWithRaw(t *testing.T) {
 // works — then floods it past its buffer without draining further and checks
 // audio queued behind the flood still arrives.
 //
-// slopstop:test non-interference — paired: asserts the consumer's channel actually receives the flooded unmodelled events (proving delivery is live) before checking that a full/never-drained channel does not stall carrier audio
+// non-interference — paired: asserts the consumer's channel actually receives the flooded unmodelled events (proving delivery is live) before checking that a full/never-drained channel does not stall carrier audio
 func TestServerEventChan_ConsumerThatNeverReadsDoesNotStallAudio(t *testing.T) {
 	ch := make(chan ServerEvent, 1) // deliberately tiny, and never drained further
 
@@ -114,7 +112,7 @@ func TestServerEventChan_ConsumerThatNeverReadsDoesNotStallAudio(t *testing.T) {
 // so the "does not trip" half alone would hold even against an inert option —
 // it is the positive receive that actually exercises this ticket's wiring.
 //
-// slopstop:test non-interference — paired: asserts the consumer's channel actually receives an unmodelled event before checking a never-drained channel does not trip the idle timer
+// non-interference — paired: asserts the consumer's channel actually receives an unmodelled event before checking a never-drained channel does not trip the idle timer
 func TestServerEventChan_ConsumerThatNeverReadsDoesNotTripTheIdleTimer(t *testing.T) {
 	ch := make(chan ServerEvent, 1) // never drained
 
@@ -141,8 +139,6 @@ func TestServerEventChan_ConsumerThatNeverReadsDoesNotTripTheIdleTimer(t *testin
 // verbatim: "The engine never closes the consumer's channel — a test reuses
 // one channel across two calls and reads after both." Mirrors
 // TestTranscriptChan_EngineNeverClosesTheConsumersChannel.
-//
-// slopstop:test contract
 func TestServerEventChan_EngineNeverClosesTheConsumersChannel(t *testing.T) {
 	ch := make(chan ServerEvent, testChanBuffer)
 
@@ -177,7 +173,7 @@ func TestServerEventChan_EngineNeverClosesTheConsumersChannel(t *testing.T) {
 // spawn nothing on either side of the comparison and pass this test having
 // wired up nothing at all.
 //
-// slopstop:test non-interference — paired: asserts the consumer channel actually receives an event on each call before measuring goroutine growth against a run with no consumer
+// non-interference — paired: asserts the consumer channel actually receives an event on each call before measuring goroutine growth against a run with no consumer
 func TestServerEventChan_NoGoroutineOutlivesCallAndEventsActuallyFlow(t *testing.T) {
 	const calls = 5
 
@@ -241,8 +237,6 @@ func TestServerEventChan_NoGoroutineOutlivesCallAndEventsActuallyFlow(t *testing
 // TestServerEventChan_DropIsLogged pins the DoD item "Drops are logged rather
 // than silent." Mirrors the log-capture pattern used elsewhere in this
 // package (e.g. telephony/twilio/demux_test.go).
-//
-// slopstop:test contract
 func TestServerEventChan_DropIsLogged(t *testing.T) {
 	// syncBuffer, not bytes.Buffer: drops are logged from the delivery
 	// goroutine, so an unguarded buffer read here is a data race under -race
@@ -278,7 +272,7 @@ func TestServerEventChan_DropIsLogged(t *testing.T) {
 // to today." Supplying no ServerEventChan option must leave the call running
 // exactly as it did before this channel existed, unmodelled events included.
 //
-// slopstop:test regression — guards: "With no option supplied, behaviour is byte-identical to today."
+// regression — guards: "With no option supplied, behaviour is byte-identical to today."
 func TestServerEventChan_AbsentOptionIsTodaysBehaviour(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url()))
@@ -298,8 +292,6 @@ func TestServerEventChan_AbsentOptionIsTodaysBehaviour(t *testing.T) {
 // TestSessionUpdate_InstructionsVaryPerCallThroughOneHandler: two calls
 // through the SAME handler must route to two different channels, which is
 // the assertion WithServerEventChan's constant channel cannot satisfy.
-//
-// slopstop:test contract
 func TestServerEventChanFor_VariesPerCallThroughOneHandler(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 
