@@ -29,6 +29,11 @@ var (
 // reaches the upstream request.
 type ctxKey struct{}
 
+// withCtxValue is a context carrying v under ctxKey.
+func withCtxValue(v string) context.Context {
+	return context.WithValue(context.Background(), ctxKey{}, v)
+}
+
 // ctxRecordingTransport answers every request itself with a one-delta stream,
 // textLine("ok"), so no socket is opened, and records the request's context:
 // its deadline, the value under ctxKey, and the span it carries.
@@ -569,7 +574,7 @@ func TestWithContext_SendAndSendStreamRunUnderBoundContext(t *testing.T) {
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
 			h, rt := newCtxRecordingHost()
-			ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), ctxKey{}, "bound"), time.Minute)
+			ctx, cancel := context.WithTimeout(withCtxValue("bound"), time.Minute)
 			defer cancel()
 			want, _ := ctx.Deadline()
 			if err := call(h.WithContext(ctx)); err != nil {
@@ -611,11 +616,11 @@ func TestWithContext_SendAndSendStreamRunUnderBoundContext(t *testing.T) {
 func TestWithContext_ExplicitContextWins(t *testing.T) {
 	window := []byte(`[{"role":"user","content":"hi"}]`)
 	h, rt := newCtxRecordingHost()
-	cs, ok := h.WithContext(context.WithValue(context.Background(), ctxKey{}, "bound")).(host.ContextSender)
+	cs, ok := h.WithContext(withCtxValue("bound")).(host.ContextSender)
 	if !ok {
 		t.Fatal("the WithContext view is not a host.ContextSender")
 	}
-	explicit := context.WithValue(context.Background(), ctxKey{}, "explicit")
+	explicit := withCtxValue("explicit")
 
 	if _, _, err := cs.SendContext(explicit, window, "fast"); err != nil {
 		t.Fatalf("SendContext: %v", err)

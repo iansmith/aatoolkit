@@ -12,9 +12,9 @@ import "context"
 // driver.Host) still applies on top. ctx is a context.Context, not
 // Host.Context(queryText), which returns the messages array; ContextBuilder is
 // that method's ctx-taking form. ContextSender is separate from Host so that
-// adding it breaks no existing Host implementation. An interpreted policy reaches it by
-// type-asserting its host.Host, which works only if the consumer injects this
-// symbol.
+// adding it breaks no existing Host implementation. An interpreted policy
+// reaches it by type-asserting its host.Host, which works only if the
+// consumer injects this symbol.
 type ContextSender interface {
 	SendContext(ctx context.Context, contextWindow []byte, tier string) ([]byte, []byte, error)
 	SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error)
@@ -74,8 +74,9 @@ type Host interface {
 	// remembered history, as a JSON array ready for Send. queryText is the
 	// current turn's text, handed to that user-context provider so its block
 	// can depend on it (e.g. retrieval keyed on the query); pass "" when there
-	// is none. It runs the provider under context.Background();
-	// ContextBuilder.ContextFor is the form that takes a ctx.
+	// is none. Which ctx the provider runs under is the implementation's: a
+	// driver.Host uses context.Background(), and its WithContext view the
+	// bound ctx. ContextBuilder.ContextFor takes the ctx explicitly.
 	Context(queryText string) []byte
 
 	// Forget drops the most recently remembered message. The policy uses it to

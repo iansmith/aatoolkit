@@ -226,8 +226,8 @@ func (h *Host) SendContext(ctx context.Context, contextWindow []byte, tier strin
 // spans are children of ctx's span, and ctx's deadline and cancellation bound
 // them. Its Context hands ctx to the user-context provider. Every other method
 // is the receiver's own, and ContextFor, SendContext and SendStreamContext keep
-// their explicit ctx. Make one per inbound request and do
-// not keep it beyond that request. For work that outlives an HTTP handler, pass
+// their explicit ctx. Make one per inbound request and do not keep it beyond
+// that request. For work that outlives an HTTP handler, pass
 // context.WithoutCancel(ctx). A nil ctx panics, as http.Request.WithContext does.
 func (h *Host) WithContext(ctx context.Context) host.Host {
 	if ctx == nil {
@@ -239,7 +239,8 @@ func (h *Host) WithContext(ctx context.Context) host.Host {
 // boundHost is the view WithContext returns: the receiver, with ctx bound to
 // its two context-free sends and to Context. It must override all three. Were
 // Send left promoted, it would run (*Host).Send, which sends under
-// context.Background() and loses ctx; Context likewise. A boundHost is never modified after WithContext builds it.
+// context.Background() and loses ctx; Context likewise. A boundHost is never
+// modified after WithContext builds it.
 type boundHost struct {
 	*Host
 	ctx context.Context
@@ -809,12 +810,15 @@ func (h *Host) Context(queryText string) []byte {
 // ContextFor implements host.ContextBuilder. It assembles [current system
 // prompt] + optional user context + history into a JSON messages array ready
 // for Send. ctx and queryText are handed to the user-context provider, so its
-// block can depend on the current turn and its I/O runs under ctx.
+// block can depend on the current turn and its I/O runs under ctx. A nil ctx
+// panics, as WithContext's does, whichever provider form is configured.
 func (h *Host) ContextFor(ctx context.Context, queryText string) []byte {
+	if ctx == nil {
+		panic("driver: ContextFor called with a nil context")
+	}
 	// Outside histMu: the provider may do I/O (e.g. retrieval) and never reads
 	// history, so holding the lock would stall Remember/Forget for no reason.
-	// The call has no deadline and no error path: a provider bounds its own
-	// I/O and returns "" on failure.
+	// Its contract (no deadline, no error path) is on Config.UserContext.
 	var userCtx string
 	if h.userContext != nil {
 		userCtx = h.userContext(ctx, queryText)

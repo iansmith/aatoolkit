@@ -115,8 +115,8 @@ driver.StartTwilioServer(addr, srv, driver.WithHandlerWrapper(
   `UserContext`; if both are set, `UserContextCtx` wins and `UserContext` is never called.
   `host.ContextBuilder` adds `ContextFor(ctx, queryText)`, which hands ctx to that provider so
   its I/O runs under the caller's span and cancellation. `Context(queryText)` hands it
-  `context.Background()`, and a `WithContext` view's `Context` hands it the bound ctx. No span,
-  deadline or error path is added: the provider bounds its own I/O and returns `""` on failure.
+  `context.Background()`, and a `WithContext` view's `Context` hands it the bound ctx. The
+  provider's contract is on `host.ContextBuilder` and `driver.Config.UserContext`.
 - **Request-scoped ctx.** The ctx a Twilio handler receives (`HandleSMS`, `HandleSMSStatus`,
   `AnswerCall`) is cancelled once the request has been handled. A model call that outlives the
   handler must run under `context.WithoutCancel(ctx)`, which keeps the span and drops the
@@ -128,7 +128,7 @@ driver.StartTwilioServer(addr, srv, driver.WithHandlerWrapper(
   `"ContextSender": reflect.ValueOf((*host.ContextSender)(nil))` and
   `"ContextBuilder": reflect.ValueOf((*host.ContextBuilder)(nil))` beside `"Host"` for the host
   package, and build and send with
-  `if cb, ok := h.(host.ContextBuilder); ok { window = cb.ContextFor(ctx, q) }` and
+  `if cb, ok := h.(host.ContextBuilder); ok { window = cb.ContextFor(ctx, q) } else { window = h.Context(q) }` and
   `if cs, ok := h.(host.ContextSender); ok { cs.SendStreamContext(ctx, ...) }`. An interface
   the policy declares itself cannot stand in for the injected one.
 - **Webhook spans.** `WithHandlerWrapper` wraps each Twilio route (`/webhook`, `/streams`,

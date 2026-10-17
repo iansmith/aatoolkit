@@ -40,32 +40,9 @@ var hostOnlyInject = interp.Inject{
 func TestPolicy_ReachesContextFormsThroughInterp(t *testing.T) {
 	window := []byte(`[{"role":"user","content":"hi"}]`)
 
-	v, err := interp.Load("testdata/boundpolicy", "policy", policyInject, "policy.Turn")
-	if err != nil {
-		t.Fatalf("Load boundpolicy: %v", err)
-	}
-	r1, ok := v.Interface().(func(host.Host, []byte) (string, error))
-	if !ok {
-		t.Fatalf("boundpolicy.Turn has type %T", v.Interface())
-	}
-
-	v, err = interp.Load("testdata/boundpolicy", "policy", hostOnlyInject, "policy.Turn")
-	if err != nil {
-		t.Fatalf("Load boundpolicy with a Host-only Inject: %v", err)
-	}
-	r1HostOnly, ok := v.Interface().(func(host.Host, []byte) (string, error))
-	if !ok {
-		t.Fatalf("boundpolicy.Turn with a Host-only Inject has type %T", v.Interface())
-	}
-
-	v, err = interp.Load("testdata/ctxpolicy", "policy", policyInject, "policy.Turn")
-	if err != nil {
-		t.Fatalf("Load ctxpolicy: %v", err)
-	}
-	r2, ok := v.Interface().(func(context.Context, host.Host, []byte) (string, error))
-	if !ok {
-		t.Fatalf("ctxpolicy.Turn has type %T", v.Interface())
-	}
+	r1 := loadPolicy[func(host.Host, []byte) (string, error)](t, "testdata/boundpolicy", policyInject, "policy.Turn")
+	r1HostOnly := loadPolicy[func(host.Host, []byte) (string, error)](t, "testdata/boundpolicy", hostOnlyInject, "policy.Turn")
+	r2 := loadPolicy[func(context.Context, host.Host, []byte) (string, error)](t, "testdata/ctxpolicy", policyInject, "policy.Turn")
 
 	cases := []struct {
 		name string
@@ -105,29 +82,80 @@ func TestPolicy_ReachesContextFormsThroughInterp(t *testing.T) {
 	}
 }
 
-// TestPolicy_ReachesContextForThroughInterp: an interpreted policy, loaded with
-// the real interp.Load and an Inject carrying ContextBuilder, builds its window
-// under the ctx it is given by asserting host.ContextBuilder, and that ctx
-// reaches the UserContextCtx provider.
-func TestPolicy_ReachesContextForThroughInterp(t *testing.T) {
-	v, err := interp.Load("testdata/ctxbuilderpolicy", "policy", policyInject, "policy.Window")
+// loadPolicy loads sym from the interpreted policy in dir with inject, and
+// fails t unless it has type F.
+func loadPolicy[F any](t *testing.T, dir string, inject interp.Inject, sym string) F {
+	t.Helper()
+	v, err := interp.Load(dir, "policy", inject, sym)
 	if err != nil {
-		t.Fatalf("Load ctxbuilderpolicy: %v", err)
+		t.Fatalf("Load %s %s: %v", dir, sym, err)
 	}
-	window, ok := v.Interface().(func(context.Context, host.Host, string) ([]byte, error))
+	f, ok := v.Interface().(F)
 	if !ok {
-		t.Fatalf("ctxbuilderpolicy.Window has type %T", v.Interface())
+		t.Fatalf("%s %s has type %T", dir, sym, v.Interface())
 	}
+	return f
+}
 
+// TestPolicy_ReachesContextForThroughInterp: an interpreted policy, loaded with
+// the real interp.Load, builds its window under the caller's context both ways
+// the README describes, and that ctx reaches the UserContextCtx provider. R1:
+// the policy calls Context on a WithContext view, with the consumer's Inject
+// with or without ContextBuilder. R2: the policy takes a ctx and asserts
+// host.ContextBuilder. An unbound host hands the provider no value.
+func TestPolicy_ReachesContextForThroughInterp(t *testing.T) {
+	r1 := loadPolicy[func(host.Host, string) []byte](t, "testdata/boundpolicy", policyInject, "policy.Window")
+	r1HostOnly := loadPolicy[func(host.Host, string) []byte](t, "testdata/boundpolicy", hostOnlyInject, "policy.Window")
+	r2 := loadPolicy[func(context.Context, host.Host, string) ([]byte, error)](t, "testdata/ctxpolicy", policyInject, "policy.Window")
+
+	cases := []struct {
+		name   string
+		window func(h *Host) ([]byte, error)
+		want   any
+	}{
+		{"R1 WithContext view", func(h *Host) ([]byte, error) { return r1(h.WithContext(withCtxValue("policy")), "q"), nil }, "policy"},
+		{"R1 unbound host", func(h *Host) ([]byte, error) { return r1(h, "q"), nil }, nil},
+		{"R1 WithContext view, Host-only Inject", func(h *Host) ([]byte, error) {
+			return r1HostOnly(h.WithContext(withCtxValue("policy")), "q"), nil
+		}, "policy"},
+		{"R2 explicit context", func(h *Host) ([]byte, error) { return r2(withCtxValue("policy"), h, "q") }, "policy"},
+		{"R2 explicit context on a bound view", func(h *Host) ([]byte, error) {
+			return r2(withCtxValue("explicit"), h.WithContext(withCtxValue("bound")), "q")
+		}, "explicit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, p := newProbeHost()
+			got, err := tc.window(h)
+			if err != nil {
+				t.Fatalf("policy Window: %v", err)
+			}
+			p.assertOnce(t, tc.want, "q")
+			assertSystemMessages(t, got, "sys", "ctx block")
+		})
+	}
+}
+
+// TestPolicy_R2BuildsAndSendsUnderOneCtx: the whole R2 recipe the README gives,
+// run by one interpreted policy -- ContextFor, then SendStreamContext, under
+// the one ctx it is handed -- carries that ctx to both the user-context
+// provider and the upstream request.
+func TestPolicy_R2BuildsAndSendsUnderOneCtx(t *testing.T) {
+	reply := loadPolicy[func(context.Context, host.Host, string) (string, error)](t, "testdata/ctxpolicy", policyInject, "policy.Reply")
+
+	h, rt := newCtxRecordingHost()
 	p := &ctxProbe{result: "ctx block"}
-	h := New(Config{Tiers: testTiers, Prompt: func() string { return "sys" }, UserContextCtx: p.provide})
+	h.userContext = p.provide
 
-	got, err := window(withCtxValue("policy"), h, "q")
+	got, err := reply(withCtxValue("policy"), h, "q")
 	if err != nil {
-		t.Fatalf("policy Window: %v", err)
+		t.Fatalf("policy Reply: %v", err)
 	}
-	if calls, _, value, q := p.last(); calls != 1 || value != "policy" || q != "q" {
-		t.Fatalf("provider saw calls=%d value=%v query=%q; want 1, %q, %q", calls, value, q, "policy", "q")
+	if got != "ok" {
+		t.Errorf("policy Reply returned %q, want %q", got, "ok")
 	}
-	assertSystemMessages(t, got, "sys", "ctx block")
+	p.assertOnce(t, "policy", "q")
+	if calls, _, _, value := rt.last(); calls != 1 || value != "policy" {
+		t.Errorf("upstream saw %d requests carrying %v; want 1 carrying %q", calls, value, "policy")
+	}
 }
