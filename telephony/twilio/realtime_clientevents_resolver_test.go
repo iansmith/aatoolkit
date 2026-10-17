@@ -22,7 +22,7 @@ import (
 // healthy the entire time ends immediately with "idle timeout", which is a
 // misattribution of exactly the kind WithIdleTimeout exists to avoid making.
 //
-// slopstop:test regression — guards: "arming the idle guard happens after the client-event resolver runs, so a slow consumer resolver cannot spend the guard's first window and end a healthy call with a bogus idle timeout"
+// regression — guards: "arming the idle guard happens after the client-event resolver runs, so a slow consumer resolver cannot spend the guard's first window and end a healthy call with a bogus idle timeout"
 func TestClientEventChanFor_SlowResolverDoesNotBurnTheIdleWindow(t *testing.T) {
 	const (
 		idleTimeout  = 1500 * time.Millisecond

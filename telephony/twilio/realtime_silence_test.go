@@ -87,8 +87,6 @@ func silenceHarness(t *testing.T, url string, opts ...RealtimeOption) *realtimeH
 // arrive within a small multiple of the configured Delay, far short of the idle
 // bound, because "the caller eventually hears something as the line is being
 // dropped" is the defect rather than the fix.
-//
-// slopstop:test contract
 func TestCallOpen_CoversASilentBackendWellBeforeTheIdleBound(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := silenceHarness(t, be.url(),
@@ -115,8 +113,6 @@ func TestCallOpen_CoversASilentBackendWellBeforeTheIdleBound(t *testing.T) {
 // call-open cover, which is the same edge AATK-108 built for the mid-turn one:
 // the clear must precede the reply's first frame, and no cover frame may follow
 // it.
-//
-// slopstop:test contract
 func TestCallOpen_CoverStopsWhenTheBackendFinallySpeaks(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := silenceHarness(t, be.url(),
@@ -142,8 +138,6 @@ func TestCallOpen_CoverStopsWhenTheBackendFinallySpeaks(t *testing.T) {
 // call-open trigger specifically. TestFiller_UnsetWritesNothingWhileTheBackendIsSilent
 // pins the same absence against the speech_stopped trigger; this one drives the
 // script that needs no event at all, which is the trigger this ticket adds.
-//
-// slopstop:test contract
 func TestCallOpen_NoCoverWhenTheFillerOptionIsAbsent(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := silenceHarness(t, be.url(), WithIdleTimeout(silenceTestIdleTimeout))
@@ -168,8 +162,6 @@ func TestCallOpen_NoCoverWhenTheFillerOptionIsAbsent(t *testing.T) {
 //
 // The assertion is the ordering, not merely that frames were written: every
 // farewell frame must carry a stamp earlier than the close's own.
-//
-// slopstop:test contract
 func TestFarewell_FramesReachTheCarrierBeforeTheClose(t *testing.T) {
 	const idleTimeout = 300 * time.Millisecond
 
@@ -228,8 +220,6 @@ func TestFarewell_FramesReachTheCarrierBeforeTheClose(t *testing.T) {
 // the assertion is in two directions: the call must NOT have ended once the
 // mark is on the wire, and it must end promptly once the carrier echoes it —
 // well inside the bound the engine would otherwise wait out.
-//
-// slopstop:test contract
 func TestFarewell_WaitsForTheCarrierToReportItPlayed(t *testing.T) {
 	const idleTimeout = 200 * time.Millisecond
 
@@ -272,8 +262,6 @@ func TestFarewell_WaitsForTheCarrierToReportItPlayed(t *testing.T) {
 // says the three record kinds are mutually exclusive, and a call carrying only
 // the farewell leaves Filler false by construction, so the assertion that they
 // do not overlap could never fire. This call puts both kinds on the channel.
-//
-// slopstop:test contract
 func TestFarewell_CarrierAudioRecordsAreMarkedFarewell(t *testing.T) {
 	// Long enough that the cover plays first, for the reason
 	// TestSilentBackend_BothConditionsAreLoggedOnce states in full.
@@ -336,8 +324,6 @@ func TestFarewell_CarrierAudioRecordsAreMarkedFarewell(t *testing.T) {
 // Driven in the window that actually exists on a real call: the clip is written
 // in microseconds and the engine then WAITS for the mark's echo, so that wait
 // is where a late backend lands.
-//
-// slopstop:test contract
 func TestFarewell_LateBackendAudioNeverLandsOnTheGoodbye(t *testing.T) {
 	const idleTimeout = 200 * time.Millisecond
 
@@ -386,8 +372,6 @@ func TestFarewell_LateBackendAudioNeverLandsOnTheGoodbye(t *testing.T) {
 // consumer that does not opt in hears the same silence-then-hangup it always
 // did — and, more to the point, the branch must not have grown a wait that
 // delays the ending for a clip nobody supplied.
-//
-// slopstop:test contract
 func TestFarewell_AbsentWhenTheOptionIsNotSupplied(t *testing.T) {
 	const idleTimeout = 300 * time.Millisecond
 
@@ -421,8 +405,6 @@ func TestFarewell_AbsentWhenTheOptionIsNotSupplied(t *testing.T) {
 // TestIdleTimeout_ErrorMatchesErrIdleTimeout pins the identification a consumer
 // needs. Matching the message text is what a consumer had to do before this,
 // and a message is not an API: it changes when the sentence changes.
-//
-// slopstop:test contract
 func TestIdleTimeout_ErrorMatchesErrIdleTimeout(t *testing.T) {
 	const idleTimeout = 100 * time.Millisecond
 
@@ -446,8 +428,6 @@ func TestIdleTimeout_ErrorMatchesErrIdleTimeout(t *testing.T) {
 // which is also the call a live deployment would see them on: the backend goes
 // silent at the open, the loop covers it, and the idle guard eventually ends
 // the call with the farewell.
-//
-// slopstop:test contract
 func TestSilentBackend_BothConditionsAreLoggedOnce(t *testing.T) {
 	// Long enough that the cover reliably starts first. Both countdowns begin at
 	// roughly call open, so this margin is the whole of what separates them: at
@@ -518,8 +498,6 @@ func TestSilentBackend_BothConditionsAreLoggedOnce(t *testing.T) {
 // this ticket safe to deploy: neither behaviour may put audio on a call that is
 // working. A backend answering steadily is never covered, and never says
 // goodbye — the idle guard does not fire at all.
-//
-// slopstop:test contract
 func TestHealthyCall_WritesNeitherCoverNorFarewell(t *testing.T) {
 	const idleTimeout = 200 * time.Millisecond
 
@@ -561,8 +539,6 @@ func TestHealthyCall_WritesNeitherCoverNorFarewell(t *testing.T) {
 // TestMarkTracker_EngineOwnedMarkTimingOutIsNotDeliveredEither, driven at the
 // tracker rather than through a call, because a carrier that never echoes is
 // not something the harness's fake can express within a test's patience.
-//
-// slopstop:test contract
 func TestFarewell_MarkIsNotReportedOnTheConsumersEchoChannel(t *testing.T) {
 	const idleTimeout = 200 * time.Millisecond
 

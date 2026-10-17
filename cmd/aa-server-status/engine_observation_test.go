@@ -21,7 +21,6 @@ import (
 	"github.com/iansmith/aatoolkit/internal/observe"
 )
 
-// slopstop:test contract
 func TestStatusForLocked_ForcedUnconfirmedEmptyRead_KeepsTrackedPID(t *testing.T) {
 	port := freeTestPort(t)
 	f := spawnForeignListener(t, port) // real, alive, genuinely bound to `port`
@@ -74,7 +73,7 @@ func TestStatusForLocked_ForcedUnconfirmedEmptyRead_KeepsTrackedPID(t *testing.T
 	}
 }
 
-// slopstop:test regression — guards: "A server genuinely holding no declared ports still reports down — the fix must not make a real down state unreachable." (ticket Definition of done)
+// regression — guards: "A server genuinely holding no declared ports still reports down — the fix must not make a real down state unreachable." (ticket Definition of done)
 func TestStatusForLocked_NeverLaunchedServer_StillReportsDown(t *testing.T) {
 	port := freeTestPort(t)
 	cfg := config.Config{

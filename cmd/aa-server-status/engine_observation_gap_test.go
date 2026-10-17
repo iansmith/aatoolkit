@@ -29,7 +29,6 @@ import (
 	"github.com/iansmith/aatoolkit/internal/observe"
 )
 
-// slopstop:test contract
 func TestStatusForLocked_ForcedUnconfirmedEmptyRead_NotRenderedDown(t *testing.T) {
 	port := freeTestPort(t)
 	f := spawnForeignListener(t, port) // real, alive, genuinely bound to `port`
@@ -87,7 +86,7 @@ func TestStatusForLocked_ForcedUnconfirmedEmptyRead_NotRenderedDown(t *testing.T
 	}
 }
 
-// slopstop:test non-interference — paired with TestStatusForLocked_ForcedUnconfirmedEmptyRead_KeepsTrackedPID
+// non-interference — paired with TestStatusForLocked_ForcedUnconfirmedEmptyRead_KeepsTrackedPID
 // (frozen, contract). That test's positive half demands the PID survive an
 // unconfirmed observation; this negative half demands the fix not buy that
 // by trusting isOurs unconditionally. Guards: "A server genuinely holding
@@ -217,8 +216,6 @@ func TestStatusForLocked_ForcedUnconfirmedEmptyRead_KeepsTrackedPIDAndNotDown(t 
 // still reported — following TestStatusForLocked_ForcedUnconfirmedEmptyRead_NotRenderedDown's
 // own precedent of asserting State != StateDown rather than a specific
 // replacement state.
-//
-// slopstop:test contract
 func TestStatusForLocked_ForcedNonNotRunningRootError_NotRenderedDownKeepsTrackedPID(t *testing.T) {
 	port := freeTestPort(t)
 	f := spawnForeignListener(t, port) // real, alive, genuinely bound to `port`
@@ -287,7 +284,7 @@ func TestStatusForLocked_ForcedNonNotRunningRootError_NotRenderedDownKeepsTracke
 	}
 }
 
-// slopstop:test non-interference — paired with TestStatusForLocked_ForcedUnconfirmedEmptyRead_KeepsTrackedPID
+// non-interference — paired with TestStatusForLocked_ForcedUnconfirmedEmptyRead_KeepsTrackedPID
 // and TestStatusForLocked_ForcedNonNotRunningRootError_NotRenderedDownKeepsTrackedPID
 // (both contract). Those demand that an UNCONFIRMED observation stop the
 // child being rendered down; this demands the fix not pay for that by keying

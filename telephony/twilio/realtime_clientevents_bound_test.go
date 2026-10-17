@@ -92,7 +92,7 @@ func stalledHTTPClient() (*http.Client, *atomic.Bool) {
 // only "some error" would also let this test pass for an ending that had
 // nothing to do with the bound.
 //
-// slopstop:test regression — guards: "a consumer-event write that never completes is bounded, so it cannot park HandleStreamRealtime's select loop and silence backendDone, carrierDone and the idle timer, and the call ends with an error naming the client-event send rather than a bare transport error"
+// regression — guards: "a consumer-event write that never completes is bounded, so it cannot park HandleStreamRealtime's select loop and silence backendDone, carrierDone and the idle timer, and the call ends with an error naming the client-event send rather than a bare transport error"
 func TestClientEventChan_SendThatNeverCompletesEndsCallOnItsBound(t *testing.T) {
 	hc, stall := stalledHTTPClient()
 	origDial := dialRealtime

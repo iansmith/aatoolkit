@@ -64,8 +64,6 @@ func (s *syncBuffer) String() string {
 // must arrive on the transcript channel AND on the server-event channel, so
 // neither "routed to the old destination only" nor "diverted to the new
 // channel only" can pass.
-//
-// slopstop:test contract
 func TestServerEventChan_ReceivesModelledEventsToo(t *testing.T) {
 	sech := make(chan ServerEvent, testChanBuffer)
 	tch := make(chan Transcript, testChanBuffer)
@@ -134,8 +132,6 @@ func TestServerEventChan_ReceivesModelledEventsToo(t *testing.T) {
 // Transcripts() is documented to yield "transcription results in arrival
 // order" (bridge.go). Events() carries the same expectation and, until this
 // test, none of the same enforcement.
-//
-// slopstop:test contract
 func TestServerEventChan_PreservesArrivalOrder(t *testing.T) {
 	ch := make(chan ServerEvent, testChanBuffer)
 
@@ -183,8 +179,6 @@ func TestServerEventChan_PreservesArrivalOrder(t *testing.T) {
 // property of that loop's drop branch, and going through the websocket harness
 // would pin timing instead. src is closed, so deliver returns on its own and
 // the log write happens-before the read.
-//
-// slopstop:test contract
 func TestDeliver_DropLoggingIsRateBounded(t *testing.T) {
 	var buf syncBuffer
 	origOutput, origFlags := log.Writer(), log.Flags()

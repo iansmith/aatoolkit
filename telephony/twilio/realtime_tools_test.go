@@ -37,8 +37,6 @@ const toolsDeclaredRaw = `[{"type":  "function","name":"lookup_weather","descrip
 // TestSessionUpdate_CarriesSuppliedInstructions
 // (realtime_instructions_test.go): a consumer-declared tools value must
 // reach the backend's handshake exactly as supplied.
-//
-// slopstop:test contract
 func TestSessionUpdate_CarriesDeclaredToolsUnmodified(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithTools(json.RawMessage(toolsDeclaredRaw))))
@@ -59,7 +57,7 @@ func TestSessionUpdate_CarriesDeclaredToolsUnmodified(t *testing.T) {
 // must get the exact handshake this engine sent before tools existed, not a
 // near-equivalent carrying an empty array or a null field.
 //
-// slopstop:test regression — guards: "Unset omits the field entirely, byte-identical to today."
+// regression — guards: "Unset omits the field entirely, byte-identical to today."
 func TestSessionUpdate_UnsetToolsIsByteIdenticalToToday(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	newRealtimeHarnessWith(t, NewStreamHandler(be.url()))
@@ -116,8 +114,6 @@ func toolOutputEvent(callID string) json.RawMessage {
 // that no declared tools ever reach the handshake: WithTools exists but is
 // not yet wired into HandleStreamRealtime's dial call, so the first
 // assertion below fails before the round trip is even attempted.
-//
-// slopstop:test contract
 func TestRealtime_ToolCallRoundTripCompletesOnOneCall(t *testing.T) {
 	const callID = "call-42"
 

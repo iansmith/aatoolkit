@@ -30,8 +30,6 @@ const sessionIDRaw = "sess-01HQZX-abc123"
 // TestDial_HandshakeCarriesSuppliedSessionID pins observable behavior 1: the
 // consumer's identifier reaches the session object carrying exactly that
 // value.
-//
-// slopstop:test contract
 func TestDial_HandshakeCarriesSuppliedSessionID(t *testing.T) {
 	be := newFakeBackend(t)
 	ctx := testCtx(t)
@@ -78,7 +76,7 @@ func TestDial_HandshakeCarriesSuppliedSessionID(t *testing.T) {
 // splits with TestSessionUpdate_UnsetToolsIsByteIdenticalToToday
 // (telephony/twilio/realtime_tools_test.go).
 //
-// slopstop:test regression — guards: "No option, or an empty string, produces a handshake with no such field."
+// regression — guards: "No option, or an empty string, produces a handshake with no such field."
 func TestDial_HandshakeWithEmptySessionIDOmitsTheField(t *testing.T) {
 	be := newFakeBackend(t)
 	ctx := testCtx(t)
@@ -117,8 +115,6 @@ func TestDial_HandshakeWithEmptySessionIDOmitsTheField(t *testing.T) {
 //
 // This test requires the whole document to be valid JSON, both values to sit
 // under "session", and the tools bytes to still appear verbatim.
-//
-// slopstop:test contract
 func TestBuildSessionUpdate_SessionIDComposesWithToolsSplice(t *testing.T) {
 	tools := json.RawMessage(declaredToolsRaw)
 	out, err := buildSessionUpdate("be helpful", "nova", sessionIDRaw, tools)
@@ -171,8 +167,6 @@ func TestBuildSessionUpdate_SessionIDComposesWithToolsSplice(t *testing.T) {
 
 // TestXClientSessionID_PinsTheWireName pins the header name, so a change to
 // it here is deliberate and made together with the fork's copy.
-//
-// slopstop:test contract
 func TestXClientSessionID_PinsTheWireName(t *testing.T) {
 	const want = "X-Client-Session-Id"
 	if XClientSessionID != want {

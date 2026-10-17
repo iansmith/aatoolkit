@@ -183,7 +183,7 @@ func TestRealEngine_Up_AfterSourceChildExits_TakesColdLaunchPath(t *testing.T) {
 	}
 }
 
-// slopstop:test non-interference — AATK-106 DoD 4. This one is GREEN at base
+// non-interference — AATK-106 DoD 4. This one is GREEN at base
 // and must stay green: `down` on a child that already exited is a no-op that
 // clears the registry entry, which is today's manual workaround for the
 // defect (`down <name>` then `<name> up` relaunches, because downOne deletes

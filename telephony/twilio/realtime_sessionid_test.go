@@ -29,8 +29,6 @@ const wiredSessionID = "sess-twilio-7f3a"
 // (realtime_tools_test.go) pins for tools. WithSessionID existing at this
 // layer proves nothing until HandleStreamRealtime actually passes it to
 // realtime.Dial.
-//
-// slopstop:test contract
 func TestSessionUpdate_CarriesSuppliedSessionID(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithSessionID(wiredSessionID)))
@@ -56,8 +54,6 @@ func TestSessionUpdate_CarriesSuppliedSessionID(t *testing.T) {
 // and a backend keying per-session state on it would serve one caller's
 // context to the other. Two calls through ONE handler must carry different
 // identifiers.
-//
-// slopstop:test contract
 func TestSessionUpdate_SessionIDVariesPerCallThroughOneHandler(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 
@@ -110,7 +106,7 @@ func TestSessionUpdate_SessionIDVariesPerCallThroughOneHandler(t *testing.T) {
 // against this same frozen literal: a fourth copy could never fail alone, and
 // would give handshakeBaseline a fourth owner to update.
 //
-// slopstop:test regression — guards: "No option, or an empty string, produces a handshake byte-identical to today's."
+// regression — guards: "No option, or an empty string, produces a handshake byte-identical to today's."
 func TestSessionUpdate_WithEmptySessionIDIsByteIdenticalToToday(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithSessionID("")))

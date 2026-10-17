@@ -37,8 +37,6 @@ func rawClientEvent(id int) json.RawMessage {
 // send()'s json.Marshal(json.RawMessage) re-escapes '<', '>' and '&' into
 // </>/&, so this fails against the Phase 0 stub for a real
 // reason, not merely because Send did not exist.
-//
-// slopstop:test contract
 func TestClientSend_EventReachesBackendByteForByte(t *testing.T) {
 	be := newFakeBackend(t)
 	ctx := testCtx(t)
@@ -95,8 +93,6 @@ func TestClientSend_EventReachesBackendByteForByte(t *testing.T) {
 // without the mutex; remove the mutex and it must go red — mutation-check it,
 // do not assume") — verifying that the *mutex specifically* is what a mutant
 // must remove to flip this test is mutation-check's job, not this one's.
-//
-// slopstop:test contract
 func TestAppendAudioAndSendConcurrently_CleanUnderRaceAndByteForByte(t *testing.T) {
 	const workers = 50
 

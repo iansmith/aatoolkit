@@ -40,7 +40,7 @@ import (
 // reached the carrier whatever the machine did. A longer clip is the honest fix,
 // since the bound it buys is derived from the clip rather than guessed.
 //
-// slopstop:test regression — guards: "the hold loop is latched off, not merely
+// regression — guards: "the hold loop is latched off, not merely
 // stopped, once the farewell owns the carrier"
 func TestFarewell_TheHoldLoopCannotReArmOverTheGoodbye(t *testing.T) {
 	const idleTimeout = 200 * time.Millisecond
@@ -94,7 +94,7 @@ func TestFarewell_TheHoldLoopCannotReArmOverTheGoodbye(t *testing.T) {
 // write in the slot while another queues behind it is the entire subject and no
 // harness-level script can pin that instant.
 //
-// slopstop:test regression — guards: "a barge-in clear that had already been
+// regression — guards: "a barge-in clear that had already been
 // admitted before the farewell took the carrier is still dropped, inside the
 // write slot"
 func TestFarewell_AClearAlreadyQueuedForTheSlotIsStillDropped(t *testing.T) {
@@ -154,7 +154,7 @@ func TestFarewell_AClearAlreadyQueuedForTheSlotIsStillDropped(t *testing.T) {
 // options gets a TimedOut record for a mark it never wrote, which is exactly
 // the unmatchable record markTracker's doc says a consumer must never get.
 //
-// slopstop:test regression — guards: "the engine's own farewell mark, and
+// regression — guards: "the engine's own farewell mark, and
 // equally its TimedOut record, is never delivered on the consumer's channel"
 func TestMarkTracker_EngineOwnedMarkTimingOutIsNotDeliveredEither(t *testing.T) {
 	const name = realtimeFarewellMarkPrefix + "SSexpire"
@@ -190,7 +190,7 @@ func TestMarkTracker_EngineOwnedMarkTimingOutIsNotDeliveredEither(t *testing.T) 
 // exist underneath such a call, and that promise has to survive it — while a
 // call that DID name a mark option keeps the line it has had since AATK-105.
 //
-// slopstop:test regression — guards: "a tracker built only for the engine's
+// regression — guards: "a tracker built only for the engine's
 // farewell does not start logging a consumer's unmatched echoes"
 func TestMarkTracker_UnmatchedEchoLogLineFollowsTheConsumersMarks(t *testing.T) {
 	const line = "matches no outstanding mark"
@@ -246,7 +246,7 @@ func TestMarkTracker_UnmatchedEchoLogLineFollowsTheConsumersMarks(t *testing.T) 
 // would pass for the wrong reason on most runs; consuming the edge by hand is
 // the same starting state, deterministically.
 //
-// slopstop:test regression — guards: "the farewell clears the carrier because a
+// regression — guards: "the farewell clears the carrier because a
 // loop is configured, not because it happened to win the loop's stop edge"
 func TestFarewell_ClearsTheCarrierEvenWhenAnotherWriterTookTheStopEdge(t *testing.T) {
 	w := &scriptedWSWriter{}
@@ -296,7 +296,7 @@ func TestFarewell_ClearsTheCarrierEvenWhenAnotherWriterTookTheStopEdge(t *testin
 // TestFarewell_AWedgedCarrierCannotParkTheIdleExitAtAnyWrite's, which wedges the
 // connection itself rather than the slot and can therefore choose where.
 //
-// slopstop:test regression — guards: "a carrier that stops reading cannot park
+// regression — guards: "a carrier that stops reading cannot park
 // the idle guard's exit path on the write slot"
 func TestFarewell_AWedgedCarrierCannotParkTheIdleExit(t *testing.T) {
 	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
@@ -353,7 +353,7 @@ func TestFarewell_AWedgedCarrierCannotParkTheIdleExit(t *testing.T) {
 // slot, so every earlier write completes and the chosen one is genuinely
 // attempted.
 //
-// slopstop:test regression — guards: "each of the goodbye's writes — the clear,
+// regression — guards: "each of the goodbye's writes — the clear,
 // the clip's frames and the mark — carries its own deadline"
 func TestFarewell_AWedgedCarrierCannotParkTheIdleExitAtAnyWrite(t *testing.T) {
 	clip := farewellTestClip()
@@ -429,7 +429,7 @@ func TestFarewell_AWedgedCarrierCannotParkTheIdleExitAtAnyWrite(t *testing.T) {
 // Two seconds of backlog against a 40 ms clip, so the two answers are an order
 // of magnitude apart and no timing margin has to be guessed.
 //
-// slopstop:test regression — guards: "the farewell clears the carrier whether
+// regression — guards: "the farewell clears the carrier whether
 // or not a hold loop was configured, so its mark bound describes the clip
 // rather than the backend's backlog"
 func TestFarewell_MarkBoundDoesNotCarryTheBackendsBacklog(t *testing.T) {

@@ -48,7 +48,6 @@ type audioSpec struct {
 	} `json:"session"`
 }
 
-// slopstop:test contract
 func TestSessionUpdate_CarriesSuppliedVoice(t *testing.T) {
 	const want = "marin"
 
@@ -65,7 +64,6 @@ func TestSessionUpdate_CarriesSuppliedVoice(t *testing.T) {
 	}
 }
 
-// slopstop:test contract
 func TestSessionUpdate_CarriesVoiceThroughNewStreamHandler(t *testing.T) {
 	const want = "alloy"
 
@@ -80,7 +78,7 @@ func TestSessionUpdate_CarriesVoiceThroughNewStreamHandler(t *testing.T) {
 	}
 }
 
-// slopstop:test non-interference — paired: asserts the output side of the audio spec carries the supplied voice
+// non-interference — paired: asserts the output side of the audio spec carries the supplied voice
 func TestSessionUpdate_VoiceAppearsOnlyOnOutputChannel(t *testing.T) {
 	const want = "marin"
 
@@ -111,8 +109,6 @@ func TestSessionUpdate_VoiceAppearsOnlyOnOutputChannel(t *testing.T) {
 	}
 }
 
-// slopstop:test contract
-//
 // Adversary round 1 gap test. The three tests above supply "marin" and
 // "alloy", and both are fixed points of the two most plausible ways a voice
 // could arrive altered: case-folding and whitespace-trimming. Proven by live
@@ -141,7 +137,7 @@ func TestSessionUpdate_VoicePreservesCaseAndWhitespace(t *testing.T) {
 	}
 }
 
-// slopstop:test regression — guards: "Unset, or empty, omits the field entirely — the handshake is byte-identical to one with no option."
+// regression — guards: "Unset, or empty, omits the field entirely — the handshake is byte-identical to one with no option."
 func TestSessionUpdate_WithNoVoiceIsByteIdenticalToToday(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	newRealtimeHarnessWith(t, NewStreamHandler(be.url()))
@@ -153,7 +149,7 @@ func TestSessionUpdate_WithNoVoiceIsByteIdenticalToToday(t *testing.T) {
 	}
 }
 
-// slopstop:test regression — guards: "Unset, or empty, omits the field entirely — the handshake is byte-identical to one with no option."
+// regression — guards: "Unset, or empty, omits the field entirely — the handshake is byte-identical to one with no option."
 func TestSessionUpdate_WithEmptyVoiceIsByteIdenticalToToday(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	newRealtimeHarnessWith(t, NewStreamHandler(be.url(), WithVoice("")))

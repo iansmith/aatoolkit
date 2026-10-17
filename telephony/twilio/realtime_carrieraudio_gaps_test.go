@@ -148,7 +148,7 @@ func TestCarrierMediaSink_WriteFailureNeverDeliversCarrierAudio(t *testing.T) {
 //
 // The frozen test is not edited; this is a pure addition beside it.
 //
-// slopstop:test non-interference — paired: the positive half is the proof read,
+// non-interference — paired: the positive half is the proof read,
 // which fails first if the option is not genuinely wired, so the goroutine
 // measurement cannot pass vacuously against an inert implementation; the
 // negative half is that a call whose consumer stopped reading, with records

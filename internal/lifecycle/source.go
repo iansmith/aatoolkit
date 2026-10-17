@@ -46,7 +46,7 @@ func LaunchSource(logDir string, s config.Server) (*Process, error) {
 
 // expandTilde expands a leading "~" or "~/..." to the user's home
 // directory. exec.Command never invokes a shell, so TOML strings like
-// "~/slopstop/router" need this done explicitly — the OS/go tool won't do
+// "~/example/router" need this done explicitly — the OS/go tool won't do
 // it for us.
 func expandTilde(path string) (string, error) {
 	if path != "~" && !strings.HasPrefix(path, "~/") {

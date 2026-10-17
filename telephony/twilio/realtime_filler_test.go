@@ -219,8 +219,6 @@ func waitFillerPlaying(t *testing.T, wire func() []carrierWireRecord, n int) {
 // time rather than dumped. The burst is the failure that matters — Twilio
 // buffers outbound media, so a loop written ahead of the clock delays the real
 // reply by the buffered length even after a clear.
-//
-// slopstop:test contract
 func TestFiller_StartsAfterDelayAndPaces(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -273,8 +271,6 @@ func TestFiller_StartsAfterDelayAndPaces(t *testing.T) {
 // TestFiller_NoStartWhenBackendIsFast pins the disarm: audio arriving inside
 // Delay must leave the caller hearing nothing at all. A relay that armed a
 // timer it never cancelled would play the loop over the reply.
-//
-// slopstop:test contract
 func TestFiller_NoStartWhenBackendIsFast(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -299,8 +295,6 @@ func TestFiller_NoStartWhenBackendIsFast(t *testing.T) {
 // TestFiller_ClearThenFirstDelta is the ordering the whole design turns on. The
 // carrier must see the clear BEFORE the reply's first media frame — a clear
 // sent after it would discard the reply — and no loop frame may follow it.
-//
-// slopstop:test contract
 func TestFiller_ClearThenFirstDelta(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -326,8 +320,6 @@ func TestFiller_ClearThenFirstDelta(t *testing.T) {
 // sends exactly one clear on speech_started; the loop must stop against that
 // clear rather than earning a second one, because a doubled clear is a
 // behaviour change to barge-in that this ticket puts out of scope.
-//
-// slopstop:test contract
 func TestFiller_StopsOnSpeechStarted(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -367,8 +359,6 @@ func TestFiller_StopsOnSpeechStarted(t *testing.T) {
 // demo call: the response that ends in a function call is not the reply, it is
 // the start of a second wait — the tool round trip plus the second LLM leg —
 // and the caller hears that as one silence.
-//
-// slopstop:test contract
 func TestFiller_RearmsAfterFunctionCall(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -403,8 +393,6 @@ func TestFiller_RearmsAfterFunctionCall(t *testing.T) {
 // TestFiller_LoopBoundaryIsSeamless pins the wrap. A loop that dropped or
 // repeated a frame at the boundary would click once per pass, which is exactly
 // the artefact a caller notices.
-//
-// slopstop:test contract
 func TestFiller_LoopBoundaryIsSeamless(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -429,8 +417,6 @@ func TestFiller_LoopBoundaryIsSeamless(t *testing.T) {
 // every test above drives: a call supplying no filler option writes nothing to
 // the carrier while the backend is silent, exactly as it did before the option
 // existed.
-//
-// slopstop:test contract
 func TestFiller_UnsetWritesNothingWhileTheBackendIsSilent(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := newRealtimeHarnessWith(t, NewStreamHandler(be.url()))
@@ -457,8 +443,6 @@ func TestFiller_UnsetWritesNothingWhileTheBackendIsSilent(t *testing.T) {
 // equivalent seam is WithCarrierAudioChan, which already carries every record
 // the sink writes. So the flag goes there, where a consumer can actually read
 // it, rather than onto a recorder this transport does not construct.
-//
-// slopstop:test contract
 func TestFiller_CarrierAudioRecordsAreMarkedFiller(t *testing.T) {
 	ch := make(chan CarrierAudio, 128)
 
@@ -518,8 +502,6 @@ func TestFiller_CarrierAudioRecordsAreMarkedFiller(t *testing.T) {
 // re-arm that stopped the loop instead of continuing it would go silent for
 // the whole tool round trip and second LLM leg, which is the longest wait this
 // ticket measured and the exact case the re-arm exists for.
-//
-// slopstop:test contract
 func TestFiller_KeepsPlayingWhenRearmedMidLoop(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -583,8 +565,6 @@ func TestFiller_KeepsPlayingWhenRearmedMidLoop(t *testing.T) {
 // No clear goes with this one, deliberately: nothing is being interrupted, and
 // the frames already written are the caller's to hear out. The assertion that
 // no clear was sent is what distinguishes this stop from every other one.
-//
-// slopstop:test contract
 func TestFiller_StopsOnTurnEndingResponseDone(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -622,8 +602,6 @@ func TestFiller_StopsOnTurnEndingResponseDone(t *testing.T) {
 // loop or the delay by caller, and what makes that possible is the start frame
 // it is handed — so the assertion is that the frame arrives, not merely that
 // something played.
-//
-// slopstop:test contract
 func TestWithFillerAudioFor_ResolvesFromTheStartFrame(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
@@ -741,8 +719,6 @@ func (w *scriptedWSWriter) records() []carrierWireRecord {
 // the sink's conn is the unexported wsWriter interface precisely so a test can
 // fail a write deterministically, while HandleStreamRealtime takes a concrete
 // *websocket.Conn.
-//
-// slopstop:test contract
 func TestFiller_SurvivesACarrierWriteFailure(t *testing.T) {
 	w := &scriptedWSWriter{}
 	fill := newFiller(context.Background(), FillerConfig{
@@ -798,8 +774,6 @@ func TestFiller_SurvivesACarrierWriteFailure(t *testing.T) {
 // the caller somewhere arbitrary in the audio the consumer supplied — which is
 // exactly what a consumer supplying a clip with a deliberate beginning does
 // not expect.
-//
-// slopstop:test contract
 func TestFiller_EachEpisodeStartsAtTheTopOfTheLoop(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -849,7 +823,7 @@ func secondEpisode(recs []carrierWireRecord, reply string) []carrierWireRecord {
 // fixed overhead behind (the httptest server and carrier conn live until
 // t.Cleanup), so an absolute count proves nothing.
 //
-// slopstop:test non-interference — paired: asserts the loop was actually
+// non-interference — paired: asserts the loop was actually
 // PLAYING on each call, so the measurement covers a live goroutine rather than
 // one that never started
 func TestFiller_NoPlayGoroutineOutlivesTheCall(t *testing.T) {
@@ -910,8 +884,6 @@ func TestFiller_NoPlayGoroutineOutlivesTheCall(t *testing.T) {
 // error would end the loop by a different door — which is exactly why
 // TestFiller_NoPlayGoroutineOutlivesTheCall passes even with shutdown gutted,
 // and why this test exists beside it.
-//
-// slopstop:test contract
 func TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot(t *testing.T) {
 	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
 	fill := newFiller(context.Background(), FillerConfig{
@@ -983,8 +955,6 @@ func TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot(t *testing.T)
 // observable, and it has to be measured WITHIN a live call: measuring across a
 // call boundary lets the goroutine exit by teardown instead, which is what
 // TestFiller_NoPlayGoroutineOutlivesTheCall would let it do.
-//
-// slopstop:test contract
 func TestFiller_PlayGoroutineEndsWithTheEpisode(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
@@ -1040,8 +1010,6 @@ func TestFiller_PlayGoroutineEndsWithTheEpisode(t *testing.T) {
 // Five calls rather than one: the losing tick is a race against teardown, so a
 // single call can win it by luck. Each call ends with the loop mid-flight,
 // which is the only arrangement that can lose it at all.
-//
-// slopstop:test contract
 func TestFiller_CallTeardownLogsNoCarrierError(t *testing.T) {
 	var buf syncBuffer
 	origOutput := log.Writer()
@@ -1097,8 +1065,6 @@ func TestFiller_CallTeardownLogsNoCarrierError(t *testing.T) {
 // with a play goroutine only if the caller had spoken and the backend had then
 // gone quiet; now every call whose backend is silent at the open has one, so
 // this is the ordinary ending rather than an unusual one.
-//
-// slopstop:test contract
 func TestFiller_ShutdownIsNotLoggedAsACarrierFailure(t *testing.T) {
 	var buf syncBuffer
 	origOutput := log.Writer()
@@ -1167,8 +1133,6 @@ func TestFiller_ShutdownIsNotLoggedAsACarrierFailure(t *testing.T) {
 // closed connection, which fails and logs. The goroutine differential is the
 // second half — it still exits, by the error path, which is precisely why the
 // count alone cannot see this and the log can.
-//
-// slopstop:test contract
 func TestFiller_ShutdownIsCalledWhenTheCallEnds(t *testing.T) {
 	const calls = 3
 

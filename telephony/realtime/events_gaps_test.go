@@ -33,8 +33,6 @@ import (
 // hole: excluding {EventAudioDelta, EventSpeechStarted} from the publish, or
 // excluding EventTranscriptDone alone, passed the entire 17-test suite. "Every"
 // means each of the four cases Run's switch handles, not one representative.
-//
-// slopstop:test contract
 func TestBridgeEvents_ReceivesModelledEventsToo(t *testing.T) {
 	delta := frameB64()
 	be := newFakeBackend(t)
@@ -110,8 +108,6 @@ func TestBridgeEvents_ReceivesModelledEventsToo(t *testing.T) {
 // Key order is what separates the two. Go's encoder sorts map keys, so a frame
 // whose keys are NOT in sorted order survives a verbatim assignment byte for
 // byte and comes back reordered from any round trip through a map.
-//
-// slopstop:test contract
 func TestClientRead_RawIsByteIdenticalToWireFrame(t *testing.T) {
 	// Deliberately unsorted: "zz_last" precedes "aa_first" on the wire.
 	frame := []byte(`{"type":"input_audio_buffer.speech_stopped","zz_last":"z","aa_first":"a"}`)
@@ -156,8 +152,6 @@ func TestClientRead_RawIsByteIdenticalToWireFrame(t *testing.T) {
 // enforcement: a publish path that dispatched every other event from a
 // short-lived goroutine reordered consecutive events and was accepted by every
 // other test in the suite.
-//
-// slopstop:test contract
 func TestBridgeEvents_PreservesArrivalOrder(t *testing.T) {
 	ids := []string{"first", "second", "third"}
 
@@ -219,8 +213,6 @@ func TestBridgeEvents_PreservesArrivalOrder(t *testing.T) {
 //
 // Transcripts() has had this guarantee since before the ticket ("The channel
 // is closed when Run returns"); Events() now states it and this enforces it.
-//
-// slopstop:test contract
 func TestBridgeEvents_ClosedWhenRunReturns(t *testing.T) {
 	be := newFakeBackend(t)
 	be.toSend = []any{ServerEvent{Type: EventSpeechStopped}}
@@ -281,8 +273,6 @@ func TestBridgeEvents_ClosedWhenRunReturns(t *testing.T) {
 // is logged" — with no layer qualifier.
 //
 // This is the checkers' own probe, promoted to a test.
-//
-// slopstop:test contract
 func TestBridgeEvents_UndrainedEventsDoNotStallTheSink(t *testing.T) {
 	const n = 40 // comfortably past b.events' 16-slot buffer
 
@@ -353,8 +343,6 @@ func (s *syncLogBuffer) Bytes() []byte {
 // Observable behavior 4 asks for both halves in one sentence: "delivery is
 // non-blocking: when the consumer is behind, events are dropped and each drop
 // is logged."
-//
-// slopstop:test contract
 func TestBridgeEvents_DropIsLogged(t *testing.T) {
 	var buf syncLogBuffer
 	origOutput, origFlags := log.Writer(), log.Flags()
@@ -416,8 +404,6 @@ func TestBridgeEvents_DropIsLogged(t *testing.T) {
 // The bound must not make drops silent: every drop is still counted and every
 // line carries the running total. This test pins both halves — that something
 // is logged, and that it is not one line per drop.
-//
-// slopstop:test contract
 func TestBridgeEvents_DropLoggingIsRateBounded(t *testing.T) {
 	var buf syncLogBuffer
 	origOutput, origFlags := log.Writer(), log.Flags()
@@ -492,8 +478,6 @@ func TestBridgeEvents_DropLoggingIsRateBounded(t *testing.T) {
 // The wanted values are literals rather than expressions over dropLogEvery: a
 // test deriving its expectation from the constant it is pinning would follow
 // any change to it and assert nothing.
-//
-// slopstop:test contract
 func TestLogDrop(t *testing.T) {
 	cases := []struct {
 		n    int

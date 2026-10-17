@@ -106,7 +106,7 @@ func TestBuildSessionUpdate_EmptyNonNilToolsOmitsTheField(t *testing.T) {
 // not. A test doc that overstates its own reach is the failure it exists to
 // prevent.
 //
-// slopstop:test regression — guards: "sessionSpec must never marshal to an empty object."
+// regression — guards: "sessionSpec must never marshal to an empty object."
 func TestBuildSessionUpdate_SessionSpecCannotMarshalEmpty(t *testing.T) {
 	// The all-zero spec is the worst case: every omitempty field omitted.
 	base, err := json.Marshal(sessionSpec{})
