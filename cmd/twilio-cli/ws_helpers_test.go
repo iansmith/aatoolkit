@@ -69,6 +69,8 @@ func readHandshake(t *testing.T, buf *bufio.ReadWriter) []byte {
 // reports the closed socket as a handshake failure (AATK-132). A handler behind
 // on scheduling is waited for; only one genuinely wedged past the timeout gets
 // its socket pulled, which is the leak trackConn was there to stop.
+// TestHijackedWSServer_CleanupJoinsLateHandler goes red if the join is
+// deleted.
 //
 // It exists because that prologue had been copied into fifteen servers across
 // three files (dial_test.go x11, playback_test.go x3, record_test.go x1),
@@ -253,4 +255,70 @@ func writeWSText(conn net.Conn, payload []byte) error {
 		return fmt.Errorf("writeWSText: %w", err)
 	}
 	return nil
+}
+
+// TestHijackedWSServer_CleanupJoinsLateHandler pins the join in
+// hijackedWSServerWithStart's cleanup (AATK-132) deterministically: the far
+// end's handler is made to be behind -- its peer sends the opening handshake
+// 200 ms after the test body has already returned -- and the cleanup must
+// still wait for that handler to run serve to completion. Without the join
+// the subtest's cleanups finish while the handler is still parked in
+// readHandshake, and serve has not run when t.Run returns.
+func TestHijackedWSServer_CleanupJoinsLateHandler(t *testing.T) {
+	const hold = 200 * time.Millisecond
+	var serveDone bool
+	var mu sync.Mutex
+	var sent chan struct{} // non-nil once the late-handshake writer is running
+	var client net.Conn
+
+	t.Run("late handshake", func(t *testing.T) {
+		srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
+			mu.Lock()
+			serveDone = true
+			mu.Unlock()
+		})
+		var err error
+		client, err = net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		req := "GET / HTTP/1.1\r\nHost: " + srv.Listener.Addr().String() + "\r\n" +
+			"Upgrade: websocket\r\nConnection: Upgrade\r\n" +
+			"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+		if _, err := client.Write([]byte(req)); err != nil {
+			t.Fatalf("write upgrade request: %v", err)
+		}
+		br := bufio.NewReader(client)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read upgrade response: %v", err)
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		// The handler is now inside readHandshake. Feed it the handshake only
+		// after this subtest has returned and its cleanups have started.
+		sent = make(chan struct{})
+		go func() {
+			defer close(sent)
+			time.Sleep(hold)
+			_ = writeWSText(client, []byte(`{"event":"connected"}`))
+			_ = writeWSText(client, []byte(`{"event":"start"}`))
+		}()
+	})
+
+	mu.Lock()
+	done := serveDone
+	mu.Unlock()
+	if !done {
+		t.Error("hijackedWSServer's cleanup returned before its handler finished serve: the handler join is gone")
+	}
+	if sent != nil {
+		<-sent
+	}
+	if client != nil {
+		client.Close()
+	}
 }
