@@ -21,10 +21,12 @@ const oneSocketEnv = "AATOOLKIT_TEST_ONE_SOCKET"
 
 // TestNewCaptureServer_NeedsOnlyTheRequestedPortsSocket pins that
 // NewCaptureServer opens no socket but the listener on the requested port. A
-// process that can open exactly one more descriptor, as one short of ports or
-// descriptors may, must still get a working capture server on that port: not a
-// panic from a second, ephemeral bind it never needed, with the requested
-// port's listener left held behind it.
+// second bind can fail where the first did not, under descriptor or
+// loopback-port exhaustion, and httptest's own ephemeral bind panics when it
+// does, leaving the requested port's listener held behind the panic. Here the
+// process can open exactly one more descriptor, which that listener takes; it
+// must still get a capture server on the requested port, and the port must be
+// free again once that server is closed.
 //
 // Lowering the descriptor limit would starve every other test in this binary,
 // so the test re-executes itself and lowers it only in that child.
@@ -48,9 +50,7 @@ func TestNewCaptureServer_NeedsOnlyTheRequestedPortsSocket(t *testing.T) {
 // oneSocketChild is the child process's half of
 // TestNewCaptureServer_NeedsOnlyTheRequestedPortsSocket.
 func oneSocketChild(t *testing.T) {
-	// freeTCPPort binds and closes a listener, so the one-time setup a first
-	// bind does (the poller's own descriptor among it) is behind us before the
-	// budget is spent.
+	// Picked before the budget is spent: freeTCPPort needs a socket of its own.
 	port := freeTCPPort(t)
 
 	release := spendAllButOneDescriptor(t)
@@ -63,19 +63,18 @@ func oneSocketChild(t *testing.T) {
 		defer func() { panicked = recover() }()
 		capture, err = smsfake.NewCaptureServer(port)
 	}()
-	// Whatever NewCaptureServer did, the one spare descriptor is now spent: by
-	// the listener it returned, or by one it leaked. If a further bind still
-	// succeeds, there was more than one to spare, and a second bind inside
-	// NewCaptureServer could have succeeded too, proving nothing.
-	extra, extraErr := net.Listen("tcp", "127.0.0.1:0")
-	release()
-	if extraErr == nil {
-		extra.Close()
-		if capture != nil {
-			capture.Close()
+	// A server in hand must hold the one spare descriptor in its listener. If
+	// a further bind still succeeds, there was more than one to spare, and a
+	// second bind inside NewCaptureServer could have succeeded too, so the
+	// server proves nothing.
+	spareLeft := false
+	if capture != nil {
+		if extra, err := net.Listen("tcp", "127.0.0.1:0"); err == nil {
+			extra.Close()
+			spareLeft = true
 		}
-		t.Fatalf("a bind after NewCaptureServer succeeded: the process had more than one descriptor to spare, so this run could not show NewCaptureServer needs only one")
 	}
+	release()
 
 	switch {
 	case panicked != nil:
@@ -83,10 +82,13 @@ func oneSocketChild(t *testing.T) {
 	case err != nil:
 		t.Errorf("NewCaptureServer(%d) = %v, want a server: the requested port was free and one descriptor was to spare for its listener", port, err)
 	default:
+		returnsWithin(t, "Close", capture.Close)
+		if spareLeft {
+			t.Fatalf("a bind after NewCaptureServer succeeded: the process had more than one descriptor to spare, so this run could not show NewCaptureServer needs only one")
+		}
 		if want := fmt.Sprintf("127.0.0.1:%d", port); !strings.HasSuffix(capture.URL, want) {
 			t.Errorf("capture server URL = %q, want it to end in %q", capture.URL, want)
 		}
-		capture.Close()
 	}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
