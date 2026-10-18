@@ -559,8 +559,9 @@ func TestSendStreamContext_DoneContextErrorOverHTTP1AndHTTP2(t *testing.T) {
 
 // TestWithContext_SendAndSendStreamRunUnderBoundContext: the view WithContext
 // returns runs Send and SendStream under the bound context -- its values and
-// its deadline reach the request -- and shares every other method, so its
-// history is the receiver's.
+// its deadline reach the request -- and its history is the receiver's. The
+// view's Context also runs under the bound context; that is
+// TestWithContext_ContextUsesBoundCtx's to check.
 func TestWithContext_SendAndSendStreamRunUnderBoundContext(t *testing.T) {
 	window := []byte(`[{"role":"user","content":"hi"}]`)
 	calls := map[string]func(v host.Host) error{
@@ -592,7 +593,7 @@ func TestWithContext_SendAndSendStreamRunUnderBoundContext(t *testing.T) {
 		})
 	}
 
-	t.Run("other methods are the receiver's", func(t *testing.T) {
+	t.Run("history is the receiver's", func(t *testing.T) {
 		h, _ := newCtxRecordingHost()
 		v := h.WithContext(context.Background())
 		v.Remember("assistant", []byte("from the view"))
