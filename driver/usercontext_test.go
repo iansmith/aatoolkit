@@ -247,22 +247,26 @@ func TestContext_PassesBackgroundToCtxProvider(t *testing.T) {
 }
 
 // TestWithContext_ContextUsesBoundCtx: on the WithContext view, Context hands
-// the provider the bound ctx, and ContextFor hands it the explicit one.
+// the provider the bound ctx itself, and ContextFor hands it the explicit ctx
+// itself. Identity, not the value under ctxKey: a ctx derived from the bound
+// one keeps that value but can drop its deadline and cancellation.
 func TestWithContext_ContextUsesBoundCtx(t *testing.T) {
 	h, p := newProbeHost()
-	v := h.WithContext(withCtxValue("bound"))
+	bound := withCtxValue("bound")
+	v := h.WithContext(bound)
 
 	assertSystemMessages(t, v.Context("q"), "sys", "ctx block")
-	if got := p.last().value(); got != "bound" {
-		t.Errorf("view's Context handed the provider %v; want the bound ctx's %q", got, "bound")
+	if c := p.last(); c.calls != 1 || c.ctx != bound {
+		t.Errorf("view's Context: provider saw calls=%d, a ctx carrying %v; want 1 call with the bound ctx itself", c.calls, c.value())
 	}
 
 	cb, ok := v.(host.ContextBuilder)
 	if !ok {
 		t.Fatal("the WithContext view is not a host.ContextBuilder")
 	}
-	cb.ContextFor(withCtxValue("explicit"), "q")
-	if got := p.last().value(); got != "explicit" {
-		t.Errorf("view's ContextFor handed the provider %v; want the explicit ctx's %q", got, "explicit")
+	explicit := withCtxValue("explicit")
+	cb.ContextFor(explicit, "q")
+	if c := p.last(); c.calls != 2 || c.ctx != explicit {
+		t.Errorf("view's ContextFor: provider saw calls=%d, a ctx carrying %v; want a 2nd call with the explicit ctx itself", c.calls, c.value())
 	}
 }
