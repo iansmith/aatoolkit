@@ -113,10 +113,12 @@ driver.StartTwilioServer(addr, srv, driver.WithHandlerWrapper(
   not keep it.
 - **User-context provider.** `driver.Config.UserContextCtx` is the ctx-taking form of
   `UserContext`; if both are set, `UserContextCtx` wins and `UserContext` is never called.
-  `host.ContextBuilder` adds `ContextFor(ctx, queryText)`, which hands ctx to that provider so
-  its I/O runs under the caller's span and cancellation. `Context(queryText)` hands it
-  `context.Background()`, and a `WithContext` view's `Context` hands it the bound ctx. The
-  provider's contract is on `driver.Config.UserContext`.
+  `host.ContextBuilder` adds `ContextFor(ctx, queryText)`, which hands ctx on unchanged to that
+  provider so its I/O can run under the caller's span, deadline and cancellation; the driver
+  adds none of its own, and a plain `UserContext` never sees ctx. `Context(queryText)` hands it
+  `context.Background()`, and a `WithContext` view's `Context` hands it the bound ctx.
+  `ContextFor` panics on a nil ctx. The provider's contract is on
+  `driver.Config.UserContext` and `driver.Config.UserContextCtx`.
 - **Request-scoped ctx.** The ctx a Twilio handler receives (`HandleSMS`, `HandleSMSStatus`,
   `AnswerCall`) is cancelled once the request has been handled. A model call that outlives the
   handler must run under `context.WithoutCancel(ctx)`, which keeps the span and drops the

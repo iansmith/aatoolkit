@@ -20,12 +20,15 @@ type ContextSender interface {
 	SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error)
 }
 
-// ContextBuilder is the context-taking form of Host.Context: ctx parents and
-// cancels any I/O building the messages array does (e.g. retrieval for a
-// user-context block). It is separate from Host, as ContextSender is, so
-// adding it breaks no existing Host implementation. An interpreted policy
-// reaches it by type-asserting its host.Host, which works only if the
-// consumer injects this symbol.
+// ContextBuilder is the context-taking form of Host.Context. ctx is for any
+// I/O building the messages array does (e.g. retrieval for a user-context
+// block): an implementation hands it on, so that I/O can run under ctx's span,
+// deadline and cancellation, and need not check ctx itself. Which I/O receives
+// ctx is the implementation's, and ctx's deadline and cancellation stop that
+// I/O only where the I/O honours them. It is separate from Host, as
+// ContextSender is, so adding it breaks no existing Host implementation. An
+// interpreted policy reaches it by type-asserting its host.Host, which works
+// only if the consumer injects this symbol.
 type ContextBuilder interface {
 	ContextFor(ctx context.Context, queryText string) []byte
 }
