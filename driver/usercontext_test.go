@@ -187,22 +187,33 @@ func TestContextFor_PassesCtxToProvider(t *testing.T) {
 }
 
 // TestContextFor_NilCtxPanics: a nil ctx panics in ContextFor itself, as
-// WithContext(nil) does, rather than reaching the provider -- whichever
-// provider form is configured.
+// WithContext(nil) does, before the provider is called -- whichever provider
+// form is configured. Each provider counts its calls and neither touches ctx,
+// so a panic raised after the provider ran is caught here, not left to a
+// provider that happens to dereference the nil ctx.
 func TestContextFor_NilCtxPanics(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		cfg  Config
+		cfg  func(calls *atomic.Int32) Config
 	}{
-		{"UserContextCtx", Config{UserContextCtx: func(ctx context.Context, _ string) string { return ctx.Value(ctxKey{}).(string) }}},
-		{"UserContext", Config{UserContext: func(string) string { return "block" }}},
+		{"UserContextCtx", func(calls *atomic.Int32) Config {
+			return Config{UserContextCtx: func(context.Context, string) string { calls.Add(1); return "block" }}
+		}},
+		{"UserContext", func(calls *atomic.Int32) Config {
+			return Config{UserContext: func(string) string { calls.Add(1); return "block" }}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.cfg.Tiers, tc.cfg.Prompt = testTiers, func() string { return "sys" }
-			h := New(tc.cfg)
+			var calls atomic.Int32
+			cfg := tc.cfg(&calls)
+			cfg.Tiers, cfg.Prompt = testTiers, func() string { return "sys" }
+			h := New(cfg)
 			defer func() {
 				if r := recover(); r != "driver: ContextFor called with a nil context" {
 					t.Errorf("ContextFor(nil) recovered %v; want the driver's nil-context panic", r)
+				}
+				if n := calls.Load(); n != 0 {
+					t.Errorf("provider called %d times before ContextFor(nil) panicked; want 0", n)
 				}
 			}()
 			var nilCtx context.Context
