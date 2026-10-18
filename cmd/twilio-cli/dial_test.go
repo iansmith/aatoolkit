@@ -347,11 +347,14 @@ func testSendsStopFrameOnCancel(t *testing.T, holdStart bool) {
 	}
 
 	cancel()
-	// Released strictly after cancel has returned. By then the cancellation
-	// has reached everything registered on ctx, so anything a conn.Write bound
-	// to ctx would do about it is already under way before that write is
-	// allowed to return and tidy up after itself. Releasing first would hand
-	// the write a head start and make this case a coin flip again.
+	// Released strictly after cancel has returned, so this case does not rest
+	// on scheduling. By then the cancellation has reached everything
+	// registered on ctx, so anything a conn.Write bound to ctx would do about
+	// it is already under way before that write is allowed to return and
+	// deregister. Released first, the write could in principle unwind before
+	// the cancel arrives; measured, it practically never does (the build that
+	// wrote the handshake under ctx was still red 20 of 20 that way), but the
+	// guarantee is the ordering, not the odds.
 	release()
 
 	var stopMsg []byte
