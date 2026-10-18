@@ -37,17 +37,24 @@ func (e *mediaFrameEncoder) encode(payload []byte) ([]byte, error) {
 	return twilio.EncodeMediaWithMetadata(e.streamSID, payload, e.chunk, *e.seqNum)
 }
 
-// connFrameWriter returns the func that puts one encoded media frame on conn.
-// Every write gets a fresh short-lived context rather than the call's: a write
-// must not inherit an unbounded deadline, and on teardown the call's context is
-// already cancelled while the trailing frames still have to go out (the same
-// reason sendStop and echoMark build their own in dial.go).
+// writeFrame puts one encoded frame on conn: handshake, media, stop and
+// mark echo all go out through it. Every write gets a fresh short-lived
+// context rather than the call's. A write must not inherit an unbounded
+// deadline; on teardown the call's context is already cancelled while the
+// trailing frames and the stop still have to go out; and coder/websocket
+// closes the connection if a write's context is cancelled while that write is
+// in flight, which for the call's context would turn a Ctrl-C into a dropped
+// socket (see writeHandshake).
+func writeFrame(conn *websocket.Conn, msg []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return conn.Write(ctx, websocket.MessageText, msg)
+}
+
+// connFrameWriter is writeFrame bound to conn, in the shape mediaFrameSender
+// takes its write.
 func connFrameWriter(conn *websocket.Conn) func([]byte) error {
-	return func(msg []byte) error {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		return conn.Write(ctx, websocket.MessageText, msg)
-	}
+	return func(msg []byte) error { return writeFrame(conn, msg) }
 }
 
 // mediaFrameSender builds the send func a frame source hands to its drain loop:

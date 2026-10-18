@@ -263,9 +263,7 @@ func dial(ctx context.Context, callSid, addr string, opts ...dialOption) error {
 				log.Printf("twilio-cli: encode stop: %v", err)
 				return
 			}
-			writeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := conn.Write(writeCtx, websocket.MessageText, stopMsg); err != nil {
+			if err := writeFrame(conn, stopMsg); err != nil {
 				log.Printf("twilio-cli: send stop: %v", err)
 				return
 			}
@@ -634,13 +632,13 @@ var errHandshakePeerGone = errors.New("peer closed during handshake")
 // hang up", so a Ctrl-C landing while the start frame's write was still
 // returning -- after the far end had read it -- closed the socket under the
 // call, and the stop frame that followed went nowhere ("send stop: ... use of
-// closed network connection"). It now writes the way every other frame dial
-// sends already did, under a short-lived context of its own; a Ctrl-C during
-// the handshake is then seen by dial's ctx.Done goroutine, which sends the
-// stop once the handshake is out. TestDial_SendsStopFrameOnCancel holds that
-// window open.
+// closed network connection"). It now writes through writeFrame, as every
+// other frame dial sends does, under a short-lived context of its own; a
+// Ctrl-C during the handshake is then seen by dial's ctx.Done goroutine, which
+// sends the stop once the handshake is out. TestDial_SendsStopFrameOnCancel
+// holds that window open.
 func writeHandshake(conn *websocket.Conn, msg []byte) error {
-	if err := connFrameWriter(conn)(msg); err != nil {
+	if err := writeFrame(conn, msg); err != nil {
 		if isCallEnded(err) {
 			log.Printf("twilio-cli: call ended during handshake: %s", callEndReason(err))
 			return errHandshakePeerGone
@@ -753,9 +751,7 @@ func echoMark(conn *websocket.Conn, streamSID, markName string, delay time.Durat
 		log.Printf("twilio-cli: encode mark echo: %v", err)
 		return
 	}
-	writeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := conn.Write(writeCtx, websocket.MessageText, echoMsg); err != nil {
+	if err := writeFrame(conn, echoMsg); err != nil {
 		log.Printf("twilio-cli: send mark echo: %v", err)
 		return
 	}
