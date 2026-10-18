@@ -1,7 +1,12 @@
 package twilio
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -80,4 +85,118 @@ func TestRecordCall_ReRecordUpdatesInPlace(t *testing.T) {
 	requirePendingSize(t, s, maxPendingFrom)
 	requirePending(t, s, pendingSID(1), "", "")
 	requirePending(t, s, pendingSID(2), pendingFrom(2), pendingTo)
+}
+
+// signedVoiceWebhook builds a voice webhook POST for ServeHTTP, signed for
+// authToken over https://example.com/webhook.
+func signedVoiceWebhook(authToken string, form url.Values) *http.Request {
+	const rawURL = "https://example.com/webhook"
+	req := httptest.NewRequest(http.MethodPost, rawURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", ComputeSignature(authToken, rawURL, form))
+	return req
+}
+
+// A call ServeHTTP does not answer with a stream takes no pending slot. No
+// stream opens for it, so nothing would ever read the entry, and holding one
+// would only push a call that will stream toward eviction. Each refusal path
+// is checked on a Server whose map is empty, and the refusal itself is
+// checked too, so a row cannot pass by never reaching its path.
+func TestServeHTTP_RefusedCallTakesNoPendingSlot(t *testing.T) {
+	const say = "not this number"
+	for _, tc := range []struct {
+		name      string
+		server    func(asked *int) *Server
+		form      url.Values
+		signWith  string
+		wantCode  int
+		wantBody  string
+		wantAsked int
+	}{
+		{
+			name:     "bad signature",
+			server:   func(*int) *Server { return &Server{AuthToken: "authtoken"} },
+			form:     url.Values{"From": {pendingFrom(1)}, "To": {pendingTo}, "CallSid": {pendingSID(1)}},
+			signWith: "wrongtoken",
+			wantCode: http.StatusForbidden,
+			wantBody: "Forbidden\n",
+		},
+		{
+			name:     "From not E.164",
+			server:   func(*int) *Server { return &Server{AuthToken: "authtoken"} },
+			form:     url.Values{"From": {"anonymous"}, "To": {pendingTo}, "CallSid": {pendingSID(1)}},
+			signWith: "authtoken",
+			wantCode: http.StatusForbidden,
+			wantBody: "Forbidden\n",
+		},
+		{
+			name: "Authorize refuses",
+			server: func(*int) *Server {
+				return &Server{
+					AuthToken:       "authtoken",
+					Authorize:       func(string) bool { return false },
+					VoiceRejectText: "no",
+				}
+			},
+			form:     url.Values{"From": {pendingFrom(1)}, "To": {pendingTo}, "CallSid": {pendingSID(1)}},
+			signWith: "authtoken",
+			wantCode: http.StatusOK,
+			wantBody: `<Response><Say>no</Say><Hangup/></Response>`,
+		},
+		{
+			name: "AnswerCall refuses",
+			server: func(asked *int) *Server {
+				return &Server{
+					AuthToken: "authtoken",
+					AnswerCall: func(context.Context, string, string) (string, bool) {
+						*asked++
+						return say, true
+					},
+				}
+			},
+			form:      url.Values{"From": {pendingFrom(1)}, "To": {pendingTo}, "CallSid": {pendingSID(1)}},
+			signWith:  "authtoken",
+			wantCode:  http.StatusOK,
+			wantBody:  `<Response><Say>` + say + `</Say><Hangup/></Response>`,
+			wantAsked: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked int
+			s := tc.server(&asked)
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, signedVoiceWebhook(tc.signWith, tc.form))
+
+			if w.Code != tc.wantCode || w.Body.String() != tc.wantBody || asked != tc.wantAsked {
+				t.Fatalf("status %d body %q, AnswerCall asked %d times; want %d %q, %d",
+					w.Code, w.Body.String(), asked, tc.wantCode, tc.wantBody, tc.wantAsked)
+			}
+			requirePendingSize(t, s, 0)
+			requirePending(t, s, pendingSID(1), "", "")
+		})
+	}
+}
+
+// The control for the refusal rows above: a call answered with a stream,
+// with Authorize and AnswerCall both set and both letting it through, does
+// take a slot, holding its From and To. Without this, the refusal rows would
+// pass on a ServeHTTP that never recorded anything.
+func TestServeHTTP_StreamedCallTakesPendingSlot(t *testing.T) {
+	s := &Server{
+		AuthToken: "authtoken",
+		Authorize: func(string) bool { return true },
+		AnswerCall: func(context.Context, string, string) (string, bool) {
+			return "", false
+		},
+	}
+	form := url.Values{"From": {pendingFrom(1)}, "To": {pendingTo}, "CallSid": {pendingSID(1)}}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, signedVoiceWebhook("authtoken", form))
+
+	want := `<Response><Connect><Stream url="wss://example.com/streams"/></Connect></Response>`
+	if w.Code != http.StatusOK || w.Body.String() != want {
+		t.Fatalf("status %d body %q, want 200 %q", w.Code, w.Body.String(), want)
+	}
+	requirePendingSize(t, s, 1)
+	requirePending(t, s, pendingSID(1), pendingFrom(1), pendingTo)
 }

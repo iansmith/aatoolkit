@@ -233,7 +233,9 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) bool {
 // /streams — unless Authorize refuses the caller (VoiceRejectText) or
 // AnswerCall refuses the call (its own say text), each answered with
 // <Say>…</Say><Hangup/>. The dialed To reaches AnswerCall and the start Frame
-// only when it is E.164; otherwise it is "".
+// only when it is E.164; otherwise it is "". Only a call answered with the
+// stream has its From and To recorded for ServeStreams (see maxPendingFrom);
+// a refused call records nothing.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.authenticate(w, r) {
 		return
@@ -252,7 +254,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !e164Pattern.MatchString(to) {
 		to = ""
 	}
-	s.recordCall(callSid, from, to)
 
 	if s.Authorize != nil && !s.Authorize(from) {
 		writeVoiceRefusal(w, s.VoiceRejectText)
@@ -265,6 +266,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Recorded only now, once the call is sure to be answered with a stream:
+	// a refused call opens no stream, so nothing would ever read its entry.
+	// Recorded before the TwiML is written, so the entry is in place before
+	// Twilio can open the stream that looks it up.
+	s.recordCall(callSid, from, to)
 
 	streamURL := fmt.Sprintf("%s://%s/streams", s.streamScheme(), r.Host)
 	w.Header().Set("Content-Type", "text/xml")
