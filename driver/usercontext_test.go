@@ -1,8 +1,11 @@
 package driver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,7 +49,7 @@ func TestDriver_UserContextInjected(t *testing.T) {
 		client:      &http.Client{},
 		prompt:      func() string { return systemPrompt },
 		tiers:       testTiers,
-		userContext: func(string) string { return userContextBlock },
+		userContext: func(context.Context, string) string { return userContextBlock },
 		history:     []message{},
 	}
 
@@ -116,4 +119,165 @@ func TestDriver_UserContextRunsOutsideHistoryLock(t *testing.T) {
 	}
 	close(release)
 	<-done
+}
+
+// ctxProbe is a UserContextCtx provider that records each call: the ctx it
+// is handed and the query text.
+type ctxProbe struct {
+	mu     sync.Mutex
+	call   probeCall
+	result string
+}
+
+// probeCall is what a ctxProbe saw: how many calls, and the last call's ctx
+// and query text.
+type probeCall struct {
+	calls int
+	ctx   context.Context
+	query string
+}
+
+// value is the value under ctxKey on the last call's ctx, or nil.
+func (c probeCall) value() any {
+	if c.ctx == nil {
+		return nil
+	}
+	return c.ctx.Value(ctxKey{})
+}
+
+func (p *ctxProbe) provide(ctx context.Context, q string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.call = probeCall{calls: p.call.calls + 1, ctx: ctx, query: q}
+	return p.result
+}
+
+func (p *ctxProbe) last() probeCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.call
+}
+
+// assertOnce fails t unless the probe was called exactly once, with a ctx
+// carrying wantValue under ctxKey and with wantQuery.
+func (p *ctxProbe) assertOnce(t *testing.T, wantValue any, wantQuery string) {
+	t.Helper()
+	if c := p.last(); c.calls != 1 || c.value() != wantValue || c.query != wantQuery {
+		t.Fatalf("provider saw calls=%d value=%v query=%q; want 1, %v, %q", c.calls, c.value(), c.query, wantValue, wantQuery)
+	}
+}
+
+// newProbeHost returns a Host whose system prompt is "sys" and whose
+// UserContextCtx is a ctxProbe answering "ctx block", and that probe.
+func newProbeHost() (*Host, *ctxProbe) {
+	p := &ctxProbe{result: "ctx block"}
+	return New(Config{Tiers: testTiers, Prompt: func() string { return "sys" }, UserContextCtx: p.provide}), p
+}
+
+// TestContextFor_PassesCtxToProvider: the ctx handed to ContextFor reaches the
+// UserContextCtx provider, along with the query text, and the provider's block
+// is injected after the system prompt.
+func TestContextFor_PassesCtxToProvider(t *testing.T) {
+	h, p := newProbeHost()
+
+	got := h.ContextFor(withCtxValue("turn"), "q1")
+
+	p.assertOnce(t, "turn", "q1")
+	assertSystemMessages(t, got, "sys", "ctx block")
+}
+
+// TestContextFor_NilCtxPanics: a nil ctx panics in ContextFor itself, as
+// WithContext(nil) does, before the provider is called -- whichever provider
+// form is configured. Each provider counts its calls and neither touches ctx,
+// so a panic raised after the provider ran is caught here, not left to a
+// provider that happens to dereference the nil ctx.
+func TestContextFor_NilCtxPanics(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  func(calls *atomic.Int32) Config
+	}{
+		{"UserContextCtx", func(calls *atomic.Int32) Config {
+			return Config{UserContextCtx: func(context.Context, string) string { calls.Add(1); return "block" }}
+		}},
+		{"UserContext", func(calls *atomic.Int32) Config {
+			return Config{UserContext: func(string) string { calls.Add(1); return "block" }}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			cfg := tc.cfg(&calls)
+			cfg.Tiers, cfg.Prompt = testTiers, func() string { return "sys" }
+			h := New(cfg)
+			defer func() {
+				if r := recover(); r != "driver: ContextFor called with a nil context" {
+					t.Errorf("ContextFor(nil) recovered %v; want the driver's nil-context panic", r)
+				}
+				if n := calls.Load(); n != 0 {
+					t.Errorf("provider called %d times before ContextFor(nil) panicked; want 0", n)
+				}
+			}()
+			var nilCtx context.Context
+			h.ContextFor(nilCtx, "q")
+		})
+	}
+}
+
+// TestUserContext_BothSetCtxWins: with both providers configured, Context and
+// ContextFor call only UserContextCtx; UserContext is never called.
+func TestUserContext_BothSetCtxWins(t *testing.T) {
+	var plainCalls atomic.Int32
+	p := &ctxProbe{result: "ctx block"}
+	h := New(Config{
+		Tiers:          testTiers,
+		Prompt:         func() string { return "sys" },
+		UserContext:    func(string) string { plainCalls.Add(1); return "plain block" },
+		UserContextCtx: p.provide,
+	})
+
+	assertSystemMessages(t, h.Context("q"), "sys", "ctx block")
+	assertSystemMessages(t, h.ContextFor(withCtxValue("turn"), "q"), "sys", "ctx block")
+
+	if n := plainCalls.Load(); n != 0 {
+		t.Errorf("UserContext called %d times; want 0 when UserContextCtx is set", n)
+	}
+	if c := p.last(); c.calls != 2 {
+		t.Errorf("UserContextCtx called %d times; want 2", c.calls)
+	}
+}
+
+// TestContext_PassesBackgroundToCtxProvider: Context, which takes no ctx,
+// hands a UserContextCtx provider context.Background().
+func TestContext_PassesBackgroundToCtxProvider(t *testing.T) {
+	h, p := newProbeHost()
+
+	assertSystemMessages(t, h.Context("q"), "sys", "ctx block")
+
+	if c := p.last(); c.calls != 1 || c.ctx != context.Background() {
+		t.Fatalf("provider saw calls=%d ctx=%v; want 1 call under context.Background()", c.calls, c.ctx)
+	}
+}
+
+// TestWithContext_ContextUsesBoundCtx: on the WithContext view, Context hands
+// the provider the bound ctx itself, and ContextFor hands it the explicit ctx
+// itself. Identity, not the value under ctxKey: a ctx derived from the bound
+// one keeps that value but can drop its deadline and cancellation.
+func TestWithContext_ContextUsesBoundCtx(t *testing.T) {
+	h, p := newProbeHost()
+	bound := withCtxValue("bound")
+	v := h.WithContext(bound)
+
+	assertSystemMessages(t, v.Context("q"), "sys", "ctx block")
+	if c := p.last(); c.calls != 1 || c.ctx != bound {
+		t.Errorf("view's Context: provider saw calls=%d, a ctx carrying %v; want 1 call with the bound ctx itself", c.calls, c.value())
+	}
+
+	cb, ok := v.(host.ContextBuilder)
+	if !ok {
+		t.Fatal("the WithContext view is not a host.ContextBuilder")
+	}
+	explicit := withCtxValue("explicit")
+	cb.ContextFor(explicit, "q")
+	if c := p.last(); c.calls != 2 || c.ctx != explicit {
+		t.Errorf("view's ContextFor: provider saw calls=%d, a ctx carrying %v; want a 2nd call with the explicit ctx itself", c.calls, c.value())
+	}
 }

@@ -17,17 +17,24 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// The context-taking send forms are reachable from both the Host and the view
+// The context-taking forms are reachable from both the Host and the view
 // WithContext returns, and that view is still a whole host.Host.
 var (
-	_ host.ContextSender = (*Host)(nil)
-	_ host.Host          = (*boundHost)(nil)
-	_ host.ContextSender = (*boundHost)(nil)
+	_ host.ContextSender  = (*Host)(nil)
+	_ host.ContextBuilder = (*Host)(nil)
+	_ host.Host           = (*boundHost)(nil)
+	_ host.ContextSender  = (*boundHost)(nil)
+	_ host.ContextBuilder = (*boundHost)(nil)
 )
 
 // ctxKey keys the value a test puts on the caller's context to see whether it
 // reaches the upstream request.
 type ctxKey struct{}
+
+// withCtxValue is a context carrying v under ctxKey.
+func withCtxValue(v string) context.Context {
+	return context.WithValue(context.Background(), ctxKey{}, v)
+}
 
 // ctxRecordingTransport answers every request itself with a one-delta stream,
 // textLine("ok"), so no socket is opened, and records the request's context:
@@ -552,8 +559,9 @@ func TestSendStreamContext_DoneContextErrorOverHTTP1AndHTTP2(t *testing.T) {
 
 // TestWithContext_SendAndSendStreamRunUnderBoundContext: the view WithContext
 // returns runs Send and SendStream under the bound context -- its values and
-// its deadline reach the request -- and shares every other method, so its
-// history is the receiver's.
+// its deadline reach the request -- and its history is the receiver's. The
+// view's Context also runs under the bound context; that is
+// TestWithContext_ContextUsesBoundCtx's to check.
 func TestWithContext_SendAndSendStreamRunUnderBoundContext(t *testing.T) {
 	window := []byte(`[{"role":"user","content":"hi"}]`)
 	calls := map[string]func(v host.Host) error{
@@ -569,7 +577,7 @@ func TestWithContext_SendAndSendStreamRunUnderBoundContext(t *testing.T) {
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
 			h, rt := newCtxRecordingHost()
-			ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), ctxKey{}, "bound"), time.Minute)
+			ctx, cancel := context.WithTimeout(withCtxValue("bound"), time.Minute)
 			defer cancel()
 			want, _ := ctx.Deadline()
 			if err := call(h.WithContext(ctx)); err != nil {
@@ -585,7 +593,7 @@ func TestWithContext_SendAndSendStreamRunUnderBoundContext(t *testing.T) {
 		})
 	}
 
-	t.Run("other methods are the receiver's", func(t *testing.T) {
+	t.Run("history is the receiver's", func(t *testing.T) {
 		h, _ := newCtxRecordingHost()
 		v := h.WithContext(context.Background())
 		v.Remember("assistant", []byte("from the view"))
@@ -611,11 +619,11 @@ func TestWithContext_SendAndSendStreamRunUnderBoundContext(t *testing.T) {
 func TestWithContext_ExplicitContextWins(t *testing.T) {
 	window := []byte(`[{"role":"user","content":"hi"}]`)
 	h, rt := newCtxRecordingHost()
-	cs, ok := h.WithContext(context.WithValue(context.Background(), ctxKey{}, "bound")).(host.ContextSender)
+	cs, ok := h.WithContext(withCtxValue("bound")).(host.ContextSender)
 	if !ok {
 		t.Fatal("the WithContext view is not a host.ContextSender")
 	}
-	explicit := context.WithValue(context.Background(), ctxKey{}, "explicit")
+	explicit := withCtxValue("explicit")
 
 	if _, _, err := cs.SendContext(explicit, window, "fast"); err != nil {
 		t.Fatalf("SendContext: %v", err)

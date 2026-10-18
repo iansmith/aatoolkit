@@ -86,7 +86,7 @@ type Host struct {
 	tts         TTSConfig
 	speech      *speechQueue // serial TTS worker so an ack and the answer don't overlap
 	history     []message
-	userContext func(queryText string) string // optional user context block
+	userContext func(ctx context.Context, queryText string) string // the one user-context provider; New folds Config.UserContext/UserContextCtx into it
 	histMu      sync.Mutex
 	// tracerProvider is Config.TracerProvider, fixed at New. Nil means the
 	// global provider, resolved at each call and never cached.
@@ -99,10 +99,32 @@ type Host struct {
 // own Config. Prompt is called every turn; use FilePrompt for a hot-reloading file
 // or supply any func() string (embed, remote, constant).
 type Config struct {
-	Tiers       map[string]Tier
-	TTS         TTSConfig
-	Prompt      func() string
-	UserContext func(queryText string) string // optional user context block injected after system prompt; queryText is what the policy passed to Context
+	Tiers  map[string]Tier
+	TTS    TTSConfig
+	Prompt func() string
+
+	// UserContext supplies an optional user-context block, injected as a
+	// system message after the system prompt and before the history.
+	// queryText is the text the policy passed to Context or ContextFor. It may
+	// do I/O. It runs outside the history lock, and the driver adds no
+	// deadline, cancellation or error path of its own: bound your own I/O and
+	// return "" on failure. It takes no ctx, so a ctx passed to ContextFor or
+	// bound by WithContext never reaches it; set UserContextCtx for that. If
+	// both are set, UserContextCtx wins and UserContext is never called.
+	UserContext func(queryText string) string
+
+	// UserContextCtx is the ctx-taking form of UserContext: it supplies the
+	// same optional user-context block, injected after the system prompt and
+	// before the history, from the queryText the policy passed to Context or
+	// ContextFor. ctx is context.Background() from Context(q), the caller's
+	// ctx from ContextFor(ctx, q), and the bound ctx from a WithContext view's
+	// Context. The driver passes ctx on unchanged and adds no deadline,
+	// cancellation or error path of its own: ctx carries only what the caller
+	// set, and its deadline and cancellation stop the provider's I/O only
+	// where the provider honours them. It may do I/O and runs outside the
+	// history lock: bound your own I/O and return "" on failure. If both are
+	// set, UserContextCtx wins and UserContext is never called.
+	UserContextCtx func(ctx context.Context, queryText string) string
 
 	// RealtimeURL selects the voice transport. Empty — the default — runs the
 	// existing VAD/STT/TTS sidecar path and constructs no realtime client. Set
@@ -144,6 +166,11 @@ func (c Config) StreamHandler() twilio.StreamHandler {
 
 // New builds a driver Host from cfg, wiring the serial speech queue internally.
 func New(cfg Config) *Host {
+	userContext := cfg.UserContextCtx
+	if userContext == nil && cfg.UserContext != nil {
+		uc := cfg.UserContext
+		userContext = func(_ context.Context, q string) string { return uc(q) }
+	}
 	h := &Host{
 		tiers: cfg.Tiers,
 		// Redirects are NOT followed (AATK-112). A tier may carry an API key,
@@ -162,7 +189,7 @@ func New(cfg Config) *Host {
 		},
 		prompt:         cfg.Prompt,
 		tts:            cfg.TTS,
-		userContext:    cfg.UserContext,
+		userContext:    userContext,
 		tracerProvider: cfg.TracerProvider,
 	}
 	h.speech = newSpeechQueue(func(text []byte, voice string, speed float64) {
@@ -208,10 +235,12 @@ func (h *Host) SendContext(ctx context.Context, contextWindow []byte, tier strin
 
 // WithContext returns a host.Host whose Send and SendStream run under ctx: their
 // spans are children of ctx's span, and ctx's deadline and cancellation bound
-// them. Every other method is the receiver's own, and SendContext/
-// SendStreamContext keep their explicit ctx. Make one per inbound request and do
-// not keep it beyond that request. For work that outlives an HTTP handler, pass
-// context.WithoutCancel(ctx). A nil ctx panics, as http.Request.WithContext does.
+// them. Its Context hands ctx to a Config.UserContextCtx provider. Every other
+// method is the receiver's own, and ContextFor, SendContext and
+// SendStreamContext keep their explicit ctx. Make one per inbound request and
+// do not keep it beyond that request. For work that outlives an HTTP handler,
+// pass context.WithoutCancel(ctx). A nil ctx panics, as http.Request.WithContext
+// does.
 func (h *Host) WithContext(ctx context.Context) host.Host {
 	if ctx == nil {
 		panic("driver: WithContext called with a nil context")
@@ -220,9 +249,10 @@ func (h *Host) WithContext(ctx context.Context) host.Host {
 }
 
 // boundHost is the view WithContext returns: the receiver, with ctx bound to
-// its two context-free sends. It must override both. Were Send left promoted,
-// it would run (*Host).Send, which sends under context.Background() and loses
-// ctx. A boundHost is never modified after WithContext builds it.
+// its two context-free sends and to Context. It must override all three. Were
+// Send left promoted, it would run (*Host).Send, which sends under
+// context.Background() and loses ctx; Context likewise. A boundHost is never
+// modified after WithContext builds it.
 type boundHost struct {
 	*Host
 	ctx context.Context
@@ -236,6 +266,11 @@ func (b *boundHost) Send(contextWindow []byte, tier string) ([]byte, []byte, err
 // SendStream implements host.Host: SendStreamContext under the bound context.
 func (b *boundHost) SendStream(contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error) {
 	return b.Host.SendStreamContext(b.ctx, contextWindow, tier, onSegment)
+}
+
+// Context implements host.Host: ContextFor under the bound context.
+func (b *boundHost) Context(queryText string) []byte {
+	return b.Host.ContextFor(b.ctx, queryText)
 }
 
 // SystemPrompt implements host.Host: the current system prompt, reloaded from
@@ -779,17 +814,30 @@ func (h *Host) LastAnswer() []byte {
 	return nil
 }
 
-// Context assembles [current system prompt] + optional user context + history
-// into a JSON messages array ready for Send. queryText is handed to the user
-// context provider so its block can depend on the current turn.
+// Context implements host.Host: ContextFor under context.Background().
 func (h *Host) Context(queryText string) []byte {
+	return h.ContextFor(context.Background(), queryText)
+}
+
+// ContextFor implements host.ContextBuilder. It assembles [current system
+// prompt] + optional user context + history into a JSON messages array ready
+// for Send. queryText is handed to the user-context provider, so its block can
+// depend on the current turn, and ctx is handed on unchanged to a
+// Config.UserContextCtx provider; a plain Config.UserContext never sees it.
+// ContextFor adds no deadline or cancellation of its own and never checks ctx
+// beyond rejecting nil: a nil ctx panics, as WithContext's does, whichever
+// provider form is configured.
+func (h *Host) ContextFor(ctx context.Context, queryText string) []byte {
+	if ctx == nil {
+		panic("driver: ContextFor called with a nil context")
+	}
 	// Outside histMu: the provider may do I/O (e.g. retrieval) and never reads
 	// history, so holding the lock would stall Remember/Forget for no reason.
-	// The call has no deadline and no error path: a provider bounds its own
-	// I/O and returns "" on failure.
+	// Its contract (no deadline or error path from the driver) is on
+	// Config.UserContext and Config.UserContextCtx.
 	var userCtx string
 	if h.userContext != nil {
-		userCtx = h.userContext(queryText)
+		userCtx = h.userContext(ctx, queryText)
 	}
 	h.histMu.Lock()
 	capacity := len(h.history) + 1

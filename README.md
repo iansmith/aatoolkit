@@ -109,15 +109,28 @@ driver.StartTwilioServer(addr, srv, driver.WithHandlerWrapper(
   call was when it stopped and over HTTP/1 or HTTP/2 alike, so a ctx cancelled with a cause
   matches that cause as well as `context.Canceled`. `Send` and `SendStream` run under
   `context.Background()`, so their spans are roots. `h.WithContext(ctx)` returns a `host.Host`
-  whose `Send` and `SendStream` run under `ctx`; make one per inbound request and do not keep it.
+  whose `Send`, `SendStream` and `Context` run under `ctx`; make one per inbound request and do
+  not keep it.
+- **User-context provider.** `driver.Config.UserContextCtx` is the ctx-taking form of
+  `UserContext`; if both are set, `UserContextCtx` wins and `UserContext` is never called.
+  `host.ContextBuilder` adds `ContextFor(ctx, queryText)`, which hands ctx on unchanged to that
+  provider so its I/O can run under the caller's span, deadline and cancellation; the driver
+  adds none of its own, and a plain `UserContext` never sees ctx. `Context(queryText)` hands it
+  `context.Background()`, and a `WithContext` view's `Context` hands it the bound ctx.
+  `ContextFor` panics on a nil ctx. The provider's contract is on
+  `driver.Config.UserContext` and `driver.Config.UserContextCtx`.
 - **Request-scoped ctx.** The ctx a Twilio handler receives (`HandleSMS`, `HandleSMSStatus`,
   `AnswerCall`) is cancelled once the request has been handled. A model call that outlives the
   handler must run under `context.WithoutCancel(ctx)`, which keeps the span and drops the
-  cancellation; under the raw ctx it fails with `context.Canceled`.
+  cancellation; under the raw ctx it fails with `context.Canceled`. The same holds for a
+  `UserContextCtx` provider handed that ctx.
 - **Interpreted policies.** (R1) Change nothing in the policy or its `interp.Inject`: hand it
-  `h.WithContext(ctx)` wherever it is handed `h` today. (R2) Give the policy entrypoint a ctx
-  parameter, inject `"ContextSender": reflect.ValueOf((*host.ContextSender)(nil))` beside
-  `"Host"` for the host package, and send with
+  `h.WithContext(ctx)` wherever it is handed `h` today; its `Send`, `SendStream` and `Context`
+  then run under `ctx`. (R2) Give the policy entrypoint a ctx parameter, inject
+  `"ContextSender": reflect.ValueOf((*host.ContextSender)(nil))` and
+  `"ContextBuilder": reflect.ValueOf((*host.ContextBuilder)(nil))` beside `"Host"` for the host
+  package, and build and send with
+  `if cb, ok := h.(host.ContextBuilder); ok { window = cb.ContextFor(ctx, q) } else { window = h.Context(q) }` and
   `if cs, ok := h.(host.ContextSender); ok { cs.SendStreamContext(ctx, ...) }`. An interface
   the policy declares itself cannot stand in for the injected one.
 - **Webhook spans.** `WithHandlerWrapper` wraps each Twilio route (`/webhook`, `/streams`,

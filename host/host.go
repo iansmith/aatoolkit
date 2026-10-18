@@ -9,14 +9,28 @@ import "context"
 // ContextSender is the context-taking form of Host's Send and SendStream. ctx
 // parents the span each model request produces and bounds the call: its
 // deadline and cancellation apply, and the driver's own ceiling (300 s for
-// driver.Host) still applies on top. ctx is a context.Context; it is unrelated to Host.Context(queryText),
-// which returns the messages array. It is separate from Host so that adding it
-// breaks no existing Host implementation. An interpreted policy reaches it by
-// type-asserting its host.Host, which works only if the consumer injects this
-// symbol.
+// driver.Host) still applies on top. ctx is a context.Context, not
+// Host.Context(queryText), which returns the messages array; ContextBuilder is
+// that method's ctx-taking form. ContextSender is separate from Host so that
+// adding it breaks no existing Host implementation. An interpreted policy
+// reaches it by type-asserting its host.Host, which works only if the
+// consumer injects this symbol.
 type ContextSender interface {
 	SendContext(ctx context.Context, contextWindow []byte, tier string) ([]byte, []byte, error)
 	SendStreamContext(ctx context.Context, contextWindow []byte, tier string, onSegment func(string)) ([]byte, []byte, error)
+}
+
+// ContextBuilder is the context-taking form of Host.Context. ctx is for any
+// I/O building the messages array does (e.g. retrieval for a user-context
+// block): an implementation hands it on, so that I/O can run under ctx's span,
+// deadline and cancellation, and need not check ctx itself. Which I/O receives
+// ctx is the implementation's, and ctx's deadline and cancellation stop that
+// I/O only where the I/O honours them. It is separate from Host, as
+// ContextSender is, so adding it breaks no existing Host implementation. An
+// interpreted policy reaches it by type-asserting its host.Host, which works
+// only if the consumer injects this symbol.
+type ContextBuilder interface {
+	ContextFor(ctx context.Context, queryText string) []byte
 }
 
 // Host is the capability set the chat policy calls into. Today that's just LLM
@@ -61,7 +75,8 @@ type Host interface {
 	// remembered history, as a JSON array ready for Send. queryText is the
 	// current turn's text, handed to that user-context provider so its block
 	// can depend on it (e.g. retrieval keyed on the query); pass "" when there
-	// is none.
+	// is none. Which ctx that provider runs under is the implementation's;
+	// ContextBuilder.ContextFor takes the ctx explicitly.
 	Context(queryText string) []byte
 
 	// Forget drops the most recently remembered message. The policy uses it to
