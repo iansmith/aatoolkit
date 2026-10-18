@@ -157,12 +157,11 @@ const DefaultCapturePort = 9750
 // BaseURL. A test that builds its own client needs no such step: it sets
 // BaseURL to URL once the capture server is up.
 //
-// It keeps the embedded *httptest.Server — only the listener is swapped — so
-// URL behaves exactly as callers already expect, and a failure to bind the
-// requested port returns an error instead of the panic httptest.NewServer
-// would raise. It does not remove httptest's own bind: NewUnstartedServer
-// still binds a throwaway ephemeral listener before the swap, and if even that
-// bind fails it panics, leaving the requested port held.
+// It keeps the embedded *httptest.Server, started on the requested port's
+// listener, so URL behaves exactly as callers already expect, and a failure to
+// bind the requested port returns an error instead of the panic
+// httptest.NewServer would raise. That listener is the only socket it opens:
+// it never binds an ephemeral port of its own, as httptest.NewServer does.
 //
 // Close, unlike URL, is not the embedded server's: CaptureServer has its own,
 // which shuts that server down and also ends every subscription. Shut the
@@ -194,14 +193,13 @@ func NewCaptureServer(port int) (*CaptureServer, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/2010-04-01/Accounts/", c.handleMessages)
 
-	srv := httptest.NewUnstartedServer(mux)
-	// NewUnstartedServer has already bound an ephemeral listener of its own;
-	// discard it in favour of the one on the requested port.
-	if err := srv.Listener.Close(); err != nil {
-		ln.Close()
-		return nil, fmt.Errorf("discard the default capture listener: %w", err)
+	// Built directly rather than through httptest.NewUnstartedServer, which
+	// binds an ephemeral listener of its own and panics when it cannot. Nothing
+	// from here on can fail, so ln is never left held behind an error.
+	srv := &httptest.Server{
+		Listener: ln,
+		Config:   &http.Server{Handler: mux},
 	}
-	srv.Listener = ln
 	srv.Start()
 
 	c.Server = srv
