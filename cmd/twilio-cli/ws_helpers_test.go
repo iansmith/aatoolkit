@@ -61,30 +61,27 @@ func readHandshake(t *testing.T, buf *bufio.ReadWriter) []byte {
 // below, which takes t, can reach a t whose test has already finished, which
 // panics the whole binary with "Log in goroutine after Test has completed".
 //
-// The conn is closed by this cleanup rather than by trackConn, and only after
-// the join has given up. trackConn registers its close from inside the handler
-// -- so it is registered LAST and, cleanups being LIFO, would run FIRST, which
-// is precisely the close-out-from-under this join exists to prevent: a handler
-// still inside readHandshake does not merely unblock, it reports the closed
-// socket as a handshake failure. A handler behind on scheduling is waited for;
-// only one genuinely wedged past the timeout gets its socket pulled, which is
-// the leak trackConn was there to stop.
+// The conn is closed by this cleanup, and only after the join has given up.
+// The helper this replaced, trackConn, registered a t.Cleanup close from
+// inside the handler -- so it was registered LAST and, cleanups being LIFO,
+// ran FIRST, which is precisely the close-out-from-under this join exists to
+// prevent: a handler still inside readHandshake does not merely unblock, it
+// reports the closed socket as a handshake failure (AATK-132). A handler behind
+// on scheduling is waited for; only one genuinely wedged past the timeout gets
+// its socket pulled, which is the leak trackConn was there to stop.
 //
 // It exists because that prologue had been copied into fifteen servers across
 // three files (dial_test.go x11, playback_test.go x3, record_test.go x1),
 // several of which had dropped trackConn along the way and leaked the client's
 // dial goroutine on any test that timed out.
 //
-// Five servers still build their own, each because it has to do something
+// Four servers still build their own, each because it has to do something
 // before or instead of this prologue: stubWSServer checks the Upgrade header
 // first, TestDial_SendsConnectedBeforeStart and
 // TestDial_PeerClosesBetweenHandshakeFrames read the handshake themselves
-// because asserting on it is the point, TestCLI_ServerClose closes without
-// reading it at all, and TestDial_ReturnsOnServerClose needs only the conn. A
-// server that needs the start frame back uses hijackedWSServerWithStart.
-// Two others -- TestDial_NoStopFrameOnServerClose and TestCLI_NoEchoMarks --
-// do match this shape and have not been migrated; that is worth doing, and is
-// not this change.
+// because asserting on it is the point, and TestDial_ReturnsOnServerClose
+// closes without reading it at all. A server that needs the start frame back
+// uses hijackedWSServerWithStart.
 func hijackedWSServer(t *testing.T, serve func(conn net.Conn, buf *bufio.ReadWriter)) *httptest.Server {
 	t.Helper()
 	return hijackedWSServerWithStart(t, func(conn net.Conn, buf *bufio.ReadWriter, _ []byte) { serve(conn, buf) })

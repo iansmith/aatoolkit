@@ -555,17 +555,9 @@ func TestDial_NoStopFrameOnServerClose(t *testing.T) {
 		return ctx.Err()
 	})
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // consume connected + start
-		conn.Close()          // server-initiated close
-	}))
-	defer srv.Close()
+	srv := hijackedWSServer(t, func(conn net.Conn, _ *bufio.ReadWriter) {
+		conn.Close() // server-initiated close, once the handshake is consumed
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	out := captureLog(t, func() {
@@ -585,16 +577,6 @@ func TestDial_NoStopFrameOnServerClose(t *testing.T) {
 func blockingMic(ctx context.Context, _ func([]byte) error, _ func(bool)) error {
 	<-ctx.Done()
 	return ctx.Err()
-}
-
-// trackConn registers a hijacked net.Conn for forced close at test end,
-// regardless of pass/fail/timeout. Without this, a red test that times out
-// via t.Fatal leaves its server-side goroutine (and the client's dial()
-// goroutine) blocked on a Read that will never complete, leaking sockets
-// and goroutines into later tests in the same process.
-func trackConn(t *testing.T, conn net.Conn) {
-	t.Helper()
-	t.Cleanup(func() { conn.Close() })
 }
 
 // dialCtx returns a context bounded to timeout, cancelled at test end. Used
@@ -770,22 +752,14 @@ func TestCLI_MarkEchoRepeats(t *testing.T) {
 func TestCLI_ServerClose(t *testing.T) {
 	withFakeMic(t, blockingMic)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			return
-		}
-		trackConn(t, conn)
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		// Drain the start frame before closing: closing a socket while
-		// unread data still sits in its receive buffer can trigger an OS
-		// RST instead of a clean FIN, which would surface as a spurious
-		// read error in dial() and make this test flaky under load.
-		_, _ = readWSFrame(buf) // connected
-		_, _ = readWSFrame(buf) // start
+	// hijackedWSServer has drained the connected and start frames by the time
+	// serve runs, and that matters: closing a socket while unread data still
+	// sits in its receive buffer can trigger an OS RST instead of a clean FIN,
+	// which would surface as a spurious read error in dial() and make this
+	// test flaky under load.
+	srv := hijackedWSServer(t, func(conn net.Conn, _ *bufio.ReadWriter) {
 		conn.Close()
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx := dialCtx(t, 5*time.Second)
@@ -867,18 +841,7 @@ func TestCLI_NoEchoMarks(t *testing.T) {
 	runMarkScenario := func(t *testing.T, opts ...dialOption) (echoed bool) {
 		t.Helper()
 		gotEcho := make(chan struct{}, 1)
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			conn, buf, err := w.(http.Hijacker).Hijack()
-			if err != nil {
-				t.Errorf("hijack: %v", err)
-				return
-			}
-			trackConn(t, conn)
-			defer conn.Close()
-			wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-			readHandshake(t, buf) // connected + start
-
+		srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 			const streamSID = "SS_noecho"
 			markMsg, err := twilio.EncodeMark(streamSID, "mark1")
 			if err != nil {
@@ -894,8 +857,7 @@ func TestCLI_NoEchoMarks(t *testing.T) {
 			if _, err := readWSFrame(buf); err == nil {
 				gotEcho <- struct{}{}
 			}
-		}))
-		defer srv.Close()
+		})
 		addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 		ctx := dialCtx(t, 5*time.Second)
