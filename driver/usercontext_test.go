@@ -121,13 +121,6 @@ func TestDriver_UserContextRunsOutsideHistoryLock(t *testing.T) {
 	<-done
 }
 
-// The context-taking form of Context is reachable from both the Host and the
-// view WithContext returns.
-var (
-	_ host.ContextBuilder = (*Host)(nil)
-	_ host.ContextBuilder = (*boundHost)(nil)
-)
-
 // ctxProbe is a UserContextCtx provider that records each call: the ctx it
 // is handed and the query text.
 type ctxProbe struct {

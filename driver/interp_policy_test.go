@@ -136,10 +136,10 @@ func TestPolicy_ReachesContextForThroughInterp(t *testing.T) {
 	}
 }
 
-// TestPolicy_R2BuildsAndSendsUnderOneCtx: the whole R2 recipe the README gives,
-// run by one interpreted policy -- ContextFor, then SendStreamContext, under
-// the one ctx it is handed -- carries that ctx to both the user-context
-// provider and the upstream request.
+// TestPolicy_R2BuildsAndSendsUnderOneCtx: one interpreted policy that runs the
+// README's R2 recipe on its asserting path -- ContextFor, then
+// SendStreamContext, under the one ctx it is handed -- carries that ctx to
+// both the user-context provider and the upstream request.
 func TestPolicy_R2BuildsAndSendsUnderOneCtx(t *testing.T) {
 	reply := loadPolicy[func(context.Context, host.Host, string) (string, error)](t, "testdata/ctxpolicy", policyInject, "policy.Reply")
 

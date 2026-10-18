@@ -17,12 +17,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// The context-taking send forms are reachable from both the Host and the view
+// The context-taking forms are reachable from both the Host and the view
 // WithContext returns, and that view is still a whole host.Host.
 var (
-	_ host.ContextSender = (*Host)(nil)
-	_ host.Host          = (*boundHost)(nil)
-	_ host.ContextSender = (*boundHost)(nil)
+	_ host.ContextSender  = (*Host)(nil)
+	_ host.ContextBuilder = (*Host)(nil)
+	_ host.Host           = (*boundHost)(nil)
+	_ host.ContextSender  = (*boundHost)(nil)
+	_ host.ContextBuilder = (*boundHost)(nil)
 )
 
 // ctxKey keys the value a test puts on the caller's context to see whether it
