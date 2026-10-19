@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -263,7 +265,33 @@ func TestDial_StartEventSIDsAreDistinct(t *testing.T) {
 // as the account. A stop naming any other stream SID names a stream that was
 // never started, and a far end that looks the stream up by it never ends the
 // one that was.
+//
+// It runs twice, because where the cancel lands is the point. "After the
+// handshake" is the ordinary Ctrl-C: the start frame's write has long since
+// returned. "While the start frame's write is still returning" is the instant
+// the far end has read the start frame and the client has not yet been
+// scheduled back out of conn.Write -- a window too narrow to hit on purpose,
+// so holdStartFrameWrite holds it open. A cancel there must still end in a
+// stop frame: the call's context means "hang up gracefully", and nothing in
+// flight on the socket may read it as "close the socket now".
 func TestDial_SendsStopFrameOnCancel(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		holdStart bool
+	}{
+		{"cancel after the handshake", false},
+		{"cancel while the start frame's write is still returning", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testSendsStopFrameOnCancel(t, tc.holdStart)
+		})
+	}
+}
+
+// testSendsStopFrameOnCancel is TestDial_SendsStopFrameOnCancel's body. With
+// holdStart, the cancel lands while dial's write of the start frame is held
+// open after its bytes reached the far end (see holdStartFrameWrite).
+func testSendsStopFrameOnCancel(t *testing.T, holdStart bool) {
 	// On the fake mic, for the reason withFakeMic exists: this is a claim about
 	// frame ORDER -- the frame after cancel is the stop -- and the real mic
 	// makes that claim false without anything being wrong. ffmpeg's graceful
@@ -274,23 +302,30 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	// the next frame really is the stop.
 	withFakeMic(t, blockingMic)
 
+	held, release := (<-chan struct{})(nil), func() {}
+	if holdStart {
+		held, release = holdStartFrameWrite(t)
+	}
+
 	startReceived := make(chan []byte, 1)
-	stopReceived := make(chan []byte, 1)
+	// The far end's read of the frame after start, error and all. The wait
+	// below ends when the far end has finished reading, whatever it read: a
+	// far end that hit EOF reports EOF at once rather than leaving the test to
+	// sit out its timeout and report "no stop frame" about a read that had
+	// already failed.
+	afterStart := make(chan readResult, 1)
 
 	srv := hijackedWSServerWithStart(t, func(conn net.Conn, buf *bufio.ReadWriter, start []byte) {
 		startReceived <- start
 
 		msg, err := readWSFrame(buf)
-		if err != nil {
-			t.Errorf("read stop frame: %v", err)
-			return
-		}
-		stopReceived <- msg
+		afterStart <- readResult{msg, err}
 	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 	callSid := smsfake.NewSID("CA")
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	dialErrCh := make(chan error, 1)
 	go func() {
 		dialErrCh <- dial(ctx, callSid, addr)
@@ -303,13 +338,34 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 		t.Fatal("timed out waiting for start frame")
 	}
 
+	if holdStart {
+		select {
+		case <-held:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the far end has the start frame but its write was never held: the window this case exists for was not opened")
+		}
+	}
+
 	cancel()
+	// Released strictly after cancel has returned, so this case does not rest
+	// on scheduling. By then the cancellation has reached everything
+	// registered on ctx, so anything a conn.Write bound to ctx would do about
+	// it is already under way before that write is allowed to return and
+	// deregister. Released first, the write could in principle unwind before
+	// the cancel arrives; measured, it practically never does (the build that
+	// wrote the handshake under ctx was still red 20 of 20 that way), but the
+	// guarantee is the ordering, not the odds.
+	release()
 
 	var stopMsg []byte
 	select {
-	case stopMsg = <-stopReceived:
+	case r := <-afterStart:
+		if r.err != nil {
+			t.Fatalf("read stop frame: %v", r.err)
+		}
+		stopMsg = r.msg
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for stop frame")
+		t.Fatal("timed out waiting for the far end to read the frame after start")
 	}
 
 	<-dialErrCh
@@ -340,6 +396,87 @@ func TestDial_SendsStopFrameOnCancel(t *testing.T) {
 	if got := stopObj["accountSid"]; got != smsfake.DefaultAccountSID {
 		t.Errorf("stop.accountSid: got %v, want %q", got, smsfake.DefaultAccountSID)
 	}
+}
+
+// holdStartFrameWrite makes the next dial hold its start frame's conn.Write
+// open after the frame's bytes have gone onto the socket -- so the far end can
+// read them -- and before that write returns, until release is called. held is
+// closed once a write is being held.
+//
+// That is the instant a cancel can land in on a real call, with the far end
+// already holding the start frame and the client's write not yet unwound; the
+// scheduler opens it for microseconds, and this holds it open for as long as
+// the test needs. Nothing about the frame or its timing changes: the bytes go
+// out exactly as written, and the hold only delays the return.
+//
+// The hold sits under the websocket library, on the net.Conn its HTTP upgrade
+// dials. dial takes no transport -- websocket.Dial falls back to
+// http.DefaultClient -- so this swaps that for one whose connections it wraps,
+// and restores it at cleanup. Safe because no test in this package runs in
+// parallel; one that did would dial through this transport too.
+//
+// release is idempotent and also runs at cleanup, so a test that fails before
+// releasing does not leave dial parked inside a write.
+func holdStartFrameWrite(t *testing.T) (held <-chan struct{}, release func()) {
+	t.Helper()
+	heldCh := make(chan struct{})
+	releaseCh := make(chan struct{})
+	var heldOnce, releaseOnce sync.Once
+	release = func() { releaseOnce.Do(func() { close(releaseCh) }) }
+
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return &startHoldingConn{
+				Conn:    conn,
+				onHold:  func() { heldOnce.Do(func() { close(heldCh) }) },
+				release: releaseCh,
+			}, nil
+		},
+	}
+	original := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: tr}
+	t.Cleanup(func() {
+		release()
+		http.DefaultClient = original
+		tr.CloseIdleConnections()
+	})
+	return heldCh, release
+}
+
+// startHoldingConn is the net.Conn holdStartFrameWrite hands the websocket
+// library: a pass-through, except that a Write carrying twilio-cli's start
+// frame waits for release after the bytes are written and before it returns.
+type startHoldingConn struct {
+	net.Conn
+	onHold  func()
+	release <-chan struct{}
+}
+
+func (c *startHoldingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if err == nil && carriesStartFrame(p) {
+		c.onHold()
+		<-c.release
+	}
+	return n, err
+}
+
+// carriesStartFrame reports whether p, one Write's worth of client bytes, is a
+// whole websocket frame whose payload is a start event. The library writes a
+// frame this small in a single Write (header and payload are buffered, then
+// flushed once); if that ever changes, no write matches, held never closes,
+// and the case that relies on it fails saying so instead of passing unheld.
+func carriesStartFrame(p []byte) bool {
+	msg, err := readWSFrame(bufio.NewReadWriter(bufio.NewReader(bytes.NewReader(p)), nil))
+	if err != nil {
+		return false
+	}
+	var m map[string]any
+	return json.Unmarshal(msg, &m) == nil && m["event"] == "start"
 }
 
 // withFakeMic overrides the package-level streamMic seam for the duration of
@@ -421,17 +558,9 @@ func TestDial_NoStopFrameOnServerClose(t *testing.T) {
 		return ctx.Err()
 	})
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		readHandshake(t, buf) // consume connected + start
-		conn.Close()          // server-initiated close
-	}))
-	defer srv.Close()
+	srv := hijackedWSServer(t, func(conn net.Conn, _ *bufio.ReadWriter) {
+		conn.Close() // server-initiated close, once the handshake is consumed
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	out := captureLog(t, func() {
@@ -451,16 +580,6 @@ func TestDial_NoStopFrameOnServerClose(t *testing.T) {
 func blockingMic(ctx context.Context, _ func([]byte) error, _ func(bool)) error {
 	<-ctx.Done()
 	return ctx.Err()
-}
-
-// trackConn registers a hijacked net.Conn for forced close at test end,
-// regardless of pass/fail/timeout. Without this, a red test that times out
-// via t.Fatal leaves its server-side goroutine (and the client's dial()
-// goroutine) blocked on a Read that will never complete, leaking sockets
-// and goroutines into later tests in the same process.
-func trackConn(t *testing.T, conn net.Conn) {
-	t.Helper()
-	t.Cleanup(func() { conn.Close() })
 }
 
 // dialCtx returns a context bounded to timeout, cancelled at test end. Used
@@ -636,22 +755,14 @@ func TestCLI_MarkEchoRepeats(t *testing.T) {
 func TestCLI_ServerClose(t *testing.T) {
 	withFakeMic(t, blockingMic)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			return
-		}
-		trackConn(t, conn)
-		wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-		// Drain the start frame before closing: closing a socket while
-		// unread data still sits in its receive buffer can trigger an OS
-		// RST instead of a clean FIN, which would surface as a spurious
-		// read error in dial() and make this test flaky under load.
-		_, _ = readWSFrame(buf) // connected
-		_, _ = readWSFrame(buf) // start
+	// hijackedWSServer has drained the connected and start frames by the time
+	// serve runs, and that matters: closing a socket while unread data still
+	// sits in its receive buffer can trigger an OS RST instead of a clean FIN,
+	// which would surface as a spurious read error in dial() and make this
+	// test flaky under load.
+	srv := hijackedWSServer(t, func(conn net.Conn, _ *bufio.ReadWriter) {
 		conn.Close()
-	}))
-	defer srv.Close()
+	})
 	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	ctx := dialCtx(t, 5*time.Second)
@@ -733,18 +844,7 @@ func TestCLI_NoEchoMarks(t *testing.T) {
 	runMarkScenario := func(t *testing.T, opts ...dialOption) (echoed bool) {
 		t.Helper()
 		gotEcho := make(chan struct{}, 1)
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			conn, buf, err := w.(http.Hijacker).Hijack()
-			if err != nil {
-				t.Errorf("hijack: %v", err)
-				return
-			}
-			trackConn(t, conn)
-			defer conn.Close()
-			wsHandshake(conn, r.Header.Get("Sec-Websocket-Key"))
-
-			readHandshake(t, buf) // connected + start
-
+		srv := hijackedWSServer(t, func(conn net.Conn, buf *bufio.ReadWriter) {
 			const streamSID = "SS_noecho"
 			markMsg, err := twilio.EncodeMark(streamSID, "mark1")
 			if err != nil {
@@ -760,8 +860,7 @@ func TestCLI_NoEchoMarks(t *testing.T) {
 			if _, err := readWSFrame(buf); err == nil {
 				gotEcho <- struct{}{}
 			}
-		}))
-		defer srv.Close()
+		})
 		addr := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 		ctx := dialCtx(t, 5*time.Second)
