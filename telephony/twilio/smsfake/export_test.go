@@ -17,7 +17,8 @@ import (
 // Not every wait has a bound. A webhook test's POST through PostWebhook is
 // bounded by its ctx alone, mostly context.Background(); the internal tests
 // end a subscription unbounded; and the tests moved here from twilio-cli,
-// TestNewCaptureServer_* and the two 403 tests, keep the unbounded waits they
+// TestNewCaptureServer_BindsRequestedPort, _PortInUseNamesThePort and
+// _RejectsUnusablePorts and the two 403 tests, keep the unbounded waits they
 // had there.
 const SubscribeWait = 5 * time.Second
 
