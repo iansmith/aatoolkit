@@ -150,16 +150,26 @@ type callParties struct {
 	from, to string
 }
 
-// maxPendingFrom bounds the CallSid -> From/To map recorded by ServeHTTP for
-// ServeStreams to thread onto the start Frame. Mirrors the maxAbandoned
-// evict-oldest discipline in telephony/stt.go: a call whose stream never
-// opens (or is rejected at the webhook) would otherwise leave a permanent
-// entry, growing unboundedly over a long-running server's lifetime.
+// maxPendingFrom bounds the CallSid -> From/To map ServeHTTP records for
+// ServeStreams to thread onto the start Frame.
+//
+// ServeHTTP records only a call it answers with a stream; a call refused at
+// the webhook (signature, E.164 From, Authorize or AnswerCall) takes no
+// entry. Only eviction removes an entry: lookupCall reads it and leaves it
+// in place, so every recorded call holds its entry until it is evicted.
+// Recording a new CallSid while the map holds maxPendingFrom evicts the
+// oldest, so a stream whose start frame arrives after maxPendingFrom newer
+// calls were recorded finds no entry, and its start Frame carries "" for
+// From and To. Without the bound the map would grow for the whole of a
+// long-running server's lifetime. Mirrors the maxAbandoned evict-oldest
+// discipline in telephony/stt.go.
 const maxPendingFrom = 1024
 
 // recordCall remembers from and to under callSid for a later ServeStreams
 // lookup. A blank callSid is never recorded — it cannot uniquely key a later
-// start frame, so keeping it would just waste an eviction slot.
+// start frame, so keeping it would just waste an eviction slot. Recording a
+// callSid already held replaces its from and to in place: it takes no new
+// slot and keeps its place in the eviction order.
 func (s *Server) recordCall(callSid, from, to string) {
 	if callSid == "" {
 		return
@@ -180,7 +190,8 @@ func (s *Server) recordCall(callSid, from, to string) {
 }
 
 // lookupCall returns the From and To recorded for callSid, or "" for both if
-// none was ever recorded (unknown/missing case).
+// none is held: never recorded, or since evicted. It leaves the entry in
+// place.
 func (s *Server) lookupCall(callSid string) callParties {
 	s.fromMu.Lock()
 	defer s.fromMu.Unlock()
@@ -233,7 +244,9 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) bool {
 // /streams — unless Authorize refuses the caller (VoiceRejectText) or
 // AnswerCall refuses the call (its own say text), each answered with
 // <Say>…</Say><Hangup/>. The dialed To reaches AnswerCall and the start Frame
-// only when it is E.164; otherwise it is "".
+// only when it is E.164; otherwise it is "". Only a call answered with the
+// stream has its From and To recorded for ServeStreams (see maxPendingFrom);
+// a refused call records nothing.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.authenticate(w, r) {
 		return
@@ -252,7 +265,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !e164Pattern.MatchString(to) {
 		to = ""
 	}
-	s.recordCall(callSid, from, to)
 
 	if s.Authorize != nil && !s.Authorize(from) {
 		writeVoiceRefusal(w, s.VoiceRejectText)
@@ -265,6 +277,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Recorded only now, once the call is sure to be answered with a stream:
+	// a refused call opens no stream, so nothing would ever read its entry.
+	// Recorded before the TwiML is written, so the entry is in place before
+	// Twilio can open the stream that looks it up.
+	s.recordCall(callSid, from, to)
 
 	streamURL := fmt.Sprintf("%s://%s/streams", s.streamScheme(), r.Host)
 	w.Header().Set("Content-Type", "text/xml")
