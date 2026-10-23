@@ -2,7 +2,9 @@ package twilio
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -329,5 +331,79 @@ func TestHandleStreamRealtime_StopFrameEndsCallWhileIdleTimeoutArmed(t *testing.
 
 	if err := h.waitDone(5 * time.Second); err != nil {
 		t.Fatalf("a stop frame must end the call cleanly even with an idle timeout armed, got error: %v", err)
+	}
+}
+
+// joinT is the slice of *testing.T that goJoined uses, so a test can drive its
+// cleanup by hand and observe the stall report.
+type joinT interface {
+	Helper()
+	Cleanup(func())
+	Errorf(format string, args ...any)
+}
+
+// goJoinBound is how long goJoined's cleanup waits for the goroutine.
+var goJoinBound = 5 * time.Second
+
+// goJoined is a RED-phase stub: it signals stop but never waits.
+func goJoined(t joinT, run func(stop <-chan struct{})) {
+	t.Helper()
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go run(stop)
+}
+
+func TestGoJoined_CleanupWaitsForGoroutineExit(t *testing.T) {
+	var finished atomic.Bool
+	t.Run("inner", func(t *testing.T) {
+		goJoined(t, func(stop <-chan struct{}) {
+			<-stop
+			// A late peer: the goroutine is still working after the test
+			// body has returned and stop has fired.
+			hold := make(chan struct{})
+			time.AfterFunc(50*time.Millisecond, func() { close(hold) })
+			<-hold
+			finished.Store(true)
+		})
+	})
+	if !finished.Load() {
+		t.Fatal("goroutine still running after the subtest returned: cleanup did not join it")
+	}
+}
+
+// fakeCleanupT records Cleanup funcs and Errorf calls without a real test.
+type fakeCleanupT struct {
+	cleanups []func()
+	errs     []string
+}
+
+func (f *fakeCleanupT) Helper()                   {}
+func (f *fakeCleanupT) Cleanup(fn func())         { f.cleanups = append(f.cleanups, fn) }
+func (f *fakeCleanupT) Errorf(s string, a ...any) { f.errs = append(f.errs, fmt.Sprintf(s, a...)) }
+
+func TestGoJoined_ReportsStallInsteadOfHanging(t *testing.T) {
+	old := goJoinBound
+	goJoinBound = 50 * time.Millisecond
+	t.Cleanup(func() { goJoinBound = old })
+
+	release := make(chan struct{})
+	defer close(release)
+	ft := &fakeCleanupT{}
+	goJoined(ft, func(stop <-chan struct{}) { <-release })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, fn := range ft.cleanups {
+			fn()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup hung on a goroutine that never exits instead of reporting a stall")
+	}
+	if len(ft.errs) != 1 {
+		t.Fatalf("stall reports = %v, want exactly one", ft.errs)
 	}
 }

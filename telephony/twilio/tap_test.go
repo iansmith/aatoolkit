@@ -922,6 +922,90 @@ func TestTap_WriteOutSteadyStateIsAllocationFree(t *testing.T) {
 	}
 }
 
+// mallocWindows is a RED-phase stub: it measures one window only.
+func mallocWindows(windows, calls int, mallocs func() uint64, body func()) (deltas []uint64, clean bool) {
+	deltas = make([]uint64, 0, windows)
+	b := mallocs()
+	for i := 0; i < calls; i++ {
+		body()
+	}
+	a := mallocs()
+	deltas = append(deltas, a-b)
+	return deltas, a-b == 0
+}
+
+// singleProc is a RED-phase stub: it never restores GOMAXPROCS.
+func singleProc(t *testing.T) {
+	t.Helper()
+	runtime.GOMAXPROCS(1)
+}
+
+// fakeMallocs is a deterministic stand-in for the process-wide Mallocs
+// counter: it advances by perWindow[w] over window w, and by nothing outside
+// the listed windows. It counts body calls so a test can tell which window a
+// call belongs to.
+type fakeMallocs struct {
+	perWindow []uint64
+	calls     int
+	perCall   int
+	counter   uint64
+}
+
+func (f *fakeMallocs) body() {
+	f.calls++
+	w := (f.calls - 1) / f.perCall
+	if (f.calls-1)%f.perCall == 0 && w < len(f.perWindow) {
+		f.counter += f.perWindow[w]
+	}
+}
+
+func (f *fakeMallocs) mallocs() uint64 { return f.counter }
+
+func TestMallocWindows_TolerantOfOneAllocatingWindow(t *testing.T) {
+	f := &fakeMallocs{perWindow: []uint64{1}, perCall: 10}
+	deltas, clean := mallocWindows(3, 10, f.mallocs, f.body)
+	if !clean {
+		t.Fatalf("clean = false, deltas = %v: one allocating window followed by a quiet one must pass", deltas)
+	}
+	if len(deltas) != 2 || deltas[0] != 1 || deltas[1] != 0 {
+		t.Fatalf("deltas = %v, want [1 0]", deltas)
+	}
+}
+
+func TestMallocWindows_FailsWhenEveryWindowAllocates(t *testing.T) {
+	f := &fakeMallocs{perWindow: []uint64{1, 2, 3}, perCall: 10}
+	deltas, clean := mallocWindows(3, 10, f.mallocs, f.body)
+	if clean {
+		t.Fatalf("clean = true, deltas = %v: every window allocated, want clean = false", deltas)
+	}
+	if len(deltas) != 3 {
+		t.Fatalf("len(deltas) = %d, want 3 (%v)", len(deltas), deltas)
+	}
+	for i, d := range deltas {
+		if d == 0 {
+			t.Errorf("deltas[%d] = 0, want > 0", i)
+		}
+	}
+	if f.calls != 30 {
+		t.Errorf("body ran %d times, want 30 (3 windows x 10 calls)", f.calls)
+	}
+}
+
+func TestSingleProc_RestoresGOMAXPROCS(t *testing.T) {
+	orig := runtime.GOMAXPROCS(2)
+	t.Cleanup(func() { runtime.GOMAXPROCS(orig) })
+
+	t.Run("inner", func(t *testing.T) {
+		singleProc(t)
+		if got := runtime.GOMAXPROCS(0); got != 1 {
+			t.Errorf("GOMAXPROCS inside = %d, want 1", got)
+		}
+	})
+	if got := runtime.GOMAXPROCS(0); got != 2 {
+		t.Errorf("GOMAXPROCS after the subtest = %d, want 2 restored", got)
+	}
+}
+
 // TestTap_RingBufferWraparoundPreservesOrder pins FIFO correctness across a
 // ring buffer's head/tail wraparound -- a classic off-by-one failure mode
 // that a pure complexity claim would never catch. Each pushed frame carries
