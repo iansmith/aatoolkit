@@ -276,9 +276,7 @@ func TestVoiceUpdateChan_DoesNotResetIdleTimer(t *testing.T) {
 
 	// Negative: keep the consumer sending steadily while the backend stays
 	// silent. The call must still end on the idle timer.
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
-	go func() {
+	goJoined(t, func(stop <-chan struct{}) {
 		ticker := time.NewTicker(idleGapTimeout / 10)
 		defer ticker.Stop()
 		n := 0
@@ -294,7 +292,7 @@ func TestVoiceUpdateChan_DoesNotResetIdleTimer(t *testing.T) {
 				n++
 			}
 		}
-	}()
+	})
 
 	err := h.waitDone(idleGapTimeout + 2*time.Second)
 	if err == nil {

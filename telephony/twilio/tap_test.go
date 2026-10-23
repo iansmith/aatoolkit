@@ -872,72 +872,123 @@ func TestTap_OutboundQueueIsBounded(t *testing.T) {
 
 // --- ring buffer correctness + complexity (attempt 8) ---------------
 //
-// Phase 0 (attempt 8) red tests. tap.go's outQueue is currently a slice
-// reslice-drop-oldest (t.outQueue = t.outQueue[1:]; append(...)) which is
-// O(n) per call once at the bound: reslicing shrinks cap in lockstep with
-// len, so every subsequent pop+append forces a full realloc+copy of the
-// live queue. Both tests below are confirmed red against that code:
-// TestTap_WriteOutSteadyStateIsAllocationFree fails because steady-state
-// WriteOut allocates (the realloc+copy) instead of 0 allocs/call;
+// The two tests below pin the ring buffer that replaced a slice
+// reslice-drop-oldest queue (t.outQueue = t.outQueue[1:]; append(...)). That
+// queue was O(n) per call once at the bound: reslicing shrinks cap in
+// lockstep with len, so each subsequent pop+append forces a full
+// realloc+copy of the live queue.
+// TestTap_WriteOutSteadyStateIsAllocationFree fails against it (all three of
+// its windows allocate, checked by putting the reslice back into tap.go);
 // TestTap_RingBufferWraparoundPreservesOrder is a correctness pin for the
-// ring-buffer replacement (it passes against the reslice implementation
-// too, since reslice-drop-oldest is *correct*, just not O(1) — its purpose
-// is to catch an off-by-one in the ring buffer's head/tail bookkeeping once
-// that replacement lands, not to distinguish the two implementations by
-// itself).
+// ring buffer (it passes against the reslice implementation too, since
+// reslice-drop-oldest is *correct*, just not O(1) — its purpose is to catch
+// an off-by-one in the ring buffer's head/tail bookkeeping, not to
+// distinguish the two implementations by itself).
 
 // TestTap_WriteOutSteadyStateIsAllocationFree pins the O(1) drop-oldest
-// claim directly: once the queue is at its bound, every further WriteOut
-// call must not allocate. A slice-reslice queue's cap shrinks with its len
-// on every pop, so once full it forces a fresh backing-array alloc+copy of
-// the entire live queue on every single call — turning the safety net into
+// claim directly: once the queue is at its bound, further WriteOut calls
+// must not allocate. A slice-reslice queue's cap shrinks with its len on
+// every pop, so once full it forces a fresh backing-array alloc+copy of the
+// entire live queue every few thousand calls — turning the safety net into
 // an allocation storm during the one failure mode (a stalled drain) it
 // exists to contain gracefully. A real ring buffer overwrites in place.
+//
+// How the measurement is made robust (AATK-144, AATK-95). The Mallocs
+// counter is process-wide, so it also counts any other goroutine that
+// allocates inside the window: a runtime background allocation (observed
+// roughly once per thousand runs at default GOMAXPROCS; its source was not
+// established), or a goroutine a sibling test left running. A single window
+// therefore fails on noise that has nothing to do with WriteOut. The route
+// taken:
+//
+//   - Up to three independent windows of 50000 calls each, run under
+//     GOMAXPROCS(1) (restored by singleProc's cleanup); the test fails only if
+//     EVERY window allocates. A real regression allocates in every window, a
+//     stray allocation lands in one. The windows stop at the first clean one.
+//   - Sibling test goroutines are joined in t.Cleanup (goJoined) where they
+//     are free-running tickers, so they cannot allocate into this window.
+//     Not joined: goroutines inside hijacked websocket handlers (the fake
+//     backend's handler and its emitAudioDeltas, the harness handlers),
+//     which httptest.Server.Close does not wait for, and realtimeHarness's
+//     countMediaFrames read loop, which ends only when its conn errors.
+//
+// Rejected:
+//
+//   - testing.AllocsPerRun: it divides total mallocs by runs with integer
+//     division, so any average below 1 truncates to 0, and the reslice
+//     queue's realloc recurs only periodically, never below 1-per-call.
+//     Run against that queue it reported 0, where the three windows below
+//     reported 18, 12 and 12.
+//   - A single window, however large: one stray allocation fails it.
+//   - runtime.GC() before the window: it can only reduce background work,
+//     the ticket's trial of it (0 failures in 4000 runs) is an observation
+//     and not an attribution, and it leaves the window open to anything else.
+//   - Skipping under -short, or running the test alone: hides the
+//     cross-test leak instead of removing it.
+//   - Joined teardown alone: it does nothing about runtime allocations,
+//     which are independent of any sibling test.
+//
+// A top-level t.Parallel in this package would break the premise that
+// nothing else allocates, so none is used.
 func TestTap_WriteOutSteadyStateIsAllocationFree(t *testing.T) {
+	const (
+		steadyStateCalls   = 50000
+		steadyStateWindows = 3
+	)
+
 	dir := t.TempDir()
 	tap := NewTap(dir, "SSallocs", "CAallocs", "", testStreamStartedAt)
 	defer tap.Close()
+
+	// Before warm-up, so the stop-the-world GOMAXPROCS call never lands in a
+	// window.
+	singleProc(t)
 
 	payload := []byte{0x01}
 	for i := 0; i < maxOutQueueFrames+10; i++ {
 		tap.WriteOut(payload)
 	}
 
-	// testing.AllocsPerRun can't see this: it divides total mallocs by runs
-	// using integer division, so any average below 1 truncates to exactly
-	// 0 -- and a slice-reslice queue's realloc+copy recurs only periodically
-	// (every few thousand calls, since cap shrinks by 1 on every pop but a
-	// Go append only grows cap when it must), never below 1-per-call. A raw
-	// runtime.MemStats delta over a large enough batch has no such floor.
-	const steadyStateCalls = 50000
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	for i := 0; i < steadyStateCalls; i++ {
-		tap.WriteOut(payload)
+	// Declared once, outside: a MemStats inside the closure would allocate
+	// on every call and add one to every window.
+	var ms runtime.MemStats
+	mallocs := func() uint64 {
+		runtime.ReadMemStats(&ms)
+		return ms.Mallocs
 	}
-	runtime.ReadMemStats(&after)
-
-	if got := after.Mallocs - before.Mallocs; got > 0 {
-		t.Errorf("%d heap allocations across %d steady-state WriteOut calls, want 0 — drop-oldest must overwrite in place (a ring buffer), not periodically realloc+copy the live queue", got, steadyStateCalls)
+	deltas, clean := mallocWindows(steadyStateWindows, steadyStateCalls, mallocs, func() { tap.WriteOut(payload) })
+	if !clean {
+		t.Errorf("%v heap allocations in each of %d windows of %d steady-state WriteOut calls, want 0 in at least one — drop-oldest must overwrite in place (a ring buffer), not periodically realloc+copy the live queue", deltas, len(deltas), steadyStateCalls)
 	}
 }
 
-// mallocWindows is a RED-phase stub: it measures one window only.
+// mallocWindows runs body calls times per window, for up to windows windows,
+// and records the process-wide Mallocs delta of each. It stops at the first
+// window with no allocation and reports clean; clean == false means every
+// window allocated. Nothing but the body loop sits between the two mallocs
+// reads, so the helper adds no allocation of its own to a window.
 func mallocWindows(windows, calls int, mallocs func() uint64, body func()) (deltas []uint64, clean bool) {
 	deltas = make([]uint64, 0, windows)
-	b := mallocs()
-	for i := 0; i < calls; i++ {
-		body()
+	for w := 0; w < windows; w++ {
+		before := mallocs()
+		for i := 0; i < calls; i++ {
+			body()
+		}
+		after := mallocs()
+		deltas = append(deltas, after-before)
+		if after == before {
+			return deltas, true
+		}
 	}
-	a := mallocs()
-	deltas = append(deltas, a-b)
-	return deltas, a-b == 0
+	return deltas, false
 }
 
-// singleProc is a RED-phase stub: it never restores GOMAXPROCS.
+// singleProc sets GOMAXPROCS to 1 for the rest of the test and restores the
+// previous value in t.Cleanup, so it is restored on t.Fatal and panic too.
 func singleProc(t *testing.T) {
 	t.Helper()
-	runtime.GOMAXPROCS(1)
+	old := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(old) })
 }
 
 // fakeMallocs is a deterministic stand-in for the process-wide Mallocs

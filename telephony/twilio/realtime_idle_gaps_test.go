@@ -59,10 +59,7 @@ func (b *fakeRealtimeBackend) emitEvery(t *testing.T, interval time.Duration, ev
 		t.Fatal("backend has no connection to emit on — call waitBackendReady first")
 	}
 
-	done := make(chan struct{})
-	t.Cleanup(func() { close(done) })
-
-	go func() {
+	goJoined(t, func(done <-chan struct{}) {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -77,7 +74,7 @@ func (b *fakeRealtimeBackend) emitEvery(t *testing.T, interval time.Duration, ev
 				}
 			}
 		}
-	}()
+	})
 }
 
 // waitBackendReady drives one carrier frame through to the backend and waits
@@ -202,12 +199,10 @@ func TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnUnmodelledBackendEventOnly
 // write error, and the carrier socket closing at the end of the run is expected
 // rather than a failure. It touches no *testing.T method, so it cannot panic by
 // logging after the test returns; t.Cleanup runs LIFO, so this stop fires
-// before the harness's own conn close, which was registered first.
+// before the harness's own conn close, which was registered first, and the
+// cleanup then waits for the goroutine to return (see goJoined).
 func emitCarrierEvery(t *testing.T, h *realtimeHarness, interval, initialDelay time.Duration) {
 	t.Helper()
-
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
 
 	send := func() bool {
 		err := h.conn.Write(context.Background(), websocket.MessageText,
@@ -215,7 +210,7 @@ func emitCarrierEvery(t *testing.T, h *realtimeHarness, interval, initialDelay t
 		return err == nil
 	}
 
-	go func() {
+	goJoined(t, func(stop <-chan struct{}) {
 		if initialDelay > 0 {
 			select {
 			case <-stop:
@@ -238,7 +233,7 @@ func emitCarrierEvery(t *testing.T, h *realtimeHarness, interval, initialDelay t
 				}
 			}
 		}
-	}()
+	})
 }
 
 // TestHandleStreamRealtime_IdleTimeoutClosesCarrierConnection pins the half of
@@ -342,15 +337,30 @@ type joinT interface {
 	Errorf(format string, args ...any)
 }
 
-// goJoinBound is how long goJoined's cleanup waits for the goroutine.
+// goJoinBound is how long goJoined's cleanup waits for the goroutine. It is a
+// stall detector, not a settle delay: a goroutine that exits is joined at once.
 var goJoinBound = 5 * time.Second
 
-// goJoined is a RED-phase stub: it signals stop but never waits.
+// goJoined runs run on its own goroutine and registers one cleanup that closes
+// stop and then waits, up to goJoinBound, for run to return, so the goroutine
+// cannot outlive the test and allocate into a later one (AATK-95). A stall is
+// reported with Errorf rather than hanging the suite.
 func goJoined(t joinT, run func(stop <-chan struct{})) {
 	t.Helper()
 	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
-	go run(stop)
+	exited := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		select {
+		case <-exited:
+		case <-time.After(goJoinBound):
+			t.Errorf("goroutine did not exit within %v of the test ending", goJoinBound)
+		}
+	})
+	go func() {
+		defer close(exited)
+		run(stop)
+	}()
 }
 
 func TestGoJoined_CleanupWaitsForGoroutineExit(t *testing.T) {

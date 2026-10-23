@@ -239,9 +239,7 @@ func TestClientEventChan_ConsumerEventDoesNotResetIdleTimer(t *testing.T) {
 
 	// Negative: keep the consumer sending steadily while the backend stays
 	// silent. The call must still end on the idle timer.
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
-	go func() {
+	goJoined(t, func(stop <-chan struct{}) {
 		ticker := time.NewTicker(idleGapTimeout / 10)
 		defer ticker.Stop()
 		id := 21
@@ -257,7 +255,7 @@ func TestClientEventChan_ConsumerEventDoesNotResetIdleTimer(t *testing.T) {
 				id++
 			}
 		}
-	}()
+	})
 
 	err := h.waitDone(idleGapTimeout + 2*time.Second)
 	if err == nil {
@@ -871,9 +869,7 @@ func TestClientEventChan_SessionUpdateRefusalDoesNotResetIdleTimer(t *testing.T)
 	// Keep the consumer sending a steady stream of session.update events —
 	// each of which the implementation refuses — while the backend stays
 	// silent. The call must still end on the idle timer.
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
-	go func() {
+	goJoined(t, func(stop <-chan struct{}) {
 		ticker := time.NewTicker(idleGapTimeout / 10)
 		defer ticker.Stop()
 		id := 280
@@ -889,7 +885,7 @@ func TestClientEventChan_SessionUpdateRefusalDoesNotResetIdleTimer(t *testing.T)
 				id++
 			}
 		}
-	}()
+	})
 
 	err := h.waitDone(idleGapTimeout + 2*time.Second)
 	if err == nil {
