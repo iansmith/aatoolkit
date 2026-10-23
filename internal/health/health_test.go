@@ -198,27 +198,46 @@ func TestPollReady_SucceedsImmediatelyWithoutPolling(t *testing.T) {
 }
 
 func TestPollReady_AttemptsAtLeastOneProbeEvenUnderTightReadyTimeout(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+	for _, tc := range []struct {
+		name        string
+		closeServer bool
+	}{
+		{"live_server", false},
+		{"refused_dial", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
 
-	spec := specFromURL(t, srv.URL, "/v1/models")
-	// ReadyTimeout shorter than PollInterval must still attempt one probe
-	// rather than timing out with zero attempts made.
-	result, err := PollReady(context.Background(), PollConfig{
-		Spec:         spec,
-		ProbeTimeout: 200 * time.Millisecond,
-		PollInterval: 500 * time.Millisecond,
-		ReadyTimeout: 1 * time.Millisecond,
-		ServerName:   "tight-timeout-server",
-		LogPath:      "/tmp/tight-timeout-server.log",
-	})
-	if err != nil {
-		t.Fatalf("PollReady returned error: %v, want at least one probe to succeed", err)
-	}
-	if !result.Healthy {
-		t.Error("Healthy = false, want true — first probe should have been attempted")
+			spec := specFromURL(t, srv.URL, "/v1/models")
+			if tc.closeServer {
+				srv.Close()
+			}
+			// ReadyTimeout shorter than PollInterval must still attempt one
+			// probe rather than timing out with zero attempts made.
+			//
+			// The contract is "attempted", not "succeeded": the probe runs
+			// under ReadyTimeout too, so a real round trip cannot be relied
+			// on to finish in 1ms. A zero Result means attempt() never ran;
+			// every return path of the HTTP Probe sets Rendered to at least
+			// the path, so the returned error and Healthy are ignored. The
+			// refused_dial case pins that the outcome of the probe does not
+			// matter. Deleting PollReady's initial attempt() turns both
+			// subtests red.
+			result, _ := PollReady(context.Background(), PollConfig{
+				Spec:         spec,
+				ProbeTimeout: 200 * time.Millisecond,
+				PollInterval: 500 * time.Millisecond,
+				ReadyTimeout: 1 * time.Millisecond,
+				ServerName:   "tight-timeout-server",
+				LogPath:      "/tmp/tight-timeout-server.log",
+			})
+			if !strings.HasPrefix(result.Rendered, spec.Path) {
+				t.Fatalf("Rendered = %q, want prefix %q — a zero Result means PollReady made no probe attempt", result.Rendered, spec.Path)
+			}
+		})
 	}
 }
 
