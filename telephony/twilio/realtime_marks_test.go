@@ -461,9 +461,7 @@ func TestMarkRequestChan_DoesNotResetTheIdleGuard(t *testing.T) {
 
 	// Mark steadily, faster than the idle bound, against a backend that says
 	// nothing after the handshake.
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
+	goJoined(t, func(done <-chan struct{}) {
 		for i := 0; ; i++ {
 			select {
 			case <-done:
@@ -472,7 +470,7 @@ func TestMarkRequestChan_DoesNotResetTheIdleGuard(t *testing.T) {
 			}
 			time.Sleep(idleGapTimeout / 4)
 		}
-	}()
+	})
 
 	err := h.waitDone(10 * time.Second)
 	if err == nil || !strings.Contains(err.Error(), "idle timeout") {

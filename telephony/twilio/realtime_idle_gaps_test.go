@@ -2,7 +2,9 @@ package twilio
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,10 +59,7 @@ func (b *fakeRealtimeBackend) emitEvery(t *testing.T, interval time.Duration, ev
 		t.Fatal("backend has no connection to emit on — call waitBackendReady first")
 	}
 
-	done := make(chan struct{})
-	t.Cleanup(func() { close(done) })
-
-	go func() {
+	goJoined(t, func(done <-chan struct{}) {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -75,7 +74,7 @@ func (b *fakeRealtimeBackend) emitEvery(t *testing.T, interval time.Duration, ev
 				}
 			}
 		}
-	}()
+	})
 }
 
 // waitBackendReady drives one carrier frame through to the backend and waits
@@ -200,12 +199,10 @@ func TestHandleStreamRealtime_IdleTimeoutDoesNotFireOnUnmodelledBackendEventOnly
 // write error, and the carrier socket closing at the end of the run is expected
 // rather than a failure. It touches no *testing.T method, so it cannot panic by
 // logging after the test returns; t.Cleanup runs LIFO, so this stop fires
-// before the harness's own conn close, which was registered first.
+// before the harness's own conn close, which was registered first, and the
+// cleanup then waits for the goroutine to return (see goJoined).
 func emitCarrierEvery(t *testing.T, h *realtimeHarness, interval, initialDelay time.Duration) {
 	t.Helper()
-
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
 
 	send := func() bool {
 		err := h.conn.Write(context.Background(), websocket.MessageText,
@@ -213,7 +210,7 @@ func emitCarrierEvery(t *testing.T, h *realtimeHarness, interval, initialDelay t
 		return err == nil
 	}
 
-	go func() {
+	goJoined(t, func(stop <-chan struct{}) {
 		if initialDelay > 0 {
 			select {
 			case <-stop:
@@ -236,7 +233,7 @@ func emitCarrierEvery(t *testing.T, h *realtimeHarness, interval, initialDelay t
 				}
 			}
 		}
-	}()
+	})
 }
 
 // TestHandleStreamRealtime_IdleTimeoutClosesCarrierConnection pins the half of
@@ -329,5 +326,94 @@ func TestHandleStreamRealtime_StopFrameEndsCallWhileIdleTimeoutArmed(t *testing.
 
 	if err := h.waitDone(5 * time.Second); err != nil {
 		t.Fatalf("a stop frame must end the call cleanly even with an idle timeout armed, got error: %v", err)
+	}
+}
+
+// joinT is the slice of *testing.T that goJoined uses, so a test can drive its
+// cleanup by hand and observe the stall report.
+type joinT interface {
+	Helper()
+	Cleanup(func())
+	Errorf(format string, args ...any)
+}
+
+// goJoinBound is how long goJoined's cleanup waits for the goroutine. It is a
+// stall detector, not a settle delay: a goroutine that exits is joined at once.
+var goJoinBound = 5 * time.Second
+
+// goJoined runs run on its own goroutine and registers one cleanup that closes
+// stop and then waits, up to goJoinBound, for run to return, so the goroutine
+// cannot outlive the test and allocate into a later one (AATK-95). A stall is
+// reported with Errorf rather than hanging the suite.
+func goJoined(t joinT, run func(stop <-chan struct{})) {
+	t.Helper()
+	stop := make(chan struct{})
+	exited := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		select {
+		case <-exited:
+		case <-time.After(goJoinBound):
+			t.Errorf("goroutine did not exit within %v of the test ending", goJoinBound)
+		}
+	})
+	go func() {
+		defer close(exited)
+		run(stop)
+	}()
+}
+
+func TestGoJoined_CleanupWaitsForGoroutineExit(t *testing.T) {
+	var finished atomic.Bool
+	t.Run("inner", func(t *testing.T) {
+		goJoined(t, func(stop <-chan struct{}) {
+			<-stop
+			// A late peer: the goroutine is still working after the test
+			// body has returned and stop has fired.
+			hold := make(chan struct{})
+			time.AfterFunc(50*time.Millisecond, func() { close(hold) })
+			<-hold
+			finished.Store(true)
+		})
+	})
+	if !finished.Load() {
+		t.Fatal("goroutine still running after the subtest returned: cleanup did not join it")
+	}
+}
+
+// fakeCleanupT records Cleanup funcs and Errorf calls without a real test.
+type fakeCleanupT struct {
+	cleanups []func()
+	errs     []string
+}
+
+func (f *fakeCleanupT) Helper()                   {}
+func (f *fakeCleanupT) Cleanup(fn func())         { f.cleanups = append(f.cleanups, fn) }
+func (f *fakeCleanupT) Errorf(s string, a ...any) { f.errs = append(f.errs, fmt.Sprintf(s, a...)) }
+
+func TestGoJoined_ReportsStallInsteadOfHanging(t *testing.T) {
+	old := goJoinBound
+	goJoinBound = 50 * time.Millisecond
+	t.Cleanup(func() { goJoinBound = old })
+
+	release := make(chan struct{})
+	defer close(release)
+	ft := &fakeCleanupT{}
+	goJoined(ft, func(stop <-chan struct{}) { <-release })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, fn := range ft.cleanups {
+			fn()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup hung on a goroutine that never exits instead of reporting a stall")
+	}
+	if len(ft.errs) != 1 {
+		t.Fatalf("stall reports = %v, want exactly one", ft.errs)
 	}
 }
