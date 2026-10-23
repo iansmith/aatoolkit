@@ -40,6 +40,46 @@ func freeTCPPort(t *testing.T) int {
 	return port
 }
 
+// smsStallBound is how long the SMS round-trip tests wait on a path that a
+// correct run finishes in milliseconds. It is a failure detector for a stalled
+// capture or webhook path, not a sleep, and sits far below defaultCaptureWait
+// so it trips before runSMS's own reply timer. It equals smsfake's test-side
+// SubscribeWait by choice, not by derivation: that constant lives in smsfake's
+// export_test.go and cannot be imported here.
+const smsStallBound = 5 * time.Second
+
+// smsBound returns what makes a capture handler that stalls on its request
+// context fail a test within about smsStallBound instead of hanging until go
+// test's own timeout: a context with a deadline for runSMS, and a client with
+// a Timeout for the stub HandleSMS's RESTClient. The context is the bound that
+// matters: smsfake.PostWebhook posts on http.DefaultClient and takes only a
+// context, and without it a stalled handler runs the test out to runSMS's own
+// 35s reply timer. The client Timeout is a second limit on the stub's
+// SendSMS; with the context in place the stub is released either way. Neither
+// bounds a handler that ignores its request context (the deferred server
+// Close then waits on it) or one that stalls while holding the capture
+// server's lock, and neither covers the other tests in this file. The client
+// uses the default Transport and never touches http.DefaultClient.
+func smsBound(t *testing.T) (*http.Client, context.Context) {
+	t.Helper()
+	return &http.Client{Timeout: smsStallBound}, dialCtx(t, smsStallBound)
+}
+
+// receiveWithin receives from ch, failing the calling test (by name) if
+// nothing arrives within smsStallBound. Call it from the test goroutine only.
+// It duplicates smsfake.ReceiveWithin only because that helper is test-only
+// in another package.
+func receiveWithin[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(smsStallBound):
+		t.Fatalf("%s: no %s within %s", t.Name(), what, smsStallBound)
+		panic("unreachable")
+	}
+}
+
 // TestTwilioCLI_SMSRoundTrip pins AATK-23's observable behaviors: the SMS mode
 // posts a correctly-signed inbound-SMS webhook to the server's /sms/inbound
 // route, the server's stub HandleSMS replies via a RESTClient pointed at the
@@ -57,9 +97,11 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 	}
 	defer capture.Close()
 
+	client, ctx := smsBound(t)
 	rest := &twilio.RESTClient{
 		AccountSID: smsfake.DefaultAccountSID,
 		BaseURL:    capture.URL,
+		HTTPClient: client,
 	}
 
 	// Buffered by one and read with a timeout below, because HandleSMS is
@@ -84,7 +126,7 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 	defer ts.Close()
 
 	webhookURL := ts.URL + "/sms/inbound"
-	if _, err := runSMS(context.Background(), webhookURL, authToken, from, to, body, capture); err != nil {
+	if _, err := runSMS(ctx, webhookURL, authToken, from, to, body, capture); err != nil {
 		t.Fatalf("runSMS: %v", err)
 	}
 
@@ -109,7 +151,7 @@ func TestTwilioCLI_SMSRoundTrip(t *testing.T) {
 		if !strings.HasPrefix(sid, "SM") {
 			t.Errorf("SendSMS returned message SID %q, want the capture server's SM-prefixed id — the fake's response shape and SendSMS's parse have diverged", sid)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(smsStallBound):
 		t.Error("HandleSMS never reported a message SID")
 	}
 }
@@ -165,7 +207,8 @@ func TestRunSMS_PostsTheDefaultsOnTheWire(t *testing.T) {
 	}
 	defer capture.Close()
 
-	rest := &twilio.RESTClient{AccountSID: smsfake.DefaultAccountSID, BaseURL: capture.URL}
+	client, ctx := smsBound(t)
+	rest := &twilio.RESTClient{AccountSID: smsfake.DefaultAccountSID, BaseURL: capture.URL, HTTPClient: client}
 	srv := &twilio.Server{
 		AuthToken:    authToken,
 		StreamScheme: "ws",
@@ -184,10 +227,10 @@ func TestRunSMS_PostsTheDefaultsOnTheWire(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	if _, err := runSMS(context.Background(), ts.URL+"/sms/inbound", authToken, from, to, body, capture); err != nil {
+	if _, err := runSMS(ctx, ts.URL+"/sms/inbound", authToken, from, to, body, capture); err != nil {
 		t.Fatalf("runSMS: %v", err)
 	}
-	form := <-posted
+	form := receiveWithin(t, posted, "posted form")
 
 	if got := form.Get("AccountSid"); got != smsfake.DefaultAccountSID {
 		t.Errorf("posted AccountSid = %q, want smsfake.DefaultAccountSID %q", got, smsfake.DefaultAccountSID)
@@ -217,10 +260,10 @@ func TestRunSMS_PostsTheDefaultsOnTheWire(t *testing.T) {
 		t.Errorf("posted form has %d fields, want exactly the eight above: %v", got, form)
 	}
 
-	if _, err := runSMS(context.Background(), ts.URL+"/sms/inbound", authToken, from, to, body, capture); err != nil {
+	if _, err := runSMS(ctx, ts.URL+"/sms/inbound", authToken, from, to, body, capture); err != nil {
 		t.Fatalf("second runSMS: %v", err)
 	}
-	if again := (<-posted).Get("MessageSid"); again == sid {
+	if again := receiveWithin(t, posted, "second posted form").Get("MessageSid"); again == sid {
 		t.Errorf("two runSMS calls both posted MessageSid %q, want a fresh SID per call", sid)
 	}
 }
