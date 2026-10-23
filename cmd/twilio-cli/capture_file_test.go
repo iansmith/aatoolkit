@@ -181,14 +181,14 @@ func TestResolveAudioPath(t *testing.T) {
 	})
 
 	t.Run("relative path resolves against the process working directory", func(t *testing.T) {
-		// The test process's cwd is the package dir. A relative name that exists
-		// there must be accepted; the same name is not expected to exist at the
-		// repo root, which is what the out-of-root subprocess test pins.
+		// The cwd is a fresh temp dir holding the fixture, so the bare name
+		// resolves only because of the chdir; nothing is written to the package dir.
 		rel := "aatk56_relcheck.ulaw"
-		if err := os.WriteFile(rel, make([]byte, muLawFrame20ms), 0o644); err != nil {
+		relDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(relDir, rel), make([]byte, muLawFrame20ms), 0o644); err != nil {
 			t.Fatalf("write relative fixture: %v", err)
 		}
-		t.Cleanup(func() { os.Remove(rel) })
+		t.Chdir(relDir)
 
 		if _, err := resolveAudioPath(rel); err != nil {
 			t.Errorf("resolveAudioPath(%q): got %v, want nil — a relative path must resolve against the process working directory", rel, err)
@@ -623,10 +623,11 @@ func TestResolveAudioPath_ReturnedPathOpensToTheSameFile(t *testing.T) {
 	content := []byte("aatk56-distinctive-bytes-for-identity-check")
 
 	rel := "aatk56_identity.ulaw"
-	if err := os.WriteFile(rel, content, 0o644); err != nil {
+	relDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(relDir, rel), content, 0o644); err != nil {
 		t.Fatalf("write relative fixture: %v", err)
 	}
-	t.Cleanup(func() { os.Remove(rel) })
+	t.Chdir(relDir)
 
 	got, err := resolveAudioPath(rel)
 	if err != nil {
