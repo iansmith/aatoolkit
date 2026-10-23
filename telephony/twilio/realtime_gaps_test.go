@@ -117,7 +117,17 @@ func awaitAppends(t *testing.T, be *fakeRealtimeBackend, n int, d time.Duration)
 }
 
 // appendWaitFailure builds awaitAppends' failure text from what the backend and
-// the harness's handler observed.
+// the harness's handler observed. The original text is an exact prefix. Each
+// error the handler returned is appended, since a failed dial is returned
+// unwrapped; with none, a backend that never saw a connection says so, which
+// separates "never dialed" from "connected but no appends".
 func appendWaitFailure(got, want, conns int, errs []error) string {
-	return fmt.Sprintf("backend received %d of %d expected appends before deadline", got, want)
+	msg := fmt.Sprintf("backend received %d of %d expected appends before deadline", got, want)
+	for _, err := range errs {
+		msg += "; stream handler returned: " + err.Error()
+	}
+	if len(errs) == 0 && conns == 0 {
+		msg += "; no backend connection was made"
+	}
+	return msg
 }
