@@ -323,6 +323,44 @@ type realtimeHarness struct {
 	done      chan error
 }
 
+// handlerErrLog records every error a harness's stream handler returned, so a
+// wait that times out can name the cause. It records rather than consumes:
+// the single buffered value on realtimeHarness.done stays for waitDone.
+type handlerErrLog struct {
+	mu   sync.Mutex
+	errs []error
+}
+
+// record keeps err; a nil error (a clean return) is not a cause and is dropped.
+func (l *handlerErrLog) record(err error) {
+	if err == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.errs = append(l.errs, err)
+}
+
+// snapshot returns a copy of the recorded errors.
+func (l *handlerErrLog) snapshot() []error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]error(nil), l.errs...)
+}
+
+// harnessErrLogs maps a test to the handlerErrLog of the harness it built, so
+// the wait helpers, which receive only the *testing.T, can read it.
+var harnessErrLogs sync.Map // *testing.T -> *handlerErrLog
+
+// harnessHandlerErrs returns the errors the stream handler of t's harness has
+// returned so far, or nil when t built no harness.
+func harnessHandlerErrs(t *testing.T) []error {
+	if l, ok := harnessErrLogs.Load(t); ok {
+		return l.(*handlerErrLog).snapshot()
+	}
+	return nil
+}
+
 func newRealtimeHarness(t *testing.T, realtimeURL string) *realtimeHarness {
 	t.Helper()
 	return newRealtimeHarnessWith(t, NewStreamHandler(realtimeURL))
@@ -340,9 +378,17 @@ func newRealtimeHarnessWith(t *testing.T, handle StreamHandler) *realtimeHarness
 		done:      make(chan error, 1),
 	}
 
+	// Registered before ts.Close's cleanup so that, cleanups running last-in
+	// first-out, it runs after the server is closed.
+	l := &handlerErrLog{}
+	actual, _ := harnessErrLogs.LoadOrStore(t, l)
+	l = actual.(*handlerErrLog)
+	t.Cleanup(func() { harnessErrLogs.Delete(t) })
+
 	srv := &Server{
 		HandleStream: func(ctx context.Context, conn *websocket.Conn, start Frame) error {
 			err := handle(ctx, conn, start)
+			l.record(err)
 			h.done <- err
 			return err
 		},

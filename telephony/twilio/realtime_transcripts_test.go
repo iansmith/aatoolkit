@@ -219,6 +219,17 @@ func TestTranscriptChan_AbsentConsumerIsTodaysDrain(t *testing.T) {
 	assertStillRunning(t, h, "an absent consumer must leave the call exactly as it was")
 }
 
+// conditionNeverHeld is waitFor's failure text: the original sentence, then
+// each error t's harness handler has returned, so a call that already ended
+// names why.
+func conditionNeverHeld(t *testing.T) string {
+	msg := "condition never held within the deadline"
+	for _, err := range harnessHandlerErrs(t) {
+		msg += "; stream handler returned: " + err.Error()
+	}
+	return msg
+}
+
 // waitFor polls cond until it holds or the deadline passes.
 func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 	t.Helper()
@@ -229,7 +240,7 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 		}
 		select {
 		case <-deadline:
-			t.Fatal("condition never held within the deadline")
+			t.Fatal(conditionNeverHeld(t))
 		case <-time.After(5 * time.Millisecond):
 		}
 	}

@@ -2,6 +2,8 @@ package twilio
 
 import (
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -90,17 +92,42 @@ func encodeFrameOf(t *testing.T, b byte) string {
 // as an ordering failure.
 func waitForAppends(t *testing.T, be *fakeRealtimeBackend, n int, d time.Duration) []string {
 	t.Helper()
+	got, err := awaitAppends(t, be, n, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// awaitAppends is waitForAppends' poll loop, returning the failure instead of
+// failing t, so a test can read the message. t is only the key that finds the
+// harness's recorded handler errors.
+func awaitAppends(t *testing.T, be *fakeRealtimeBackend, n int, d time.Duration) ([]string, error) {
 	deadline := time.After(d)
 	for {
 		if got := be.appendedAudio(); len(got) >= n {
-			return got
+			return got, nil
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("backend received %d of %d expected appends before deadline",
-				len(be.appendedAudio()), n)
-			return nil
+			return nil, errors.New(appendWaitFailure(len(be.appendedAudio()), n, be.connCount(), harnessHandlerErrs(t)))
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+// appendWaitFailure builds awaitAppends' failure text from what the backend and
+// the harness's handler observed. The original text is an exact prefix. Each
+// error the handler returned is appended, since a failed dial is returned
+// unwrapped; with none, a backend that never saw a connection says so, which
+// separates "never dialed" from "connected but no appends".
+func appendWaitFailure(got, want, conns int, errs []error) string {
+	msg := fmt.Sprintf("backend received %d of %d expected appends before deadline", got, want)
+	for _, err := range errs {
+		msg += "; stream handler returned: " + err.Error()
+	}
+	if len(errs) == 0 && conns == 0 {
+		msg += "; no backend connection was made"
+	}
+	return msg
 }
