@@ -219,6 +219,11 @@ func TestTranscriptChan_AbsentConsumerIsTodaysDrain(t *testing.T) {
 	assertStillRunning(t, h, "an absent consumer must leave the call exactly as it was")
 }
 
+// conditionNeverHeld is waitFor's failure text.
+func conditionNeverHeld(t *testing.T) string {
+	return "condition never held within the deadline"
+}
+
 // waitFor polls cond until it holds or the deadline passes.
 func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 	t.Helper()
@@ -229,7 +234,7 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 		}
 		select {
 		case <-deadline:
-			t.Fatal("condition never held within the deadline")
+			t.Fatal(conditionNeverHeld(t))
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
