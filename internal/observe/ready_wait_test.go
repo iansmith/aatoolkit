@@ -113,3 +113,40 @@ func TestAwaitReady_ReadyLine_ReturnsNil(t *testing.T) {
 		t.Fatalf("awaitReady: %v", err)
 	}
 }
+
+// oldFixtureReadyWait is the fixed ready-wait the spawn helpers used before
+// fixtureReadyTimeout replaced it.
+const oldFixtureReadyWait = 5 * time.Second
+
+// TestStartFixture_ReadyAfterOldBound_Succeeds drives the real spawn path,
+// startFixture, with a child that prints ready only after oldFixtureReadyWait
+// has passed. It goes red if startFixture's wait is cut back to the old 5s,
+// whether by passing 5s or by an inline wait in place of fixtureReadyTimeout.
+// It pins "longer than the old bound", not the exact 30s value.
+func TestStartFixture_ReadyAfterOldBound_Succeeds(t *testing.T) {
+	delay := oldFixtureReadyWait + time.Second
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep %d; echo ready; exec sleep 30", int(delay.Seconds())))
+
+	start := time.Now()
+	if _, err := startFixture(t, cmd); err != nil {
+		t.Fatalf("startFixture rejected a fixture ready after %s: %v", time.Since(start).Round(time.Millisecond), err)
+	}
+	if elapsed := time.Since(start); elapsed < oldFixtureReadyWait {
+		t.Fatalf("premise: ready arrived after %s, inside the old %s bound", elapsed, oldFixtureReadyWait)
+	}
+}
+
+// TestStartFixture_ExitWithoutReady_FailureNamesFixture checks the failure
+// text the real spawn path produces carries readyWaitLabel and the exit.
+func TestStartFixture_ExitWithoutReady_FailureNamesFixture(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 3")
+
+	f, err := startFixture(t, cmd)
+	if err == nil {
+		t.Fatal("startFixture returned nil for a fixture that exited without printing ready")
+	}
+	want := fmt.Sprintf("%s pid %d never signaled ready: child exited (exit status 3)", readyWaitLabel, f.pid)
+	if !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("message %q does not start with %q", err.Error(), want)
+	}
+}
