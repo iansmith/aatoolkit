@@ -149,7 +149,21 @@ func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool, childPort
 	if childPort != 0 {
 		args = append(args, "-child-port", strconv.Itoa(childPort))
 	}
-	cmd := exec.Command(bin, args...)
+	f, err := startFixture(t, exec.Command(bin, args...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// startFixture starts cmd in its own process group with its stdout piped and
+// its stderr on the test's, registers a group-kill cleanup, and waits up to
+// fixtureReadyTimeout for its "ready" line. It returns awaitReady's error,
+// labelled readyWaitLabel; a StdoutPipe or Start failure is fatal. Every
+// fixture spawn in this package goes through it, so the ready-wait bound and
+// label live here once.
+func startFixture(t *testing.T, cmd *exec.Cmd) (*foreignProc, error) {
+	t.Helper()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = os.Stderr
 
@@ -158,7 +172,7 @@ func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool, childPort
 		t.Fatalf("StdoutPipe: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start foreign listener: %v", err)
+		t.Fatalf("start %s: %v", readyWaitLabel, err)
 	}
 
 	f := &foreignProc{cmd: cmd, pid: int32(cmd.Process.Pid)}
@@ -166,10 +180,7 @@ func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool, childPort
 	// Registered before the wait so a fixture that never signals ready is
 	// group-killed rather than left holding its process group and port.
 	t.Cleanup(f.forceKill)
-	if err := awaitReady("foreign listener", cmd, stdout, fixtureReadyTimeout); err != nil {
-		t.Fatal(err)
-	}
-	return f
+	return f, awaitReady(readyWaitLabel, cmd, stdout, fixtureReadyTimeout)
 }
 
 // spawnForeignListenerWithChild is spawnForeignListener plus the fixture's
@@ -242,6 +253,10 @@ func waitForTreePort(t *testing.T, rootPID int32, wantPort int, timeout time.Dur
 // deliberately far above the old 5s. Why start-up was slow on a loaded host has
 // not been measured, so no cause is asserted here.
 const fixtureReadyTimeout = 30 * time.Second
+
+// readyWaitLabel names the fixture in startFixture's failure text, which reads
+// "<label> pid N never signaled ready...".
+const readyWaitLabel = "foreign listener"
 
 // awaitReady waits until stdout yields the exact line "ready", the child
 // exits, or timeout elapses, and returns nil only for the first. The error

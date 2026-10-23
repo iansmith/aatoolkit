@@ -103,36 +103,46 @@ func spawnListenerTree(t *testing.T, port, childPort, grandchildPort int, transi
 	if transientChild {
 		args = append(args, "-transient-child")
 	}
-	cmd := exec.Command(bin, args...)
-	// Own process group so the test can group-kill without touching the
-	// test binary's own group.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("StdoutPipe: %v", err)
-	}
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start listener fixture: %v", err)
-	}
-
-	sl := &spawnedListener{cmd: cmd, pid: int32(cmd.Process.Pid), port: port}
-
-	// Registered before the wait so a fixture that never signals ready is
-	// group-killed rather than left holding its process group and ports.
-	t.Cleanup(func() { sl.kill(t) })
-
 	// Wait for the fixture's readiness line so the test doesn't race the
 	// listener's bind (and, if a child was requested, the child's own
 	// bind — the parent only prints "ready" after starting the child, but
 	// the child's own bind happens asynchronously, so callers that need the
 	// child port ready should additionally poll waitForPort).
-	if err := awaitReady("listener fixture", cmd, stdout, fixtureReadyTimeout); err != nil {
+	sl, err := startFixture(t, exec.Command(bin, args...))
+	if err != nil {
 		t.Fatal(err)
 	}
+	sl.port = port
 	return sl
+}
+
+// startFixture starts cmd in its own process group (so the test can
+// group-kill without touching the test binary's own group) with its stdout
+// piped and its stderr on the test's, registers a group-kill cleanup, and
+// waits up to fixtureReadyTimeout for its "ready" line. It returns
+// awaitReady's error, labelled readyWaitLabel; a StdoutPipe or Start failure
+// is fatal. The returned spawnedListener's port is left for the caller to set.
+// Every fixture spawn in this package goes through it, so the ready-wait bound
+// and label live here once.
+func startFixture(t *testing.T, cmd *exec.Cmd) (*spawnedListener, error) {
+	t.Helper()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stderr = os.Stderr
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %s: %v", readyWaitLabel, err)
+	}
+
+	sl := &spawnedListener{cmd: cmd, pid: int32(cmd.Process.Pid)}
+
+	// Registered before the wait so a fixture that never signals ready is
+	// group-killed rather than left holding its process group and ports.
+	t.Cleanup(func() { sl.kill(t) })
+	return sl, awaitReady(readyWaitLabel, cmd, stdout, fixtureReadyTimeout)
 }
 
 func (sl *spawnedListener) kill(t *testing.T) {
@@ -181,6 +191,10 @@ func waitForListenSet(t *testing.T, query func(int32) (observe.TreeObservation, 
 // deliberately far above the old 5s. Why start-up was slow on a loaded host has
 // not been measured, so no cause is asserted here.
 const fixtureReadyTimeout = 30 * time.Second
+
+// readyWaitLabel names the fixture in startFixture's failure text, which reads
+// "<label> pid N never signaled ready...".
+const readyWaitLabel = "listener fixture"
 
 // awaitReady waits until stdout yields the exact line "ready", the child
 // exits, or timeout elapses, and returns nil only for the first. The error

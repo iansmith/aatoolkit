@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-// readyWaitLabel is the label the cmd package's spawn helper passes to
-// awaitReady; the failure text is "<label> pid N never signaled ready...".
-const readyWaitLabel = "foreign listener"
-
 // readyWaitGuard is a fixed anti-hang limit for the tests below. It is far
 // above every injected bound, so it only fires when awaitReady fails to
 // return at all; it is not a timing assertion on a healthy run.
