@@ -246,3 +246,26 @@ func waitForTreePort(t *testing.T, rootPID int32, wantPort int, timeout time.Dur
 	t.Fatalf("port %d never observed listening under root pid %d within %s", wantPort, rootPID, timeout)
 	return 0
 }
+
+// fixtureReadyTimeout PLACEHOLDER.
+const fixtureReadyTimeout = 5 * time.Second
+
+// awaitReady PLACEHOLDER (old behaviour).
+func awaitReady(label string, cmd *exec.Cmd, stdout io.Reader, timeout time.Duration) error {
+	done := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			if scanner.Text() == "ready" {
+				close(done)
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("%s pid %d never signaled ready", label, cmd.Process.Pid)
+	}
+}
