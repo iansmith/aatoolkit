@@ -120,9 +120,9 @@ const oldFixtureReadyWait = 5 * time.Second
 
 // TestStartFixture_ReadyAfterOldBound_Succeeds drives the real spawn path,
 // startFixture, with a child that prints ready only after oldFixtureReadyWait
-// has passed. It goes red if startFixture's wait is cut back to the old 5s,
-// whether by passing 5s or by an inline wait in place of fixtureReadyTimeout.
-// It pins "longer than the old bound", not the exact 30s value.
+// has passed. It goes red if startFixture's wait is cut to the child's 6s delay
+// or less, the old 5s included. It pins "longer than the old bound", not the
+// exact 30s value, and not that startFixture uses fixtureReadyTimeout.
 func TestStartFixture_ReadyAfterOldBound_Succeeds(t *testing.T) {
 	delay := oldFixtureReadyWait + time.Second
 	cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep %d; echo ready; exec sleep 30", int(delay.Seconds())))
