@@ -160,6 +160,61 @@ func TestServeHTTP_RefusedCallTakesNoPendingSlot(t *testing.T) {
 			wantBody:  `<Response><Say>` + say + `</Say><Hangup/></Response>`,
 			wantAsked: 1,
 		},
+		// AATK-162: an unanswered refusal takes no slot either. In these rows
+		// asked counts RejectCall.
+		{
+			name: "RejectCall rejects",
+			server: func(asked *int) *Server {
+				return &Server{
+					AuthToken: "authtoken",
+					RejectCall: func(context.Context, string, string) (RejectReason, bool) {
+						*asked++
+						return "", true
+					},
+				}
+			},
+			form:      url.Values{"From": {pendingFrom(1)}, "To": {pendingTo}, "CallSid": {pendingSID(1)}},
+			signWith:  "authtoken",
+			wantCode:  http.StatusOK,
+			wantBody:  `<Response><Reject/></Response>`,
+			wantAsked: 1,
+		},
+		{
+			name: "RejectCall rejects busy",
+			server: func(asked *int) *Server {
+				return &Server{
+					AuthToken: "authtoken",
+					RejectCall: func(context.Context, string, string) (RejectReason, bool) {
+						*asked++
+						return RejectReasonBusy, true
+					},
+				}
+			},
+			form:      url.Values{"From": {pendingFrom(1)}, "To": {pendingTo}, "CallSid": {pendingSID(1)}},
+			signWith:  "authtoken",
+			wantCode:  http.StatusOK,
+			wantBody:  `<Response><Reject reason="busy"/></Response>`,
+			wantAsked: 1,
+		},
+		{
+			name: "Authorize refuses with VoiceRejectReason",
+			server: func(asked *int) *Server {
+				return &Server{
+					AuthToken:         "authtoken",
+					Authorize:         func(string) bool { return false },
+					VoiceRejectText:   "no",
+					VoiceRejectReason: RejectReasonRejected,
+					RejectCall: func(context.Context, string, string) (RejectReason, bool) {
+						*asked++
+						return "", true
+					},
+				}
+			},
+			form:     url.Values{"From": {pendingFrom(1)}, "To": {pendingTo}, "CallSid": {pendingSID(1)}},
+			signWith: "authtoken",
+			wantCode: http.StatusOK,
+			wantBody: `<Response><Reject/></Response>`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var asked int
@@ -168,7 +223,7 @@ func TestServeHTTP_RefusedCallTakesNoPendingSlot(t *testing.T) {
 			s.ServeHTTP(w, signedVoiceWebhook(tc.signWith, tc.form))
 
 			if w.Code != tc.wantCode || w.Body.String() != tc.wantBody || asked != tc.wantAsked {
-				t.Fatalf("status %d body %q, AnswerCall asked %d times; want %d %q, %d",
+				t.Fatalf("status %d body %q, hook asked %d times; want %d %q, %d",
 					w.Code, w.Body.String(), asked, tc.wantCode, tc.wantBody, tc.wantAsked)
 			}
 			requirePendingSize(t, s, 0)
@@ -185,6 +240,34 @@ func TestServeHTTP_StreamedCallTakesPendingSlot(t *testing.T) {
 	s := &Server{
 		AuthToken: "authtoken",
 		Authorize: func(string) bool { return true },
+		AnswerCall: func(context.Context, string, string) (string, bool) {
+			return "", false
+		},
+	}
+	form := url.Values{"From": {pendingFrom(1)}, "To": {pendingTo}, "CallSid": {pendingSID(1)}}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, signedVoiceWebhook("authtoken", form))
+
+	want := `<Response><Connect><Stream url="wss://example.com/streams"/></Connect></Response>`
+	if w.Code != http.StatusOK || w.Body.String() != want {
+		t.Fatalf("status %d body %q, want 200 %q", w.Code, w.Body.String(), want)
+	}
+	requirePendingSize(t, s, 1)
+	requirePending(t, s, pendingSID(1), pendingFrom(1), pendingTo)
+}
+
+// The control for the unanswered refusal rows above: with VoiceRejectReason
+// set and RejectCall letting the call through, a call answered with a stream
+// still takes a slot, holding its From and To. Without this, those rows would
+// pass on a ServeHTTP that skipped recording whenever a reject option was set.
+func TestServeHTTP_RejectOptionsSetStreamedCallTakesPendingSlot(t *testing.T) {
+	s := &Server{
+		AuthToken:         "authtoken",
+		Authorize:         func(string) bool { return true },
+		VoiceRejectReason: RejectReasonBusy,
+		RejectCall: func(context.Context, string, string) (RejectReason, bool) {
+			return RejectReasonBusy, false
+		},
 		AnswerCall: func(context.Context, string, string) (string, bool) {
 			return "", false
 		},
