@@ -169,9 +169,8 @@ func TestServeHTTP_SpokenRefusalBytesUnchanged(t *testing.T) {
 	}
 }
 
-// injectedReason is a reason that would break out of the attribute, and add
-// a <Say> that answers the call, if a reason value were ever written into the
-// document.
+// injectedReason is a reason that would break out of the attribute and add
+// a <Say> to the document, if a reason value were ever written into it.
 const injectedReason = twilio.RejectReason(`busy"/><Say>x</Say><Reject reason="busy`)
 
 // A rejecting RejectCall writes <Reject> as the first and only verb: the

@@ -81,11 +81,11 @@ type SMSStatus struct {
 type SMSStatusHandler func(ctx context.Context, status SMSStatus)
 
 // RejectReason is the reason attribute of TwiML's <Reject> verb, which
-// ServeHTTP writes when a voice call is refused unanswered (see RejectCall and
-// Server.VoiceRejectReason). With <Reject> as the first verb Twilio does not
-// answer the call, so it is not billed; it still appears in the call log.
-// Twilio takes two reasons: RejectReasonRejected, its default, and
-// RejectReasonBusy.
+// ServeHTTP writes when a voice call is refused unanswered (see
+// Server.RejectCall and Server.VoiceRejectReason). With <Reject> as the first
+// verb Twilio does not answer the call, so it is not billed; it still appears
+// in the call log. Twilio takes two reasons: RejectReasonRejected, its
+// default, and RejectReasonBusy.
 //
 // Only an exact RejectReasonBusy writes <Reject reason="busy"/>. Every other
 // value — "", RejectReasonRejected, or anything outside the two — writes a
@@ -143,9 +143,9 @@ type Server struct {
 	VoiceRejectText string
 	SMSRejectText   string
 
-	// VoiceRejectReason, if set, refuses a voice call that Authorize turns
-	// away unanswered: ServeHTTP writes <Reject/> (<Reject reason="busy"/>
-	// for RejectReasonBusy; see RejectReason) as the first and only verb, and
+	// VoiceRejectReason, if set, makes Authorize's refusal of a voice call
+	// unanswered: ServeHTTP writes <Reject/> (<Reject reason="busy"/> for
+	// RejectReasonBusy; see RejectReason) as the first and only verb, and
 	// VoiceRejectText is not used. The zero value "" keeps the spoken
 	// VoiceRejectText refusal byte for byte, so a Server built before this
 	// field existed behaves exactly as it did. It is read only when Authorize
