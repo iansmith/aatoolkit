@@ -102,7 +102,7 @@ func resolveTwilioServerConfig(opts []TwilioServerOption) twilioServerConfig {
 //     handler, such as a model call started in a goroutine, must run under
 //     context.WithoutCancel(ctx), which keeps the values (the span parent
 //     among them) and drops the cancellation. The same holds for the ctx
-//     HandleSMSStatus and AnswerCall receive.
+//     HandleSMSStatus, RejectCall and AnswerCall receive.
 //   - With otelhttp, pass otelhttp.WithPublicEndpointFn returning true
 //     (current otelhttp releases no longer have WithPublicEndpoint): these
 //     requests come from the provider, not from a traced caller, so a trace

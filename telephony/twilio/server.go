@@ -80,6 +80,36 @@ type SMSStatus struct {
 // reading absence as failure would manufacture failures that did not happen.
 type SMSStatusHandler func(ctx context.Context, status SMSStatus)
 
+// RejectReason is the reason attribute of TwiML's <Reject> verb, which
+// ServeHTTP writes when a voice call is refused unanswered (see
+// Server.RejectCall and Server.VoiceRejectReason). With <Reject> as the first
+// verb Twilio does not answer the call, so it is not billed; it still appears
+// in the call log. Twilio takes two reasons: RejectReasonRejected, its
+// default, and RejectReasonBusy.
+//
+// Once a call is refused unanswered, only an exact RejectReasonBusy writes
+// <Reject reason="busy"/>. Every other value — RejectReasonRejected, anything
+// outside the two, or "" returned by RejectCall alongside reject=true — writes
+// a plain <Reject/>, so no other value can reach the document. A typo such as
+// "Busy" is therefore still refused unanswered, as a plain rejection, and
+// nothing reports it.
+//
+// On Server.VoiceRejectReason, "" (the zero value) does not mean a plain
+// <Reject/>: it means Authorize's refusal is not unanswered at all and stays
+// the spoken <Say>…</Say><Hangup/>. Set RejectReasonRejected there for a plain
+// <Reject/>.
+type RejectReason string
+
+const (
+	// RejectReasonRejected is Twilio's default reason. It writes a plain
+	// <Reject/>: the default needs no attribute, so this value never reaches
+	// the document.
+	RejectReasonRejected RejectReason = "rejected"
+
+	// RejectReasonBusy writes <Reject reason="busy"/>.
+	RejectReasonBusy RejectReason = "busy"
+)
+
 // Server handles Twilio HTTP webhook requests and WebSocket Media Streams connections.
 // Set AuthToken to the Twilio auth token for the account; every inbound webhook
 // request is validated against the X-Twilio-Signature header before processing.
@@ -113,9 +143,22 @@ type Server struct {
 
 	// VoiceRejectText and SMSRejectText are the caller-facing rejection
 	// wording for an unauthorized voice call / SMS, respectively. Injected by
-	// the consumer — the engine never hard-codes rejection copy.
+	// the consumer — the engine never hard-codes rejection copy. The voice
+	// refusal is spoken (<Say>, then <Hangup/>), which answers the call;
+	// VoiceRejectReason refuses it unanswered instead.
 	VoiceRejectText string
 	SMSRejectText   string
+
+	// VoiceRejectReason, if set, makes Authorize's refusal of a voice call
+	// unanswered: ServeHTTP writes <Reject/> (<Reject reason="busy"/> for
+	// RejectReasonBusy; see RejectReason) as the first and only verb, and
+	// VoiceRejectText is not used. The zero value "" keeps the spoken
+	// VoiceRejectText refusal byte for byte, so a Server built before this
+	// field existed behaves exactly as it did. It is read only when Authorize
+	// refuses a voice call; with Authorize nil, or admitting the caller, it
+	// does nothing. Voice only: ServeSMS never reads it, and an SMS refusal
+	// is still SMSRejectText.
+	VoiceRejectReason RejectReason
 
 	// ReplyRouter, if set, is threaded onto each stream's context before
 	// HandleStream is called, letting a caller outside this package reach a
@@ -131,13 +174,29 @@ type Server struct {
 	// each. Returning refuse=true answers <Say>say</Say><Hangup/> and opens
 	// no stream; say is XML-escaped, and anything XML 1.0 cannot carry
 	// (invalid UTF-8, U+0000-U+001F other than tab, LF and CR, U+FFFE and
-	// U+FFFF) is dropped. It runs only for a call that passed signature
-	// validation, the E.164 From check and Authorize; an Authorize refusal
-	// wins and AnswerCall is never consulted. Nil keeps the stream answer
-	// unchanged. Voice only: ServeSMS never calls it, because InboundSMS
-	// already carries To. The engine holds no wording and no identity here;
-	// both belong to the consumer, as with Authorize.
+	// U+FFFF) is dropped. That refusal is spoken, so it answers the call;
+	// RejectCall refuses one unanswered. AnswerCall runs only for a call that
+	// passed signature validation, the E.164 From check, Authorize and
+	// RejectCall; an Authorize refusal or a RejectCall rejection wins and
+	// AnswerCall is never consulted. Nil keeps the stream answer unchanged.
+	// Voice only: ServeSMS never calls it, because InboundSMS already
+	// carries To. The engine holds no wording and no identity here; both
+	// belong to the consumer, as with Authorize.
 	AnswerCall func(ctx context.Context, from, to string) (say string, refuse bool)
+
+	// RejectCall, if set, decides per call whether to refuse it unanswered.
+	// It is handed the request's ctx and the same from and to as AnswerCall
+	// (to is "" when the webhook's To is missing or not E.164). Returning
+	// reject=true writes <Reject/> (<Reject reason="busy"/> for
+	// RejectReasonBusy; see RejectReason) as the first and only verb and
+	// opens no stream; AnswerCall is not consulted. Returning reject=false
+	// ignores reason, and the call goes on to AnswerCall. It runs only for a
+	// call that passed signature validation, the E.164 From check and
+	// Authorize; an Authorize refusal wins and RejectCall is never consulted.
+	// The webhook waits on it, so it should return promptly. Nil changes
+	// nothing. Voice only: ServeSMS never calls it. The engine holds no
+	// identity here; the decision belongs to the consumer, as with Authorize.
+	RejectCall func(ctx context.Context, from, to string) (reason RejectReason, reject bool)
 
 	fromMu    sync.Mutex
 	fromBySID map[string]callParties // CallSid -> From/To, bounded by maxPendingFrom
@@ -154,9 +213,11 @@ type callParties struct {
 // ServeStreams to thread onto the start Frame.
 //
 // ServeHTTP records only a call it answers with a stream; a call refused at
-// the webhook (signature, E.164 From, Authorize or AnswerCall) takes no
-// entry. Only eviction removes an entry: lookupCall reads it and leaves it
-// in place, so every recorded call holds its entry until it is evicted.
+// the webhook takes no entry, whether the signature or E.164 From check
+// refused it (403) or Authorize, RejectCall or AnswerCall did (spoken or
+// unanswered). Only eviction removes an entry: lookupCall reads it and
+// leaves it in place, so every recorded call holds its entry until it is
+// evicted.
 // Recording a new CallSid while the map holds maxPendingFrom evicts the
 // oldest, so a stream whose start frame arrives after maxPendingFrom newer
 // calls were recorded finds no entry, and its start Frame carries "" for
@@ -241,12 +302,21 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) bool {
 // request signature (403 on failure, including an empty AuthToken), then validates
 // the caller's E.164 From number (403 on failure), logs From and CallSid, and
 // responds with TwiML instructing Twilio to open the Media Streams WebSocket at
-// /streams — unless Authorize refuses the caller (VoiceRejectText) or
-// AnswerCall refuses the call (its own say text), each answered with
-// <Say>…</Say><Hangup/>. The dialed To reaches AnswerCall and the start Frame
-// only when it is E.164; otherwise it is "". Only a call answered with the
-// stream has its From and To recorded for ServeStreams (see maxPendingFrom);
-// a refused call records nothing.
+// /streams — unless the call is refused. Authorize, RejectCall and AnswerCall
+// are consulted in that order; the first to refuse answers the webhook, and
+// the rest are not consulted:
+//
+//   - Authorize refuses the caller: VoiceRejectText spoken as
+//     <Say>…</Say><Hangup/>, or, with VoiceRejectReason set, <Reject/>.
+//   - RejectCall rejects the call: <Reject/>.
+//   - AnswerCall refuses the call: its own say text, as <Say>…</Say><Hangup/>.
+//
+// A spoken refusal answers the call. <Reject/> (reason="busy" for
+// RejectReasonBusy) is written as the first and only verb, so Twilio does not
+// answer the call. The dialed To reaches RejectCall, AnswerCall and the start
+// Frame only when it is E.164; otherwise it is "". Only a call answered with
+// the stream has its From and To recorded for ServeStreams (see
+// maxPendingFrom); a refused call records nothing.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.authenticate(w, r) {
 		return
@@ -267,8 +337,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.Authorize != nil && !s.Authorize(from) {
-		writeVoiceRefusal(w, s.VoiceRejectText)
+		if s.VoiceRejectReason != "" {
+			writeVoiceReject(w, s.VoiceRejectReason)
+		} else {
+			writeVoiceRefusal(w, s.VoiceRejectText)
+		}
 		return
+	}
+
+	if s.RejectCall != nil {
+		if reason, reject := s.RejectCall(r.Context(), from, to); reject {
+			writeVoiceReject(w, reason)
+			return
+		}
 	}
 
 	if s.AnswerCall != nil {
@@ -319,12 +400,37 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeVoiceRefusal answers a voice webhook by speaking text (escaped by
-// escapeTwiML) and hanging up, opening no stream. One definition for both
-// refusals in ServeHTTP — Authorize's VoiceRejectText and AnswerCall's say —
-// so the two cannot drift into different documents.
+// escapeTwiML) and hanging up, opening no stream; the call is answered. One
+// definition for both spoken refusals in ServeHTTP — Authorize's
+// VoiceRejectText and AnswerCall's say — so the two cannot drift into
+// different documents. The unanswered refusal is writeVoiceReject.
 func writeVoiceRefusal(w http.ResponseWriter, text string) {
 	w.Header().Set("Content-Type", "text/xml")
 	fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, escapeTwiML(text))
+}
+
+// rejectTwiML and rejectBusyTwiML are the only two documents an unanswered
+// refusal can write: <Reject> as the first and only verb, with no reason
+// attribute for Twilio's default reason, or with reason="busy". Both are
+// constants, so no caller value can reach the document.
+const (
+	rejectTwiML     = `<Response><Reject/></Response>`
+	rejectBusyTwiML = `<Response><Reject reason="` + string(RejectReasonBusy) + `"/></Response>`
+)
+
+// writeVoiceReject answers a voice webhook with <Reject>, so Twilio does not
+// answer the call, and opens no stream. One definition for both unanswered
+// refusals in ServeHTTP — Authorize's VoiceRejectReason and RejectCall's
+// reason. Only an exact RejectReasonBusy writes rejectBusyTwiML; every other
+// reason writes rejectTwiML. Like writeVoiceRefusal it sets Content-Type
+// text/xml before writing and writes no XML prolog.
+func writeVoiceReject(w http.ResponseWriter, reason RejectReason) {
+	doc := rejectTwiML
+	if reason == RejectReasonBusy {
+		doc = rejectBusyTwiML
+	}
+	w.Header().Set("Content-Type", "text/xml")
+	fmt.Fprint(w, doc)
 }
 
 // escapeTwiML makes text safe as the content of a TwiML element.

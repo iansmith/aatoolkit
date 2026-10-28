@@ -120,10 +120,10 @@ driver.StartTwilioServer(addr, srv, driver.WithHandlerWrapper(
   `ContextFor` panics on a nil ctx. The provider's contract is on
   `driver.Config.UserContext` and `driver.Config.UserContextCtx`.
 - **Request-scoped ctx.** The ctx a Twilio handler receives (`HandleSMS`, `HandleSMSStatus`,
-  `AnswerCall`) is cancelled once the request has been handled. A model call that outlives the
-  handler must run under `context.WithoutCancel(ctx)`, which keeps the span and drops the
-  cancellation; under the raw ctx it fails with `context.Canceled`. The same holds for a
-  `UserContextCtx` provider handed that ctx.
+  `RejectCall`, `AnswerCall`) is cancelled once the request has been handled. A model call that
+  outlives the handler must run under `context.WithoutCancel(ctx)`, which keeps the span and
+  drops the cancellation; under the raw ctx it fails with `context.Canceled`. The same holds for
+  a `UserContextCtx` provider handed that ctx.
 - **Interpreted policies.** (R1) Change nothing in the policy or its `interp.Inject`: hand it
   `h.WithContext(ctx)` wherever it is handed `h` today; its `Send`, `SendStream` and `Context`
   then run under `ctx`. (R2) Give the policy entrypoint a ctx parameter, inject
