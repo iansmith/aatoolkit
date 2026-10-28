@@ -140,7 +140,7 @@ func TestMarkEchoBound_KeepsTheSubMillisecondRemainder(t *testing.T) {
 	// truncating spelling drops.
 	const queued = telephony.SampleRateHz + 1
 
-	sink := newCarrierMediaSink(&discardWSWriter{}, "SSremainder", nil, nil, nil)
+	sink := newCarrierMediaSink(&discardWSWriter{}, "SSremainder", nil, nil, nil, nil)
 	base := time.Now()
 	sink.playout.fed(queued, base)
 
@@ -230,7 +230,7 @@ func (b *blockingWSWriter) writes() int {
 func TestCarrierMediaSink_MarkQueuesBehindTheWriteInFlight(t *testing.T) {
 	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
 	tr := newMarkTracker(make(chan MarkEcho, 4), true)
-	sink := newCarrierMediaSink(w, "SSslot", nil, tr, nil)
+	sink := newCarrierMediaSink(w, "SSslot", nil, tr, nil, nil)
 
 	mediaDone := make(chan error, 1)
 	go func() { mediaDone <- sink.Media(context.Background(), silencePayloadB64()) }()
@@ -321,7 +321,7 @@ func TestCarrierMediaSink_BoundTracksItsOwnWrites(t *testing.T) {
 	const frames = 50
 	const grace = telephony.MarkEchoGraceMS * time.Millisecond
 
-	sink := newCarrierMediaSink(&discardWSWriter{}, "SSwiring", nil, nil, nil)
+	sink := newCarrierMediaSink(&discardWSWriter{}, "SSwiring", nil, nil, nil, nil)
 
 	if got := sink.markEchoBound(time.Now()); got != grace {
 		t.Fatalf("with nothing written, markEchoBound = %s, want the bare grace %s", got, grace)
@@ -383,7 +383,7 @@ func TestCarrierMediaSink_MarkArmsTheDerivedBound(t *testing.T) {
 	echoes := make(chan MarkEcho, 4)
 	tr := newMarkTracker(echoes, true)
 	t.Cleanup(tr.stop)
-	sink := newCarrierMediaSink(&discardWSWriter{}, "SSderived", nil, tr, nil)
+	sink := newCarrierMediaSink(&discardWSWriter{}, "SSderived", nil, tr, nil, nil)
 
 	for i := 0; i < frames; i++ {
 		if err := sink.Media(context.Background(), silencePayloadB64()); err != nil {

@@ -99,7 +99,7 @@ func TestFarewell_TheHoldLoopCannotReArmOverTheGoodbye(t *testing.T) {
 // write slot"
 func TestFarewell_AClearAlreadyQueuedForTheSlotIsStillDropped(t *testing.T) {
 	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
-	sink := newCarrierMediaSink(w, "SSgate", nil, nil, nil)
+	sink := newCarrierMediaSink(w, "SSgate", nil, nil, nil, nil)
 
 	// One write in flight, holding the slot.
 	inFlight := make(chan error, 1)
@@ -251,7 +251,7 @@ func TestMarkTracker_UnmatchedEchoLogLineFollowsTheConsumersMarks(t *testing.T) 
 func TestFarewell_ClearsTheCarrierEvenWhenAnotherWriterTookTheStopEdge(t *testing.T) {
 	w := &scriptedWSWriter{}
 	fill := newFiller(context.Background(), FillerConfig{Loop: fillerTestLoop(), Delay: 20 * time.Millisecond})
-	sink := newCarrierMediaSink(w, "SSedge", nil, nil, fill)
+	sink := newCarrierMediaSink(w, "SSedge", nil, nil, fill, nil)
 	fill.attach(sink)
 	t.Cleanup(fill.shutdown)
 
@@ -266,7 +266,7 @@ func TestFarewell_ClearsTheCarrierEvenWhenAnotherWriterTookTheStopEdge(t *testin
 		t.Fatal("test setup: the loop must have been playing for there to be an edge to consume")
 	}
 
-	sink.playFarewell(context.Background(), farewellTestClip())
+	sink.playFarewell(context.Background(), farewellTestClip(), ErrIdleTimeout)
 
 	got := w.records()
 	firstFarewell := slices.IndexFunc(got, isFarewellFrame)
@@ -300,7 +300,7 @@ func TestFarewell_ClearsTheCarrierEvenWhenAnotherWriterTookTheStopEdge(t *testin
 // the idle guard's exit path on the write slot"
 func TestFarewell_AWedgedCarrierCannotParkTheIdleExit(t *testing.T) {
 	w := &blockingWSWriter{entered: make(chan struct{}, 4), release: make(chan struct{})}
-	sink := newCarrierMediaSink(w, "SSwedged", nil, nil, nil)
+	sink := newCarrierMediaSink(w, "SSwedged", nil, nil, nil, nil)
 
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(w.release) }) }
@@ -319,7 +319,7 @@ func TestFarewell_AWedgedCarrierCannotParkTheIdleExit(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		sink.playFarewell(context.Background(), farewellTestClip())
+		sink.playFarewell(context.Background(), farewellTestClip(), ErrIdleTimeout)
 	}()
 
 	// Generously past the one bound that can release it, and far short of
@@ -380,13 +380,13 @@ func TestFarewell_AWedgedCarrierCannotParkTheIdleExitAtAnyWrite(t *testing.T) {
 				passthrough: tc.accepted,
 			}
 			t.Cleanup(func() { close(w.release) })
-			sink := newCarrierMediaSink(w, "SSwedgeat", nil, nil, nil)
+			sink := newCarrierMediaSink(w, "SSwedgeat", nil, nil, nil, nil)
 
 			done := make(chan struct{})
 			start := time.Now()
 			go func() {
 				defer close(done)
-				sink.playFarewell(context.Background(), clip)
+				sink.playFarewell(context.Background(), clip, ErrIdleTimeout)
 			}()
 
 			// Generously past the one bound that can release it, and far short
@@ -439,7 +439,7 @@ func TestFarewell_MarkBoundDoesNotCarryTheBackendsBacklog(t *testing.T) {
 	tr := newMarkTracker(nil, false)
 	t.Cleanup(tr.stop)
 	// nil filler: the case the conditional clear left uncovered.
-	sink := newCarrierMediaSink(w, "SSbacklog", nil, tr, nil)
+	sink := newCarrierMediaSink(w, "SSbacklog", nil, tr, nil, nil)
 
 	// The backend dumped a long reply far faster than real time and then went
 	// silent — which is what the idle guard fires on.
@@ -459,7 +459,7 @@ func TestFarewell_MarkBoundDoesNotCarryTheBackendsBacklog(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		sink.playFarewell(context.Background(), farewellTestClip())
+		sink.playFarewell(context.Background(), farewellTestClip(), ErrIdleTimeout)
 	}()
 
 	select {
