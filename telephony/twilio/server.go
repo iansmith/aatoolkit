@@ -87,11 +87,17 @@ type SMSStatusHandler func(ctx context.Context, status SMSStatus)
 // in the call log. Twilio takes two reasons: RejectReasonRejected, its
 // default, and RejectReasonBusy.
 //
-// Only an exact RejectReasonBusy writes <Reject reason="busy"/>. Every other
-// value — "", RejectReasonRejected, or anything outside the two — writes a
-// plain <Reject/>, so no other value can reach the document. A typo such as
+// Once a call is refused unanswered, only an exact RejectReasonBusy writes
+// <Reject reason="busy"/>. Every other value — RejectReasonRejected, anything
+// outside the two, or "" returned by RejectCall alongside reject=true — writes
+// a plain <Reject/>, so no other value can reach the document. A typo such as
 // "Busy" is therefore still refused unanswered, as a plain rejection, and
 // nothing reports it.
+//
+// On Server.VoiceRejectReason, "" (the zero value) does not mean a plain
+// <Reject/>: it means Authorize's refusal is not unanswered at all and stays
+// the spoken <Say>…</Say><Hangup/>. Set RejectReasonRejected there for a plain
+// <Reject/>.
 type RejectReason string
 
 const (
