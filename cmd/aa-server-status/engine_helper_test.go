@@ -149,7 +149,21 @@ func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool, childPort
 	if childPort != 0 {
 		args = append(args, "-child-port", strconv.Itoa(childPort))
 	}
-	cmd := exec.Command(bin, args...)
+	f, err := startFixture(t, exec.Command(bin, args...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// startFixture starts cmd in its own process group with its stdout piped and
+// its stderr on the test's, registers a group-kill cleanup, and waits up to
+// fixtureReadyTimeout for its "ready" line. It returns awaitReady's error,
+// labelled readyWaitLabel; a StdoutPipe or Start failure is fatal. Every
+// fixture spawn in this package goes through it, so the ready-wait bound and
+// label live here once.
+func startFixture(t *testing.T, cmd *exec.Cmd) (*foreignProc, error) {
+	t.Helper()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = os.Stderr
 
@@ -158,29 +172,15 @@ func spawnForeignListenerOpts(t *testing.T, port int, ignoreTerm bool, childPort
 		t.Fatalf("StdoutPipe: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start foreign listener: %v", err)
+		t.Fatalf("start %s: %v", readyWaitLabel, err)
 	}
 
 	f := &foreignProc{cmd: cmd, pid: int32(cmd.Process.Pid)}
 
-	done := make(chan struct{})
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			if scanner.Text() == "ready" {
-				close(done)
-				return
-			}
-		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("foreign listener pid %d never signaled ready", f.pid)
-	}
-
+	// Registered before the wait so a fixture that never signals ready is
+	// group-killed rather than left holding its process group and port.
 	t.Cleanup(f.forceKill)
-	return f
+	return f, awaitReady(readyWaitLabel, cmd, stdout, fixtureReadyTimeout)
 }
 
 // spawnForeignListenerWithChild is spawnForeignListener plus the fixture's
@@ -245,4 +245,71 @@ func waitForTreePort(t *testing.T, rootPID int32, wantPort int, timeout time.Dur
 	}
 	t.Fatalf("port %d never observed listening under root pid %d within %s", wantPort, rootPID, timeout)
 	return 0
+}
+
+// fixtureReadyTimeout bounds how long a spawned fixture may take to print its
+// "ready" line. A healthy fixture prints within milliseconds, so the bound only
+// matters on a heavily loaded host or when the fixture is dead; it is
+// deliberately far above the old 5s. Why start-up was slow on a loaded host has
+// not been measured, so no cause is asserted here.
+const fixtureReadyTimeout = 30 * time.Second
+
+// readyWaitLabel names the fixture in startFixture's failure text, which reads
+// "<label> pid N never signaled ready...".
+const readyWaitLabel = "foreign listener"
+
+// awaitReady waits until stdout yields the exact line "ready", the child
+// exits, or timeout elapses, and returns nil only for the first. The error
+// text starts "<label> pid N never signaled ready" and then says either
+// ": child still running after <elapsed>" or ": child exited (<status>) after
+// <elapsed>". Exit is detected by waiting on cmd.Process, not by pipe EOF
+// (a grandchild can hold the pipe open) or signal 0 (it succeeds on a zombie),
+// so the caller must not wait on cmd.Process before awaitReady returns. A child
+// that prints ready and exits before the scanner goroutine runs can be
+// reported as exited; the fixtures stay alive after ready, so this does not
+// arise. After a nil return the watcher goroutine keeps waiting and reaps the
+// child whenever it exits, so a later cmd.Process.Wait by the caller reports an
+// error rather than a status. It never calls t.Fatal, so it is safe to run off the test goroutine.
+func awaitReady(label string, cmd *exec.Cmd, stdout io.Reader, timeout time.Duration) error {
+	start := time.Now()
+	ready := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			if scanner.Text() == "ready" {
+				close(ready)
+				return
+			}
+		}
+	}()
+	type exit struct {
+		state *os.ProcessState
+		err   error
+	}
+	exited := make(chan exit, 1)
+	go func() {
+		st, err := cmd.Process.Wait()
+		exited <- exit{st, err}
+	}()
+
+	pid := cmd.Process.Pid
+	select {
+	case <-ready:
+		return nil
+	case e := <-exited:
+		select {
+		case <-ready:
+			return nil
+		default:
+		}
+		status := "wait failed: " + fmt.Sprint(e.err)
+		if e.state != nil {
+			status = e.state.String()
+		}
+		return fmt.Errorf("%s pid %d never signaled ready: child exited (%s) after %s",
+			label, pid, status, time.Since(start).Round(time.Millisecond))
+	case <-time.After(timeout):
+		return fmt.Errorf("%s pid %d never signaled ready: child still running after %s",
+			label, pid, time.Since(start).Round(time.Millisecond))
+	}
 }
