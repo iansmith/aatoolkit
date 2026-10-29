@@ -115,6 +115,28 @@ func TestNewStreamHandler_EmptyURLEndsTheCallAndDialsNothing(t *testing.T) {
 	}
 }
 
+// TestNewStreamHandler_EmptyURLLogsWhyTheCallEnded pins the operator's only
+// signal for a call that ends this way. Server.ServeStreams does not log the
+// error a StreamHandler returns, so unless the handler itself logs, a
+// deployment with no realtime URL drops every call and leaves nothing in the
+// log saying why or which call it was.
+func TestNewStreamHandler_EmptyURLLogsWhyTheCallEnded(t *testing.T) {
+	logs := captureLog(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(""))
+
+	if err := h.waitDone(2 * time.Second); err == nil {
+		t.Fatal("an empty realtimeURL must end the call with a non-nil error")
+	}
+
+	got := logs.String()
+	if !strings.Contains(got, "no realtime URL") {
+		t.Errorf("log must say the realtime URL is missing, got:\n%s", got)
+	}
+	if callSID := "CA" + t.Name(); !strings.Contains(got, callSID) {
+		t.Errorf("log must name the call (%s), got:\n%s", callSID, got)
+	}
+}
+
 // --- WithFillerAudio's inert cases (AATK-108) ------------------------------
 //
 // The filler option carries a value rather than a channel, so its "asked for
