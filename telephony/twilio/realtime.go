@@ -84,34 +84,38 @@ const realtimeClientEventSendTimeout = 5 * time.Second
 // inject a transport-level fault). Production code never overrides it.
 var dialRealtime = realtime.Dial
 
-// NewStreamHandler selects the transport for a call.
+// NewStreamHandler returns the StreamHandler for a call: HandleStreamRealtime
+// against the realtime voice backend at realtimeURL, with opts applied.
 //
-// realtimeURL == "" is the default and returns DefaultHandleStream unchanged:
-// the existing VAD/STT/TTS sidecar path, with no realtime client constructed
-// and no dial attempted. Non-empty routes the call to an external realtime
-// voice backend instead.
-//
-// The realtime path changes turn-taking, which is the reason this defaults off:
-// see HandleStreamRealtime for what is bypassed and why the replay corpus does
-// not transfer. Which turn-taking is better is a question for measurement, in
-// its own ticket; this switch exists so both stacks can be run and compared
-// without a redeploy.
-//
-// Options apply to the realtime path only. Supplying one alongside an empty
-// realtimeURL is a no-op, because the default path returns DefaultHandleStream
-// and never reaches the realtime transport at all.
+// The realtime backend is the only transport. An empty realtimeURL — the zero
+// value, and so what driver.Config{}.StreamHandler() passes — returns a handler
+// that logs the call's CallSid and returns a non-nil error at once, ending the
+// call without dialing anything. Options supplied alongside an empty
+// realtimeURL are ignored.
 func NewStreamHandler(realtimeURL string, opts ...RealtimeOption) StreamHandler {
 	if realtimeURL == "" {
-		return DefaultHandleStream
+		return endUnconfiguredCall
 	}
 	return func(ctx context.Context, conn *websocket.Conn, start Frame) error {
 		return HandleStreamRealtime(ctx, conn, start, realtimeURL, opts...)
 	}
 }
 
-// RealtimeOption configures one call on the realtime transport. It mirrors
-// telephony.SessionOption, which configures the default path the same way, so
-// the two transports are extended with one vocabulary rather than two.
+// errNoRealtimeURL is the error a call ends with when NewStreamHandler was
+// given no realtime URL.
+var errNoRealtimeURL = errors.New("twilio: no realtime URL configured")
+
+// endUnconfiguredCall is the StreamHandler NewStreamHandler returns for an
+// empty realtimeURL. ServeStreams does not log the error a handler returns, so
+// the log line here is an operator's only record of why the call ended and
+// which call it was. conn is left alone: ServeStreams closes it when the
+// handler returns.
+func endUnconfiguredCall(ctx context.Context, conn *websocket.Conn, start Frame) error {
+	log.Printf("twilio: NewStreamHandler: %v; ending call CallSid=%s", errNoRealtimeURL, start.CallSID)
+	return errNoRealtimeURL
+}
+
+// RealtimeOption configures one call on the realtime transport.
 //
 // The zero set of options is today's behavior exactly. Every option is
 // therefore additive: a caller that supplies none gets what a caller before

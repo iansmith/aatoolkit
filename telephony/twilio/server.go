@@ -11,8 +11,6 @@ import (
 	"sync"
 
 	"github.com/coder/websocket"
-
-	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // e164Pattern matches E.164-formatted phone numbers: a leading '+', a first
@@ -159,13 +157,6 @@ type Server struct {
 	// does nothing. Voice only: ServeSMS never reads it, and an SMS refusal
 	// is still SMSRejectText.
 	VoiceRejectReason RejectReason
-
-	// ReplyRouter, if set, is threaded onto each stream's context before
-	// HandleStream is called, letting a caller outside this package reach a
-	// live session by CallSID/StreamSID and route reply frames through its
-	// already-wired data-plane output (AATK-22). Nil means no registration —
-	// the engine never requires a router to operate.
-	ReplyRouter *telephony.ReplyRouter
 
 	// AnswerCall, if set, decides per call whether to answer with a spoken
 	// refusal instead of opening a stream. It is handed the caller (from) and
@@ -541,10 +532,6 @@ func (s *Server) ServeStreams(w http.ResponseWriter, r *http.Request) {
 
 	parties := s.lookupCall(f.CallSID)
 	f.From, f.To = parties.from, parties.to
-
-	if s.ReplyRouter != nil {
-		ctx = ContextWithReplyRouter(ctx, s.ReplyRouter)
-	}
 
 	if s.HandleStream != nil {
 		s.HandleStream(ctx, conn, f)

@@ -14,8 +14,6 @@ import (
 	"github.com/iansmith/aatoolkit/telephony"
 )
 
-const tapDirEnv = "AATOOLKIT_AUDIO_TAP"
-
 // defaultFrameBytes is one MuLawFrameMS frame's worth of mu-law audio (1
 // byte/sample at SampleRateHz) -- the same derivation session.go's
 // farewellFrameBytes uses. It is only the silence-fallback size before any
@@ -46,21 +44,6 @@ const maxOutQueueFrames = 5 * 60 * 1000 / telephony.MuLawFrameMS // same bufferM
 // is called from. Batching costs one 16KB buffer and changes neither the bytes
 // on disk nor the timeline they describe.
 const silenceChunkFrames = 100
-
-func tapDirFromEnv() string {
-	return os.Getenv(tapDirEnv)
-}
-
-func tapLabelFromEnv() string {
-	return os.Getenv("AATOOLKIT_TAP_LABEL")
-}
-
-// agentLabelFromEnv is the transcript summary's response role label,
-// injected by the consumer (empty = the engine's generic "agent" default). The
-// engine never embeds a product name; the deployment sets this env var.
-func agentLabelFromEnv() string {
-	return os.Getenv("AATOOLKIT_AGENT_LABEL")
-}
 
 // Tap records a call's audio to a pair of raw mu-law files plus a JSON
 // sidecar. It is best-effort throughout: every failure is logged once and
