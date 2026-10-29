@@ -1396,6 +1396,69 @@ func TestTap_DuplexOutputUnchanged(t *testing.T) {
 	}
 }
 
+// TestTap_SidecarBytesUnchanged pins the sidecar file byte for byte, for both
+// shapes of Tap a depending project can build: duplex, and outbound-only as on
+// the realtime path. The other sidecar tests decode the file and compare
+// values, which cannot see how the bytes are laid out: a field moved within the
+// sidecar struct, or within its vad_config block, decodes equal and is written
+// in another order.
+//
+// The literals are the sidecars this suite wrote before AATK-164 removed the
+// VAD pipeline, captured from a run rather than written by hand, so they are an
+// oracle independent of whatever struct produces the file.
+func TestTap_SidecarBytesUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		streamSID string
+		record    func(dir, streamSID string)
+		want      string
+	}{
+		{
+			name:      "duplex",
+			streamSID: "SSsidecarbytesduplex",
+			record: func(dir, streamSID string) {
+				tap := NewTap(dir, streamSID, "CAsidecarbytesduplex", "golden", testStreamStartedAt)
+				tap.WriteOut(realFrame(0xA0))
+				tap.WriteOut(realFrame(0xB0))
+				tap.WriteIn(realFrame(0x01))
+				tap.DrainOut()
+				tap.WriteIn(realFrame(0x02))
+				tap.DrainOut()
+				tap.WriteIn(realFrame(0x03))
+				tap.DrainOut()
+				tap.WriteOut(realFrame(0xC0))
+				tap.Close()
+			},
+			want: `{"stream_sid":"SSsidecarbytesduplex","call_sid":"CAsidecarbytesduplex","label":"golden","started_at":"2026-07-17T09:30:15.123456789Z","frames":3,"bytes":480,"vad_config":{"WindowSize":256,"SpeechThresh":0.5,"SilenceThresh":0.35,"EndSilenceMS":700,"SampleRateHz":8000,"TurnEndSilenceMS":5000},"alignment":"inbound-frame-clock, 20ms/frame, silence=0xFF","channels":["in","out"],"out_truncated":true}`,
+		},
+		{
+			name:      "outbound-only",
+			streamSID: "SSsidecarbytesoutonly",
+			record: func(dir, streamSID string) {
+				clk := &fakeClock{t: testStreamStartedAt}
+				tap := outboundOnlyTap(dir, streamSID, "CAsidecarbytesoutonly", clk)
+				tap.WriteOut(realFrame(0x10))
+				clk.advance(40 * time.Millisecond)
+				tap.Close()
+			},
+			want: `{"stream_sid":"SSsidecarbytesoutonly","call_sid":"CAsidecarbytesoutonly","started_at":"2026-07-17T09:30:15.123456789Z","frames":0,"bytes":0,"vad_config":{"WindowSize":256,"SpeechThresh":0.5,"SilenceThresh":0.35,"EndSilenceMS":700,"SampleRateHz":8000,"TurnEndSilenceMS":5000},"alignment":"wall-clock, 20ms/frame, silence=0xFF, t0=first outbound frame","channels":["out"]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.record(dir, tc.streamSID)
+
+			got, err := os.ReadFile(sidecarPath(dir, tc.streamSID))
+			if err != nil {
+				t.Fatalf("reading sidecar: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("sidecar bytes changed:\n got %s\nwant %s", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestTap_DuplexKeepsSidecarWhenOnlyOneDirectionRecorded is behavior 4 for a
 // duplex tap: a real call where the engine never spoke opens no out.ulaw, and
 // that must not cost the recording its sidecar. Green before AATK-101 as well

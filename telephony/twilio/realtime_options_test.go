@@ -1,9 +1,14 @@
 package twilio
 
 import (
+	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony/realtime"
 )
 
 // Option-reachability tests for the realtime path (AATK-78).
@@ -65,6 +70,48 @@ func TestNewStreamHandler_OptionsOnTheDefaultPathAreInert(t *testing.T) {
 
 	if got := be.connCount(); got != 0 {
 		t.Fatalf("an option on the default path must not construct a realtime client, got %d dial(s)", got)
+	}
+}
+
+// TestNewStreamHandler_EmptyURLEndsTheCallAndDialsNothing pins what an empty
+// realtimeURL does to a call — and so what driver.Config{}.StreamHandler()
+// does, since it passes an unset RealtimeURL straight through: the handler
+// returns a non-nil error promptly, which ends the call, and never reaches the
+// realtime dial.
+//
+// The dial is counted at the dialRealtime seam rather than at a backend,
+// because a handler that fell through to the realtime path with an empty URL
+// would fail to dial and never reach any backend, so a backend's connection
+// count reads zero for that handler too. Nothing is sent after the start
+// frame: the call must end on its own, not because carrier traffic arrived.
+//
+// No t.Parallel: dialRealtime is process-global.
+func TestNewStreamHandler_EmptyURLEndsTheCallAndDialsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []RealtimeOption
+	}{
+		{"no options", nil},
+		{"with options", []RealtimeOption{WithIdleTimeout(idleGapTimeout), WithCallerSilenceTimeout(time.Second)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var dials atomic.Int32
+			orig := dialRealtime
+			dialRealtime = func(ctx context.Context, url string, opts ...realtime.DialOption) (*realtime.Client, error) {
+				dials.Add(1)
+				return nil, errors.New("dial refused by the test")
+			}
+			t.Cleanup(func() { dialRealtime = orig })
+
+			h := newRealtimeHarnessWith(t, NewStreamHandler("", tc.opts...))
+
+			if err := h.waitDone(2 * time.Second); err == nil {
+				t.Fatal("an empty realtimeURL must end the call with a non-nil error")
+			}
+			if got := dials.Load(); got != 0 {
+				t.Fatalf("an empty realtimeURL must not dial a realtime backend, got %d dial(s)", got)
+			}
+		})
 	}
 }
 
