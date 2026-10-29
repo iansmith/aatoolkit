@@ -381,10 +381,13 @@ func (l *failableListener) Accept() (net.Conn, error) {
 // The carrier socket's writes are failed after the agent's audio has reached
 // the carrier and before the response.done that ends the turn, so the first
 // write to fail is the playout mark that turn asks for: nothing else is
-// configured to write the carrier in between.
+// configured to write the carrier in between. Should a later change add a
+// carrier write on that path, the prefix check fails on the other write's
+// error rather than passing on it.
 //
 // Mutation: drop the `return err` after handlePlayoutMark in
-// HandleStreamRealtime's select loop.
+// HandleStreamRealtime's select loop. The handler then logs the failed mark
+// and runs on, and this test goes red at waitDone with the handler hung.
 func TestCallerSilence_AFailedPlayoutMarkWriteEndsTheCall(t *testing.T) {
 	ln := &failableListener{accepted: make(chan *failableConn, 1)}
 	be := newFakeRealtimeBackend(t)
