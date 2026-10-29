@@ -107,9 +107,9 @@ var errNoRealtimeURL = errors.New("twilio: no realtime URL configured")
 
 // endUnconfiguredCall is the StreamHandler NewStreamHandler returns for an
 // empty realtimeURL. ServeStreams does not log the error a handler returns, so
-// the log line here is an operator's only record of why the call ended and
-// which call it was. conn is left alone: ServeStreams closes it when the
-// handler returns.
+// the log line here is an operator's only record of why the call ended; the
+// CallSid ties it to the ServeHTTP line for the same call. conn is left alone:
+// ServeStreams closes it when the handler returns.
 func endUnconfiguredCall(ctx context.Context, conn *websocket.Conn, start Frame) error {
 	log.Printf("twilio: NewStreamHandler: %v; ending call CallSid=%s", errNoRealtimeURL, start.CallSID)
 	return errNoRealtimeURL
