@@ -213,8 +213,7 @@ type callParties struct {
 // oldest, so a stream whose start frame arrives after maxPendingFrom newer
 // calls were recorded finds no entry, and its start Frame carries "" for
 // From and To. Without the bound the map would grow for the whole of a
-// long-running server's lifetime. Mirrors the maxAbandoned evict-oldest
-// discipline in telephony/stt.go.
+// long-running server's lifetime.
 const maxPendingFrom = 1024
 
 // recordCall remembers from and to under callSid for a later ServeStreams

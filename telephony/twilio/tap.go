@@ -15,24 +15,22 @@ import (
 )
 
 // defaultFrameBytes is one MuLawFrameMS frame's worth of mu-law audio (1
-// byte/sample at SampleRateHz) -- the same derivation session.go's
-// farewellFrameBytes uses. It is only the silence-fallback size before any
+// byte/sample at SampleRateHz). It is only the silence-fallback size before any
 // real inbound frame has set the pace; once WriteIn has seen a frame,
 // DrainOut's silence matches that frame's actual length instead.
 const defaultFrameBytes = telephony.SampleRateHz * telephony.MuLawFrameMS / 1000
 
-// maxOutQueueFrames bounds the outbound recording queue. sendClip enqueues
+// maxOutQueueFrames bounds the outbound recording queue. A caller may enqueue
 // an entire clip's frames in one synchronous burst -- burst-dumped, not
 // real-time paced, which the duplex tap's queue-and-drain undoes in the
 // recording -- so the queue must hold at least one full clip before
 // DrainOut (paced by real inbound frame arrival) can catch up. This bound is deliberately NOT
 // real-time flow control: it is a safety net against a genuine runaway (a
 // bug causing endless WriteOut calls unrelated to any real clip), sized
-// generously above every currently known clip (farewell, forced-stop, and a
-// generated response bounded by MaxResponseMS) so drop-oldest never fires in
-// normal operation. 5 minutes of frames is a generous, cheap floor (~2.4MB
-// worst case at ~160 bytes/frame).
-const maxOutQueueFrames = 5 * 60 * 1000 / telephony.MuLawFrameMS // same bufferMS/frameMS derivation as telephony.ComputeDepth
+// generously above any clip a call plays so drop-oldest never fires in normal
+// operation. 5 minutes of frames is a generous, cheap floor (~2.4MB worst case
+// at ~160 bytes/frame).
+const maxOutQueueFrames = 5 * 60 * 1000 / telephony.MuLawFrameMS // bufferMS / frameMS
 
 // silenceChunkFrames is how many silence frames fillOutGap hands to one Write.
 //
@@ -53,13 +51,12 @@ const silenceChunkFrames = 100
 // WithChannels) and decides how the outbound side works, because the two
 // shapes have different clocks:
 //
-// Duplex -- the default, and the pipeline session's tap. WriteOut only
-// ENQUEUES; nothing reaches disk until DrainOut dequeues a frame, and the
-// pipeline calls DrainOut once per inbound frame. That inbound frame clock,
-// with nextOutFrame synthesizing 0xFF silence when the queue is empty, is what
-// makes out.ulaw time-aligned with in.ulaw byte for byte -- the property the
-// sidecar's alignment promises and probeset build consumes. A caller that
-// writes outbound frames and never drains gets no error and no file.
+// Duplex -- the default. WriteOut only ENQUEUES; nothing reaches disk until
+// DrainOut dequeues a frame, and the caller calls DrainOut once per inbound
+// frame. That inbound frame clock, with nextOutFrame synthesizing 0xFF silence
+// when the queue is empty, is what makes out.ulaw time-aligned with in.ulaw
+// byte for byte -- the property the sidecar's alignment promises. A caller
+// that writes outbound frames and never drains gets no error and no file.
 //
 // One-directional -- WriteOut writes through, paced against the wall clock
 // (fillOutGap), and DrainOut is a no-op. This exists because the two rules
@@ -189,19 +186,18 @@ const (
 	ChannelOut Channel = "out"
 )
 
-// TapOption configures a Tap at construction, matching the RealtimeOption /
-// SessionOption vocabulary the rest of this package uses.
+// TapOption configures a Tap at construction, matching the RealtimeOption
+// vocabulary the rest of this package uses.
 type TapOption func(*Tap)
 
 // WithChannels declares which directions of the call this Tap will be given.
 //
-// The default -- no option at all -- is duplex, which is the pipeline
-// session's tap and is unchanged in every respect: the outbound ring buffer,
-// the inbound frame clock that drains it, the 0xFF silence fill, and the
-// sidecar it writes. Declaring a single channel is what makes a Tap usable to
-// a consumer that only ever sees one direction of a call, and it changes three
-// things for that Tap; see hasChannel's callers in WriteIn, WriteOut, DrainOut
-// and Close.
+// The default -- no option at all -- is duplex, and is unchanged in every
+// respect by this option existing: the outbound ring buffer, the inbound frame
+// clock that drains it, the 0xFF silence fill, and the sidecar it writes.
+// Declaring a single channel is what makes a Tap usable to a consumer that
+// only ever sees one direction of a call, and it changes three things for
+// that Tap; see hasChannel's callers in WriteIn, WriteOut, DrainOut and Close.
 //
 // A direction that is not declared never reaches disk and is never counted:
 // writing one is a caller mistake, and a tap's whole ethos is to absorb those
@@ -273,9 +269,9 @@ func (t *Tap) hasChannel(ch Channel) bool {
 	return false
 }
 
-// duplex reports whether both directions were declared -- the pipeline
-// session's tap, and the only shape that has an inbound frame clock to align
-// the two files against.
+// duplex reports whether both directions were declared -- the default, and
+// the only shape that has an inbound frame clock to align the two files
+// against.
 func (t *Tap) duplex() bool {
 	return t.hasChannel(ChannelIn) && t.hasChannel(ChannelOut)
 }
@@ -547,9 +543,9 @@ func (t *Tap) fillOutGap(now time.Time) {
 	}
 }
 
-// DrainOut moves one queued outbound frame to disk, paced by the caller -- the
-// pipeline session calls it once per inbound frame, which is what makes
-// out.ulaw time-aligned with in.ulaw.
+// DrainOut moves one queued outbound frame to disk, paced by the caller --
+// calling it once per inbound frame is what makes out.ulaw time-aligned with
+// in.ulaw.
 //
 // It is a no-op on a tap that did not declare both directions: there is no
 // inbound clock to pace it, WriteOut has already written the payload through,
@@ -602,10 +598,10 @@ func (t *Tap) closeWriters() {
 //
 //   - Outbound content with an inbound count of zero used to lose both files
 //     and the sidecar, and now keeps out.ulaw with a sidecar saying frames: 0.
-//     On the pipeline path DrainOut is called only after WriteIn, but that does
-//     not make the case unreachable: t.frames stays zero whenever the inbound
-//     side never landed a byte, and in.ulaw failing to open latches
-//     inOpenFailed so every WriteIn after it returns early. What the change
+//     A caller that calls DrainOut only after WriteIn does not make the case
+//     unreachable: t.frames stays zero whenever the inbound side never landed
+//     a byte, and in.ulaw failing to open latches inOpenFailed so every
+//     WriteIn after it returns early. What the change
 //     costs there is keeping the recording of a call whose inbound capture
 //     broke, which beats the nothing it used to leave behind.
 //   - Inbound content with an outbound count of zero used to keep an empty
@@ -643,9 +639,9 @@ func (t *Tap) alignment() string {
 	}
 }
 
-// declaredChannels renders the channel set for the sidecar. It is what stops a
-// one-directional recording being fed to probeset build, which needs caller
-// utterances an outbound-only file does not contain. Caller holds t.mu.
+// declaredChannels renders the channel set for the sidecar, so a reader can
+// tell a one-directional recording from a duplex one without guessing from
+// which files exist. Caller holds t.mu.
 func (t *Tap) declaredChannels() []string {
 	out := make([]string, 0, len(t.channels))
 	for _, ch := range t.channels {

@@ -446,11 +446,11 @@ func TestFiller_UnsetWritesNothingWhileTheBackendIsSilent(t *testing.T) {
 // tell the loop from the reply, and the run of filler-marked records is what
 // says exactly when the loop played.
 //
-// The ticket asks for this on the Tap. There is no Tap on the realtime path —
-// it is wired only by the classic session (session.go) — and this path's
-// equivalent seam is WithCarrierAudioChan, which already carries every record
-// the sink writes. So the flag goes there, where a consumer can actually read
-// it, rather than onto a recorder this transport does not construct.
+// The ticket asks for this on the Tap. The engine constructs no Tap on the
+// realtime path, and this path's equivalent seam is WithCarrierAudioChan,
+// which already carries every record the sink writes. So the flag goes there,
+// where a consumer can actually read it, rather than onto a recorder this
+// transport does not construct.
 func TestFiller_CarrierAudioRecordsAreMarkedFiller(t *testing.T) {
 	ch := make(chan CarrierAudio, 128)
 

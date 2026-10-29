@@ -27,7 +27,7 @@ func MuLawDuration(n int) time.Duration {
 // at init to allow future flexibility if frame size changes.
 var FrameMS = MuLawFrameMS
 
-// MarkEchoGraceMS is the only tunable knob in the mark-echo timeout
-// derivation: the margin added atop the farewell clip's own playout
-// duration to give Twilio a chance to echo the mark back.
+// MarkEchoGraceMS is the margin, in milliseconds, a mark-echo wait adds atop
+// the playout still queued ahead of the mark, to give Twilio a chance to echo
+// the mark back. Untyped, so a caller scales it by time.Millisecond.
 const MarkEchoGraceMS = 500

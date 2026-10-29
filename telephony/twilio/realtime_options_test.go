@@ -50,16 +50,16 @@ func TestNewStreamHandler_WithNoOptionsLeavesASilentCallRunning(t *testing.T) {
 }
 
 // TestNewStreamHandler_OptionsOnTheDefaultPathAreInert pins the documented
-// no-op: an empty realtimeURL returns DefaultHandleStream, which never reaches
-// the realtime transport, so an option supplied alongside it is ignored rather
-// than routing the call. Asserted by the backend seeing no dial at all, which is
-// the same signal TestRealtime_SwitchUnsetAttemptsNoDial uses for the switch
-// itself.
+// no-op: options supplied alongside an empty realtimeURL, the default, are
+// ignored rather than routing the call to a realtime backend. Asserted by the
+// backend seeing no connection, the same signal
+// TestRealtime_SwitchUnsetAttemptsNoDial uses.
 //
-// Deliberately no assertion about how the call ends. On the default path it ends
-// with "no VAD factory wired", because this harness has no sidecars — a property
-// of the fixture, not of the option, and asserting on it would pin the default
-// path's unrelated behaviour inside an options test.
+// That signal cannot tell an ignored option from a handler that tried to dial
+// the empty URL and failed, which reaches no backend either;
+// TestNewStreamHandler_EmptyURLEndsTheCallAndDialsNothing counts dials at the
+// dialRealtime seam for that. Deliberately no assertion here about how the
+// call ends: that is the same test's subject, not an option's.
 func TestNewStreamHandler_OptionsOnTheDefaultPathAreInert(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 

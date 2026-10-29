@@ -385,11 +385,9 @@ func resolveRealtimeConfig(opts []RealtimeOption) realtimeConfig {
 // no backend activity, the call ends with an error naming "idle timeout".
 //
 // A hung backend and a legitimately quiet one look identical on this path —
-// there is no local VAD or turn state to tell them apart (see
-// telephony.MaxSilenceMS for the order of magnitude the default transport uses
-// to make that call). Set this longer than the longest backend-quiet interval
-// the deployment tolerates, or a normal pause in conversation will end the
-// call.
+// there is no local VAD or turn state to tell them apart. Set this longer than
+// the longest backend-quiet interval the deployment tolerates, or a normal
+// pause in conversation will end the call.
 func WithIdleTimeout(d time.Duration) RealtimeOption {
 	return func(c *realtimeConfig) { c.idleTimeout = d }
 }
@@ -885,9 +883,9 @@ func WithVoiceUpdateChanFor(fn func(start Frame) <-chan string) RealtimeOption {
 // the engine had already written, and the carrier echoes it back once that
 // audio has finished playing. WithMarkEchoChan is where the echo arrives.
 //
-// The classic path has answered that question since its mark-echo flow landed, and this path
-// could not: the backend owns playback here, so nothing local consumed marks
-// and an inbound one was dropped. A consumer can still have a reason to care
+// Before this option the realtime path could not answer it: the backend owns
+// playback here, so nothing local consumed marks and an inbound one was
+// dropped. A consumer can still have a reason to care
 // about the carrier's playout position — ending a call after a spoken line,
 // without cutting the line mid-word — and the alternative was for it to model
 // the carrier as a real-time player and add up the audio deltas it observed.
@@ -955,8 +953,7 @@ func WithMarkRequestChanFor(fn func(start Frame) <-chan string) RealtimeOption {
 // MarkEcho.TimedOut: the carrier echoed it, or it did not and the engine's own
 // bound elapsed. THE BOUND LIVES HERE, not in the consumer — see
 // carrierMediaSink.markEchoBound, which derives it from the playout still
-// queued ahead of the mark plus telephony.MarkEchoGraceMS, the same grace the
-// classic path's MarkEchoTimeout adds atop a clip. So a carrier that never
+// queued ahead of the mark plus telephony.MarkEchoGraceMS. So a carrier that never
 // honors the mark protocol cannot leave a consumer waiting, and a carrier that
 // is honoring it perfectly is not cut short for still playing.
 //
@@ -1069,25 +1066,18 @@ func (c realtimeConfig) sessionID(start Frame) string {
 	return c.sessionIDFor(start)
 }
 
-// HandleStreamRealtime drives one call over the realtime voice backend. It is
-// the realtime peer of HandleStreamWithOpts: same entry shape, called with the
-// (ctx, conn, start) a StreamHandler receives, so a consumer that owns its own
-// handler body — because its per-call setup and teardown are bound to that
-// scope — can select this transport by branching on its own configuration
+// HandleStreamRealtime drives one call over the realtime voice backend. It
+// takes the (ctx, conn, start) a StreamHandler receives, plus the backend URL
+// and options, so a consumer that owns its own handler body — because its
+// per-call setup and teardown are bound to that scope — can call it directly
 // rather than going through NewStreamHandler.
 //
 // Carrier audio crosses to the backend as the base64 string it arrived as, and
 // the backend's audio comes back the same way — no transcoding in either
 // direction.
 //
-// TURN-TAKING CONSEQUENCE, stated here rather than at NewStreamHandler because
-// a consumer calling this directly never reads that doc: on this path the
-// *backend's* VAD and turn logic govern the conversation, so
-// telephony/decision.go — this engine's own turn-taking decision function — is
-// bypassed entirely for those turns, along with the VAD tuning that feeds it.
-// That is a real behavioral change, not a transport swap, and the replay corpus
-// was captured against the current decision function, so its labels do NOT
-// transfer to calls run this way and cannot be used to judge them.
+// The *backend's* VAD and turn logic govern the conversation: the engine runs
+// no voice-activity detection or turn-taking of its own.
 //
 // The call ends when either side does: the carrier hangs up (a stop frame or a
 // read error) or the backend goes away. A backend that fails to dial, or drops
@@ -1348,26 +1338,17 @@ func endWithFarewell(ctx context.Context, sink *carrierMediaSink, clip []byte, s
 // a consumer too, and its echo would then resolve this wait early. The stream
 // SID is the one string on this call the engine knows a consumer's mark name
 // cannot accidentally be.
-//
-// Named realtimeFarewellMark… rather than farewellMarkName because package
-// telephony already defines that symbol, unexported and with a different
-// value, for the classic path's farewell.
 const realtimeFarewellMarkPrefix = "aatoolkit-farewell-"
 
 // playFarewell writes clip to the carrier and waits for the carrier to report
 // it played, so HandleStreamRealtime's CloseNow defer runs AFTER the caller has
 // actually heard it. A farewell cut off mid-word is worse than none.
 //
-// This is the realtime path's answer to the same question telephony's
-// Session.terminateWithClip answers for the classic one — chunk the clip, mark,
-// await the echo, then close. A deliberate second implementation rather than an
-// unnoticed one, and the reason is that there is almost nothing to fold. The
-// classic one is an ASYNCHRONOUS state-machine transition whose wait lives in
-// the FSM, over dataOut.Send of raw μ-law; this is a SYNCHRONOUS write-and-wait
-// over a websocket with base64 JSON framing and a per-write deadline. The only
-// genuinely common code is the four-line chunk loop below.
+// Chunk the clip, mark, await the echo, then close: a SYNCHRONOUS
+// write-and-wait over the carrier websocket, with base64 JSON framing and a
+// per-write deadline.
 //
-// Nothing else here is new machinery: the frames go through the sink's own
+// Nothing here is new machinery: the frames go through the sink's own
 // write slot, and the wait is the mark protocol AATK-105 built. The loop is
 // stopped and the carrier cleared ONCE, ahead of the clip rather than per
 // frame, since after the first frame there is nothing left to stop.
@@ -2146,10 +2127,7 @@ func (s *carrierMediaSink) clear(ctx context.Context) error {
 		// markTracker.echo stops the timer, and the stale bound never fires —
 		// shortening it here would buy nothing and would add a second path
 		// into the tracker from this goroutine. Recorded because three review
-		// rounds re-opened the question from this file alone; the classic path
-		// cannot answer it either, since handleResponseReady always sends its
-		// clear immediately BEFORE the next clip and mark and so never holds
-		// one across a clear.
+		// rounds re-opened the question from this file alone.
 		s.playout.flush(time.Now())
 		s.deliverCarrierAudio(CarrierAudio{Clear: true})
 	})
@@ -2214,12 +2192,11 @@ func (s *carrierMediaSink) writeMark(ctx context.Context, name string, build fun
 // markEchoBound is how long the carrier is given to echo a mark written now:
 // the playout still queued ahead of it, plus telephony.MarkEchoGraceMS.
 //
-// Derived, not a constant, for the reason telephony.MarkEchoTimeout is derived
-// from its clip — a mark written behind two seconds of audio cannot be judged
-// late until that audio has had two seconds to play, or a carrier honoring the
-// protocol perfectly is reported as having timed out simply for still playing.
-// The grace is the classic path's own, reused rather than restated: same
-// protocol, same peer, same purpose (CLAUDE.md #5).
+// Derived, not a constant: a mark written behind two seconds of audio cannot
+// be judged late until that audio has had two seconds to play, or a carrier
+// honoring the protocol perfectly is reported as having timed out simply for
+// still playing. The grace is telephony's single definition, reused rather
+// than restated (CLAUDE.md #5).
 //
 // The playout term comes from telephony.MuLawDuration, the module's one
 // definition of the μ-law byte-to-duration conversion. Its result is exact,
