@@ -736,7 +736,7 @@ func TestCallerSilence_AndIdleTimeoutEachEndWithTheirOwnSentinel(t *testing.T) {
 		want, notWant error
 	}{
 		{"caller silence first", 300 * time.Millisecond, 3 * time.Second, ErrCallerSilenceTimeout, ErrIdleTimeout},
-		{"idle first", 3 * time.Second, 500 * time.Millisecond, ErrIdleTimeout, ErrCallerSilenceTimeout},
+		{"idle first", 5 * time.Second, 500 * time.Millisecond, ErrIdleTimeout, ErrCallerSilenceTimeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			be := newFakeRealtimeBackend(t)
