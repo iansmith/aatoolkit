@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/iansmith/aatoolkit/telephony/realtime"
 )
@@ -326,5 +329,92 @@ func TestNewCallerSilence_ZeroAndNegativeAreNilAndInert(t *testing.T) {
 		if s.markDue() != nil || s.expired() != nil {
 			t.Fatal("a nil callerSilence must select on nil channels")
 		}
+	}
+}
+
+// --- a failed playout-mark write ends the call ------------------------------
+
+// errCarrierSocketWrite is what failableConn's writes return once failed.
+var errCarrierSocketWrite = errors.New("carrier socket write failed")
+
+// failableConn is the server side of the carrier socket with a switch on its
+// writes: once failWrites is set, every write fails with errCarrierSocketWrite,
+// while reads go on as before.
+type failableConn struct {
+	net.Conn
+	failWrites atomic.Bool
+}
+
+func (c *failableConn) Write(p []byte) (int, error) {
+	if c.failWrites.Load() {
+		return 0, errCarrierSocketWrite
+	}
+	return c.Conn.Write(p)
+}
+
+// failableListener wraps every connection it accepts in a failableConn and
+// hands the first one to the test.
+type failableListener struct {
+	net.Listener
+	accepted chan *failableConn
+}
+
+func (l *failableListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	fc := &failableConn{Conn: c}
+	select {
+	case l.accepted <- fc:
+	default:
+	}
+	return fc, nil
+}
+
+// TestCallerSilence_AFailedPlayoutMarkWriteEndsTheCall pins, through
+// HandleStreamRealtime, what WithCallerSilenceTimeout's doc promises: a playout
+// mark whose write fails ends the call with an error naming the playout mark
+// send. Ignoring that error would leave the call running with the bound
+// silently off.
+//
+// The carrier socket's writes are failed after the agent's audio has reached
+// the carrier and before the response.done that ends the turn, so the first
+// write to fail is the playout mark that turn asks for: nothing else is
+// configured to write the carrier in between.
+//
+// Mutation: drop the `return err` after handlePlayoutMark in
+// HandleStreamRealtime's select loop.
+func TestCallerSilence_AFailedPlayoutMarkWriteEndsTheCall(t *testing.T) {
+	ln := &failableListener{accepted: make(chan *failableConn, 1)}
+	be := newFakeRealtimeBackend(t)
+	h := newRealtimeHarnessOn(t, func(ctx context.Context, conn *websocket.Conn, start Frame) error {
+		return HandleStreamRealtime(ctx, conn, start, be.url(), WithCallerSilenceTimeout(time.Hour))
+	}, func(inner net.Listener) net.Listener {
+		ln.Listener = inner
+		return ln
+	})
+	var carrier *failableConn
+	select {
+	case carrier = <-ln.accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the carrier connection was never accepted")
+	}
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+
+	playAgentAudio(t, be, wire, 5)
+	carrier.failWrites.Store(true)
+	endTurn(t, be)
+
+	err := h.waitDone(10 * time.Second)
+	if err == nil {
+		t.Fatal("a failed playout-mark write must end the call with an error, got a clean return")
+	}
+	if want := "twilio: realtime: playout mark send: "; !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("the call must end on the playout mark's send error, want prefix %q, got: %v", want, err)
+	}
+	if !errors.Is(err, errCarrierSocketWrite) {
+		t.Fatalf("the error must wrap the carrier socket's write failure, got: %v", err)
 	}
 }
