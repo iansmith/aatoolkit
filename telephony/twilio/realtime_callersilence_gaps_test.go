@@ -44,11 +44,15 @@ func playedTurn(t *testing.T, s *callerSilence) uint64 {
 // TestCallerSilence_ASpeechStartTheDrainHasNotSeenVoidsTheMark pins the drain
 // lag. The sink counts a speech start the moment Bridge.Run hands it the clear;
 // the drain can still be behind it, having asked for a playout mark on the
-// strength of a turn ending it saw first. That mark would be written behind the
-// caller's speech and its echo would start a count while they talk, so the
-// claim inside the write slot must refuse it.
+// strength of a turn ending it saw first. A delta trailing the speech start
+// then puts agent audio back on the wire, so the claim's audio condition holds
+// again — and a mark written now would sit behind the caller's speech, its
+// echo starting a count while they talk. The claim must refuse it on the
+// speech counts alone.
 //
-// Mutation: delete the starts == tag check from callerSilence.claim.
+// Mutation: delete the starts == tag check from callerSilence.claim. Without
+// the trailing delta this case is green under that mutation, because caller
+// speech also clears the audio condition (measured).
 func TestCallerSilence_ASpeechStartTheDrainHasNotSeenVoidsTheMark(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -71,6 +75,7 @@ func TestCallerSilence_ASpeechStartTheDrainHasNotSeenVoidsTheMark(t *testing.T) 
 			if tc.spoke {
 				s.callerSpoke()
 			}
+			s.agentAudio() // a delta trailing whatever happened above
 			if _, ok := s.claim(tag); ok != tc.wantClaim {
 				t.Fatalf("claim = %v, want %v", ok, tc.wantClaim)
 			}

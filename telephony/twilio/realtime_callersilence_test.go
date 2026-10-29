@@ -107,6 +107,14 @@ func greet(t *testing.T, be *fakeRealtimeBackend, wire func() []carrierWireRecor
 // caller-silence count starts. It returns that instant, taken just BEFORE the
 // echo is sent, so a duration measured from it is never shorter than the one
 // the engine measured.
+//
+// It then settles for countSettle before returning. The echo travels the
+// carrier socket while whatever the test emits next travels the backend's, and
+// an echo the engine processes AFTER that next event is correctly stale: the
+// count a test then assumes is running never started, and the test passes
+// without testing anything. Measured: without the settle, deleting callerSpoke's
+// gen bump alone turned TestCallerSilence_OneUtteranceLongerThanTheLimitIsNotCut
+// red through exactly that ordering, not through the property it pins.
 func startCount(t *testing.T, be *fakeRealtimeBackend, h *realtimeHarness, wire func() []carrierWireRecord) time.Time {
 	t.Helper()
 	n := len(playoutMarks(h, wire()))
@@ -114,8 +122,14 @@ func startCount(t *testing.T, be *fakeRealtimeBackend, h *realtimeHarness, wire 
 	mark := waitPlayoutMarks(t, h, wire, n+1)[n]
 	at := time.Now()
 	echoMarkFromCarrier(t, h, mark.markName)
+	time.Sleep(countSettle)
 	return at
 }
+
+// countSettle is how long startCount waits for its echo to be processed: a
+// small fraction of every limit these tests configure, and generous for one
+// frame across a loopback socket.
+const countSettle = 50 * time.Millisecond
 
 func emitSpeechStarted(t *testing.T, be *fakeRealtimeBackend) {
 	t.Helper()
@@ -171,8 +185,8 @@ func waitEndedAfter(t *testing.T, h *realtimeHarness, from time.Time, bound time
 //
 // The echo is withheld across a window longer than the limit and shorter than
 // the mark's own bound, which is the case that tells the two clocks apart: an
-// implementation that started counting when the mark was written ends this
-// call inside the window.
+// implementation that started counting when the mark was written starts the
+// farewell inside the window (measured).
 func TestCallerSilence_EndsAtTheLimitAfterTheGreetingHasPlayed(t *testing.T) {
 	const d = callerSilenceTestLimit
 	const (
@@ -282,7 +296,8 @@ func TestCallerSilence_ACallerWhoKeepsSpeakingIsNotEnded(t *testing.T) {
 //
 // Mutation, exactly as run: delete BOTH the gen bump and the stopTimerLocked
 // call from callerSpoke, leaving starts++ and audio=false. Either one alone
-// voids the pending fire, so deleting only the stop leaves this green.
+// ends a running count — the stop cancels the timer, the gen bump voids its
+// fire — so deleting only one leaves this green (measured both ways).
 func TestCallerSilence_OneUtteranceLongerThanTheLimitIsNotCut(t *testing.T) {
 	const d = callerSilenceTestLimit
 
@@ -447,7 +462,10 @@ func TestCallerSilence_BargeInDoesNotStartTheCount(t *testing.T) {
 		return be, h, wire
 	}
 
-	// Mutation: delete the gen == s.gen check from callerSilence.played.
+	// Mutation, exactly as run: delete the generation check from BOTH
+	// callerSilence.played and callerSilence.fire. Either alone voids the
+	// stale echo — played declines to start, or fire declines to end — so
+	// deleting only played's leaves this green (measured).
 	t.Run("immediate echo", func(t *testing.T) {
 		_, h, _ := bargeIn(t)
 		time.Sleep(3 * d)
@@ -607,6 +625,12 @@ func TestCallerSilence_UnsetZeroOrNegativeIsByteIdenticalToToday(t *testing.T) {
 			be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": payload})
 			waitFor(t, 5*time.Second, func() bool { return len(raw()) >= 1 })
 			endTurn(t, be)
+			// Room for the playout mark this call must not write, BEFORE the
+			// speech_started below: caller speech voids a mark not yet written,
+			// so emitting it straight after the turn ends would hide a bound
+			// that was wrongly switched on (measured: green with the nil
+			// return deleted).
+			time.Sleep(300 * time.Millisecond)
 			emitSpeechStarted(t, be)
 			waitFor(t, 5*time.Second, func() bool { return len(raw()) >= 2 })
 			echoMarkFromCarrier(t, h, "nobody-asked-for-this")
@@ -768,7 +792,8 @@ func TestCallerSilence_TheFillersClearIsNotCallerSpeech(t *testing.T) {
 // limit again (restart), rather than the count pausing while the agent speaks
 // and resuming with what was left (accumulate). Ian confirmed restart on
 // 2026-10-28. No deletion turns this red; an accumulating implementation
-// does, because it ends the call 0.4 of a limit after the second echo.
+// does, because it ends the call roughly 0.4 of a limit after the second echo
+// (measured: red 3/3 against a temporary accumulating callerSilence).
 func TestCallerSilence_EachAgentTurnGrantsAFreshBound(t *testing.T) {
 	const d = 500 * time.Millisecond
 

@@ -257,6 +257,7 @@ func (s *callerSilence) claim(tag uint64) (gen uint64, ok bool) {
 // played is a playout mark's resolution — its echo, or its bound elapsing —
 // reported by the markTracker under its own lock. It starts the count only if
 // nothing has happened since the mark was written and no reply is pending.
+// fire checks the generation again, so a stale start is voided at either end.
 func (s *callerSilence) played(gen uint64) {
 	if s == nil {
 		return
