@@ -65,9 +65,8 @@ func TestCarrierAudioChan_AbsentOptionNeverLogsADrop(t *testing.T) {
 // failingWSWriter always fails Write with err, so a test can force
 // carrierMediaSink's write path to error deterministically — no real network
 // connection, no race against TCP write buffering. Package-local to this
-// file rather than added to fakeWSWriter (output_test.go): that fixture's
-// whole contract is that Write always succeeds, and every one of its callers
-// relies on that.
+// file rather than a mode on discardWSWriter (realtime_marks_test.go), whose
+// contract is that Write always succeeds.
 type failingWSWriter struct{ err error }
 
 func (f *failingWSWriter) Write(context.Context, websocket.MessageType, []byte) error {
@@ -85,9 +84,8 @@ func (f *failingWSWriter) Write(context.Context, websocket.MessageType, []byte) 
 // This constructs carrierMediaSink directly rather than driving it through
 // HandleStreamRealtime and a real carrier WebSocket: carrierMediaSink.conn
 // is already typed as the unexported wsWriter interface specifically so
-// tests can fake it (see output.go's doc comment on wsWriter, and
-// output_test.go's fakeWSWriter, which does the same for
-// dataPlaneOutput/controlPlaneOutput). HandleStreamRealtime takes the carrier
+// tests can fake it (see wsWriter's doc comment, and discardWSWriter in
+// realtime_marks_test.go). HandleStreamRealtime takes the carrier
 // connection as a concrete *websocket.Conn, so reaching this path through it
 // would mean forcing a real socket write to fail — racy against TCP write
 // buffering — or widening HandleStreamRealtime's public signature to accept

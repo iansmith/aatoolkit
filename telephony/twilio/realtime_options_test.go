@@ -1,9 +1,14 @@
 package twilio
 
 import (
+	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/iansmith/aatoolkit/telephony/realtime"
 )
 
 // Option-reachability tests for the realtime path (AATK-78).
@@ -45,16 +50,16 @@ func TestNewStreamHandler_WithNoOptionsLeavesASilentCallRunning(t *testing.T) {
 }
 
 // TestNewStreamHandler_OptionsOnTheDefaultPathAreInert pins the documented
-// no-op: an empty realtimeURL returns DefaultHandleStream, which never reaches
-// the realtime transport, so an option supplied alongside it is ignored rather
-// than routing the call. Asserted by the backend seeing no dial at all, which is
-// the same signal TestRealtime_SwitchUnsetAttemptsNoDial uses for the switch
-// itself.
+// no-op: options supplied alongside an empty realtimeURL, the default, are
+// ignored rather than routing the call to a realtime backend. Asserted by the
+// backend seeing no connection, the same signal
+// TestRealtime_SwitchUnsetAttemptsNoDial uses.
 //
-// Deliberately no assertion about how the call ends. On the default path it ends
-// with "no VAD factory wired", because this harness has no sidecars — a property
-// of the fixture, not of the option, and asserting on it would pin the default
-// path's unrelated behaviour inside an options test.
+// That signal cannot tell an ignored option from a handler that tried to dial
+// the empty URL and failed, which reaches no backend either;
+// TestNewStreamHandler_EmptyURLEndsTheCallAndDialsNothing counts dials at the
+// dialRealtime seam for that. Deliberately no assertion here about how the
+// call ends: that is the same test's subject, not an option's.
 func TestNewStreamHandler_OptionsOnTheDefaultPathAreInert(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 
@@ -65,6 +70,70 @@ func TestNewStreamHandler_OptionsOnTheDefaultPathAreInert(t *testing.T) {
 
 	if got := be.connCount(); got != 0 {
 		t.Fatalf("an option on the default path must not construct a realtime client, got %d dial(s)", got)
+	}
+}
+
+// TestNewStreamHandler_EmptyURLEndsTheCallAndDialsNothing pins what an empty
+// realtimeURL does to a call — and so what driver.Config{}.StreamHandler()
+// does, since it passes an unset RealtimeURL straight through: the handler
+// returns a non-nil error promptly, which ends the call, and never reaches the
+// realtime dial.
+//
+// The dial is counted at the dialRealtime seam rather than at a backend,
+// because a handler that fell through to the realtime path with an empty URL
+// would fail to dial and never reach any backend, so a backend's connection
+// count reads zero for that handler too. Nothing is sent after the start
+// frame: the call must end on its own, not because carrier traffic arrived.
+//
+// No t.Parallel: dialRealtime is process-global.
+func TestNewStreamHandler_EmptyURLEndsTheCallAndDialsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []RealtimeOption
+	}{
+		{"no options", nil},
+		{"with options", []RealtimeOption{WithIdleTimeout(idleGapTimeout), WithCallerSilenceTimeout(time.Second)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var dials atomic.Int32
+			orig := dialRealtime
+			dialRealtime = func(ctx context.Context, url string, opts ...realtime.DialOption) (*realtime.Client, error) {
+				dials.Add(1)
+				return nil, errors.New("dial refused by the test")
+			}
+			t.Cleanup(func() { dialRealtime = orig })
+
+			h := newRealtimeHarnessWith(t, NewStreamHandler("", tc.opts...))
+
+			if err := h.waitDone(2 * time.Second); err == nil {
+				t.Fatal("an empty realtimeURL must end the call with a non-nil error")
+			}
+			if got := dials.Load(); got != 0 {
+				t.Fatalf("an empty realtimeURL must not dial a realtime backend, got %d dial(s)", got)
+			}
+		})
+	}
+}
+
+// TestNewStreamHandler_EmptyURLLogsWhyTheCallEnded pins the operator's only
+// signal for why a call ended this way. Server.ServeStreams does not log the
+// error a StreamHandler returns, so unless the handler itself logs, a
+// deployment with no realtime URL ends every call with nothing in the log
+// saying why. The CallSid ties the line to the call it ended.
+func TestNewStreamHandler_EmptyURLLogsWhyTheCallEnded(t *testing.T) {
+	logs := captureLog(t)
+	h := newRealtimeHarnessWith(t, NewStreamHandler(""))
+
+	if err := h.waitDone(2 * time.Second); err == nil {
+		t.Fatal("an empty realtimeURL must end the call with a non-nil error")
+	}
+
+	got := logs.String()
+	if !strings.Contains(got, "no realtime URL") {
+		t.Errorf("log must say the realtime URL is missing, got:\n%s", got)
+	}
+	if callSID := "CA" + t.Name(); !strings.Contains(got, callSID) {
+		t.Errorf("log must name the call (%s), got:\n%s", callSID, got)
 	}
 }
 

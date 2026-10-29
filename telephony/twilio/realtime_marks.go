@@ -21,10 +21,8 @@ import (
 // TimedOut == false means the carrier echoed the mark, which is the signal
 // this exists to deliver. TimedOut == true means it did not, and the engine's
 // own bound elapsed instead — see carrierMediaSink.markEchoBound. A consumer
-// hanging up after a spoken line can treat both as "go ahead": the second is
-// the classic path's behavior too (handleMarkEchoTimeout closes anyway, logging
-// that the peer did not honor the mark protocol). A consumer that cares which
-// happened has the bool.
+// hanging up after a spoken line can treat both as "go ahead". A consumer that
+// cares which happened has the bool.
 type MarkEcho struct {
 	Name     string
 	TimedOut bool
@@ -295,9 +293,8 @@ func (t *markTracker) resolveAwaitLocked(name string) bool {
 
 // echo resolves an inbound mark echo from the carrier.
 //
-// An echo matching nothing outstanding is logged and NOT delivered — the
-// distinction handleMarkEchoControlEvent already draws on the classic path,
-// and what stops a consumer with two marks in flight from reading one as the
+// An echo matching nothing outstanding is logged and NOT delivered — that is
+// what stops a consumer with two marks in flight from reading one as the
 // other. The one unlogged case is a late echo of the engine's own playout
 // mark; see playoutArmed. Called from pumpCarrierToBridge's goroutine.
 func (t *markTracker) echo(name string) {

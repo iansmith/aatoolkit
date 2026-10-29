@@ -236,7 +236,7 @@ func TestServerEventChan_NoGoroutineOutlivesCallAndEventsActuallyFlow(t *testing
 
 // TestServerEventChan_DropIsLogged pins the DoD item "Drops are logged rather
 // than silent." Mirrors the log-capture pattern used elsewhere in this
-// package (e.g. telephony/twilio/demux_test.go).
+// package (see captureLog).
 func TestServerEventChan_DropIsLogged(t *testing.T) {
 	// syncBuffer, not bytes.Buffer: drops are logged from the delivery
 	// goroutine, so an unguarded buffer read here is a data race under -race

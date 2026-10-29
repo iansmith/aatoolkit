@@ -11,8 +11,6 @@ import (
 	"sync"
 
 	"github.com/coder/websocket"
-
-	"github.com/iansmith/aatoolkit/telephony"
 )
 
 // e164Pattern matches E.164-formatted phone numbers: a leading '+', a first
@@ -160,13 +158,6 @@ type Server struct {
 	// is still SMSRejectText.
 	VoiceRejectReason RejectReason
 
-	// ReplyRouter, if set, is threaded onto each stream's context before
-	// HandleStream is called, letting a caller outside this package reach a
-	// live session by CallSID/StreamSID and route reply frames through its
-	// already-wired data-plane output (AATK-22). Nil means no registration —
-	// the engine never requires a router to operate.
-	ReplyRouter *telephony.ReplyRouter
-
 	// AnswerCall, if set, decides per call whether to answer with a spoken
 	// refusal instead of opening a stream. It is handed the caller (from) and
 	// the dialed number (to; "" when the webhook's To is missing or not
@@ -222,8 +213,7 @@ type callParties struct {
 // oldest, so a stream whose start frame arrives after maxPendingFrom newer
 // calls were recorded finds no entry, and its start Frame carries "" for
 // From and To. Without the bound the map would grow for the whole of a
-// long-running server's lifetime. Mirrors the maxAbandoned evict-oldest
-// discipline in telephony/stt.go.
+// long-running server's lifetime.
 const maxPendingFrom = 1024
 
 // recordCall remembers from and to under callSid for a later ServeStreams
@@ -541,10 +531,6 @@ func (s *Server) ServeStreams(w http.ResponseWriter, r *http.Request) {
 
 	parties := s.lookupCall(f.CallSID)
 	f.From, f.To = parties.from, parties.to
-
-	if s.ReplyRouter != nil {
-		ctx = ContextWithReplyRouter(ctx, s.ReplyRouter)
-	}
 
 	if s.HandleStream != nil {
 		s.HandleStream(ctx, conn, f)
