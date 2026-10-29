@@ -2,8 +2,8 @@ package twilio
 
 import (
 	"context"
-	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -98,10 +98,13 @@ func (p *playoutClock) outstanding(now time.Time) time.Duration {
 // A nil *markTracker is the "nobody needs marks on this call" case and every
 // method tolerates it: HandleStreamRealtime builds one only when a mark option
 // was supplied, or — since AATK-128 — when a farewell clip was, since the
-// engine waits on its own mark there. A call with none of the three keeps
-// today's behavior exactly: no mark is written, and an inbound mark frame is
-// ignored without even a log line. A farewell-only call keeps the same silence
-// on the CONSUMER's side, which is what logUnmatchedEchoes below is for.
+// engine waits on its own mark there, or — since AATK-163 — when the
+// caller-silence bound is set, since its count starts at the echo of the
+// engine's own playout mark. A call with none of the four keeps today's
+// behavior exactly: no mark is written, and an inbound mark frame is ignored
+// without even a log line. A call whose tracker exists only for the engine's
+// own marks keeps the same silence on the CONSUMER's side, which is what
+// logUnmatchedEchoes below is for.
 type markTracker struct {
 	// echoCh is the consumer's destination, resolved once per call, and nil
 	// when the consumer asked for none (it may still have asked for the
@@ -109,11 +112,20 @@ type markTracker struct {
 	echoCh chan<- MarkEcho
 
 	// logUnmatchedEchoes gates echo's "matches no outstanding mark" line. It
-	// is false when the tracker exists only for the engine's own farewell
-	// wait: a call that named neither mark option ignored an inbound mark
-	// frame without even a log line, and the tracker appearing underneath a
-	// farewell must not change that.
+	// is false when the tracker exists only for the engine's own marks — the
+	// farewell's wait, or the caller-silence bound's playout marks: a call
+	// that named neither mark option ignored an inbound mark frame without
+	// even a log line, and the tracker appearing underneath the engine's own
+	// use must not change that.
 	logUnmatchedEchoes bool
+
+	// playoutArmed is set once armPlayout has armed a playout mark on this
+	// call. echo reads it to leave an unmatched echo carrying
+	// realtimePlayoutMarkPrefix unlogged: on a call that wrote such marks it
+	// is one of the engine's own arriving after its bound fired, which says
+	// nothing about the consumer's marks. A call that never wrote one logs
+	// such a name like any other.
+	playoutArmed bool
 
 	mu sync.Mutex
 	// outstanding maps each written-but-unechoed mark name to the arming that
@@ -127,9 +139,15 @@ type markTracker struct {
 	// the consumer's observation of one through echoCh. AATK-128 needs exactly
 	// one: the farewell must have reached the caller before the socket closes,
 	// and the echo is the only honest report that it did. One waiter per call
-	// rather than a map, because there is one engine-internal wait and it is
-	// the last thing the call does; a second would be a different feature and
-	// would say so by needing a different shape here.
+	// rather than a map, because there is one engine-internal WAIT and it is
+	// the last thing the call does.
+	//
+	// The caller-silence bound's playout marks (AATK-163) are the second
+	// engine use, and they are the different shape this comment used to
+	// predict: not a wait but a callback, outstandingMark.played, carried by
+	// each arming. await could not serve them — it holds one name, a playout
+	// mark can be in flight beside the farewell's and beside another playout
+	// mark, and stop closes its channel, which would read as "played".
 	awaitName string
 	awaitCh   chan struct{}
 	// stopped is set when the call ends. It is what keeps a timer that fires,
@@ -139,7 +157,8 @@ type markTracker struct {
 }
 
 // outstandingMark is one written-but-unechoed mark: the timer enforcing its
-// bound, and the number of the arming that started it.
+// bound, the number of the arming that started it, and — for an engine
+// playout mark only — what to call when it resolves.
 //
 // The number is what lets expire act on its OWN arming and no other.
 // time.Timer.Stop cannot unwind a callback that has already begun, so a
@@ -148,9 +167,14 @@ type markTracker struct {
 // it would then resolve whichever arming had replaced it: a TimedOut record
 // for a mark still well inside its own bound, whose real echo would afterwards
 // match nothing outstanding and be discarded.
+//
+// played is non-nil only for a mark armPlayout armed. Its resolution — the
+// echo, or the bound firing — calls played and is delivered nowhere else; stop
+// never calls it, because a call ending is not the audio having played.
 type outstandingMark struct {
-	timer *time.Timer
-	gen   uint64
+	timer  *time.Timer
+	gen    uint64
+	played func()
 }
 
 func newMarkTracker(echoCh chan<- MarkEcho, consumerMarks bool) *markTracker {
@@ -178,6 +202,25 @@ func (t *markTracker) arm(name string, bound time.Duration) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.armLocked(name, bound, nil)
+}
+
+// armPlayout is arm for the caller-silence bound's playout mark: its
+// resolution calls played rather than reaching the consumer. Called under
+// writeSem, as arm is, for the same reason.
+func (t *markTracker) armPlayout(name string, bound time.Duration, played func()) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.playoutArmed = true
+	t.armLocked(name, bound, played)
+}
+
+// armLocked is arm's body, with played carried on the arming. Called with t.mu
+// held.
+func (t *markTracker) armLocked(name string, bound time.Duration, played func()) {
 	if t.stopped {
 		return
 	}
@@ -189,7 +232,7 @@ func (t *markTracker) arm(name string, bound time.Duration) {
 	gen := t.gen
 	// The callback takes t.mu, which is held here, so a bound of zero cannot
 	// beat this assignment: expire waits for arm to return either way.
-	t.outstanding[name] = outstandingMark{timer: time.AfterFunc(bound, func() { t.expire(name, gen) }), gen: gen}
+	t.outstanding[name] = outstandingMark{timer: time.AfterFunc(bound, func() { t.expire(name, gen) }), gen: gen, played: played}
 }
 
 // await registers name as the mark the engine itself is waiting on and returns
@@ -255,7 +298,8 @@ func (t *markTracker) resolveAwaitLocked(name string) bool {
 // An echo matching nothing outstanding is logged and NOT delivered — the
 // distinction handleMarkEchoControlEvent already draws on the classic path,
 // and what stops a consumer with two marks in flight from reading one as the
-// other. Called from pumpCarrierToBridge's goroutine.
+// other. The one unlogged case is a late echo of the engine's own playout
+// mark; see playoutArmed. Called from pumpCarrierToBridge's goroutine.
 func (t *markTracker) echo(name string) {
 	if t == nil {
 		return
@@ -267,13 +311,19 @@ func (t *markTracker) echo(name string) {
 	}
 	m, ok := t.outstanding[name]
 	if !ok {
-		if t.logUnmatchedEchoes {
+		if t.logUnmatchedEchoes && !(t.playoutArmed && strings.HasPrefix(name, realtimePlayoutMarkPrefix)) {
 			log.Printf("twilio: realtime: mark echo %q matches no outstanding mark; not delivered as a match", name)
 		}
 		return
 	}
 	m.timer.Stop()
 	delete(t.outstanding, name)
+	if m.played != nil {
+		// The engine's own playout mark: the caller-silence bound's, not the
+		// consumer's to hear about.
+		m.played()
+		return
+	}
 	if t.resolveAwaitLocked(name) {
 		// The engine's own farewell mark: not the consumer's to hear about.
 		return
@@ -284,7 +334,8 @@ func (t *markTracker) echo(name string) {
 // expire is the bound firing: the carrier never echoed this mark. The record
 // still goes to the consumer, carrying TimedOut, because the whole point of
 // the bound is that a peer which does not honor the mark protocol must not
-// leave the consumer waiting forever.
+// leave the consumer waiting forever. An engine playout mark's bound firing
+// counts as its audio having played, for the same reason: it calls played.
 //
 // gen names the arming this bound belongs to, and only that arming is resolved
 // here — see outstandingMark for why matching the name alone is not enough.
@@ -294,7 +345,8 @@ func (t *markTracker) expire(name string, gen uint64) {
 	if t.stopped {
 		return
 	}
-	if m, ok := t.outstanding[name]; !ok || m.gen != gen {
+	m, ok := t.outstanding[name]
+	if !ok || m.gen != gen {
 		// This arming was already resolved — echoed, or replaced by a re-arm
 		// of the same name — while this timer was running its func and waiting
 		// on the mutex. Stop() cannot unwind that, so the check here is what
@@ -305,6 +357,12 @@ func (t *markTracker) expire(name string, gen uint64) {
 	delete(t.outstanding, name)
 	engineOwned := t.resolveAwaitLocked(name)
 	log.Printf("twilio: realtime: carrier did not honor mark protocol for %q within its bound", name)
+	if m.played != nil {
+		// The engine's own playout mark: the caller-silence bound's, not the
+		// consumer's to hear about.
+		m.played()
+		return
+	}
 	if engineOwned {
 		// The engine's own farewell mark: not the consumer's to hear about.
 		return
@@ -385,11 +443,8 @@ func handleMarkRequest(ctx context.Context, sink *carrierMediaSink, ch <-chan st
 	// write happens on the select loop that observes every way the call can
 	// end, and the slot it queues behind is held by writes taken on the call's
 	// own unbounded context.
-	sendCtx, cancelSend := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
-	defer cancelSend()
-	if err := sink.Mark(sendCtx, name); err != nil {
-		log.Printf("twilio: realtime: mark send failed: %v", err)
-		return ch, fmt.Errorf("twilio: realtime: mark send: %w", err)
+	if err := boundedSend(ctx, "mark", func(c context.Context) error { return sink.Mark(c, name) }); err != nil {
+		return ch, err
 	}
 	return ch, nil
 }
