@@ -58,7 +58,7 @@ func TestNewStreamHandler_WithNoOptionsLeavesASilentCallRunning(t *testing.T) {
 func TestNewStreamHandler_OptionsOnTheDefaultPathAreInert(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 
-	h := newRealtimeHarnessWith(t, NewStreamHandler("", WithIdleTimeout(idleGapTimeout)))
+	h := newRealtimeHarnessWith(t, NewStreamHandler("", WithIdleTimeout(idleGapTimeout), WithCallerSilenceTimeout(time.Second)))
 	h.sendRaw(mediaFrameRaw(h.streamSID, carrierPayloadB64()))
 
 	time.Sleep(idleGapTimeout * 2)

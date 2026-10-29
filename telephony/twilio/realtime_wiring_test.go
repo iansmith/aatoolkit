@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -372,6 +373,16 @@ func newRealtimeHarness(t *testing.T, realtimeURL string) *realtimeHarness {
 // than only through NewStreamHandler's switch.
 func newRealtimeHarnessWith(t *testing.T, handle StreamHandler) *realtimeHarness {
 	t.Helper()
+	return newRealtimeHarnessOn(t, handle, nil)
+}
+
+// newRealtimeHarnessOn is newRealtimeHarnessWith with the carrier server's
+// listener passed through wrap first, when wrap is non-nil, so a test can sit
+// between the handler's *websocket.Conn and the socket under it — the only
+// seam a call-level test has, since HandleStreamRealtime takes the concrete
+// connection rather than the wsWriter interface the sink tests fake.
+func newRealtimeHarnessOn(t *testing.T, handle StreamHandler, wrap func(net.Listener) net.Listener) *realtimeHarness {
+	t.Helper()
 	h := &realtimeHarness{
 		t:         t,
 		streamSID: "SS" + t.Name(),
@@ -394,7 +405,11 @@ func newRealtimeHarnessWith(t *testing.T, handle StreamHandler) *realtimeHarness
 		},
 	}
 
-	ts := httptest.NewServer(http.HandlerFunc(srv.ServeStreams))
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(srv.ServeStreams))
+	if wrap != nil {
+		ts.Listener = wrap(ts.Listener)
+	}
+	ts.Start()
 	t.Cleanup(ts.Close)
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")

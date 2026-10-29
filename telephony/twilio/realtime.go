@@ -66,8 +66,8 @@ func resolveHandshake(name string, resolve func(Frame) string, start Frame) stri
 // was still hung 3 s later.
 //
 // It bounds the writes to the other socket too: the mark handleMarkRequest
-// writes to the CARRIER, and every frame, clear and mark playFarewell writes
-// there (AATK-128). The reason is the same one stated above and so is the
+// writes to the CARRIER, every frame, clear and mark playFarewell writes there
+// (AATK-128), and the playout mark handlePlayoutMark writes (AATK-163). The reason is the same one stated above and so is the
 // value, so this stays the single definition rather than growing a near-identical
 // twin (CLAUDE.md #5) — those writes also happen on the select loop, and the
 // write slot they queue behind is held by carrier audio written on the call's own
@@ -123,6 +123,10 @@ type RealtimeOption func(*realtimeConfig)
 // same value.
 type realtimeConfig struct {
 	idleTimeout time.Duration
+
+	// callerSilenceTimeout is WithCallerSilenceTimeout's bound: a plain value,
+	// like idleTimeout, and zero or negative is off.
+	callerSilenceTimeout time.Duration
 
 	// instructionsFor is resolved per call rather than stored as a string, and
 	// that is the whole point. NewStreamHandler binds its options once at
@@ -195,11 +199,11 @@ type realtimeConfig struct {
 	// consumer reads, resolved per call for the same reason.
 	markEchoChanFor func(start Frame) chan<- MarkEcho
 
-	// farewell is the clip played to the caller on the idle guard's own exit
-	// path, before the carrier is closed. A plain value rather than a per-call
-	// resolver, mirroring voice and tools: what a deployment says as it hangs
-	// up on a backend that stopped answering is a property of the deployment,
-	// and no stated need varies it by caller. nil is inert.
+	// farewell is the clip played to the caller on the two timer exit paths —
+	// the idle guard's and the caller-silence bound's — before the carrier is
+	// closed. A plain value rather than a per-call resolver, mirroring voice
+	// and tools: what a deployment says as it hangs up is a property of the
+	// deployment, and no stated need varies it by caller. nil is inert.
 	farewell []byte
 
 	// fillerFor mirrors instructionsFor rather than the channel resolvers: it
@@ -258,8 +262,9 @@ type FillerConfig struct {
 // Farewell == true means the chunk is a frame of the consumer's farewell clip
 // (WithFarewellAudio), added by AATK-128 in the shape Filler already
 // established and for the same reason: it is engine-originated audio, so
-// reporting it with both bools clear would assert backend speech on the one
-// call whose error says there was none. The three are mutually exclusive.
+// reporting it with both bools clear would assert backend speech that never
+// happened — on an idle ending, on the one call whose error says there was
+// none. The three are mutually exclusive.
 // Zero for every record on a call that supplies no farewell.
 type CarrierAudio struct {
 	Payload  string
@@ -396,14 +401,69 @@ func WithIdleTimeout(d time.Duration) RealtimeOption {
 // return, and a message is not an API.
 var ErrIdleTimeout = errors.New("twilio: realtime: idle timeout")
 
-// WithFarewellAudio plays clip to the caller on the idle guard's own exit path,
-// before the carrier connection is closed (AATK-128).
+// WithCallerSilenceTimeout ends the call once the caller has said nothing for
+// d after the agent's audio has finished playing to them (AATK-163). Zero or
+// negative is off — no timer, no mark, a carrier wire byte-identical to a call
+// that never named the option — and off is the default: the engine picks no
+// value, because how long a silent caller is worth waiting for is the
+// deployment's call.
 //
-// The gap it fills is the one a caller reads as the line having died: the guard
-// fires while they are still holding an open line expecting something, and
-// today the call simply stops. This is the only exit path it covers, and
-// deliberately — every other ending either has the caller hanging up already or
-// has the backend still speaking.
+// The count is anchored to PLAYOUT, not to the backend. After each agent turn
+// that put audio on the line, and that the caller did not interrupt, the
+// engine writes a mark of its own to the carrier, behind the turn's audio, and
+// the count starts when the carrier echoes it — or, for a carrier that never
+// echoes, when the mark's own bound elapses. So a reply the backend sent
+// in a burst seconds ago and the carrier is still playing is never counted as
+// the caller's silence. Each agent turn that plays grants a whole d again.
+//
+// The count stops when the caller starts speaking (the backend's
+// speech_started), when agent audio reaches the carrier, and when a response
+// ends in a function call, which leaves the reply pending until the next
+// response that does not. It does not run at call open: a call where the agent
+// never speaks is bounded only by WithIdleTimeout, so set both. They measure
+// different things — this one the caller, that one the backend — and the
+// first to run out ends the call.
+//
+// LINE NOISE that the backend's VAD hears as speech is caller speech to this
+// bound: it stops the count, and the call stays up. This option does not bound
+// a noisy line.
+//
+// On expiry the call ends through the same path as the idle guard, so
+// WithFarewellAudio's clip plays first, and HandleStreamRealtime returns an
+// error wrapping ErrCallerSilenceTimeout. That error reaches only a consumer
+// that calls HandleStreamRealtime, or the handler NewStreamHandler returns,
+// itself and reads what it returns: Server.ServeStreams discards a handler's
+// error, and driver.Config.StreamHandler passes no realtime options at all.
+//
+// The engine's marks are its own. They are never delivered on
+// WithMarkEchoChan, and an echo of one that arrives after its bound has fired
+// is not logged as unmatched. A mark the carrier fails to echo in time logs
+// the same "did not honor mark protocol" line a consumer's does. A playout
+// mark whose write fails ends the call with an error naming the playout mark
+// send, as a consumer mark's failed write does.
+//
+// One value for every call this handler serves. There is no "For" twin, for
+// the reason WithFarewellAudio has none: no stated need varies it per caller.
+func WithCallerSilenceTimeout(d time.Duration) RealtimeOption {
+	return func(c *realtimeConfig) { c.callerSilenceTimeout = d }
+}
+
+// ErrCallerSilenceTimeout identifies the ending WithCallerSilenceTimeout
+// produces, so a consumer can tell it apart from ErrIdleTimeout with errors.Is.
+// The returned error wraps this and adds how long the bound was. It neither
+// wraps nor is wrapped by ErrIdleTimeout: the two conditions are different
+// facts — the caller went quiet, or the backend did.
+var ErrCallerSilenceTimeout = errors.New("twilio: realtime: caller silence timeout")
+
+// WithFarewellAudio plays clip to the caller on the two timer exit paths —
+// WithIdleTimeout's and WithCallerSilenceTimeout's — before the carrier
+// connection is closed (AATK-128).
+//
+// The gap it fills is the one a caller reads as the line having died: the
+// timer fires while they are still holding an open line expecting something,
+// and without it the call simply stops. Those are the only exit paths it
+// covers, and deliberately — every other ending either has the caller hanging
+// up already or has the backend still speaking.
 //
 // clip is 8 kHz G.711 μ-law raw bytes, the same codec and the same "no
 // transcoding, no gain, no fade" contract FillerConfig.Loop carries; see there
@@ -412,8 +472,9 @@ var ErrIdleTimeout = errors.New("twilio: realtime: idle timeout")
 // played (or the engine's own bound for that report elapses) — so a farewell is
 // never cut off mid-word by the close.
 //
-// nil or empty is inert: the idle branch then behaves exactly as it did before
-// this option existed, ending the call at its bound with nothing written.
+// nil or empty is inert: each timer's branch then ends the call at its bound
+// with nothing written, which for the idle branch is exactly what it did before
+// this option existed.
 //
 // One clip for every call this handler serves. There is no "For" twin, for the
 // reason WithVoice and WithTools have none: no stated need varies it per
@@ -861,7 +922,10 @@ func WithVoiceUpdateChanFor(fn func(start Frame) <-chan string) RealtimeOption {
 // use WithMarkRequestChanFor and give each call its own channel.
 //
 // Supplying neither this nor WithMarkEchoChan is byte-for-byte today's
-// behavior: no mark is written, and an inbound mark frame is still ignored.
+// behavior: no mark of the consumer's is written, and an inbound mark frame
+// matching none of the engine's own is still ignored. The engine's own marks —
+// WithFarewellAudio's and WithCallerSilenceTimeout's — are written when those
+// options are set, whatever the consumer chose here.
 func WithMarkRequestChan(ch <-chan string) RealtimeOption {
 	return WithMarkRequestChanFor(func(Frame) <-chan string { return ch })
 }
@@ -894,7 +958,9 @@ func WithMarkRequestChanFor(fn func(start Frame) <-chan string) RealtimeOption {
 //
 // An echo whose name matches nothing outstanding is logged and NOT delivered:
 // it is not the mark anything is waiting on, and delivering it as one is the
-// mistake a consumer with two marks in flight cannot recover from.
+// mistake a consumer with two marks in flight cannot recover from. The one
+// echo not logged is a late one of the engine's own playout mark; see
+// WithCallerSilenceTimeout.
 //
 // Nothing is delivered once the call has ended. A consumer must not treat this
 // channel as the only way its wait can finish — the call ending is the other,
@@ -1087,9 +1153,16 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	// paragraph above true of a farewell-only call: nothing is delivered
 	// anywhere it was not already going, AND an inbound mark frame is still
 	// ignored without a log line.
+	//
+	// The caller-silence bound needs one for the same reason (AATK-163): its
+	// count starts at the echo of the engine's own playout mark, and the
+	// tracker is told the same thing about whose marks it holds.
+	silence := newCallerSilence(cfg.callerSilenceTimeout)
+	defer silence.stop()
+
 	consumerMarks := markRequestCh != nil || markEchoCh != nil
 	var marks *markTracker
-	if consumerMarks || len(cfg.farewell) > 0 {
+	if consumerMarks || len(cfg.farewell) > 0 || silence != nil {
 		marks = newMarkTracker(markEchoCh, consumerMarks)
 	}
 	// Before conn.CloseNow's defer runs, so a bound firing during teardown
@@ -1112,7 +1185,7 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 	fill := newFiller(ctx, cfg.filler(start))
 	defer fill.shutdown()
 
-	sink := newCarrierMediaSink(conn, start.StreamSID, cfg.carrierAudioChan(start), marks, fill)
+	sink := newCarrierMediaSink(conn, start.StreamSID, cfg.carrierAudioChan(start), marks, fill, silence)
 	fill.attach(sink)
 
 	// The call is now open on both sides, and nothing has been said on either.
@@ -1157,8 +1230,13 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 
 	// The filler's arming half rides this drain: the events that arm it reach
 	// this package nowhere else. See filler's type comment for why arming and
-	// stopping are driven from two different places.
-	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event", fill.observe)
+	// stopping are driven from two different places. The caller-silence
+	// bound's drain half rides it for the same reason (see callerSilence),
+	// after the filler's, in stream order.
+	go deliver(bridge.Events(), cfg.serverEventChan(start), "server event", func(ev ServerEvent) {
+		fill.observe(ev)
+		silence.observe(ev)
+	})
 
 	carrierDone := make(chan error, 1)
 	go func() { carrierDone <- pumpCarrierToBridge(ctx, conn, bridge, marks, cfg.inboundAudioChan(start)) }()
@@ -1193,10 +1271,12 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 
 	// One goroutine, one select: bridge.Activity() resets the guard without any
 	// Reset call crossing a goroutine boundary, which is what keeps this
-	// race-free under -race. Only backendDone, carrierDone, the guard firing,
-	// or a consumer send failure — client event, voice update or mark alike —
-	// ends the loop; an activity signal, a forwarded client event, a forwarded
-	// voice update or a written mark just re-arms/loops again.
+	// race-free under -race. Only backendDone, carrierDone, either timer
+	// running out — the idle guard or the caller-silence bound — or a send
+	// failure — client event, voice update, mark or playout mark alike — ends
+	// the loop; an activity signal, a forwarded client event, a forwarded voice
+	// update, a written mark, or a caller-silence expiry that caller speech
+	// overtook just re-arms/loops again.
 	for {
 		select {
 		case err := <-backendDone:
@@ -1205,12 +1285,23 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 		case err := <-carrierDone:
 			return err
 		case <-idle.fired():
-			// Before the return, and therefore before the CloseNow defer: this
-			// is the one ending that fires while the caller is still holding a
-			// live line expecting something, so it is the one that owes them a
-			// word. Inert when no clip was supplied.
-			sink.playFarewell(ctx, cfg.farewell)
-			return fmt.Errorf("%w: no backend activity for %s", ErrIdleTimeout, cfg.idleTimeout)
+			// The two timer endings are the ones that fire while the caller is
+			// still holding a live line expecting something, so they are the
+			// ones that owe them a word — played before the return, and
+			// therefore before the CloseNow defer. Inert when no clip was
+			// supplied.
+			return endWithFarewell(ctx, sink, cfg.farewell, ErrIdleTimeout, "backend activity", cfg.idleTimeout)
+		case <-silence.expired():
+			// end re-checks under the bound's own lock: a caller who started
+			// speaking after the count ran out and before this case ran is no
+			// longer silent, and is not hung up on.
+			if silence.end() {
+				return endWithFarewell(ctx, sink, cfg.farewell, ErrCallerSilenceTimeout, "caller speech", cfg.callerSilenceTimeout)
+			}
+		case <-silence.markDue():
+			if err := handlePlayoutMark(ctx, sink, silence); err != nil {
+				return err
+			}
 		case <-bridge.Activity():
 			idle.reset()
 		case ev, ok := <-clientEventCh:
@@ -1233,6 +1324,15 @@ func HandleStreamRealtime(ctx context.Context, conn *websocket.Conn, start Frame
 			}
 		}
 	}
+}
+
+// endWithFarewell is the ending both timers share: the farewell, then the
+// error naming which timer ran out. sentinel is that timer's own sentinel, and
+// missing and bound say what it waited for and for how long, so each ending's
+// message has one definition and the two cannot drift apart in shape.
+func endWithFarewell(ctx context.Context, sink *carrierMediaSink, clip []byte, sentinel error, missing string, bound time.Duration) error {
+	sink.playFarewell(ctx, clip, sentinel)
+	return fmt.Errorf("%w: no %s for %s", sentinel, missing, bound)
 }
 
 // realtimeFarewellMarkPrefix begins the name of the mark the engine writes
@@ -1274,43 +1374,46 @@ const realtimeFarewellMarkPrefix = "aatoolkit-farewell-"
 // follows the clip, and the mark's own bound — derived from the playout queued
 // ahead of it — is what waits out the real time the audio takes to play.
 //
-// An empty clip is inert: the branch then ends the call exactly as it did
-// before this option existed. A write failure ends the attempt rather than the
-// call, because the call is already ending; the error the caller returns is the
-// idle timeout either way.
+// An empty clip is inert: the branch then ends the call at its bound with
+// nothing written. A write failure ends the attempt rather than the call,
+// because the call is already ending; the error the caller returns is the
+// timer's own either way.
+//
+// why is the sentinel of the timer that ran out, and names it in the log line,
+// so each ending's name has one definition — its sentinel's text.
 //
 // Every WRITE here is bounded, for the reason handleMarkRequest bounds its own:
 // this runs on the select loop that observes every way the call can end, and it
 // runs AHEAD of the CloseNow that would otherwise unblock a stalled carrier
 // write. On the call's own unbounded context a carrier that stopped reading
-// would park this branch forever and void the idle bound entirely — the one
+// would park this branch forever and void the timer's bound entirely — the one
 // guarantee this exit path exists to make. The WAIT for the echo is deliberately
 // not bounded here: it carries the mark's own bound, derived from the playout
 // the clip queued, which is the real time the audio takes to play.
-func (s *carrierMediaSink) playFarewell(ctx context.Context, clip []byte) {
+func (s *carrierMediaSink) playFarewell(ctx context.Context, clip []byte, why error) {
 	if len(clip) == 0 {
 		return
 	}
-	log.Printf("twilio: realtime: idle timeout: playing the farewell before ending the call")
+	log.Printf("%v: playing the farewell before ending the call", why)
 
 	// bounded gives one carrier write its own deadline; see the paragraph above.
 	bounded := func(write func(context.Context) error) error {
-		wctx, cancel := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
-		defer cancel()
-		return write(wctx)
+		return boundedWrite(ctx, write)
 	}
 
 	// The carrier may be holding audio the goodbye must not sit behind — the
 	// hold loop if one is playing, and equally whatever the backend dumped
-	// before it went quiet, which the guard fires on rather than waits out.
-	// Before the flag below, since that flag is what makes Clear a no-op.
+	// before it went quiet, which the idle guard fires on rather than waits
+	// out. Before the flag below, since that flag is what makes clear a no-op.
+	// clear rather than Clear: this is the engine's own clear, not the caller
+	// speaking, so it must not reach the caller-silence bound (AATK-163).
 	//
 	// UNCONDITIONAL, and both halves of that are load-bearing.
 	//
 	// Not routed through stopFillerAndClear, which sends its clear only on the
 	// filler's stop EDGE — and that edge belongs to whichever caller took it
 	// first. Media and Clear run on Bridge.Run's read loop and call filler.stop
-	// too, so one of them arriving as the guard fires can consume the edge
+	// too, so one of them arriving as a timer fires can consume the edge
 	// microseconds ahead of this, leaving stopFillerAndClear here with nothing
 	// to report and no clear to send; that caller's OWN clear is then dropped by
 	// the gate below, and the goodbye ships behind whatever the carrier still
@@ -1318,15 +1421,15 @@ func (s *carrierMediaSink) playFarewell(ctx context.Context, clip []byte) {
 	//
 	// Not gated on a filler being configured either. The stale audio the clear
 	// discards is not only the loop's: a backend that burst-dumped a long reply
-	// and then stopped answering leaves the rest of it queued, and the guard
-	// fires on the silence that followed rather than on the queue draining.
+	// and then stopped answering leaves the rest of it queued, and the idle
+	// guard fires on the silence that followed rather than on the queue draining.
 	// Without the clear the goodbye ships behind it AND the mark's bound is
 	// derived from it, so the wait below — which every teardown this function's
 	// caller owns sits behind — lasts the backlog rather than the clip. A call
 	// that supplies no farewell never reaches here at all, so this writes
 	// nothing on any wire that was silent before.
 	s.filler.stop()
-	if err := bounded(s.Clear); err != nil {
+	if err := bounded(s.clear); err != nil {
 		log.Printf("twilio: realtime: farewell audio: clear: %v", err)
 		return
 	}
@@ -1341,7 +1444,7 @@ func (s *carrierMediaSink) playFarewell(ctx context.Context, clip []byte) {
 	// carrier's write slot directly. stop() above only ended the CURRENT
 	// episode — the machine can still be RE-ARMED, by an observe running on
 	// the server-event drain goroutine for an event Bridge.Run read just as
-	// the idle guard fired. Delay later that arm would start the loop over the
+	// a timer fired. Delay later that arm would start the loop over the
 	// goodbye, which the farewell wait is long enough to allow. shutdown
 	// latches the machine off for good, which is the truth of this path: the
 	// call ends the moment this function returns.
@@ -1393,13 +1496,30 @@ func (s *carrierMediaSink) playFarewell(ctx context.Context, clip []byte) {
 // what names the sender in both the log line and the wrapped error, so those
 // strings stay one definition rather than two that can drift apart.
 func sendBounded(ctx context.Context, client *realtime.Client, ev json.RawMessage, what string) error {
-	sendCtx, cancelSend := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
-	defer cancelSend()
-	if err := client.Send(sendCtx, ev); err != nil {
+	return boundedSend(ctx, what, func(c context.Context) error { return client.Send(c, ev) })
+}
+
+// boundedSend is the one definition of a bounded, attributed send from
+// HandleStreamRealtime's select loop, whichever socket it writes: write runs
+// under realtimeClientEventSendTimeout, and a failure is logged and returned
+// wrapped, both naming what. sendBounded is its backend form; handleMarkRequest
+// and handlePlayoutMark write the carrier through it (AATK-163 folded the
+// third copy of this shape into one).
+func boundedSend(ctx context.Context, what string, write func(context.Context) error) error {
+	if err := boundedWrite(ctx, write); err != nil {
 		log.Printf("twilio: realtime: %s send failed: %v", what, err)
 		return fmt.Errorf("twilio: realtime: %s send: %w", what, err)
 	}
 	return nil
+}
+
+// boundedWrite runs one write under realtimeClientEventSendTimeout, and is the
+// one definition of that deadline: boundedSend and playFarewell's own writes
+// both take it from here.
+func boundedWrite(ctx context.Context, write func(context.Context) error) error {
+	wctx, cancel := context.WithTimeout(ctx, realtimeClientEventSendTimeout)
+	defer cancel()
+	return write(wctx)
 }
 
 // handleClientEvent processes one receive from the client-event select case,
@@ -1494,7 +1614,7 @@ func handleVoiceUpdate(ctx context.Context, client *realtime.Client, ch <-chan s
 }
 
 // idleGuard is the idle timeout as a single object, so HandleStreamRealtime's
-// loop reads as six things that can end or extend a call rather than as timer
+// loop reads as the things that can end or extend a call rather than as timer
 // bookkeeping. A zero duration produces a guard that never fires: fired()
 // returns a nil channel, which blocks forever in a select, so the loop reduces
 // to the original two-case shape — unbounded, exactly today's behavior.
@@ -1591,8 +1711,9 @@ func sendOrDrop[T any](out chan<- T, v T, dropped *int, what string) {
 // and on the no-consumer path too, which is the point of it being here rather
 // than in a wrapper: it is engine-internal work that must happen whether or
 // not anybody asked to watch the stream. It runs on this goroutine, so it must
-// not block; the filler's is the only one today (see filler.observe), and it
-// takes a mutex and returns.
+// not block; the server-event drain's is the only one today, composing
+// filler.observe and callerSilence.observe, and each takes a mutex and
+// returns.
 func deliver[T any](src <-chan T, out chan<- T, what string, observe func(T)) {
 	var dropped int
 	for v := range src {
@@ -1685,9 +1806,9 @@ type carrierMediaSink struct {
 	// writeSem serialises every write to the carrier connection through one
 	// chokepoint. It exists because this sink has TWO writers: Bridge.Run's
 	// read loop calls Media and Clear, while HandleStreamRealtime's select
-	// loop calls Mark. Ordering is what a mark is for, so the two cannot
-	// simply race — a mark that overtook a media frame would report a playout
-	// position that has not happened.
+	// loop calls Mark and playoutMark. Ordering is what a mark is for, so the
+	// two cannot simply race — a mark that overtook a media frame would report
+	// a playout position that has not happened.
 	//
 	// A one-slot channel rather than a sync.Mutex, and THAT part is
 	// load-bearing for the reason realtime.Client.writeSem states in full:
@@ -1734,19 +1855,27 @@ type carrierMediaSink struct {
 	// and Clear are called for every audio delta and every speech_started,
 	// unconditionally, which no other seam on this path can promise.
 	filler *filler
+
+	// silence is the caller-silence bound, nil when the consumer set none —
+	// see callerSilence, whose methods all tolerate nil. The sink holds it for
+	// the reason it holds the filler, inverted: the bound's STOPS have to be
+	// lossless, and Clear and Media are where caller speech and agent audio
+	// arrive without a drop.
+	silence *callerSilence
 }
 
 // newCarrierMediaSink builds the sink with its write slot open. A constructor
 // rather than a struct literal because writeSem must exist: a nil channel
 // blocks forever in a send, so a sink assembled without it would hang on its
 // first write rather than fail visibly.
-func newCarrierMediaSink(conn wsWriter, streamSID string, carrierAudioCh chan<- CarrierAudio, marks *markTracker, fill *filler) *carrierMediaSink {
+func newCarrierMediaSink(conn wsWriter, streamSID string, carrierAudioCh chan<- CarrierAudio, marks *markTracker, fill *filler, silence *callerSilence) *carrierMediaSink {
 	return &carrierMediaSink{
 		conn:           conn,
 		streamSID:      streamSID,
 		carrierAudioCh: carrierAudioCh,
 		marks:          marks,
 		filler:         fill,
+		silence:        silence,
 		writeSem:       make(chan struct{}, 1),
 	}
 }
@@ -1773,7 +1902,9 @@ var _ realtime.MediaSink = (*carrierMediaSink)(nil)
 // is a callback rather than a parameter — a filler frame's right to be on the
 // wire expires the moment the reply's first frame stops the loop, and only a
 // decision taken inside the slot can be ordered against the clear that goes
-// with it. Every other caller builds its message up front and always writes.
+// with it. The farewelling gate (gatedMessage) and a playout mark's claim
+// (playoutMark, AATK-163) decline through the same seam for the same reason;
+// every other caller always writes.
 func (s *carrierMediaSink) write(ctx context.Context, build func() ([]byte, bool), afterWrite func()) (bool, error) {
 	select {
 	case s.writeSem <- struct{}{}:
@@ -1845,7 +1976,7 @@ func (s *carrierMediaSink) Media(ctx context.Context, payload string) error {
 	if err := s.stopFillerAndClear(ctx); err != nil {
 		return err
 	}
-	return s.mediaWrite(ctx, payload, CarrierAudio{Payload: payload}, s.gatedMessage)
+	return s.mediaWrite(ctx, payload, CarrierAudio{Payload: payload}, s.gatedMessage, s.silence.agentAudio)
 }
 
 // stopFillerAndClear ends the loop and, if it was actually playing, sends the
@@ -1858,13 +1989,19 @@ func (s *carrierMediaSink) Media(ctx context.Context, payload string) error {
 // caller's wire output is byte-identical to what it was before AATK-108.
 //
 // playFarewell deliberately does NOT use this: the stop edge belongs to
-// whichever caller took it first, so a Media or Clear racing the idle guard can
+// whichever caller took it first, so a Media or Clear racing a timer can
 // consume it and leave the goodbye with no clear at all. See the comment there.
+//
+// The clear it sends is clear, not Clear: it is the engine's own, not the
+// caller speaking, and counting it as speech would put the sink's count of
+// speech starts ahead of the drain's for the rest of the call — which the
+// caller-silence bound reads as speech the drain has not seen, and never
+// writes a playout mark again.
 func (s *carrierMediaSink) stopFillerAndClear(ctx context.Context) error {
 	if !s.filler.stop() {
 		return nil
 	}
-	return s.Clear(ctx)
+	return s.clear(ctx)
 }
 
 // mediaWrite is the encode-write-account step every media frame takes that
@@ -1879,7 +2016,13 @@ func (s *carrierMediaSink) stopFillerAndClear(ctx context.Context) error {
 // build is which of the two ready-bytes callbacks this frame gets — the
 // farewelling gate (gatedMessage) or none (staticMessage) — taken as a function
 // rather than a bool so the decision names itself at the two call sites.
-func (s *carrierMediaSink) mediaWrite(ctx context.Context, payload string, rec CarrierAudio, build func([]byte) func() ([]byte, bool)) error {
+//
+// after, when non-nil, runs at the end of the frame's afterWrite, inside the
+// slot: Media passes the caller-silence bound's agentAudio there, so the
+// bound's record of agent audio is ordered against a playout mark exactly as
+// the two are on the wire. farewellMedia passes nil — the farewell is not the
+// agent speaking.
+func (s *carrierMediaSink) mediaWrite(ctx context.Context, payload string, rec CarrierAudio, build func([]byte) func() ([]byte, bool), after func()) error {
 	msg, err := EncodeMediaB64(s.streamSID, payload)
 	if err != nil {
 		return err
@@ -1887,6 +2030,9 @@ func (s *carrierMediaSink) mediaWrite(ctx context.Context, payload string, rec C
 	_, err = s.write(ctx, build(msg), func() {
 		s.playout.fed(muLawBytesInB64(payload), time.Now())
 		s.deliverCarrierAudio(rec)
+		if after != nil {
+			after()
+		}
 	})
 	return err
 }
@@ -1901,7 +2047,7 @@ func (s *carrierMediaSink) mediaWrite(ctx context.Context, payload string, rec C
 func (s *carrierMediaSink) farewellMedia(ctx context.Context, payload string) error {
 	// staticMessage, not gatedMessage: the farewell is what the gate exists to
 	// protect, so it is the one media write the gate must not stop.
-	return s.mediaWrite(ctx, payload, CarrierAudio{Payload: payload, Farewell: true}, staticMessage)
+	return s.mediaWrite(ctx, payload, CarrierAudio{Payload: payload, Farewell: true}, staticMessage, nil)
 }
 
 // fillerMedia writes one frame of filler audio, built inside the write slot by
@@ -1937,9 +2083,20 @@ func (s *carrierMediaSink) fillerMedia(ctx context.Context, next func() (string,
 	})
 }
 
-// Clear discards what the carrier has buffered. It is the barge-in signal, and
-// it is also the clear Media sends ahead of a reply that interrupted the
-// filler loop.
+// Clear discards what the carrier has buffered. It is the barge-in signal:
+// Bridge.Run calls it once for every speech_started, and nothing else does.
+// That is what lets it tell the caller-silence bound the caller has started
+// speaking (AATK-163) — before the clear is written, so an echo the clear
+// releases from the carrier is already stale when it arrives. The engine's own
+// clears — the one Media sends ahead of a reply that interrupted the filler
+// loop, and the farewell's — go through clear, which is the write alone.
+func (s *carrierMediaSink) Clear(ctx context.Context) error {
+	s.silence.callerSpoke()
+	return s.clear(ctx)
+}
+
+// clear writes the carrier's clear, with nothing said to the caller-silence
+// bound; see Clear for who calls which.
 //
 // The loop is stopped BEFORE the clear is written, not after, so no filler
 // frame can be admitted between the two — filler.writeFrame takes its decision
@@ -1953,7 +2110,7 @@ func (s *carrierMediaSink) fillerMedia(ctx context.Context, next func() (string,
 // change barge-in semantics, which AATK-108 puts out of scope. On Media's path
 // this call IS that second clear, and Media has already tested the same thing
 // to decide whether to make it.
-func (s *carrierMediaSink) Clear(ctx context.Context) error {
+func (s *carrierMediaSink) clear(ctx context.Context) error {
 	if s.farewelling.Load() {
 		// The goodbye owns the carrier, and a clear here would discard it; see
 		// the field. playFarewell sends its OWN clear before setting the flag,
@@ -1998,12 +2155,48 @@ func (s *carrierMediaSink) Clear(ctx context.Context) error {
 // stated. Nothing is delivered to the carrier-audio channel: a mark is not
 // audio, and CarrierAudio's record kinds are what shipped as sound.
 func (s *carrierMediaSink) Mark(ctx context.Context, name string) error {
+	return s.writeMark(ctx, name, staticMessage, func(bound time.Duration) { s.marks.arm(name, bound) })
+}
+
+// playoutMark writes the caller-silence bound's playout mark named name, the
+// mark whose echo says the agent's turn has finished playing (AATK-163).
+// Called only from handlePlayoutMark, on HandleStreamRealtime's select loop.
+//
+// Whether it is written at all is decided INSIDE the write slot, by the
+// bound's claim: the slot is what orders the decision against the audio and
+// the caller's speech on the wire, so a claim taken outside it could admit a
+// mark that some later frame had already overtaken. The generation the claim
+// captures rides the arming into the tracker, which hands it back on the
+// echo or the bound.
+func (s *carrierMediaSink) playoutMark(ctx context.Context, name string, tag uint64) error {
+	var gen uint64
+	claimed := func(msg []byte) func() ([]byte, bool) {
+		return func() ([]byte, bool) {
+			g, ok := s.silence.claim(tag)
+			if !ok {
+				return nil, false
+			}
+			gen = g
+			return msg, true
+		}
+	}
+	return s.writeMark(ctx, name, claimed, func(bound time.Duration) {
+		s.marks.armPlayout(name, bound, func() { s.silence.played(gen) })
+	})
+}
+
+// writeMark is the step every mark takes: encode it, write it through the
+// slot, and arm its echo bound inside the slot beside the write, from the
+// playout queued ahead of it. Mark and playoutMark differ only in build —
+// which ready-bytes callback the mark gets, as mediaWrite takes it — and in
+// what arming means.
+func (s *carrierMediaSink) writeMark(ctx context.Context, name string, build func([]byte) func() ([]byte, bool), arm func(bound time.Duration)) error {
 	msg, err := EncodeMark(s.streamSID, name)
 	if err != nil {
 		return err
 	}
-	_, err = s.write(ctx, staticMessage(msg), func() {
-		s.marks.arm(name, s.markEchoBound(time.Now()))
+	_, err = s.write(ctx, build(msg), func() {
+		arm(s.markEchoBound(time.Now()))
 	})
 	return err
 }

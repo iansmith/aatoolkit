@@ -179,6 +179,21 @@ func armFiller(t *testing.T, be *fakeRealtimeBackend) {
 	be.emitOnce(t, map[string]string{"type": "input_audio_buffer.speech_stopped"})
 }
 
+// emitFunctionCallDone emits a response.done whose output is a function call:
+// the turn is not over, the tool round trip has begun. One definition for every
+// test in this package that drives that event.
+func emitFunctionCallDone(t *testing.T, be *fakeRealtimeBackend) {
+	t.Helper()
+	be.emitAny(t, map[string]any{
+		"type": "response.done",
+		"response": map[string]any{
+			"output": []any{
+				map[string]any{"type": "function_call", "name": "lookup", "call_id": "c1"},
+			},
+		},
+	})
+}
+
 // afterTheBackendHasSpoken makes explicit a precondition these tests used to
 // get for free. AATK-128 arms the machine at call open as well, so a test whose
 // subject is the speech_stopped trigger has to start from a call where the
@@ -372,14 +387,7 @@ func TestFiller_RearmsAfterFunctionCall(t *testing.T) {
 	// arm removed, this passed 3/3.
 	wire = afterTheBackendHasSpoken(t, be, wire)
 
-	be.emitAny(t, map[string]any{
-		"type": "response.done",
-		"response": map[string]any{
-			"output": []any{
-				map[string]any{"type": "function_call", "name": "lookup", "call_id": "c1"},
-			},
-		},
-	})
+	emitFunctionCallDone(t, be)
 
 	waitFillerPlaying(t, wire, 3)
 
@@ -525,14 +533,7 @@ func TestFiller_KeepsPlayingWhenRearmedMidLoop(t *testing.T) {
 	waitFillerPlaying(t, wire, 5)
 	before := len(fillerFrames(wire()))
 
-	be.emitAny(t, map[string]any{
-		"type": "response.done",
-		"response": map[string]any{
-			"output": []any{
-				map[string]any{"type": "function_call", "name": "lookup", "call_id": "c1"},
-			},
-		},
-	})
+	emitFunctionCallDone(t, be)
 
 	// Well under Delay: a machine that stopped and re-armed would be silent
 	// across this whole window, while one that kept playing adds ~10 frames.
@@ -729,7 +730,7 @@ func TestFiller_SurvivesACarrierWriteFailure(t *testing.T) {
 		t.Fatal("test setup: the config must produce a live filler")
 	}
 	t.Cleanup(fill.shutdown)
-	sink := newCarrierMediaSink(w, "SSwritefail", nil, nil, fill)
+	sink := newCarrierMediaSink(w, "SSwritefail", nil, nil, fill, nil)
 	fill.attach(sink)
 
 	countFiller := func() int { return len(fillerFrames(w.records())) }
@@ -890,7 +891,7 @@ func TestFiller_ShutdownReleasesAPlayGoroutineParkedOnTheWriteSlot(t *testing.T)
 		Loop:  fillerTestLoop(),
 		Delay: 20 * time.Millisecond,
 	})
-	sink := newCarrierMediaSink(w, "SSpark", nil, nil, fill)
+	sink := newCarrierMediaSink(w, "SSpark", nil, nil, fill, nil)
 	fill.attach(sink)
 
 	// Released through Cleanup rather than at the end of the body, so a
@@ -1081,7 +1082,7 @@ func TestFiller_ShutdownIsNotLoggedAsACarrierFailure(t *testing.T) {
 		Loop:  fillerTestLoop(),
 		Delay: 20 * time.Millisecond,
 	})
-	sink := newCarrierMediaSink(w, "SSquiet", nil, nil, fill)
+	sink := newCarrierMediaSink(w, "SSquiet", nil, nil, fill, nil)
 	fill.attach(sink)
 
 	var releaseOnce sync.Once

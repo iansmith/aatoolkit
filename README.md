@@ -61,7 +61,10 @@ In this mode the engine is a thin, careful relay between the phone carrier and t
   a reply.
 - **Call hygiene.** `WithFillerAudio` plays a hold loop while the model is thinking or
   running a tool, `WithIdleTimeout` ends calls whose backend has gone quiet, and
-  `WithFarewellAudio` plays a goodbye before hanging up.
+  `WithFarewellAudio` plays a goodbye before hanging up. `WithCallerSilenceTimeout` ends a
+  call once the caller has said nothing for that long after the agent's reply finished
+  playing, with the farewell first and its own error (`ErrCallerSilenceTimeout`); pair it
+  with `WithIdleTimeout`, which covers a call where the agent never speaks.
 
 Note that on this path the **backend's** VAD and turn-taking run the conversation;
 the engine's own turn-taking logic is bypassed for those calls.
