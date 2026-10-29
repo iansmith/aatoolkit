@@ -116,21 +116,48 @@ type Tap struct {
 }
 
 type tapSidecar struct {
-	StreamSID    string              `json:"stream_sid"`
-	CallSID      string              `json:"call_sid"`
-	Label        string              `json:"label,omitempty"`
-	StartedAt    time.Time           `json:"started_at"`
-	Frames       int                 `json:"frames"`
-	Bytes        int                 `json:"bytes"`
-	VADConfig    telephony.VADConfig `json:"vad_config"`
-	Alignment    string              `json:"alignment,omitempty"`
-	Channels     []string            `json:"channels,omitempty"`
-	OutTruncated bool                `json:"out_truncated,omitempty"`
+	StreamSID    string       `json:"stream_sid"`
+	CallSID      string       `json:"call_sid"`
+	Label        string       `json:"label,omitempty"`
+	StartedAt    time.Time    `json:"started_at"`
+	Frames       int          `json:"frames"`
+	Bytes        int          `json:"bytes"`
+	VAD          tapVADConfig `json:"vad_config"`
+	Alignment    string       `json:"alignment,omitempty"`
+	Channels     []string     `json:"channels,omitempty"`
+	OutTruncated bool         `json:"out_truncated,omitempty"`
 
 	// OutDroppedFrames is the count of outbound frames discarded because
 	// the queue hit maxOutQueueFrames -- surfaced so a recording that lost
 	// frames to overflow is distinguishable from a clean one downstream.
 	OutDroppedFrames int `json:"out_dropped_frames,omitempty"`
+}
+
+// tapVADConfig is the shape of the sidecar's vad_config block. The fields,
+// their types and their order are those of the VAD configuration the removed
+// VAD pipeline ran, untagged as it was, so the block is written byte for byte
+// as before (AATK-164).
+type tapVADConfig struct {
+	WindowSize       int
+	SpeechThresh     float32
+	SilenceThresh    float32
+	EndSilenceMS     int
+	SampleRateHz     int
+	TurnEndSilenceMS int
+}
+
+// recordedVADConfig is what every sidecar's vad_config records: the removed
+// VAD pipeline's defaults, frozen. No running code applies these thresholds;
+// they are kept only so a sidecar reads the same as one written before the
+// pipeline was removed. Dropping the block is a format change for whoever
+// reads the sidecars, and would be its own decision.
+var recordedVADConfig = tapVADConfig{
+	WindowSize:       256,
+	SpeechThresh:     0.5,
+	SilenceThresh:    0.35,
+	EndSilenceMS:     700,
+	SampleRateHz:     telephony.SampleRateHz,
+	TurnEndSilenceMS: 5000,
 }
 
 // duplexAlignment is the sidecar "alignment" string a duplex recording
@@ -641,7 +668,7 @@ func (t *Tap) writeSidecar() {
 		StartedAt:        t.startedAt,
 		Frames:           t.frames,
 		Bytes:            t.bytes,
-		VADConfig:        telephony.DefaultVADConfig(),
+		VAD:              recordedVADConfig,
 		Alignment:        t.alignment(),
 		Channels:         t.declaredChannels(),
 		OutTruncated:     t.outCount > 0,

@@ -134,15 +134,16 @@ func TestTap_SidecarCountsEveryFrame(t *testing.T) {
 	}
 }
 
-// TestTap_SidecarRecordsVADConfig: the sidecar's job is to tell a later replay
-// which thresholds produced this stream's live log, so the replay harness can
-// check it is comparing like with like.
-//
-// The comparison is derived, never hardcoded. No literal threshold appears
-// here: EndSilenceMS is a tuning knob, and a retune took it 1050 -> 700. The
-// earlier 700 -> 1050 retune is the worked example of the cost -- six tests
-// across three packages broke on that tuning change because they had hardcoded
-// 22 = 700ms/32ms, failing in packages that had nothing to do with the cause.
+// wantRecordedVAD is the vad_config block every sidecar must carry: the removed
+// VAD pipeline's default thresholds, frozen so a sidecar reads as it did before
+// the pipeline went (AATK-164). They are no longer a tuning knob, so this is
+// deliberately a literal rather than recordedVADConfig itself: a test comparing
+// the field with the variable that fills it would pass whatever the variable
+// held.
+var wantRecordedVAD = tapVADConfig{WindowSize: 256, SpeechThresh: 0.5, SilenceThresh: 0.35, EndSilenceMS: 700, SampleRateHz: 8000, TurnEndSilenceMS: 5000}
+
+// TestTap_SidecarRecordsVADConfig pins the sidecar's identifying fields and its
+// vad_config block.
 func TestTap_SidecarRecordsVADConfig(t *testing.T) {
 	dir := t.TempDir()
 	const streamSID, callSID = "SSsidecar", "CAsidecar"
@@ -152,8 +153,8 @@ func TestTap_SidecarRecordsVADConfig(t *testing.T) {
 	tap.Close()
 
 	got := readSidecar(t, dir, streamSID)
-	if got.VADConfig != telephony.DefaultVADConfig() {
-		t.Errorf("sidecar vad_config = %+v\n                  want %+v", got.VADConfig, telephony.DefaultVADConfig())
+	if got.VAD != wantRecordedVAD {
+		t.Errorf("sidecar vad_config = %+v\n                  want %+v", got.VAD, wantRecordedVAD)
 	}
 	if got.StreamSID != streamSID {
 		t.Errorf("sidecar stream_sid = %q, want %q", got.StreamSID, streamSID)
@@ -1296,7 +1297,7 @@ func TestTap_DuplexOutputUnchanged(t *testing.T) {
 		StartedAt:    testStreamStartedAt,
 		Frames:       3,
 		Bytes:        3 * frameBytes,
-		VADConfig:    telephony.DefaultVADConfig(),
+		VAD:          wantRecordedVAD,
 		Alignment:    duplexAlignment,
 		Channels:     []string{string(ChannelIn), string(ChannelOut)},
 		OutTruncated: true,
