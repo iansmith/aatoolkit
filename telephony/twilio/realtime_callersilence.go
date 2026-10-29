@@ -42,8 +42,8 @@ const realtimePlayoutMarkPrefix = "aatoolkit-playout-"
 //     response.done that ends in a function call, which leaves the reply
 //     pending until the next response.done that does not.
 //   - RESET: none mid-count. Each echo that starts the count grants a whole
-//     bound again, so every agent turn that plays restarts it (Ian's decision,
-//     2026-10-28).
+//     bound again, so every agent turn that plays restarts it (the ticket
+//     owner's decision, AATK-163).
 //
 // It is NOT running at call open. The first start is the first playout echo,
 // so a call where the agent never speaks is bounded only by WithIdleTimeout
@@ -71,8 +71,10 @@ const realtimePlayoutMarkPrefix = "aatoolkit-playout-"
 // caller turn; a dropped turn-ending response.done skips that turn; a caller
 // turn the backend never answers with audio leaves the count stopped; and an
 // echo that overtakes the arming of the very mark it answers is unmatched.
-// The unsafe residual: a function-call response.done dropped while the count
-// runs lets it run through the tool round trip.
+// The unsafe residuals: a function-call response.done dropped while the count
+// runs lets it run through the tool round trip; and a speech_started that
+// Bridge.Run has read but not yet handed to Clear when end latches gets the
+// farewell played over the caller — a window of microseconds.
 //
 // LINE NOISE that the backend's VAD hears as speech produces speech_started,
 // which stops this count exactly as it resets the idle guard. This bound does

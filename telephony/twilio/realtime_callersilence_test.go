@@ -112,9 +112,10 @@ func greet(t *testing.T, be *fakeRealtimeBackend, wire func() []carrierWireRecor
 // carrier socket while whatever the test emits next travels the backend's, and
 // an echo the engine processes AFTER that next event is correctly stale: the
 // count a test then assumes is running never started, and the test passes
-// without testing anything. Measured: without the settle, deleting callerSpoke's
-// gen bump alone turned TestCallerSilence_OneUtteranceLongerThanTheLimitIsNotCut
-// red through exactly that ordering, not through the property it pins.
+// without testing anything. Measured: without the settle, deleting only
+// callerSpoke's gen bump turned TestCallerSilence_OneUtteranceLongerThanTheLimitIsNotCut
+// red; with it, the same mutation is green 3/3, because the stop it keeps ends
+// a count that has started. The difference is that ordering.
 func startCount(t *testing.T, be *fakeRealtimeBackend, h *realtimeHarness, wire func() []carrierWireRecord) time.Time {
 	t.Helper()
 	n := len(playoutMarks(h, wire()))
@@ -790,8 +791,8 @@ func TestCallerSilence_TheFillersClearIsNotCallerSpeech(t *testing.T) {
 // TestCallerSilence_EachAgentTurnGrantsAFreshBound pins a DECISION, not a
 // deletion: each agent turn whose audio has played grants the caller a whole
 // limit again (restart), rather than the count pausing while the agent speaks
-// and resuming with what was left (accumulate). Ian confirmed restart on
-// 2026-10-28. No deletion turns this red; an accumulating implementation
+// and resuming with what was left (accumulate). The ticket owner confirmed
+// restart (AATK-163). No deletion turns this red; an accumulating implementation
 // does, because it ends the call roughly 0.4 of a limit after the second echo
 // (measured: red 3/3 against a temporary accumulating callerSilence).
 func TestCallerSilence_EachAgentTurnGrantsAFreshBound(t *testing.T) {

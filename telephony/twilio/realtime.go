@@ -409,9 +409,10 @@ var ErrIdleTimeout = errors.New("twilio: realtime: idle timeout")
 // deployment's call.
 //
 // The count is anchored to PLAYOUT, not to the backend. After each agent turn
-// the engine writes a mark of its own to the carrier, behind the turn's audio,
-// and the count starts when the carrier echoes it — or, for a carrier that
-// never echoes, when the mark's own bound elapses. So a reply the backend sent
+// that put audio on the line, and that the caller did not interrupt, the
+// engine writes a mark of its own to the carrier, behind the turn's audio, and
+// the count starts when the carrier echoes it — or, for a carrier that never
+// echoes, when the mark's own bound elapses. So a reply the backend sent
 // in a burst seconds ago and the carrier is still playing is never counted as
 // the caller's silence. Each agent turn that plays grants a whole d again.
 //
@@ -921,7 +922,10 @@ func WithVoiceUpdateChanFor(fn func(start Frame) <-chan string) RealtimeOption {
 // use WithMarkRequestChanFor and give each call its own channel.
 //
 // Supplying neither this nor WithMarkEchoChan is byte-for-byte today's
-// behavior: no mark is written, and an inbound mark frame is still ignored.
+// behavior: no mark of the consumer's is written, and an inbound mark frame
+// matching none of the engine's own is still ignored. The engine's own marks —
+// WithFarewellAudio's and WithCallerSilenceTimeout's — are written when those
+// options are set, whatever the consumer chose here.
 func WithMarkRequestChan(ch <-chan string) RealtimeOption {
 	return WithMarkRequestChanFor(func(Frame) <-chan string { return ch })
 }
@@ -954,7 +958,9 @@ func WithMarkRequestChanFor(fn func(start Frame) <-chan string) RealtimeOption {
 //
 // An echo whose name matches nothing outstanding is logged and NOT delivered:
 // it is not the mark anything is waiting on, and delivering it as one is the
-// mistake a consumer with two marks in flight cannot recover from.
+// mistake a consumer with two marks in flight cannot recover from. The one
+// echo not logged is a late one of the engine's own playout mark; see
+// WithCallerSilenceTimeout.
 //
 // Nothing is delivered once the call has ended. A consumer must not treat this
 // channel as the only way its wait can finish — the call ending is the other,
