@@ -10,9 +10,10 @@ import (
 
 // The surface a depending project imports from this package, pinned from
 // outside it the way that project sees it (AATK-164). Each declaration below
-// fails to compile if the symbol it names is removed, renamed, re-typed, or
-// changes between typed and untyped; the const blocks also fail to compile if a
-// value moves. TestKeepSurface_Values covers what a compile-time check cannot.
+// fails to compile if the symbol it names is removed, renamed or re-typed; the
+// untyped constants' lines also fail if one becomes typed, and the const
+// blocks fail if a value moves. TestKeepSurface_Values covers what a
+// compile-time check cannot.
 
 var (
 	_ func(int16) byte = telephony.LinearToMuLaw

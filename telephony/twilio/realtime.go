@@ -1344,9 +1344,9 @@ const realtimeFarewellMarkPrefix = "aatoolkit-farewell-"
 // it played, so HandleStreamRealtime's CloseNow defer runs AFTER the caller has
 // actually heard it. A farewell cut off mid-word is worse than none.
 //
-// Chunk the clip, mark, await the echo, then close: a SYNCHRONOUS
-// write-and-wait over the carrier websocket, with base64 JSON framing and a
-// per-write deadline.
+// It chunks the clip, writes a mark after it and awaits the echo: a
+// SYNCHRONOUS write-and-wait over the carrier websocket, with base64 JSON
+// framing and a per-write deadline.
 //
 // Nothing here is new machinery: the frames go through the sink's own
 // write slot, and the wait is the mark protocol AATK-105 built. The loop is

@@ -116,10 +116,10 @@ func TestNewStreamHandler_EmptyURLEndsTheCallAndDialsNothing(t *testing.T) {
 }
 
 // TestNewStreamHandler_EmptyURLLogsWhyTheCallEnded pins the operator's only
-// signal for a call that ends this way. Server.ServeStreams does not log the
+// signal for why a call ended this way. Server.ServeStreams does not log the
 // error a StreamHandler returns, so unless the handler itself logs, a
-// deployment with no realtime URL drops every call and leaves nothing in the
-// log saying why or which call it was.
+// deployment with no realtime URL ends every call with nothing in the log
+// saying why. The CallSid ties the line to the call it ended.
 func TestNewStreamHandler_EmptyURLLogsWhyTheCallEnded(t *testing.T) {
 	logs := captureLog(t)
 	h := newRealtimeHarnessWith(t, NewStreamHandler(""))

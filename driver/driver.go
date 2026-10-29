@@ -157,9 +157,9 @@ type Config struct {
 	TracerProvider trace.TracerProvider
 }
 
-// StreamHandler returns the Media Streams handler for the configured
-// transport, for a consumer to install on twilio.Server.HandleStream. It is
-// the one place the transport switch is read.
+// StreamHandler returns the Media Streams handler for the configured realtime
+// backend, for a consumer to install on twilio.Server.HandleStream. It is the
+// one place RealtimeURL is read.
 func (c Config) StreamHandler() twilio.StreamHandler {
 	return twilio.NewStreamHandler(c.RealtimeURL)
 }
