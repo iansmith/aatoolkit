@@ -1133,6 +1133,13 @@ func TestTap_SidecarRecordsDropCount(t *testing.T) {
 // pin the declared-channel-set behavior that fixes both, and the golden that
 // keeps duplex exactly as it was.
 
+// fakeClock is a hand-advanced clock. It needs no mutex: dropOldestPlane reads
+// it only under p.mu, and these tests drive Send/Recv from one goroutine.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
 // outboundOnlyTap builds the Tap under test in this section: outbound-only,
 // paced by a hand-advanced clock so the gap fill is deterministic rather than
 // a function of how long the test took to run.

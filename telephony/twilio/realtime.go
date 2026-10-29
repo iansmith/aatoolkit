@@ -1777,6 +1777,12 @@ func pumpCarrierToBridge(ctx context.Context, conn *websocket.Conn, bridge *real
 	}
 }
 
+// wsWriter is the subset of *websocket.Conn that carrierMediaSink needs —
+// narrowed to keep tests able to fake it.
+type wsWriter interface {
+	Write(ctx context.Context, typ websocket.MessageType, data []byte) error
+}
+
 // carrierMediaSink is the carrier-facing side of the bridge: it writes the
 // backend's audio and barge-in signals to the Twilio Media Streams WebSocket.
 // Audio arrives base64 and is placed on the wire unchanged.

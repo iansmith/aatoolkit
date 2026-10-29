@@ -37,11 +37,6 @@ const MaxUtteranceMS = 45000
 // WithMaxTurnMS.
 const MaxTurnMS = 60000
 
-// MarkEchoGraceMS is the only tunable knob in the mark-echo timeout
-// derivation: the margin added atop the farewell clip's own playout
-// duration to give Twilio a chance to echo the mark back.
-const MarkEchoGraceMS = 500
-
 // MarkEchoTimeout derives how long to wait for Twilio's mark-echo after
 // sending the farewell clip: the clip's own playout duration (μ-law is 1
 // byte/sample at SampleRateHz) plus MarkEchoGraceMS. Genuinely derived from

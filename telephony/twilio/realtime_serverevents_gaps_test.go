@@ -45,6 +45,21 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
+// captureLog redirects the standard logger for one test and returns the buffer
+// it writes into. It restores the previous writer rather than assuming stderr,
+// so a caller that is itself capturing gets its output back.
+//
+// A syncBuffer, so a test may read it while an engine goroutine is still
+// logging into it.
+func captureLog(t *testing.T) *syncBuffer {
+	t.Helper()
+	var buf syncBuffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+	return &buf
+}
+
 // Adversary gap test for AATK-81, round 1 — the twilio-level sibling of
 // TestBridgeEvents_ReceivesModelledEventsToo.
 

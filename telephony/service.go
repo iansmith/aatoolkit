@@ -38,6 +38,11 @@ func MuLawDuration(n int) time.Duration {
 // at init to allow future flexibility if frame size changes.
 var FrameMS = MuLawFrameMS
 
+// MarkEchoGraceMS is the only tunable knob in the mark-echo timeout
+// derivation: the margin added atop the farewell clip's own playout
+// duration to give Twilio a chance to echo the mark back.
+const MarkEchoGraceMS = 500
+
 // ServiceInput[T] is the generic interface for a service that accepts
 // typed input. It wraps a channel and provides context-aware send/recv.
 type ServiceInput[T any] interface {

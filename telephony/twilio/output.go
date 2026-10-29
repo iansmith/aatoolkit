@@ -20,12 +20,6 @@ type TwilioDataPlaneOutput = telephony.ServiceOutput[[]byte]
 // outbound control-plane messages to (mark/clear).
 type TwilioControlPlaneOutput = telephony.ServiceOutput[telephony.ControlOutMessage]
 
-// wsWriter is the subset of *websocket.Conn that dataPlaneOutput/
-// controlPlaneOutput need — narrowed to keep tests able to fake it.
-type wsWriter interface {
-	Write(ctx context.Context, typ websocket.MessageType, data []byte) error
-}
-
 // dataPlaneOutput is the concrete TwilioDataPlaneOutput: it encodes each
 // outbound payload via EncodeMedia and writes it to the WebSocket. It is a
 // send-only ServiceOutput — Channel/Recv are never used by a real Session

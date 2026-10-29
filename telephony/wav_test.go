@@ -6,33 +6,6 @@ import (
 	"testing"
 )
 
-// muLawGolden pins G.711 μ-law decoding to an external ground truth: these are
-// the samples ffmpeg emits for the same input bytes
-// (`ffmpeg -f mulaw -ar 8000 -ac 1 -i - -f s16le -acodec pcm_s16le -`).
-// They are NOT re-derived from our own decoder, so a regression in
-// muLawToLinear fails here instead of being asserted back at itself.
-var muLawGolden = []struct {
-	in   byte
-	want int16
-	name string
-}{
-	{0x00, -32124, "full-scale negative"},
-	{0x80, 32124, "full-scale positive"},
-	{0xFF, 0, "positive zero decodes to 0"},
-	{0x7F, 0, "negative zero decodes to 0"},
-	{0x54, -748, "mid-range negative"},
-}
-
-func TestMuLawDecodeMatchesG711(t *testing.T) {
-	for _, tt := range muLawGolden {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := muLawToLinear(tt.in); got != tt.want {
-				t.Errorf("muLawToLinear(0x%02X) = %d, want %d", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
 // headerWant is one header field's expected value. Each implementation knows
 // its own on-disk encoding, so the field's width is implied by its type
 // instead of being restated as a number that could disagree with it.

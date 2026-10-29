@@ -2,7 +2,6 @@ package twilio
 
 import (
 	"context"
-	"log"
 	"strings"
 	"testing"
 	"time"
@@ -17,28 +16,6 @@ import (
 // It was measured with time.Now()/time.Since read inside the plane, which made
 // it unassertable -- a test could only sleep and hope, and no test did, so the
 // arithmetic went unchecked entirely.
-
-// fakeClock is a hand-advanced clock. It needs no mutex: dropOldestPlane reads
-// it only under p.mu, and these tests drive Send/Recv from one goroutine.
-type fakeClock struct{ t time.Time }
-
-func (c *fakeClock) now() time.Time          { return c.t }
-func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
-
-// captureLog redirects the standard logger for one test and returns the buffer
-// it writes into. It restores the previous writer rather than assuming stderr,
-// so a caller that is itself capturing gets its output back.
-//
-// A syncBuffer, so a test may read it while an engine goroutine is still
-// logging into it.
-func captureLog(t *testing.T) *syncBuffer {
-	t.Helper()
-	var buf syncBuffer
-	orig := log.Writer()
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(orig) })
-	return &buf
-}
 
 // TestDataPlane_DropEpisodeReportsDurationFromInjectedClock drives a depth-1
 // plane through one complete drop episode and requires the reported duration to
