@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -225,6 +226,44 @@ func TestRESTClient_SendSMS_StatusCallback(t *testing.T) {
 			}
 			if tc.wantSent && got != tc.callback {
 				t.Errorf("StatusCallback = %q, want %q verbatim — a caller may carry its own correlation id in the query string", got, tc.callback)
+			}
+		})
+	}
+}
+
+func TestRESTClient_SendSMS_MediaURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		media []string
+	}{
+		{"two", []string{"https://example.test/a.jpg", "https://example.test/b.jpg"}},
+		{"none", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			var present bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("ParseForm: %v", err)
+					return
+				}
+				got, present = r.PostForm["MediaUrl"]
+				w.WriteHeader(http.StatusCreated)
+				w.Write([]byte(messagesResource))
+			}))
+			defer srv.Close()
+
+			client := testClient(srv.URL)
+			msg := testSMS()
+			msg.MediaURLs = tc.media
+			if _, err := client.SendSMS(context.Background(), msg); err != nil {
+				t.Fatalf("SendSMS returned error: %v", err)
+			}
+			if present != (len(tc.media) > 0) {
+				t.Fatalf("MediaUrl present = %v, want %v", present, len(tc.media) > 0)
+			}
+			if !slices.Equal(got, tc.media) {
+				t.Errorf("MediaUrl = %q, want %q in order", got, tc.media)
 			}
 		})
 	}
