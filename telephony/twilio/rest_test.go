@@ -231,13 +231,13 @@ func TestRESTClient_SendSMS_StatusCallback(t *testing.T) {
 	}
 }
 
-func TestRESTClient_SendSMS_MediaURLs(t *testing.T) {
+func TestRESTClient_SendSMS_MediaURL(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		media []string
+		media string
 	}{
-		{"two", []string{"https://example.test/a.jpg", "https://example.test/b.jpg"}},
-		{"none", nil},
+		{"supplied", "https://example.test/a.jpg"},
+		{"omitted", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got []string
@@ -255,15 +255,15 @@ func TestRESTClient_SendSMS_MediaURLs(t *testing.T) {
 
 			client := testClient(srv.URL)
 			msg := testSMS()
-			msg.MediaURLs = tc.media
+			msg.MediaURL = tc.media
 			if _, err := client.SendSMS(context.Background(), msg); err != nil {
 				t.Fatalf("SendSMS returned error: %v", err)
 			}
-			if present != (len(tc.media) > 0) {
-				t.Fatalf("MediaUrl present = %v, want %v", present, len(tc.media) > 0)
+			if present != (tc.media != "") {
+				t.Fatalf("MediaUrl present = %v, want %v", present, tc.media != "")
 			}
-			if !slices.Equal(got, tc.media) {
-				t.Errorf("MediaUrl = %q, want %q in order", got, tc.media)
+			if present && !slices.Equal(got, []string{tc.media}) {
+				t.Errorf("MediaUrl = %q, want exactly [%q]", got, tc.media)
 			}
 		})
 	}

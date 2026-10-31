@@ -72,10 +72,11 @@ type OutboundSMS struct {
 	// id is the intended use; a bearer token is not.
 	StatusCallback string
 
-	// MediaURLs makes the send an MMS: one MediaUrl parameter per entry, in
-	// order, each a public URL the provider fetches itself (Twilio takes up
-	// to 10). Empty sends the plain SMS request this client always sent.
-	MediaURLs []string
+	// MediaURL makes the send an MMS: a public URL the provider fetches
+	// itself, sent as one MediaUrl parameter. Empty sends the plain SMS
+	// request this client always sent. One string, not a slice, so the
+	// struct stays comparable: consumers' tests compare sends with ==.
+	MediaURL string
 }
 
 // SendSMS POSTs a Messages.json request and returns the provider's message id
@@ -116,8 +117,8 @@ func (c *RESTClient) SendSMS(ctx context.Context, msg OutboundSMS) (messageSID s
 	if msg.StatusCallback != "" {
 		form.Set("StatusCallback", msg.StatusCallback)
 	}
-	for _, u := range msg.MediaURLs {
-		form.Add("MediaUrl", u)
+	if msg.MediaURL != "" {
+		form.Set("MediaUrl", msg.MediaURL)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
