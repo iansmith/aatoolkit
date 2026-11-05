@@ -1,5 +1,9 @@
 # Teardown protocol: stop → drain → close
 
+> Status: historical. The call pipeline this note describes was removed in AATK-164,
+> and the names it uses no longer exist in the code. It is kept as a record of the
+> reasoning.
+
 This note states the protocol the engine uses to tear down a producer → queue →
 consumer pipeline that also owns close actions (flushing a file, writing a
 sidecar), and proves why it is correct. It generalizes the specific fix in

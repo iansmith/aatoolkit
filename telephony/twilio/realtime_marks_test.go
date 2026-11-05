@@ -18,10 +18,9 @@ import (
 // Mark tests for the realtime path (AATK-105, "no way to learn when the
 // carrier has finished playing what was sent").
 //
-// The classic path has answered "has everything I sent actually played?" since
-// its mark-echo flow landed: Session.sendMarkAndArmEcho writes a Twilio mark after a clip and
-// handleMarkEchoControlEvent reads the echo as playout-complete. The realtime
-// path dropped the same signal in pumpCarrierToBridge's default: case, so a
+// A Twilio mark written after audio, echoed back by the carrier once that audio
+// has played, answers "has everything I sent actually played?". The realtime
+// path dropped that signal in pumpCarrierToBridge's default: case, so a
 // consumer that wants to hang up after a spoken line had to estimate the
 // playout position from the audio deltas it happened to observe — and those
 // deltas drop when the consumer is behind (Bridge.publishEvent), so the
@@ -209,8 +208,7 @@ func TestMarkEchoChan_EchoReachesTheConsumerWithItsName(t *testing.T) {
 
 // TestMarkEchoChan_UnrequestedEchoIsNotDeliveredAsAMatch is behavior 2's other
 // half: an echo whose name matches nothing outstanding is logged and NOT
-// delivered as a match. handleMarkEchoControlEvent already draws exactly that
-// distinction on the classic path, and it is what stops a consumer with two
+// delivered as a match. That distinction is what stops a consumer with two
 // marks in flight from reading one as the other.
 func TestMarkEchoChan_UnrequestedEchoIsNotDeliveredAsAMatch(t *testing.T) {
 	requests := make(chan string, testChanBuffer)
@@ -305,8 +303,7 @@ func TestRealtime_NoMarkOptionsIsByteIdenticalToToday(t *testing.T) {
 // the only thing that can complete the consumer's wait.
 //
 // No audio is driven before the mark, so the derived bound is its floor —
-// telephony.MarkEchoGraceMS, the same grace the classic path's MarkEchoTimeout
-// adds atop the clip's playout. The assertion allows generous slack above that
+// telephony.MarkEchoGraceMS. The assertion allows generous slack above that
 // but is still far below the test's own failure deadline, so an implementation
 // with no bound at all fails here rather than passing slowly.
 func TestMarkRequestChan_NonEchoingCarrierDoesNotHang(t *testing.T) {
@@ -369,8 +366,8 @@ func TestMarkRequestChan_BoundCoversQueuedPlayout(t *testing.T) {
 	}
 
 	// A clear discards the queue, so the next mark is owed the grace and
-	// nothing more: waiting out audio nobody will hear is exactly what the
-	// classic path's flush avoids.
+	// nothing more: waiting out audio nobody will hear is what flush exists
+	// to avoid.
 	sink.playout.flush(base)
 	if got, want := sink.markEchoBound(base), telephony.MarkEchoGraceMS*time.Millisecond; got != want {
 		t.Fatalf("markEchoBound after a clear = %s, want %s", got, want)
@@ -379,9 +376,8 @@ func TestMarkRequestChan_BoundCoversQueuedPlayout(t *testing.T) {
 
 // discardWSWriter accepts every write. carrierMediaSink.conn is typed as the
 // unexported wsWriter interface precisely so tests can substitute one (see
-// output.go's comment on wsWriter, and failingWSWriter in
-// realtime_carrieraudio_gaps_test.go, which does the same for the failure
-// direction).
+// failingWSWriter in realtime_carrieraudio_gaps_test.go, which does the same
+// for the failure direction).
 type discardWSWriter struct{}
 
 func (discardWSWriter) Write(context.Context, websocket.MessageType, []byte) error { return nil }

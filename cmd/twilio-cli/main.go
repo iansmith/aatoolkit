@@ -303,7 +303,7 @@ func main() {
 	webhookURL := flag.String("webhook", "", "the server webhook URL; skips config resolution entirely (default: resolved from -config / $"+configEnvVar+")")
 	configPath := flag.String("config", "", "path to the fleet config to resolve the webhook target from; overrides $"+configEnvVar)
 	serverFlag := flag.String("server", "", "name of the config server entry to resolve the webhook target from; overrides $"+serverEnvVar)
-	noEchoMarks := flag.Bool("no-echo-marks", false, "suppress mark-echo (for testing the server's AwaitingMarkEcho timeout)")
+	noEchoMarks := flag.Bool("no-echo-marks", false, "suppress mark-echo (for testing the server's mark-echo timeout)")
 	toNumber := flag.String("to", defaultTo, "dialed (listening) number, E.164")
 	audioPath := flag.String("audio", "", "stream this raw μ-law file instead of capturing the mic (any platform)")
 	recordPath := flag.String("record", "", "record inbound server audio to this raw μ-law file, with per-arrival timing in <file>.jsonl")

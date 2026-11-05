@@ -13,7 +13,7 @@ sound-effect clips. All are documented below.
 | Source (kept) | `audio-forced-stop.mp3` | `llm-thinking.mp3` |
 | Format | headerless μ-law, 8 kHz, mono (`len/8000` == seconds) | same |
 | μ-law size | 12672 bytes = 1.58s | 40320 bytes = 5.04s |
-| Role | played when a single utterance exceeds `MaxUtteranceMS` and the caller is cut off, then the call terminates via the mark-echo flow | a loopable "thinking" bed for a future feature; **first embedded with no playback path** |
+| Role | was played when a caller overran a single-utterance cap, before that call pipeline was removed (AATK-164); **no playback path since** | a loopable "thinking" bed for a future feature; **first embedded with no playback path** |
 | Original filename | `daviddumaisaudio-sci-fi-weapon-laser-shot-04-316416.mp3` | `soundzee-futuristic-ui-beeps-356129.mp3` |
 | License | **Pixabay Content License** (deferred: verify attribution requirements before production; swap if terms are unclear — Ian's call, 2026-07-17) | same |
 

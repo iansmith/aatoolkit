@@ -20,19 +20,18 @@ import (
 // Phase 0 (rev 3). These tests describe the audio tap's expected
 // behavior and fail against the stubs in tap.go.
 //
-// The tap exists to capture real telephony audio for the probe dataset:
-// mu-law over the phone network is what makes the transcriber hear a
-// similar-sounding but different phrase from the one spoken, and no mic
-// recording reproduces that. Its governing constraint is that it must be
-// invisible -- off by default, and incapable of harming a call when on.
+// The tap exists to capture real telephony audio: mu-law over the phone
+// network is what makes a transcriber hear a similar-sounding but different
+// phrase from the one spoken, and no mic recording reproduces that. Its
+// governing constraint is that it must be invisible -- off by default, and
+// incapable of harming a call when on.
 //
 // Recordings are keyed by streamSid, not CallSID: streamSid uniquely
 // identifies a Media Streams connection, and a reconnect is a new connection
 // on the same call.
 
-// testStreamStartedAt is the stream start time every test in this package
-// states, whether it builds a Tap directly or drives one through the harness.
-// One definition: it is one concept, and two would drift.
+// testStreamStartedAt is the stream start time every Tap test in this package
+// states. One definition: it is one concept, and two would drift.
 //
 // Do not round this value. The odd nanoseconds are the whole sub-second
 // precision guarantee: because every assertion compares against it with
@@ -71,108 +70,11 @@ func readSidecar(t *testing.T, dir, streamSID string) tapSidecar {
 	return s
 }
 
-// --- the two that make the rest matter ---------------------------------------
-
-// TestTap_WiredToDataPlane is the test this suite exists for. Every other test
-// here drives a Tap directly, so all of them pass against a flawless Tap that
-// production never calls -- which is exactly what the rev-2 suite did, with
-// NewTap having no non-test callers at all.
-//
-// Contract 2's load-bearing word is "delivered": the bytes on disk must be the
-// payloads delivered to the session. This drives a real media frame through the
-// real handler path -- websocket, DecodeFrame, demux, pumpDataPlane -- and
-// requires it to land on disk. Nothing is asserted by waiting: the stop frame
-// makes handleStream return, and its defer closes the tap before h.done fires.
-//
-// This is load-independent because teardown is a structural stop->drain->close
-// boundary (AATK-15): the defer closes the data plane, the pump drains every
-// buffered frame to the tap and terminates on errPlaneClosed, then tap.Close
-// runs. It used to flake -- a frame buffered at teardown was abandoned in a
-// 50/50 select between a ready <-ch and a ready <-ctx.Done(). See
-// TestHandleStreamDrainsDataBeforeTapClose for the K-frame drain guard and
-// design/teardown-protocol.md for the protocol.
-func TestTap_WiredToDataPlane(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv(tapDirEnv, dir)
-
-	h := newHarness(t)
-	h.sendMedia([]byte{0x01, 0x02, 0x03})
-	h.sendRaw([]byte(`{"event":"stop","streamSid":"SS` + t.Name() + `"}`))
-
-	select {
-	case <-h.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handleStream did not return after stop")
-	}
-
-	streamSID := "SS" + t.Name()
-	got, err := os.ReadFile(inulawPath(dir, streamSID))
-	if err != nil {
-		t.Fatalf("no recording for a call that carried media — the tap is not wired to the data plane: %v", err)
-	}
-	if want := []byte{0x01, 0x02, 0x03}; !bytes.Equal(got, want) {
-		t.Errorf("recording = % x, want % x", got, want)
-	}
-
-	// The start time has to survive the real path too, not just a direct NewTap
-	// call: a wrong instant here means the production chain sampled a clock
-	// somewhere instead of passing down the one it was given.
-	if side := readSidecar(t, dir, streamSID); !side.StartedAt.Equal(testStreamStartedAt) {
-		t.Errorf("sidecar started_at = %s, want %s — handleStream is not passing the stream's start time down to the tap",
-			side.StartedAt.Format(time.RFC3339Nano), testStreamStartedAt.Format(time.RFC3339Nano))
-	}
-}
-
-// TestTap_CreatesMissingTapDir: the tap directory (AATOOLKIT_AUDIO_TAP) may not
-// exist yet -- a fresh build/, or one just emptied by `task clean`. handleStream
-// must create it, or every capture write (tap AND the decision recorder, which
-// share the dir) silently ENOENTs, since capture is best-effort. Regression for
-// the live "open build/audio/....in.ulaw: no such file or directory" seen when
-// build/audio had never been created.
-func TestTap_CreatesMissingTapDir(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "does-not-exist-yet")
-	t.Setenv(tapDirEnv, dir)
-
-	h := newHarness(t)
-	h.sendMedia([]byte{0x01, 0x02, 0x03})
-	h.sendRaw([]byte(`{"event":"stop","streamSid":"SS` + t.Name() + `"}`))
-
-	select {
-	case <-h.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handleStream did not return after stop")
-	}
-
-	streamSID := "SS" + t.Name()
-	if _, err := os.ReadFile(inulawPath(dir, streamSID)); err != nil {
-		t.Fatalf("no recording — handleStream did not create the missing tap dir %s: %v", dir, err)
-	}
-}
-
-// TestTap_EnvVarNamesTheDir pins the variable's spelling. Without it, an
-// implementation reading AATOOLKIT_TAP (or AATOOLKIT_AUDIO_TAP_DIR, or anything else)
-// is green, captures nothing, and looks correct -- the operator simply finds no
-// files and has nothing to go on.
-func TestTap_EnvVarNamesTheDir(t *testing.T) {
-	t.Run("set", func(t *testing.T) {
-		t.Setenv(tapDirEnv, "/tmp/some-tap-dir")
-		if got := tapDirFromEnv(); got != "/tmp/some-tap-dir" {
-			t.Errorf("tapDirFromEnv() = %q, want %q — is the tap reading %s?", got, "/tmp/some-tap-dir", tapDirEnv)
-		}
-	})
-	t.Run("unset", func(t *testing.T) {
-		t.Setenv(tapDirEnv, "")
-		if got := tapDirFromEnv(); got != "" {
-			t.Errorf("tapDirFromEnv() = %q, want \"\" — capture must be off by default", got)
-		}
-	})
-}
-
 // --- the Tap itself ----------------------------------------------------------
 
 // TestTap_DisabledWritesNothing pins the default. The tap is opt-in: with no
 // directory configured NewTap yields nil, and a nil *Tap is a working no-op, so
-// the data plane needs no branch and an off tap opens nothing and allocates
+// a caller needs no branch and an off tap opens nothing and allocates
 // nothing. Calling Write and Close on the nil must be safe -- that is the whole
 // mechanism by which "off" costs nothing.
 func TestTap_DisabledWritesNothing(t *testing.T) {
@@ -231,15 +133,16 @@ func TestTap_SidecarCountsEveryFrame(t *testing.T) {
 	}
 }
 
-// TestTap_SidecarRecordsVADConfig: the sidecar's job is to tell a later replay
-// which thresholds produced this stream's live log, so the replay harness can
-// check it is comparing like with like.
-//
-// The comparison is derived, never hardcoded. No literal threshold appears
-// here: EndSilenceMS is a tuning knob, and a retune took it 1050 -> 700. The
-// earlier 700 -> 1050 retune is the worked example of the cost -- six tests
-// across three packages broke on that tuning change because they had hardcoded
-// 22 = 700ms/32ms, failing in packages that had nothing to do with the cause.
+// wantRecordedVAD is the vad_config block every sidecar must carry: the removed
+// VAD pipeline's default thresholds, frozen so a sidecar reads as it did before
+// the pipeline went (AATK-164). They are no longer a tuning knob, so this is
+// deliberately a literal rather than recordedVADConfig itself: a test comparing
+// the field with the variable that fills it would pass whatever the variable
+// held.
+var wantRecordedVAD = tapVADConfig{WindowSize: 256, SpeechThresh: 0.5, SilenceThresh: 0.35, EndSilenceMS: 700, SampleRateHz: 8000, TurnEndSilenceMS: 5000}
+
+// TestTap_SidecarRecordsVADConfig pins the sidecar's identifying fields and its
+// vad_config block.
 func TestTap_SidecarRecordsVADConfig(t *testing.T) {
 	dir := t.TempDir()
 	const streamSID, callSID = "SSsidecar", "CAsidecar"
@@ -249,13 +152,13 @@ func TestTap_SidecarRecordsVADConfig(t *testing.T) {
 	tap.Close()
 
 	got := readSidecar(t, dir, streamSID)
-	if got.VADConfig != telephony.DefaultVADConfig() {
-		t.Errorf("sidecar vad_config = %+v\n                  want %+v", got.VADConfig, telephony.DefaultVADConfig())
+	if got.VAD != wantRecordedVAD {
+		t.Errorf("sidecar vad_config = %+v\n                  want %+v", got.VAD, wantRecordedVAD)
 	}
 	if got.StreamSID != streamSID {
 		t.Errorf("sidecar stream_sid = %q, want %q", got.StreamSID, streamSID)
 	}
-	// Both IDs: the file is keyed by stream, but the replay harness needs to group a
+	// Both IDs: the file is keyed by stream, but a reader needs CallSID to group a
 	// reconnected call's recordings back together.
 	if got.CallSID != callSID {
 		t.Errorf("sidecar call_sid = %q, want %q", got.CallSID, callSID)
@@ -378,8 +281,8 @@ func TestTap_OutboundWriteFailureLogsOnce(t *testing.T) {
 // Write creates the .ulaw before it writes to it, so a full disk yields a
 // zero-byte recording with no sidecar beside it -- exactly the artifact
 // EmptyPayloadIsNotMedia rejects ("indistinguishable from a recording whose
-// capture broke"), and exactly what Close's own doc says cannot happen. The replay
-// harness would find a recording it cannot tell from a silent call, with no sidecar to
+// capture broke"), and exactly what Close's own doc says cannot happen. A reader
+// would find a recording it cannot tell from a silent call, with no sidecar to
 // say otherwise. The invariant worth having is the one this pins: every .ulaw
 // on disk is real audio with a sidecar next to it.
 //
@@ -437,12 +340,11 @@ func TestTap_MissingDirDoesNotKillCall(t *testing.T) {
 	}
 }
 
-// TestTap_WriteAfterCloseIsSafe covers a live sequence, not a hypothetical:
-// pumpDataPlane runs in its own goroutine, and handleStream's defer cancels the
-// pumps, joins, then closes the tap. A frame in flight arriving at a closed
-// file must not panic -- a panic there fires inside the defer and drops the
-// call, which is the exact harm contract 4 forbids. Close must also be
-// idempotent and final: a late frame cannot reopen a finished recording.
+// TestTap_WriteAfterCloseIsSafe covers a caller that feeds the tap from one
+// goroutine and closes it from another: a frame in flight arriving at a
+// closed tap must not panic -- a panic there drops the call, which is the
+// exact harm contract 4 forbids. Close must also be idempotent and final: a
+// late frame cannot reopen a finished recording.
 func TestTap_WriteAfterCloseIsSafe(t *testing.T) {
 	dir := t.TempDir()
 	const streamSID = "SSlate"
@@ -450,7 +352,7 @@ func TestTap_WriteAfterCloseIsSafe(t *testing.T) {
 	tap := NewTap(dir, streamSID, "CAlate", "", testStreamStartedAt)
 	tap.WriteIn([]byte{0x01, 0x02})
 	tap.Close()
-	tap.WriteIn([]byte{0x03}) // a frame still in flight in pumpDataPlane
+	tap.WriteIn([]byte{0x03}) // a frame still in flight when Close ran
 	tap.Close()               // and the double close that follows it
 
 	audio, err := os.ReadFile(inulawPath(dir, streamSID))
@@ -471,7 +373,7 @@ func TestTap_WriteAfterCloseIsSafe(t *testing.T) {
 // TestTap_EmptyPayloadIsNotMedia decides what contract 3's "first media frame"
 // hinges on: Write being called, or bytes actually arriving. It must be the
 // latter -- an empty .ulaw is indistinguishable from a recording whose capture
-// broke, and the replay harness would replay it as a zero-utterance sample.
+// broke.
 //
 // Contrast-structured: "no file appeared" is true of any tap that does nothing.
 func TestTap_EmptyPayloadIsNotMedia(t *testing.T) {
@@ -739,9 +641,9 @@ func TestTap_QueueTruncationOnClose(t *testing.T) {
 // 1-byte payloads on both channels, so a DrainOut that falls back to a single
 // 0xFF byte on an empty queue passes them even though it desyncs the two files
 // by ~159 bytes on every real, 160-byte (20ms @ 8kHz mu-law) silent frame.
-// This test uses realistic frame-sized payloads on WriteIn, matching what the
-// real Twilio media-stream path (session.go's frame size,
-// SampleRateHz*MuLawFrameMS/1000) delivers, so a fixed-1-byte silence fallback
+// This test uses realistic frame-sized payloads on WriteIn, matching what a
+// real Twilio media stream (SampleRateHz*MuLawFrameMS/1000 bytes per frame)
+// delivers, so a fixed-1-byte silence fallback
 // fails it while the 5 synthetic tests stay green.
 func TestTap_SilenceMatchesRealFrameSize(t *testing.T) {
 	dir := t.TempDir()
@@ -1133,6 +1035,13 @@ func TestTap_SidecarRecordsDropCount(t *testing.T) {
 // pin the declared-channel-set behavior that fixes both, and the golden that
 // keeps duplex exactly as it was.
 
+// fakeClock is a hand-advanced clock. It needs no mutex: the Tap reads it only
+// under t.mu, and these tests drive the Tap from one goroutine.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
 // outboundOnlyTap builds the Tap under test in this section: outbound-only,
 // paced by a hand-advanced clock so the gap fill is deterministic rather than
 // a function of how long the test took to run.
@@ -1331,9 +1240,9 @@ func TestTap_OutboundOnlyFillsGapsWithSilence(t *testing.T) {
 }
 
 // TestTap_DuplexOutputUnchanged is behavior 3, and it is a golden rather than a
-// red test: it must pass both before and after AATK-101. Duplex recordings are
-// what probeset build already consumes, so the load-bearing safety property of
-// the channel set is that adding it changed nothing for them -- the queue, the
+// red test: it must pass both before and after AATK-101. Duplex recordings
+// already had readers, so the load-bearing safety property of the channel set
+// is that adding it changed nothing for them -- the queue, the
 // inbound frame clock, the empty-queue silence, the truncation flag and the
 // sidecar strings all as they were. Reasoning that "duplex is untouched" is not
 // the same as a fixed script asserting it byte for byte.
@@ -1386,13 +1295,76 @@ func TestTap_DuplexOutputUnchanged(t *testing.T) {
 		StartedAt:    testStreamStartedAt,
 		Frames:       3,
 		Bytes:        3 * frameBytes,
-		VADConfig:    telephony.DefaultVADConfig(),
+		VAD:          wantRecordedVAD,
 		Alignment:    duplexAlignment,
 		Channels:     []string{string(ChannelIn), string(ChannelOut)},
 		OutTruncated: true,
 	}
 	if !reflect.DeepEqual(side, want) {
 		t.Errorf("duplex sidecar = %+v, want %+v", side, want)
+	}
+}
+
+// TestTap_SidecarBytesUnchanged pins the sidecar file byte for byte, for both
+// shapes of Tap a depending project can build: duplex, and outbound-only as on
+// the realtime path. The other sidecar tests decode the file and compare
+// values, which cannot see how the bytes are laid out: a field moved within the
+// sidecar struct, or within its vad_config block, decodes equal and is written
+// in another order.
+//
+// The literals are the sidecars this suite wrote before AATK-164 removed the
+// VAD pipeline, captured from a run rather than written by hand, so they are an
+// oracle independent of whatever struct produces the file.
+func TestTap_SidecarBytesUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		streamSID string
+		record    func(dir, streamSID string)
+		want      string
+	}{
+		{
+			name:      "duplex",
+			streamSID: "SSsidecarbytesduplex",
+			record: func(dir, streamSID string) {
+				tap := NewTap(dir, streamSID, "CAsidecarbytesduplex", "golden", testStreamStartedAt)
+				tap.WriteOut(realFrame(0xA0))
+				tap.WriteOut(realFrame(0xB0))
+				tap.WriteIn(realFrame(0x01))
+				tap.DrainOut()
+				tap.WriteIn(realFrame(0x02))
+				tap.DrainOut()
+				tap.WriteIn(realFrame(0x03))
+				tap.DrainOut()
+				tap.WriteOut(realFrame(0xC0))
+				tap.Close()
+			},
+			want: `{"stream_sid":"SSsidecarbytesduplex","call_sid":"CAsidecarbytesduplex","label":"golden","started_at":"2026-07-17T09:30:15.123456789Z","frames":3,"bytes":480,"vad_config":{"WindowSize":256,"SpeechThresh":0.5,"SilenceThresh":0.35,"EndSilenceMS":700,"SampleRateHz":8000,"TurnEndSilenceMS":5000},"alignment":"inbound-frame-clock, 20ms/frame, silence=0xFF","channels":["in","out"],"out_truncated":true}`,
+		},
+		{
+			name:      "outbound-only",
+			streamSID: "SSsidecarbytesoutonly",
+			record: func(dir, streamSID string) {
+				clk := &fakeClock{t: testStreamStartedAt}
+				tap := outboundOnlyTap(dir, streamSID, "CAsidecarbytesoutonly", clk)
+				tap.WriteOut(realFrame(0x10))
+				clk.advance(40 * time.Millisecond)
+				tap.Close()
+			},
+			want: `{"stream_sid":"SSsidecarbytesoutonly","call_sid":"CAsidecarbytesoutonly","started_at":"2026-07-17T09:30:15.123456789Z","frames":0,"bytes":0,"vad_config":{"WindowSize":256,"SpeechThresh":0.5,"SilenceThresh":0.35,"EndSilenceMS":700,"SampleRateHz":8000,"TurnEndSilenceMS":5000},"alignment":"wall-clock, 20ms/frame, silence=0xFF, t0=first outbound frame","channels":["out"]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.record(dir, tc.streamSID)
+
+			got, err := os.ReadFile(sidecarPath(dir, tc.streamSID))
+			if err != nil {
+				t.Fatalf("reading sidecar: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("sidecar bytes changed:\n got %s\nwant %s", got, tc.want)
+			}
+		})
 	}
 }
 
