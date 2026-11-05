@@ -19,12 +19,16 @@ const (
 // policy never reads: the provider's id for an inbound SMS, which the harness
 // copies from twilio.InboundSMS.MessageSID to give a stable key for counting
 // or de-duplicating inbound messages. The harness sets it only on SMS turns.
+// HasMedia is the same kind of bookkeeping: whether an inbound SMS carried media
+// (twilio.InboundSMS.HasMedia), set only on SMS turns, and never read by the
+// policy. A bool, so Message stays comparable; Text is still only the body.
 type Message struct {
 	Text       string
 	Transport  TransportType
 	SessionID  string
 	From       string
 	MessageSID string
+	HasMedia   bool
 }
 
 // VADKind is the kind of voice-activity event emitted by the VAD goroutine.
