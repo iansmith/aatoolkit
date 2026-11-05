@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -25,13 +26,14 @@ var e164Pattern = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
 type StreamHandler func(ctx context.Context, conn *websocket.Conn, start Frame) error
 
 // InboundSMS is the parsed subset of a Twilio inbound-message webhook. Additional
-// fields (NumMedia, MediaUrl0…, NumSegments, …) remain available on the raw form
-// if a consumer needs them later.
+// fields (MediaUrl0…, NumSegments, …) remain on the raw form if a consumer needs
+// them later; ServeSMS reads none of them, and no media is ever fetched.
 type InboundSMS struct {
 	MessageSID string // Twilio MessageSid
 	From       string // sender, E.164
 	To         string // the Twilio number that received it, E.164
 	Body       string // message text
+	HasMedia   bool   // NumMedia is a positive integer; anything else is false
 }
 
 // SMSHandler is called by ServeSMS for each validated inbound-SMS webhook. It is
@@ -391,12 +393,20 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 		From:       from,
 		To:         r.PostForm.Get("To"),
 		Body:       r.PostForm.Get("Body"),
+		HasMedia:   hasMedia(r.PostForm.Get("NumMedia")),
 	}
 	if s.HandleSMS != nil {
 		s.HandleSMS(r.Context(), msg)
 	}
 
 	writeEmptyTwiML(w)
+}
+
+// hasMedia reads a webhook's NumMedia: true only for a positive integer. Missing,
+// empty, zero, negative, garbage and overflowing values all mean no media.
+func hasMedia(numMedia string) bool {
+	n, err := strconv.Atoi(numMedia)
+	return err == nil && n > 0
 }
 
 // writeVoiceRefusal answers a voice webhook by speaking text (escaped by

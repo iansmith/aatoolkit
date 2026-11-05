@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/iansmith/aatoolkit/telephony"
 	"github.com/iansmith/aatoolkit/telephony/twilio"
 )
 
@@ -409,4 +410,65 @@ func TestServeSMSStatus_CallbackURLWithQueryStringValidates(t *testing.T) {
 		t.Fatalf("HandleSMSStatus called %d times, want 1 — a correlation id in the callback URL broke signature validation (status %d)", called, w.Code)
 	}
 	assertEmptyTwiML(t, w)
+}
+
+// HasMedia is the fact a consumer needs from Twilio's NumMedia: a signed
+// webhook sets it only for a positive integer. Anything else is no media, so a
+// value Twilio never sends cannot make a text look like a picture.
+func TestServeSMS_HasMedia(t *testing.T) {
+	cases := []struct {
+		name     string
+		numMedia string
+		present  bool
+		want     bool
+	}{
+		{name: "absent", present: false, want: false},
+		{name: "empty", numMedia: "", present: true, want: false},
+		{name: "zero", numMedia: "0", present: true, want: false},
+		{name: "one", numMedia: "1", present: true, want: true},
+		{name: "ten", numMedia: "10", present: true, want: true},
+		{name: "garbage", numMedia: "abc", present: true, want: false},
+		{name: "negative", numMedia: "-1", present: true, want: false},
+		{name: "overflow", numMedia: "99999999999999999999999", present: true, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got twilio.InboundSMS
+			s := &twilio.Server{
+				AuthToken:    "authtoken",
+				StreamScheme: "wss",
+				HandleSMS:    func(_ context.Context, msg twilio.InboundSMS) { got = msg },
+			}
+			form := url.Values{
+				"MessageSid": {"SM123"},
+				"From":       {"+15105551234"},
+				"To":         {"+15105550000"},
+				"Body":       {"caption"},
+			}
+			if c.present {
+				form.Set("NumMedia", c.numMedia)
+			}
+			req := signedTwilioRequest(t, "authtoken", "https", "webhook.example.com", "/sms/inbound", form)
+			w := httptest.NewRecorder()
+
+			s.ServeSMS(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", w.Code)
+			}
+			if got.HasMedia != c.want {
+				t.Fatalf("HasMedia = %v, want %v", got.HasMedia, c.want)
+			}
+		})
+	}
+}
+
+// Both structs stay comparable: consumer tests compare them with == (AATK-165).
+func TestInboundSMSAndMessage_StayComparable(t *testing.T) {
+	if (twilio.InboundSMS{HasMedia: true}) == (twilio.InboundSMS{}) {
+		t.Fatal("InboundSMS with media equals one without")
+	}
+	if (telephony.Message{HasMedia: true}) == (telephony.Message{}) {
+		t.Fatal("Message with media equals one without")
+	}
 }
