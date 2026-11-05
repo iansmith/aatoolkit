@@ -290,6 +290,44 @@ func TestCallerSilence_ACallerWhoKeepsSpeakingIsNotEnded(t *testing.T) {
 	assertStillRunning(t, h, "a caller who keeps speaking within the limit must not be hung up on")
 }
 
+// TestCallerSilence_TurnResumedIsCallerSpeech pins AATK-167's routing of
+// turn.resumed for the bound: it is the caller speaking, so it must stop a
+// running count exactly as speech_started does, and it must keep the sink's
+// and the drain's counts of speech starts in step. Routing it to Clear without
+// counting it on the drain leaves heard behind starts for the rest of the
+// call, every later playout mark is refused, and the bound is off.
+func TestCallerSilence_TurnResumedIsCallerSpeech(t *testing.T) {
+	const d = callerSilenceTestLimit
+	resumed := map[string]string{"type": "turn.resumed"}
+
+	t.Run("stops a running count", func(t *testing.T) {
+		be := newFakeRealtimeBackend(t)
+		h := silenceHarness(t, be.url(), WithCallerSilenceTimeout(d))
+		waitBackendReady(t, be, h)
+		wire := h.captureCarrierWire(t)
+
+		startCount(t, be, h, wire)
+		be.emitEvery(t, d/3, resumed)
+
+		time.Sleep(3*d + d/2)
+		assertStillRunning(t, h, "a caller who keeps resuming within the limit must not be hung up on")
+	})
+
+	t.Run("keeps the bound on afterwards", func(t *testing.T) {
+		be := newFakeRealtimeBackend(t)
+		h := silenceHarness(t, be.url(), WithCallerSilenceTimeout(d))
+		waitBackendReady(t, be, h)
+		wire := h.captureCarrierWire(t)
+
+		be.emitOnce(t, map[string]string{"type": "turn.ended"})
+		be.emitOnce(t, resumed)
+		emitSpeechStopped(t, be)
+
+		from := startCount(t, be, h, wire)
+		waitEndedAfter(t, h, from, d)
+	})
+}
+
 // TestCallerSilence_OneUtteranceLongerThanTheLimitIsNotCut pins that caller
 // speech STOPS the count rather than resetting it: one speech_started and then
 // nothing at all — no speech_stopped, no reply — for three limits. A caller

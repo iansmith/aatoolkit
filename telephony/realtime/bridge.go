@@ -112,9 +112,16 @@ func (b *Bridge) dispatch(ctx context.Context, ev ServerEvent) error {
 		if err := b.sink.Media(ctx, ev.Delta); err != nil {
 			return fmt.Errorf("realtime: media sink: %w", err)
 		}
-	case EventSpeechStarted:
+	case EventSpeechStarted, EventTurnResumed:
 		// One clear per event. Collapsing repeats would be a behavior
 		// change, not an optimisation.
+		//
+		// turn.resumed is the caller speaking again in a turn the backend
+		// had judged complete, sent where that backend sends no
+		// speech_started (AATK-167). It is the same event to everything
+		// downstream — barge-in, the filler's stop, the caller-silence
+		// bound — so it takes the same lossless path rather than a second
+		// one that could disagree with it.
 		if err := b.sink.Clear(ctx); err != nil {
 			return fmt.Errorf("realtime: clear sink: %w", err)
 		}
