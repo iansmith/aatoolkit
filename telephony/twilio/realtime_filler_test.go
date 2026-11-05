@@ -368,6 +368,136 @@ func TestFiller_StopsOnSpeechStarted(t *testing.T) {
 	}
 }
 
+// --- AATK-167: the early turn-ended arm -------------------------------------
+
+// emitTurnEnded emits the backend's early report that the caller's turn is
+// complete, sent ahead of a speech_stopped the backend holds back.
+func emitTurnEnded(t *testing.T, be *fakeRealtimeBackend) {
+	t.Helper()
+	be.emitOnce(t, map[string]string{"type": "turn.ended", "event_id": "e1", "item_id": "i1", "audio_end_ms": "1200"})
+}
+
+// TestFiller_ArmsOnTurnEnded is the fix: a backend that holds speech_stopped
+// until its reply's output exists sends turn.ended first, and the loop must
+// start Delay after it with no speech_stopped at all.
+func TestFiller_ArmsOnTurnEnded(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+	// The subject is the turn.ended trigger, so the call-open countdown is
+	// disarmed first; otherwise the loop watched is the call-open episode.
+	wire = afterTheBackendHasSpoken(t, be, wire)
+
+	armedAt := time.Now()
+	emitTurnEnded(t, be)
+
+	waitFillerPlaying(t, wire, 3)
+	if waited := fillerFrames(wire())[0].at.Sub(armedAt); waited < fillerTestDelay {
+		t.Fatalf("the loop must not start before Delay: first frame %v after turn.ended, Delay is %v",
+			waited, fillerTestDelay)
+	}
+
+	reply := carrierPayloadB64()
+	be.emitOnce(t, map[string]string{"type": "response.output_audio.delta", "delta": reply})
+	assertClearThenReply(t, wire, reply)
+}
+
+// TestFiller_HeldSpeechStoppedDoesNotRestartTheCountdown pins the re-arm rule
+// against the new trigger. The held speech_stopped lands half a Delay after
+// turn.ended; the countdown is already pending, so the loop must start Delay
+// after turn.ended, not Delay after speech_stopped. And once the loop plays, a
+// speech_stopped must not interrupt it.
+func TestFiller_HeldSpeechStoppedDoesNotRestartTheCountdown(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+	wire = afterTheBackendHasSpoken(t, be, wire)
+
+	armedAt := time.Now()
+	emitTurnEnded(t, be)
+	time.Sleep(fillerTestDelay / 2)
+	armFiller(t, be)
+
+	waitFillerPlaying(t, wire, 1)
+	// A restarted countdown starts at 1.5 Delay or later. The first tick is
+	// one frame after start, so a correct one lands near Delay + 20 ms.
+	if waited := fillerFrames(wire())[0].at.Sub(armedAt); waited >= fillerTestDelay+fillerTestDelay/2 {
+		t.Fatalf("a held speech_stopped restarted the countdown: first frame %v after turn.ended, want under %v",
+			waited, fillerTestDelay+fillerTestDelay/2)
+	}
+
+	// Playing now: a second held speech_stopped must leave the loop alone.
+	n := len(fillerFrames(wire()))
+	armFiller(t, be)
+	waitFillerPlaying(t, wire, n+10)
+	got := wire()
+	if i := slices.IndexFunc(got, isClear); i >= 0 {
+		t.Fatalf("a speech_stopped while the loop plays must not clear it:\n%+v", got)
+	}
+}
+
+// TestFiller_ResumeDuringTheCountdownStopsIt pins the other edge: the caller
+// kept talking after turn.ended, so no loop may play. speech_started is the
+// OpenAI-protocol resume; turn.resumed is the backend's own, for a reopened
+// turn that sends no speech_started. Both take the barge-in path, so each
+// sends the one clear speech_started always has.
+func TestFiller_ResumeDuringTheCountdownStopsIt(t *testing.T) {
+	for _, resume := range []string{"input_audio_buffer.speech_started", "turn.resumed"} {
+		t.Run(resume, func(t *testing.T) {
+			be := newFakeRealtimeBackend(t)
+			h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
+			waitBackendReady(t, be, h)
+			wire := h.captureCarrierWire(t)
+			wire = afterTheBackendHasSpoken(t, be, wire)
+
+			emitTurnEnded(t, be)
+			time.Sleep(fillerTestDelay / 3)
+			be.emitOnce(t, map[string]string{"type": resume})
+			waitForWireRecord(t, wire, isClear)
+
+			// Well past the start the countdown would have reached.
+			time.Sleep(fillerTestDelay * 3)
+			got := wire()
+			if n := len(fillerFrames(got)); n != 0 {
+				t.Fatalf("%s during the countdown must stop it, but %d loop frames played:\n%+v", resume, n, got)
+			}
+			if n := countOf(got, isClear); n != 1 {
+				t.Fatalf("%s must produce exactly one clear, got %d:\n%+v", resume, n, got)
+			}
+		})
+	}
+}
+
+// TestFiller_StopsOnTurnResumed is TestFiller_StopsOnSpeechStarted for the
+// backend's own resume: a loop already playing stops against the one clear,
+// with no frame after it.
+func TestFiller_StopsOnTurnResumed(t *testing.T) {
+	be := newFakeRealtimeBackend(t)
+	h := fillerHarness(t, be.url(), FillerConfig{Loop: fillerTestLoop(), Delay: fillerTestDelay})
+	waitBackendReady(t, be, h)
+	wire := h.captureCarrierWire(t)
+	wire = afterTheBackendHasSpoken(t, be, wire)
+
+	emitTurnEnded(t, be)
+	waitFillerPlaying(t, wire, 3)
+
+	be.emitOnce(t, map[string]string{"type": "turn.resumed"})
+	waitForWireRecord(t, wire, isClear)
+	time.Sleep(150 * time.Millisecond)
+
+	got := wire()
+	if n := countOf(got, isClear); n != 1 {
+		t.Fatalf("turn.resumed must produce exactly one clear, got %d:\n%+v", n, got)
+	}
+	for _, r := range got[slices.IndexFunc(got, isClear):] {
+		if isFillerFrame(r) {
+			t.Fatalf("the loop must stop on turn.resumed, but a frame followed the clear:\n%+v", got)
+		}
+	}
+}
+
 // --- behaviour 2: the tool round trip re-arms ------------------------------
 
 // TestFiller_RearmsAfterFunctionCall covers the longest wait measured on the

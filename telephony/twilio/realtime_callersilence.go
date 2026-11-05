@@ -180,7 +180,10 @@ func (s *callerSilence) observe(ev ServerEvent) {
 		return
 	}
 	switch ev.Type {
-	case realtime.EventSpeechStarted:
+	case realtime.EventSpeechStarted, realtime.EventTurnResumed:
+		// turn.resumed reaches Clear exactly as speech_started does (see
+		// Bridge.dispatch), so it is counted here too: heard must keep
+		// pace with starts, or every later mark is refused.
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.heard++

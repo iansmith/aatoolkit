@@ -2084,7 +2084,9 @@ func (s *carrierMediaSink) fillerMedia(ctx context.Context, next func() (string,
 }
 
 // Clear discards what the carrier has buffered. It is the barge-in signal:
-// Bridge.Run calls it once for every speech_started, and nothing else does.
+// Bridge.Run calls it once for every speech_started (and every turn.resumed,
+// its equivalent from a backend that sends no speech_started; AATK-167), and
+// nothing else does.
 // That is what lets it tell the caller-silence bound the caller has started
 // speaking (AATK-163) — before the clear is written, so an echo the clear
 // releases from the carrier is already stale when it arrives. The engine's own

@@ -33,6 +33,24 @@ const (
 	EventAudioDelta      = "response.output_audio.delta"
 	EventResponseDone    = "response.done"
 
+	// EventTurnEnded and EventTurnResumed are engine extensions, not part of
+	// the OpenAI protocol: a backend that sends neither behaves exactly as
+	// before (AATK-167).
+	//
+	// EventTurnEnded is a backend reporting that its turn detector judged the
+	// caller's turn complete, as soon as it judges so. It exists for a backend
+	// that holds speech_stopped back until its reply's output exists, which
+	// leaves speech_stopped too late to time the wait the filler covers. It
+	// carries type, event_id, item_id and audio_end_ms, of which this package
+	// reads only the type.
+	//
+	// EventTurnResumed is the same backend reopening a turn it had judged
+	// complete — the caller kept talking — on a path that sends no
+	// speech_started. This package treats it exactly as a speech_started: it is
+	// the caller speaking. It carries type, event_id and item_id.
+	EventTurnEnded   = "turn.ended"
+	EventTurnResumed = "turn.resumed"
+
 	// EventError is how a backend refuses something. This package acts on it
 	// nowhere — it is named only so Dial can PREFER such a frame when saying
 	// why a handshake never completed (AATK-136). Deliberately not a filter:

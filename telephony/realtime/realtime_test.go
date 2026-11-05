@@ -164,6 +164,42 @@ func TestTwoConsecutiveSpeechStartedProduceTwoClears(t *testing.T) {
 	}
 }
 
+// TestTurnResumedClearsLikeSpeechStarted pins AATK-167's routing of a resumed
+// turn: the caller speaking again, so it takes speech_started's lossless path
+// to the sink's Clear, one clear per event.
+func TestTurnResumedClearsLikeSpeechStarted(t *testing.T) {
+	be := newFakeBackend(t)
+	be.toSend = []any{
+		ServerEvent{Type: EventTurnEnded},
+		ServerEvent{Type: EventTurnResumed},
+	}
+	ctx := testCtx(t)
+
+	c, err := Dial(ctx, be.url())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	sink := &recordingSink{}
+	b := NewBridge(c, sink)
+	go func() { _ = b.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, clears := sink.snapshot(); clears >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Let a wrongly doubled clear, or one for turn.ended, arrive too.
+	time.Sleep(100 * time.Millisecond)
+
+	if _, clears := sink.snapshot(); clears != 1 {
+		t.Errorf("turn.ended then turn.resumed produced %d clears, want exactly 1 (turn.resumed's)", clears)
+	}
+}
+
 // --- transcripts ------------------------------------------------------------
 
 func TestTranscriptsSurfaceInArrivalOrder(t *testing.T) {

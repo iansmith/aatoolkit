@@ -44,8 +44,9 @@ const (
 // design rather than an accident of where the code sits.
 //
 // ARMING is driven by observe, on the server-event drain goroutine, because
-// the two events that arm it — speech_stopped, and the response.done that
-// ended in a function call — reach this package nowhere else. (AATK-128 adds a
+// the events that arm it — speech_stopped or its early form turn.ended, and
+// the response.done that ended in a function call — reach this package
+// nowhere else. (AATK-128 adds a
 // third trigger, armedByCallOpen, from HandleStreamRealtime's own setup
 // goroutine before either loop is running; it is not an event and so has
 // nothing to do with this stream's losses.) That stream is
@@ -171,9 +172,17 @@ func (f *filler) observe(ev ServerEvent) {
 		return
 	}
 	switch ev.Type {
-	case realtime.EventSpeechStopped:
+	case realtime.EventSpeechStopped, realtime.EventTurnEnded:
 		// The caller has finished a sentence. Everything from here to the
 		// reply's first frame is the wait this option exists to fill.
+		//
+		// turn.ended is the early form of the same report (AATK-167), from a
+		// backend that holds speech_stopped back until its reply's output
+		// exists — by which time the wait is over. Such a backend sends both,
+		// turn.ended first; the re-arm rule makes the later speech_stopped a
+		// no-op, whether the countdown is still pending or the loop is
+		// already playing. A backend that sends only speech_stopped arms
+		// exactly as before.
 		f.arm(armedByTurn)
 	case realtime.EventResponseDone:
 		// A response that ended in a function call is not the reply: it is
@@ -186,9 +195,9 @@ func (f *filler) observe(ev ServerEvent) {
 			f.stop()
 		}
 	}
-	// Audio deltas and speech_started are deliberately absent: see the type
-	// comment. Both reach carrierMediaSink unconditionally, and the sink is
-	// what acts on them.
+	// Audio deltas, speech_started and turn.resumed are deliberately absent:
+	// see the type comment. All three reach carrierMediaSink unconditionally,
+	// and the sink is what acts on them.
 }
 
 // arm starts the wait before the loop may play, and — this is the fix for the
