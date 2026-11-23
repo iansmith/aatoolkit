@@ -208,7 +208,8 @@ type Server struct {
 // callParties is what the voice webhook records under a CallSid for
 // ServeStreams to thread onto the start Frame.
 type callParties struct {
-	from, to string
+	from, to    string
+	stirVerstat string
 }
 
 // maxPendingFrom bounds the CallSid -> From/To map ServeHTTP records for
@@ -228,12 +229,12 @@ type callParties struct {
 // discipline in telephony/stt.go.
 const maxPendingFrom = 1024
 
-// recordCall remembers from and to under callSid for a later ServeStreams
+// recordCall remembers from, to and stirVerstat under callSid for a later ServeStreams
 // lookup. A blank callSid is never recorded — it cannot uniquely key a later
 // start frame, so keeping it would just waste an eviction slot. Recording a
-// callSid already held replaces its from and to in place: it takes no new
+// callSid already held replaces all three in place: it takes no new
 // slot and keeps its place in the eviction order.
-func (s *Server) recordCall(callSid, from, to string) {
+func (s *Server) recordCall(callSid, from, to, stirVerstat string) {
 	if callSid == "" {
 		return
 	}
@@ -249,10 +250,10 @@ func (s *Server) recordCall(callSid, from, to string) {
 			s.fromOrder = s.fromOrder[1:]
 		}
 	}
-	s.fromBySID[callSid] = callParties{from: from, to: to}
+	s.fromBySID[callSid] = callParties{from: from, to: to, stirVerstat: stirVerstat}
 }
 
-// lookupCall returns the From and To recorded for callSid, or "" for both if
+// lookupCall returns the parties recorded for callSid, or "" for each if
 // none is held: never recorded, or since evicted. It leaves the entry in
 // place.
 func (s *Server) lookupCall(callSid string) callParties {
@@ -316,7 +317,9 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) bool {
 // A spoken refusal answers the call. <Reject/> (reason="busy" for
 // RejectReasonBusy) is written as the first and only verb, so Twilio does not
 // answer the call. The dialed To reaches RejectCall, AnswerCall and the start
-// Frame only when it is E.164; otherwise it is "". Only a call answered with
+// Frame only when it is E.164; otherwise it is "". The webhook's StirVerstat
+// is on the ctx RejectCall and AnswerCall are handed (read it with
+// StirVerstat) and on the start Frame. Only a call answered with
 // the stream has its From and To recorded for ServeStreams (see
 // maxPendingFrom); a refused call records nothing.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -331,7 +334,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("twilio: ServeHTTP: From=%s CallSid=%s", from, callSid)
+	stirVerstat := r.PostForm.Get("StirVerstat")
+	log.Printf("twilio: ServeHTTP: From=%s CallSid=%s StirVerstat=%q", from, callSid, stirVerstat)
 
 	to := r.PostForm.Get("To")
 	if !e164Pattern.MatchString(to) {
@@ -347,15 +351,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := context.WithValue(r.Context(), stirVerstatKey{}, stirVerstat)
+
 	if s.RejectCall != nil {
-		if reason, reject := s.RejectCall(r.Context(), from, to); reject {
+		if reason, reject := s.RejectCall(ctx, from, to); reject {
 			writeVoiceReject(w, reason)
 			return
 		}
 	}
 
 	if s.AnswerCall != nil {
-		if say, refuse := s.AnswerCall(r.Context(), from, to); refuse {
+		if say, refuse := s.AnswerCall(ctx, from, to); refuse {
 			writeVoiceRefusal(w, say)
 			return
 		}
@@ -365,7 +371,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// a refused call opens no stream, so nothing would ever read its entry.
 	// Recorded before the TwiML is written, so the entry is in place before
 	// Twilio can open the stream that looks it up.
-	s.recordCall(callSid, from, to)
+	s.recordCall(callSid, from, to, stirVerstat)
 
 	streamURL := fmt.Sprintf("%s://%s/streams", s.streamScheme(), r.Host)
 	w.Header().Set("Content-Type", "text/xml")
@@ -550,7 +556,7 @@ func (s *Server) ServeStreams(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parties := s.lookupCall(f.CallSID)
-	f.From, f.To = parties.from, parties.to
+	f.From, f.To, f.StirVerstat = parties.from, parties.to, parties.stirVerstat
 
 	if s.ReplyRouter != nil {
 		ctx = ContextWithReplyRouter(ctx, s.ReplyRouter)
@@ -566,4 +572,21 @@ func (s *Server) ServeStreams(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// stirVerstatKey is the context key ServeHTTP stores the webhook's
+// StirVerstat under for RejectCall and AnswerCall.
+type stirVerstatKey struct{}
+
+// StirVerstat returns the voice webhook's StirVerstat form field, carried on
+// the ctx ServeHTTP hands RejectCall and AnswerCall: Twilio's STIR/SHAKEN
+// verification result for the inbound call, such as "TN-Validation-Passed-A",
+// "TN-Validation-Failed-B" or "No-TN-Validation". Twilio sends it only when
+// the call carries a SHAKEN PASSporT, so "" means the call had none (or the
+// field was empty), and also that ctx did not come from ServeHTTP. The engine
+// reads nothing into the value; what an unattested caller gets is the
+// consumer's decision. The same value is on the stream's start Frame.
+func StirVerstat(ctx context.Context) string {
+	v, _ := ctx.Value(stirVerstatKey{}).(string)
+	return v
 }
