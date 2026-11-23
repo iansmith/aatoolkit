@@ -134,8 +134,8 @@ type dialOptions struct {
 type dialOption func(*dialOptions)
 
 // withNoEchoMarks suppresses mark-echo behavior (see --no-echo-marks in
-// main.go) so the server's AwaitingMarkEcho state hits its timeout path
-// instead of receiving an echo.
+// main.go) so the server's mark-echo timeout fires instead of an echo
+// arriving.
 func withNoEchoMarks() dialOption {
 	return func(o *dialOptions) { o.noEchoMarks = true }
 }
@@ -560,8 +560,8 @@ func dialHandleReadResult(r readResult, player *lazyPlayer, audio *callAudio, co
 // peer gone, and a write to a peer that already left.
 //
 // ECONNRESET belongs here alongside EOF. the server ends a call by closing its
-// socket (CloseNow — see the server's WithCloseFunc) while twilio-cli is
-// still writing mic frames at it, and writing to a closed socket draws a RST:
+// socket (CloseNow) while twilio-cli is still writing mic frames at it, and
+// writing to a closed socket draws a RST:
 // the OS then reports "connection reset by peer" instead of a clean EOF.
 // Which of the two surfaces is a race, so accepting only EOF made "the peer
 // hung up" — the single most ordinary way a call ends — intermittently a hard

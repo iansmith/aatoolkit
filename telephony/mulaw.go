@@ -168,6 +168,22 @@ func LinearToMuLaw(sample int16) byte {
 	return bestByte
 }
 
+// muLawToLinear decodes one G.711 μ-law byte to a signed 16-bit PCM sample
+// (standard Sun/G.711 reference algorithm; full-scale ≈ ±32124).
+func muLawToLinear(u byte) int16 {
+	const bias = 0x84
+	u = ^u
+	sign := u & 0x80
+	exponent := (u >> 4) & 0x07
+	mantissa := u & 0x0F
+	sample := (int(mantissa)<<3 + bias) << exponent
+	sample -= bias
+	if sign != 0 {
+		return int16(-sample)
+	}
+	return int16(sample)
+}
+
 func absInt32(v int32) int32 {
 	if v < 0 {
 		return -v

@@ -126,12 +126,12 @@ type Config struct {
 	// set, UserContextCtx wins and UserContext is never called.
 	UserContextCtx func(ctx context.Context, queryText string) string
 
-	// RealtimeURL selects the voice transport. Empty — the default — runs the
-	// existing VAD/STT/TTS sidecar path and constructs no realtime client. Set
-	// to a backend websocket URL, calls run over that backend instead, which
-	// also hands it the turn-taking; see twilio.NewStreamHandler for what that
-	// bypasses. The engine supplies no default URL: like every other field
-	// here, it is the consumer's to inject.
+	// RealtimeURL is the realtime voice backend's websocket URL. Calls run over
+	// that backend, which also owns the turn-taking. It is the only voice
+	// transport: empty — the default — gives a StreamHandler that ends each
+	// call with an error and dials nothing (see twilio.NewStreamHandler). The
+	// engine supplies no default URL: like every other field here, it is the
+	// consumer's to inject.
 	RealtimeURL string
 
 	// TracerProvider supplies the tracer for the span each model call
@@ -157,9 +157,9 @@ type Config struct {
 	TracerProvider trace.TracerProvider
 }
 
-// StreamHandler returns the Media Streams handler for the configured
-// transport, for a consumer to install on twilio.Server.HandleStream. It is
-// the one place the transport switch is read.
+// StreamHandler returns the Media Streams handler for the configured realtime
+// backend, for a consumer to install on twilio.Server.HandleStream. It is the
+// one place RealtimeURL is read.
 func (c Config) StreamHandler() twilio.StreamHandler {
 	return twilio.NewStreamHandler(c.RealtimeURL)
 }

@@ -1,20 +1,25 @@
 # Audio input architecture
 
+> Status: since AATK-164 the engine runs no VAD or STT of its own. `/streams`
+> relays call audio to the realtime speech-to-speech backend, which does both.
+> The one-ingestion-path rule below still holds.
+
 aatoolkit has **one** audio ingestion path. Both real Twilio and the `twilio-cli`
 fake-Twilio feed identical media frames to the same WebSocket endpoint; the
-server-side sidecars (VAD, STT) take over from there. Local *interactive* input is
+realtime speech-to-speech backend takes over from there. Local *interactive* input is
 typed-only. There is no second, local-microphone audio path — an earlier one was
 removed (see History) precisely so there would be a single VAD and a single STT.
 
 ```
   real phone call ─┐
-                   ├─▶ μ-law frames ─▶ /streams ─▶ telephony session ─▶ VAD ─▶ STT ─▶ Turn ─▶ Respond
-  twilio-cli ──────┘        (WebSocket)              (Silero sidecar) (whisper sidecar)   (the seam)
+                   ├─▶ μ-law frames ─▶ /streams ─▶ realtime backend (VAD → STT → LLM → TTS)
+  twilio-cli ──────┘        (WebSocket)
 
-  typed line ─▶ stdinSource (driver) ───────────────────────────────────────────▶ Turn ─▶ Respond
+  typed line ─▶ stdinSource (driver) ─▶ Turn ─▶ Respond
+                                                (the seam)
 ```
 
-## The one audio path: frames → `/streams` → sidecars
+## The one audio path: frames → `/streams` → realtime backend
 
 - **Real Twilio** streams call audio as 8 kHz μ-law 20 ms frames over a Media
   Streams WebSocket to `/streams` (`telephony/twilio`).
@@ -23,13 +28,12 @@ removed (see History) precisely so there would be a single VAD and a single STT.
   into the same 8 kHz μ-law 20 ms frames, and `websocket.Dial`s the same `/streams`
   endpoint. That is *why* it is a faithful test tool — it is indistinguishable from
   Twilio at the frame boundary.
-- **Server side**, the telephony session runs VAD (Silero, externalized to a sidecar
-  by default) and STT (`telephony.STTClient.Transcribe` → the whisper
-  sidecar at `/v1/audio/transcriptions`). This is the single VAD and the single STT
-  client in the engine.
+- **Server side**, `twilio.NewStreamHandler` relays the frames, base64 μ-law
+  unchanged, to the realtime speech-to-speech backend, which runs VAD and STT itself.
+  The engine has no VAD or STT client of its own.
 
 So the answer to "how do I get local voice in?" is **run `twilio-cli`** — it streams
-mic frames to the same endpoint and gets the same sidecar VAD/STT. Do not add a
+mic frames to the same endpoint and gets the same backend VAD/STT. Do not add a
 second capture/VAD path.
 
 ## Local interactive input: typed only
@@ -69,6 +73,6 @@ rule. If local voice input is ever wanted without a full phone call, extend
 ## The convergence seam
 
 Both inputs exist to produce the same thing: a user text `Turn` bound for the
-policy's `Respond`. The frame path yields it via STT through the turn sink; the typed
-path yields it directly from `stdinSource`. Unifying these onto one `Respond` entry
-point is the "Turn seam" work.
+policy's `Respond`. The typed path yields it directly from `stdinSource`. The frame
+path no longer produces one in the engine: the realtime backend runs the turn itself
+(AATK-164). Unifying these onto one `Respond` entry point is the "Turn seam" work.

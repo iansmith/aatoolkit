@@ -50,22 +50,6 @@ func TestTransportType_BuiltinValuesDistinct(t *testing.T) {
 	}
 }
 
-func TestVADEvent_KindDistinguishesThreeStates(t *testing.T) {
-	s := telephony.VADEvent{Kind: telephony.VADSpeech}
-	p := telephony.VADEvent{Kind: telephony.VADSilence}
-	e := telephony.VADEvent{Kind: telephony.VADEndOfUtterance}
-
-	if s.Kind == p.Kind {
-		t.Fatal("VADSpeech and VADSilence must be distinct")
-	}
-	if s.Kind == e.Kind {
-		t.Fatal("VADSpeech and VADEndOfUtterance must be distinct")
-	}
-	if p.Kind == e.Kind {
-		t.Fatal("VADSilence and VADEndOfUtterance must be distinct")
-	}
-}
-
 // Gap 4: TransportType named constants must not be the zero/empty string.
 func TestTransportType_NamedConstantsAreNonEmpty(t *testing.T) {
 	for name, tt := range map[string]telephony.TransportType{
@@ -89,19 +73,6 @@ func TestTransportType_ZeroValueDistinctFromAllConstants(t *testing.T) {
 	}
 	if zero == telephony.TransportOutbound {
 		t.Error("zero TransportType must not equal TransportOutbound")
-	}
-}
-
-// Gap 5: VADKind named constants must not be the zero/empty string.
-func TestVADKind_NamedConstantsAreNonEmpty(t *testing.T) {
-	for name, k := range map[string]telephony.VADKind{
-		"VADSpeech":         telephony.VADSpeech,
-		"VADSilence":        telephony.VADSilence,
-		"VADEndOfUtterance": telephony.VADEndOfUtterance,
-	} {
-		if string(k) == "" {
-			t.Errorf("%s must not be the empty string", name)
-		}
 	}
 }
 

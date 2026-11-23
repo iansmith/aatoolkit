@@ -11,9 +11,8 @@ import (
 )
 
 // TestDecodeFrame_PayloadStillDecodesForExistingConsumers pins the guarantee
-// that carrying the encoded form alongside changes no existing field: the tap,
-// STT dispatch, and replay all read Payload and must see exactly the bytes they
-// see today.
+// that carrying the encoded form alongside changes no existing field: a
+// consumer that reads Payload must see exactly the bytes it saw before.
 //
 // Deliberately not part of the Phase 0 red commit — it is green on current code
 // by design. It is a regression guard for AATK-70's change to Frame, not a
@@ -40,11 +39,11 @@ func TestDecodeFrame_PayloadStillDecodesForExistingConsumers(t *testing.T) {
 
 // --- AATK-72: the exported realtime entry point -----------------------------
 //
-// A consumer that supplies telephony.SessionOptions never calls
-// NewStreamHandler — it owns its own StreamHandler body so per-call setup and
-// teardown stay bound to that scope. These tests enter the way that consumer
-// does: HandleStreamRealtime called directly with the (ctx, conn, start) the
-// consumer's own handler received. Entering through NewStreamHandler instead
+// A consumer that owns its own StreamHandler body, so per-call setup and
+// teardown stay bound to that scope, never calls NewStreamHandler. These tests
+// enter the way that consumer does: HandleStreamRealtime called directly with
+// the (ctx, conn, start) the consumer's own handler received. Entering through
+// NewStreamHandler instead
 // would leave the exported name itself uncovered, which is the whole ticket.
 
 // realtimeDirect adapts the exported entry point to a StreamHandler, closing

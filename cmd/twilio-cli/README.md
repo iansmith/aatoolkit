@@ -64,7 +64,7 @@ This tone used to be a single 20 ms frame, which nobody could hear; it is now 24
 | `-server` | Name of the config server entry to resolve from. Overrides `$AATOOLKIT_SERVER_NAME`. |
 | `-to` | The dialed number, E.164. |
 | `-audio` | Stream a raw μ-law file instead of capturing the mic. Any platform. |
-| `-no-echo-marks` | Suppress mark-echo, to exercise the server's `AwaitingMarkEcho` timeout. |
+| `-no-echo-marks` | Suppress mark-echo, to exercise the server's mark-echo timeout. |
 | `-record <file>` | Record inbound server audio to a raw μ-law file, with per-arrival timing in `<file>.jsonl`. |
 | `-record-sent <file>` | Record the outbound caller audio (mic or `-audio`) to a raw μ-law file, replayable with `-audio`. |
 | `-full-duplex` | Send captured audio — mic or `-audio` — even while the server is speaking. Off by default; see [Acoustic bleed](#acoustic-bleed). |

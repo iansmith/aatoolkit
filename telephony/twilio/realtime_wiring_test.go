@@ -517,8 +517,10 @@ func TestRealtime_CarrierAudioReachesBackendVerbatim(t *testing.T) {
 func TestRealtime_SwitchUnsetAttemptsNoDial(t *testing.T) {
 	be := newFakeRealtimeBackend(t)
 
-	// Switch unset: the existing VAD/STT/TTS path runs and no realtime client
-	// is constructed, so the backend sees zero connection attempts.
+	// Switch unset: the call ends without a realtime client being constructed,
+	// so the backend sees zero connection attempts. A handler that dialed the
+	// empty URL would also reach no backend; the dial itself is counted at the
+	// seam by TestNewStreamHandler_EmptyURLEndsTheCallAndDialsNothing.
 	h := newRealtimeHarness(t, "")
 	h.sendRaw(mediaFrameRaw(h.streamSID, carrierPayloadB64()))
 
