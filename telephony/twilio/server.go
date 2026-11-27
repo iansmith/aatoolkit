@@ -6,6 +6,7 @@ import (
 	"html"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -25,15 +26,40 @@ var e164Pattern = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
 // handler owns the connection for the duration of the call and returns when done.
 type StreamHandler func(ctx context.Context, conn *websocket.Conn, start Frame) error
 
-// InboundSMS is the parsed subset of a Twilio inbound-message webhook. Additional
-// fields (MediaUrl0…, NumSegments, …) remain on the raw form if a consumer needs
-// them later; ServeSMS reads none of them, and no media is ever fetched.
+// MaxMedia is the most media items one inbound message can carry: Twilio
+// attaches at most ten to an MMS. InboundSMS.Media holds this many slots.
+const MaxMedia = 10
+
+// MediaItem is one media attachment of an inbound message, as the webhook
+// names it: MediaUrlN and MediaContentTypeN for the same N. The URL is the
+// provider's Media resource, which FetchMedia reads and DeleteMedia removes;
+// the content type is what the webhook claims, not yet checked against the
+// bytes.
+type MediaItem struct {
+	URL         string // MediaUrlN
+	ContentType string // MediaContentTypeN, e.g. image/jpeg
+}
+
+// InboundSMS is the parsed subset of a Twilio inbound-message webhook. Other
+// fields (NumSegments, …) remain on the raw form; no media is ever fetched by
+// ServeSMS itself.
+//
+// Media is a fixed-size array, not a slice, so the struct stays comparable:
+// consumer tests compare messages with ==. Media[i] is set for i < NumMedia
+// (capped at MaxMedia); later slots are zero.
 type InboundSMS struct {
 	MessageSID string // Twilio MessageSid
 	From       string // sender, E.164
 	To         string // the Twilio number that received it, E.164
 	Body       string // message text
 	HasMedia   bool   // NumMedia is a positive integer; anything else is false
+
+	// NumMedia is the webhook's NumMedia when it is a positive integer, and 0
+	// for anything else (missing, garbage, negative, overflowing). It is the
+	// count Twilio claims, so it can exceed MaxMedia; only MaxMedia items are
+	// kept in Media.
+	NumMedia int
+	Media    [MaxMedia]MediaItem
 }
 
 // SMSHandler is called by ServeSMS for each validated inbound-SMS webhook. It is
@@ -399,8 +425,8 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 		From:       from,
 		To:         r.PostForm.Get("To"),
 		Body:       r.PostForm.Get("Body"),
-		HasMedia:   hasMedia(r.PostForm.Get("NumMedia")),
 	}
+	parseMedia(&msg, r.PostForm)
 	if s.HandleSMS != nil {
 		s.HandleSMS(r.Context(), msg)
 	}
@@ -408,11 +434,28 @@ func (s *Server) ServeSMS(w http.ResponseWriter, r *http.Request) {
 	writeEmptyTwiML(w)
 }
 
-// hasMedia reads a webhook's NumMedia: true only for a positive integer. Missing,
-// empty, zero, negative, garbage and overflowing values all mean no media.
-func hasMedia(numMedia string) bool {
-	n, err := strconv.Atoi(numMedia)
-	return err == nil && n > 0
+// numMedia reads a webhook's NumMedia: the value only for a positive integer.
+// Missing, empty, zero, negative, garbage and overflowing values all mean 0.
+func numMedia(v string) int {
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// parseMedia fills msg's NumMedia, HasMedia and Media from the webhook form.
+// HasMedia is NumMedia > 0, the one fact earlier consumers read.
+func parseMedia(msg *InboundSMS, form url.Values) {
+	msg.NumMedia = numMedia(form.Get("NumMedia"))
+	msg.HasMedia = msg.NumMedia > 0
+	for i := 0; i < msg.NumMedia && i < MaxMedia; i++ {
+		n := strconv.Itoa(i)
+		msg.Media[i] = MediaItem{
+			URL:         form.Get("MediaUrl" + n),
+			ContentType: form.Get("MediaContentType" + n),
+		}
+	}
 }
 
 // writeVoiceRefusal answers a voice webhook by speaking text (escaped by
