@@ -23,7 +23,8 @@ const defaultBaseURL = "https://api.twilio.com"
 // on errors.
 const maxResponseBody = 64 << 10
 
-// RESTClient sends outbound SMS via the Twilio Messages REST API. Credentials are
+// RESTClient sends outbound SMS via the Twilio Messages REST API, and reads and
+// deletes inbound media (FetchMedia, DeleteMedia). Credentials are
 // supplied by the caller — the client never reads TWILIO_* environment variables
 // itself; the consumer is responsible for sourcing its own credentials.
 type RESTClient struct {
@@ -128,12 +129,7 @@ func (c *RESTClient) SendSMS(ctx context.Context, msg OutboundSMS) (messageSID s
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(c.KeySID, c.KeySecret)
 
-	client := c.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-
-	resp, err := client.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("twilio: send request failed: %w", err)
 	}
